@@ -1,0 +1,395 @@
+{{- if .Values.crd.enable }}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+  annotations:
+    {{- if .Values.crd.keep }}
+    "helm.sh/resource-policy": keep
+    {{- end }}
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: hpcargoworkflowjobs.hpc.kaos.io
+spec:
+  group: hpc.kaos.io
+  names:
+    kind: HPCArgoWorkflowJob
+    listKind: HPCArgoWorkflowJobList
+    plural: hpcargoworkflowjobs
+    singular: hpcargoworkflowjob
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.class
+      name: Class
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.reason
+      name: Reason
+      type: string
+    - jsonPath: .status.attempt
+      name: Attempt
+      type: integer
+    - jsonPath: .status.run.siteJobID
+      name: Site job
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          HPCArgoWorkflowJob is one Argo Workflow step run on an HPC site. The step creates it and supplies what the job
+          needs from the platform and the run (image, command, dataset, outputs, credentials); it cannot run on its
+          own. The controller admits and books it against the project's share before anything is submitted
+          (PRD-HPC-1461 F-01, F-26). The name HPCJob is kept for a future kind that runs without a workflow.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: HPCArgoWorkflowJobSpec is one pipeline step to run on an
+              HPC site (D-01).
+            properties:
+              class:
+                description: Class is the site class the user picked, for example
+                  meluxina-gpu.
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              command:
+                description: Command of the step.
+                items:
+                  type: string
+                type: array
+              datasetRef:
+                description: DatasetRef the step reads, <dataset-repo>@<version>.
+                type: string
+              image:
+                description: Image of the step.
+                minLength: 1
+                type: string
+              nodes:
+                default: 1
+                description: Nodes the job asks for. Only 1 is admitted (D-41, CON-06);
+                  more is refused with a reason.
+                format: int32
+                minimum: 1
+                type: integer
+              outputs:
+                description: Outputs the step declares.
+                items:
+                  type: string
+                type: array
+              resumable:
+                description: |-
+                  Resumable makes the step continue across jobs: it gets the wall-time signal LeadMinutes before
+                  its wall time, saves a checkpoint through the KAOS library and exits 85, and the job continues
+                  from that checkpoint in a new site job under this same HPCArgoWorkflowJob (D-38, D-44 as amended
+                  2026-11-05, F-29). Absent: the step ends when its wall time is reached.
+                properties:
+                  leadMinutes:
+                    default: 10
+                    description: |-
+                      LeadMinutes before the wall time the signal arrives: the time to save and upload the
+                      checkpoint (resumable="20m" gives 20).
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxContinuations:
+                    default: 5
+                    description: MaxContinuations caps how many times the step continues
+                      (counted apart from failure retries).
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
+              wallTimeMinutes:
+                description: WallTimeMinutes is the job's run limit once started (Slurm
+                  --time).
+                format: int32
+                minimum: 1
+                type: integer
+            required:
+            - class
+            - image
+            - wallTimeMinutes
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable; create a new HPCArgoWorkflowJob
+              rule: self == oldSelf
+          status:
+            description: |-
+              HPCArgoWorkflowJobStatus: the controller owns phase, reason, message, booking and settlement; the submitter
+              owns run. The two never write the same field.
+            properties:
+              attempt:
+                description: Attempt is the current attempt (1 for the first site
+                  job; +1 per continuation).
+                format: int32
+                type: integer
+              attempts:
+                description: Attempts are the finished, settled site jobs of this
+                  HPCArgoWorkflowJob.
+                items:
+                  description: AttemptRecord is one finished site job of an HPCArgoWorkflowJob,
+                    settled (written by the controller).
+                  properties:
+                    attempt:
+                      format: int32
+                      type: integer
+                    endTime:
+                      description: EndTime decides the budget period the spend counts
+                        in.
+                      format: date-time
+                      type: string
+                    exitCode:
+                      format: int32
+                      type: integer
+                    outcome:
+                      description: 'Outcome: Continued, Succeeded, Failed, Cancelled,
+                        Timeout, ...'
+                      type: string
+                    settledNodeMinutes:
+                      format: int64
+                      type: integer
+                    siteJobID:
+                      type: string
+                    tier:
+                      description: 'Tier and SettledNodeMinutes: what the attempt
+                        spent.'
+                      enum:
+                      - gpu
+                      - cpu
+                      type: string
+                  required:
+                  - attempt
+                  - endTime
+                  - outcome
+                  - settledNodeMinutes
+                  - tier
+                  type: object
+                type: array
+              booking:
+                description: Booking held by the current attempt; cleared when the
+                  attempt ends.
+                properties:
+                  at:
+                    description: At is when the booking was made.
+                    format: date-time
+                    type: string
+                  nodeMinutes:
+                    description: 'NodeMinutes booked: nodes × wall time.'
+                    format: int64
+                    type: integer
+                  site:
+                    description: Site the job was admitted to (the HPCSite's spec.site)
+                      and the HPCSite that holds the ledger.
+                    type: string
+                  siteName:
+                    type: string
+                  siteNamespace:
+                    description: SiteNamespace is where the HPCSite lives (the project's
+                      HPC namespace).
+                    type: string
+                  tier:
+                    description: Tier is the kind of node-hours a class spends. Sites
+                      meter GPU and CPU nodes separately.
+                    enum:
+                    - gpu
+                    - cpu
+                    type: string
+                required:
+                - at
+                - nodeMinutes
+                - site
+                - siteName
+                - siteNamespace
+                - tier
+                type: object
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              continuations:
+                description: Continuations so far (exit 85 with a checkpoint), counted
+                  apart from failure retries.
+                format: int32
+                type: integer
+              message:
+                type: string
+              phase:
+                description: Phase of an HPCArgoWorkflowJob.
+                enum:
+                - Pending
+                - Waiting
+                - Refused
+                - Admitted
+                - Running
+                - Succeeded
+                - Failed
+                - Cancelled
+                type: string
+              reason:
+                type: string
+              resume:
+                description: 'Resume is set for a continuation: the submitter passes
+                  it to the new site job.'
+                properties:
+                  checkpointRef:
+                    description: CheckpointRef of the attempt that saved it.
+                    type: string
+                  fromAttempt:
+                    format: int32
+                    type: integer
+                required:
+                - checkpointRef
+                - fromAttempt
+                type: object
+              run:
+                description: Run is the submitter's report of the site job.
+                properties:
+                  attempt:
+                    description: |-
+                      Attempt this report is about (status.attempt when it was written). A report of an earlier
+                      attempt is ignored.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  checkpointRef:
+                    description: |-
+                      CheckpointRef is set with exit code 85: the lakeFS commit (or URI) of the checkpoint the job
+                      staged out before it exited, checked by the submitter (T-19). Without it nothing continues.
+                    type: string
+                  endTime:
+                    format: date-time
+                    type: string
+                  exitCode:
+                    description: ExitCode of the job's step; 85 means it saved and
+                      continues (D-44).
+                    format: int32
+                    type: integer
+                  hostSiteJobID:
+                    description: |-
+                      HostSiteJobID is set when a host job of the same project took this job onto its node
+                      (node sharing, PRD-1609 D-26). The host's booking then covers the node.
+                    type: string
+                  siteJobID:
+                    description: SiteJobID is the scheduler's job id.
+                    type: string
+                  slot:
+                    description: Slot is the GPU slot the host gave this job.
+                    format: int32
+                    type: integer
+                  startTime:
+                    description: StartTime and EndTime as the site reports them.
+                    format: date-time
+                    type: string
+                  state:
+                    description: State is the scheduler's job state, for example PENDING,
+                      RUNNING, COMPLETED, FAILED, TIMEOUT.
+                    type: string
+                  terminal:
+                    description: Terminal is set by the submitter once the job will
+                      not run again (it gave up retrying).
+                    type: boolean
+                type: object
+              settledNodeMinutes:
+                description: SettledNodeMinutes is the job's actual spend over all
+                  its attempts, set once it ended.
+                format: int64
+                type: integer
+              site:
+                description: |-
+                  Site is the HPCSite the job was first admitted to; it stays set across continuations, so every
+                  attempt's spend counts on the same project ledger.
+                properties:
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end -}}
