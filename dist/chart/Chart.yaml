@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kaos-hpc-operator
+description: "Runs pipeline steps on HPC (Slurm) sites as a tenant: admission against a budget share, booking and settlement"
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

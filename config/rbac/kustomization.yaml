@@ -34,4 +34,5 @@ resources:
 - hpcargoworkflowjob_admin_role.yaml
 - hpcargoworkflowjob_editor_role.yaml
 - hpcargoworkflowjob_viewer_role.yaml
+- hpcargoworkflowjob_submitter_role.yaml
 

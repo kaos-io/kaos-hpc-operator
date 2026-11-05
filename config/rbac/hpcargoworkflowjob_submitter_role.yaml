@@ -1,0 +1,27 @@
+# The workflow step that runs a pipeline step on an HPC site: it creates the step's
+# HPCArgoWorkflowJob, waits for the controller's admission and reports the site job in
+# status.run. Bind it (RoleBinding) to that step's service account in each namespace whose
+# workflows may use HPC; nothing else needs it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: kaos-hpc-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: hpcargoworkflowjob-submitter-role
+rules:
+- apiGroups:
+  - hpc.kaos.io
+  resources:
+  - hpcargoworkflowjobs
+  verbs:
+  - create
+  - get
+  - watch
+- apiGroups:
+  - hpc.kaos.io
+  resources:
+  - hpcargoworkflowjobs/status
+  verbs:
+  - get
+  - patch

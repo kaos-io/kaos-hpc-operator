@@ -1,0 +1,369 @@
+{{- if .Values.crd.enable }}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+  annotations:
+    {{- if .Values.crd.keep }}
+    "helm.sh/resource-policy": keep
+    {{- end }}
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: hpcsites.hpc.kaos.io
+spec:
+  group: hpc.kaos.io
+  names:
+    kind: HPCSite
+    listKind: HPCSiteList
+    plural: hpcsites
+    singular: hpcsite
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.site
+      name: Site
+      type: string
+    - jsonPath: .status.gpu.leftNodeMinutes
+      name: GPU left min
+      type: integer
+    - jsonPath: .status.activeJobs
+      name: Active
+      type: integer
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          HPCSite is one KAOS project's specification for one HPC site: the site part from the KAOS
+          profile and the tenant part (identity, budget share, policy, limits, classes). Owned by the
+          KubeProject and rendered by kubecore-operator (PRD-HPC-1461 D-47).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: HPCSiteSpec is one KAOS project's whole specification for
+              one site (D-47).
+            properties:
+              allowedClasses:
+                description: AllowedClasses restricts the profile's classes for this
+                  project; empty allows them all.
+                items:
+                  type: string
+                type: array
+              budget:
+                description: Budget is the project's share of the org allocation.
+                properties:
+                  allocationRef:
+                    description: AllocationRef names the org's HPCAllocation the share
+                      is carved from (checked on the hub, D-48).
+                    type: string
+                  atLimit:
+                    default: block
+                    description: 'AtLimit: block (default) or warn (D-13).'
+                    enum:
+                    - block
+                    - warn
+                    type: string
+                  cpuNodeHours:
+                    description: CPUNodeHours per period.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  gpuNodeHours:
+                    description: GPUNodeHours per period. Zero means the project may
+                      not spend GPU node-hours.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  warnAtPercent:
+                    default: 80
+                    description: WarnAtPercent of the share raises an alert (D-13).
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                type: object
+              identity:
+                description: Identity is the project identity on the site.
+                properties:
+                  account:
+                    description: Account is the site account (subscription) the jobs
+                      are charged to.
+                    type: string
+                  sshKeySecretRef:
+                    description: SSHKeySecretRef holds the private key used to mint
+                      scheduler tokens (D-19).
+                    properties:
+                      key:
+                        type: string
+                      name:
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  user:
+                    description: User is the site user name, for example u100001.
+                    type: string
+                required:
+                - account
+                - sshKeySecretRef
+                - user
+                type: object
+              limits:
+                description: Limits are the project's central job limits.
+                properties:
+                  maxConcurrentJobs:
+                    description: 'MaxConcurrentJobs: extra jobs WAIT in KAOS, they
+                      are never refused (D-49). Zero means no limit.'
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxWallTimeMinutes:
+                    description: MaxWallTimeMinutes caps any job's wall time; above
+                      it the job is refused at admission.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
+              profile:
+                description: Profile is the site part, rendered from the KAOS-curated
+                  profile.
+                properties:
+                  classes:
+                    description: Classes offered by the site.
+                    items:
+                      description: SiteClass is a site-specific choice in the run
+                        form, for example meluxina-gpu (D-08, D-28).
+                      properties:
+                        gpus:
+                          description: GPUs per step of this class (0 for CPU classes).
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        maxWallTimeMinutes:
+                          description: MaxWallTimeMinutes is the site's limit for
+                            the class's partition and QOS.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        name:
+                          description: Name is unique within the site, for example
+                            meluxina-gpu.
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        partition:
+                          description: Partition and QOS the class submits to.
+                          type: string
+                        qos:
+                          type: string
+                        tier:
+                          description: Tier is whose node-hours the class spends.
+                          enum:
+                          - gpu
+                          - cpu
+                          type: string
+                      required:
+                      - maxWallTimeMinutes
+                      - name
+                      - partition
+                      - tier
+                      type: object
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  endpoint:
+                    description: Endpoint of the scheduler API, for example https://slurm-api.example.org.
+                    pattern: ^https://
+                    type: string
+                  loginHosts:
+                    description: LoginHosts the controller may SSH to for token minting
+                      (host:port).
+                    items:
+                      type: string
+                    type: array
+                  restVersion:
+                    description: RESTVersion of the scheduler API, for example v0.0.44.
+                    pattern: ^v[0-9]+\.[0-9]+\.[0-9]+$
+                    type: string
+                  scratchRoot:
+                    description: ScratchRoot is the per-project working area on the
+                      site's shared filesystem.
+                    type: string
+                  transport:
+                    default: slurmrestd
+                    description: Transport to the scheduler.
+                    enum:
+                    - slurmrestd
+                    - ssh-slurm-cli
+                    - firecrest
+                    type: string
+                required:
+                - classes
+                - endpoint
+                - restVersion
+                - transport
+                type: object
+              sharing:
+                description: Sharing lets the project's one-GPU jobs share nodes (PRD-1609,
+                  D-26, D-50).
+                type: boolean
+              site:
+                description: Site is the site profile name, for example meluxina.
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+            required:
+            - budget
+            - identity
+            - profile
+            - site
+            type: object
+            x-kubernetes-validations:
+            - message: site is immutable
+              rule: self.site == oldSelf.site
+          status:
+            description: HPCSiteStatus is the controller's view of the project's site
+              use.
+            properties:
+              activeJobs:
+                description: ActiveJobs is the number of admitted jobs that have not
+                  ended.
+                format: int32
+                type: integer
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              cpu:
+                description: |-
+                  TierLedger is the project's spend in one tier for the current period, in node-minutes (the
+                  site meters node-minutes; shares are set in node-hours).
+                properties:
+                  bookedNodeMinutes:
+                    description: BookedNodeMinutes held by admitted jobs that have
+                      not ended (worst case, D-12).
+                    format: int64
+                    type: integer
+                  leftNodeMinutes:
+                    description: LeftNodeMinutes = share - used - booked, never below
+                      zero.
+                    format: int64
+                    type: integer
+                  usedNodeMinutes:
+                    description: UsedNodeMinutes settled from finished jobs this period.
+                    format: int64
+                    type: integer
+                required:
+                - bookedNodeMinutes
+                - leftNodeMinutes
+                - usedNodeMinutes
+                type: object
+              gpu:
+                description: GPU and CPU ledgers.
+                properties:
+                  bookedNodeMinutes:
+                    description: BookedNodeMinutes held by admitted jobs that have
+                      not ended (worst case, D-12).
+                    format: int64
+                    type: integer
+                  leftNodeMinutes:
+                    description: LeftNodeMinutes = share - used - booked, never below
+                      zero.
+                    format: int64
+                    type: integer
+                  usedNodeMinutes:
+                    description: UsedNodeMinutes settled from finished jobs this period.
+                    format: int64
+                    type: integer
+                required:
+                - bookedNodeMinutes
+                - leftNodeMinutes
+                - usedNodeMinutes
+                type: object
+              periodStart:
+                description: PeriodStart is the start of the current budget period
+                  (calendar month, UTC).
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end -}}

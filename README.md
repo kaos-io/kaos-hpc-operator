@@ -55,3 +55,19 @@ Requires Go 1.24+.
 ## Licence
 
 Apache License 2.0. See [LICENSE](LICENSE).
+
+## Install
+
+The Helm chart is in `dist/chart` (CRDs, RBAC, the controller). Set the image you built:
+
+```bash
+helm install kaos-hpc-operator dist/chart -n kaos-hpc-system --create-namespace \
+  --set controllerManager.container.image.repository=<registry>/kaos-hpc-operator
+```
+
+The chart also installs `hpcargoworkflowjob-submitter-role`: bind it to the service account of
+the workflow steps that run on HPC, in each namespace whose workflows may use it.
+
+After an API change, regenerate the chart with `kubebuilder edit --plugins=helm/v1-alpha`;
+`make test` fails while the chart's CRDs or RBAC differ from `config/`.
+
