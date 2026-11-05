@@ -22,7 +22,7 @@ rules:
 - apiGroups:
   - hpc.kaos.io
   resources:
-  - hpcjobs
+  - hpcargoworkflowjobs
   - hpcsites
   verbs:
   - get
@@ -31,7 +31,7 @@ rules:
 - apiGroups:
   - hpc.kaos.io
   resources:
-  - hpcjobs/status
+  - hpcargoworkflowjobs/status
   - hpcsites/status
   verbs:
   - get

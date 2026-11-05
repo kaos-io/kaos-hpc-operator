@@ -15,7 +15,7 @@ resources:
   controller: true
   domain: kaos.io
   group: hpc
-  kind: HPCJob
+  kind: HPCArgoWorkflowJob
   path: github.com/kaos-io/kaos-hpc-operator/api/v1alpha1
   version: v1alpha1
 - api:

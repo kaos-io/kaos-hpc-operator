@@ -4,14 +4,14 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: hpcjobs.hpc.kaos.io
+  name: hpcargoworkflowjobs.hpc.kaos.io
 spec:
   group: hpc.kaos.io
   names:
-    kind: HPCJob
-    listKind: HPCJobList
-    plural: hpcjobs
-    singular: hpcjob
+    kind: HPCArgoWorkflowJob
+    listKind: HPCArgoWorkflowJobList
+    plural: hpcargoworkflowjobs
+    singular: hpcargoworkflowjob
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -24,6 +24,9 @@ spec:
     - jsonPath: .status.reason
       name: Reason
       type: string
+    - jsonPath: .status.attempt
+      name: Attempt
+      type: integer
     - jsonPath: .status.run.siteJobID
       name: Site job
       type: string
@@ -34,8 +37,10 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          HPCJob is one pipeline step run on an HPC site. The controller admits and books it against the
-          project's share before anything is submitted (PRD-HPC-1461 F-01, F-26).
+          HPCArgoWorkflowJob is one Argo Workflow step run on an HPC site. The step creates it and supplies what the job
+          needs from the platform and the run (image, command, dataset, outputs, credentials); it cannot run on its
+          own. The controller admits and books it against the project's share before anything is submitted
+          (PRD-HPC-1461 F-01, F-26). The name HPCJob is kept for a future kind that runs without a workflow.
         properties:
           apiVersion:
             description: |-
@@ -55,7 +60,8 @@ spec:
           metadata:
             type: object
           spec:
-            description: HPCJobSpec is one pipeline step to run on an HPC site (D-01).
+            description: HPCArgoWorkflowJobSpec is one pipeline step to run on an
+              HPC site (D-01).
             properties:
               class:
                 description: Class is the site class the user picked, for example
@@ -87,9 +93,28 @@ spec:
                   type: string
                 type: array
               resumable:
-                description: 'Resumable: the step saves on the wall-time signal and
-                  continues in a new job (D-38, D-44).'
-                type: boolean
+                description: |-
+                  Resumable makes the step continue across jobs: it gets the wall-time signal LeadMinutes before
+                  its wall time, saves a checkpoint through the KAOS library and exits 85, and the job continues
+                  from that checkpoint in a new site job under this same HPCArgoWorkflowJob (D-38, D-44 as amended
+                  2026-11-05, F-29). Absent: the step ends when its wall time is reached.
+                properties:
+                  leadMinutes:
+                    default: 10
+                    description: |-
+                      LeadMinutes before the wall time the signal arrives: the time to save and upload the
+                      checkpoint (resumable="20m" gives 20).
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxContinuations:
+                    default: 5
+                    description: MaxContinuations caps how many times the step continues
+                      (counted apart from failure retries).
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
               wallTimeMinutes:
                 description: WallTimeMinutes is the job's run limit once started (Slurm
                   --time).
@@ -102,15 +127,63 @@ spec:
             - wallTimeMinutes
             type: object
             x-kubernetes-validations:
-            - message: spec is immutable; create a new HPCJob
+            - message: spec is immutable; create a new HPCArgoWorkflowJob
               rule: self == oldSelf
           status:
             description: |-
-              HPCJobStatus: the controller owns phase, reason, message, booking and settlement; the submitter
+              HPCArgoWorkflowJobStatus: the controller owns phase, reason, message, booking and settlement; the submitter
               owns run. The two never write the same field.
             properties:
+              attempt:
+                description: Attempt is the current attempt (1 for the first site
+                  job; +1 per continuation).
+                format: int32
+                type: integer
+              attempts:
+                description: Attempts are the finished, settled site jobs of this
+                  HPCArgoWorkflowJob.
+                items:
+                  description: AttemptRecord is one finished site job of an HPCArgoWorkflowJob,
+                    settled (written by the controller).
+                  properties:
+                    attempt:
+                      format: int32
+                      type: integer
+                    endTime:
+                      description: EndTime decides the budget period the spend counts
+                        in.
+                      format: date-time
+                      type: string
+                    exitCode:
+                      format: int32
+                      type: integer
+                    outcome:
+                      description: 'Outcome: Continued, Succeeded, Failed, Cancelled,
+                        Timeout, ...'
+                      type: string
+                    settledNodeMinutes:
+                      format: int64
+                      type: integer
+                    siteJobID:
+                      type: string
+                    tier:
+                      description: 'Tier and SettledNodeMinutes: what the attempt
+                        spent.'
+                      enum:
+                      - gpu
+                      - cpu
+                      type: string
+                  required:
+                  - attempt
+                  - endTime
+                  - outcome
+                  - settledNodeMinutes
+                  - tier
+                  type: object
+                type: array
               booking:
-                description: Booking is what admission reserved for the job (D-12).
+                description: Booking held by the current attempt; cleared when the
+                  attempt ends.
                 properties:
                   at:
                     description: At is when the booking was made.
@@ -204,10 +277,15 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              continuations:
+                description: Continuations so far (exit 85 with a checkpoint), counted
+                  apart from failure retries.
+                format: int32
+                type: integer
               message:
                 type: string
               phase:
-                description: Phase of an HPCJob.
+                description: Phase of an HPCArgoWorkflowJob.
                 enum:
                 - Pending
                 - Waiting
@@ -220,9 +298,35 @@ spec:
                 type: string
               reason:
                 type: string
+              resume:
+                description: 'Resume is set for a continuation: the submitter passes
+                  it to the new site job.'
+                properties:
+                  checkpointRef:
+                    description: CheckpointRef of the attempt that saved it.
+                    type: string
+                  fromAttempt:
+                    format: int32
+                    type: integer
+                required:
+                - checkpointRef
+                - fromAttempt
+                type: object
               run:
                 description: Run is the submitter's report of the site job.
                 properties:
+                  attempt:
+                    description: |-
+                      Attempt this report is about (status.attempt when it was written). A report of an earlier
+                      attempt is ignored.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  checkpointRef:
+                    description: |-
+                      CheckpointRef is set with exit code 85: the lakeFS commit (or URI) of the checkpoint the job
+                      staged out before it exited, checked by the submitter (T-19). Without it nothing continues.
+                    type: string
                   endTime:
                     format: date-time
                     type: string
@@ -257,10 +361,23 @@ spec:
                     type: boolean
                 type: object
               settledNodeMinutes:
-                description: SettledNodeMinutes is the job's actual spend once it
-                  ended.
+                description: SettledNodeMinutes is the job's actual spend over all
+                  its attempts, set once it ended.
                 format: int64
                 type: integer
+              site:
+                description: |-
+                  Site is the HPCSite the job was first admitted to; it stays set across continuations, so every
+                  attempt's spend counts on the same project ledger.
+                properties:
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
             type: object
         required:
         - spec

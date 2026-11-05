@@ -20,7 +20,7 @@ type HPCOperationSpec struct {
 	Params map[string]string `json:"params,omitempty"`
 }
 
-// HPCOperationStatus mirrors an HPCJob's: phase, reason and the site's report.
+// HPCOperationStatus mirrors an HPCArgoWorkflowJob's: phase, reason and the site's report.
 type HPCOperationStatus struct {
 	// +optional
 	Phase Phase `json:"phase,omitempty"`

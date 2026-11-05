@@ -1,6 +1,6 @@
 ## Append samples of your project ##
 resources:
-- hpc_v1alpha1_hpcjob.yaml
+- hpc_v1alpha1_hpcargoworkflowjob.yaml
 - hpc_v1alpha1_hpcsite.yaml
 - hpc_v1alpha1_hpcallocation.yaml
 - hpc_v1alpha1_hpcoperation.yaml
