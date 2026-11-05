@@ -202,12 +202,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.HPCArgoWorkflowJobReconciler{
+	jobs := &controller.HPCArgoWorkflowJobReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("kaos-hpc-operator"),
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if err := jobs.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HPCArgoWorkflowJob")
+		os.Exit(1)
+	}
+	if err := (&controller.HPCSiteReconciler{Client: mgr.GetClient(), Jobs: jobs}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "HPCSite")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
