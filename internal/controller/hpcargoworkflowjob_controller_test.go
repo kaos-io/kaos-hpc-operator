@@ -134,6 +134,22 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		r = &HPCArgoWorkflowJobReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 	})
 
+	It("publishes a new site's ledger before any job runs (F-30)", func() {
+		newSite(10, nil)
+		site := &hpcv1alpha1.HPCSite{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "meluxina", Namespace: hpcNS}, site)).To(Succeed())
+		res, err := (&HPCSiteReconciler{Client: k8sClient, Jobs: r}).Reconcile(ctx,
+			reconcile.Request{NamespacedName: client.ObjectKeyFromObject(site)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(LedgerResync))
+		st := siteStatus()
+		Expect(st.GPU).NotTo(BeNil())
+		Expect(st.GPU.LeftNodeMinutes).To(Equal(int64(600)))
+		Expect(st.GPU.BookedNodeMinutes).To(BeZero())
+		Expect(st.ActiveJobs).To(BeZero())
+		Expect(st.PeriodStart).NotTo(BeNil())
+	})
+
 	It("admits a job that fits and books nodes x wall time", func() {
 		newSite(10, nil)
 		_, got := reconcileJob(newJob(envNS, 240))
