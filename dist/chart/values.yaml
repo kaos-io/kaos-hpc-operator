@@ -40,6 +40,10 @@ controllerManager:
     seccompProfile:
       type: RuntimeDefault
   terminationGracePeriodSeconds: 10
+  # Where the controller runs: platforms with tainted system nodes set these.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
   serviceAccountName: kaos-hpc-operator-controller-manager
 
 # [RBAC]: To enable RBAC (Permissions) configurations
