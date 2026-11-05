@@ -1,0 +1,9 @@
+apiVersion: hpc.kaos.io/v1alpha1
+kind: HPCSite
+metadata:
+  labels:
+    app.kubernetes.io/name: kaos-hpc-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: hpcsite-sample
+spec:
+  # TODO(user): Add fields here
