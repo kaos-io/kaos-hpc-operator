@@ -122,3 +122,32 @@ func TestBetweenAttemptsTheJobStillBelongsToItsSite(t *testing.T) {
 		t.Fatalf("got used %d booked %d", g.Used, g.Booked)
 	}
 }
+
+func TestASiteBudgetCountsOnlyWhatTheSiteHasNotSeenYet(t *testing.T) {
+	site := theSite()
+	observed := metav1.NewTime(now.Add(-30 * time.Minute))
+	site.Spec.Budget = hpcv1alpha1.Budget{Source: hpcv1alpha1.BudgetSourceSite, ObservedAt: &observed,
+		GPUNodeHours: 10} // left on the account when the site was asked
+	jobs := []hpcv1alpha1.HPCArgoWorkflowJob{
+		booked("seen", hpcv1alpha1.PhaseSucceeded, 0, settled(100, now.Add(-time.Hour))),       // in the site's figure
+		booked("unseen", hpcv1alpha1.PhaseSucceeded, 0, settled(50, now.Add(-10*time.Minute))), // ended after
+		booked("running", hpcv1alpha1.PhaseRunning, 60, nil),
+	}
+	l := Compute(site, jobs, nil, now)
+	g := l.Tiers[hpcv1alpha1.TierGPU]
+	if g.Share != 600 || g.Used != 50 || g.Booked != 60 || g.Left() != 490 {
+		t.Fatalf("got share %d used %d booked %d left %d", g.Share, g.Used, g.Booked, g.Left())
+	}
+	if !l.PeriodStart.Equal(observed.Time) {
+		t.Fatalf("counted from %v, want the observation %v", l.PeriodStart, observed.Time)
+	}
+}
+
+func TestASpentSiteAllocationLeavesNothing(t *testing.T) {
+	site := theSite()
+	observed := metav1.NewTime(now.Add(-time.Minute))
+	site.Spec.Budget = hpcv1alpha1.Budget{Source: hpcv1alpha1.BudgetSourceSite, ObservedAt: &observed}
+	if g := Compute(site, nil, nil, now).Tiers[hpcv1alpha1.TierCPU]; g.Left() != 0 {
+		t.Fatalf("a spent CPU allocation must leave nothing, got %d", g.Left())
+	}
+}

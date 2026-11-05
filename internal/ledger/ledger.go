@@ -58,6 +58,12 @@ func Holds(j *hpcv1alpha1.HPCArgoWorkflowJob) bool {
 func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 	pending map[string]hpcv1alpha1.Booking, now time.Time) Ledger {
 	start := PeriodStart(now)
+	// Source site (D-56): the share is what the site reported left at ObservedAt, which already
+	// counts every job that ended before it, so only later ends are used against it. An attempt
+	// that was running at ObservedAt is counted whole: conservative, never an overspend.
+	if b := site.Spec.Budget; b.Source == hpcv1alpha1.BudgetSourceSite && b.ObservedAt != nil {
+		start = b.ObservedAt.UTC()
+	}
 	l := Ledger{PeriodStart: start, Tiers: map[hpcv1alpha1.Tier]Tier{
 		hpcv1alpha1.TierGPU: {Share: site.Spec.Budget.GPUNodeHours * 60},
 		hpcv1alpha1.TierCPU: {Share: site.Spec.Budget.CPUNodeHours * 60},

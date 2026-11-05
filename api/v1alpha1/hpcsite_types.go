@@ -93,12 +93,35 @@ type ProjectIdentity struct {
 	SSHKeySecretRef SecretKeyRef `json:"sshKeySecretRef"`
 }
 
-// Budget is the project's share of its org allocation, per tier, per period (D-10, D-11).
+// BudgetSource is where a project's node-hours come from.
+// +kubebuilder:validation:Enum=share;site
+type BudgetSource string
+
+const (
+	// BudgetSourceShare: a fixed share per calendar month (D-10, D-11).
+	BudgetSourceShare BudgetSource = "share"
+	// BudgetSourceSite: what the site reports is left on the project's own account, polled
+	// (PRD-HPC-1461 D-56). The project owns its account, so no share has to be typed in.
+	BudgetSourceSite BudgetSource = "site"
+)
+
+// Budget is the project's node-hours per tier: a fixed share per period (D-10, D-11), or what
+// the site reports is left on the project's account (source site, D-56).
 type Budget struct {
+	// Source: share (default) or site. With site, GPUNodeHours and CPUNodeHours are what the
+	// site reported left at ObservedAt; the site's figure already counts every job that ran, so
+	// only bookings and attempts that ended after ObservedAt are taken off it.
+	// +kubebuilder:default=share
+	// +optional
+	Source BudgetSource `json:"source,omitempty"`
+	// ObservedAt is when the site reported the remaining node-hours (source site).
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
 	// AllocationRef names the org's HPCAllocation the share is carved from (checked on the hub, D-48).
 	// +optional
 	AllocationRef string `json:"allocationRef,omitempty"`
-	// GPUNodeHours per period. Zero means the project may not spend GPU node-hours.
+	// GPUNodeHours per period (source share) or left on the account (source site). Zero means
+	// the project may not spend GPU node-hours.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	GPUNodeHours int64 `json:"gpuNodeHours,omitempty"`

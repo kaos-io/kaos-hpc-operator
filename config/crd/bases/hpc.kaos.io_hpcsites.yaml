@@ -79,11 +79,27 @@ spec:
                     minimum: 0
                     type: integer
                   gpuNodeHours:
-                    description: GPUNodeHours per period. Zero means the project may
-                      not spend GPU node-hours.
+                    description: |-
+                      GPUNodeHours per period (source share) or left on the account (source site). Zero means
+                      the project may not spend GPU node-hours.
                     format: int64
                     minimum: 0
                     type: integer
+                  observedAt:
+                    description: ObservedAt is when the site reported the remaining
+                      node-hours (source site).
+                    format: date-time
+                    type: string
+                  source:
+                    default: share
+                    description: |-
+                      Source: share (default) or site. With site, GPUNodeHours and CPUNodeHours are what the
+                      site reported left at ObservedAt; the site's figure already counts every job that ran, so
+                      only bookings and attempts that ended after ObservedAt are taken off it.
+                    enum:
+                    - share
+                    - site
+                    type: string
                   warnAtPercent:
                     default: 80
                     description: WarnAtPercent of the share raises an alert (D-13).
