@@ -23,8 +23,8 @@ func site(mod func(*hpcv1alpha1.HPCSite)) *hpcv1alpha1.HPCSite {
 	return s
 }
 
-func job(class string, wall int32, nodes int32) *hpcv1alpha1.HPCJob {
-	return &hpcv1alpha1.HPCJob{Spec: hpcv1alpha1.HPCJobSpec{Class: class, Image: "i", WallTimeMinutes: wall, Nodes: nodes}}
+func job(class string, wall int32, nodes int32) *hpcv1alpha1.HPCArgoWorkflowJob {
+	return &hpcv1alpha1.HPCArgoWorkflowJob{Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: class, Image: "i", WallTimeMinutes: wall, Nodes: nodes}}
 }
 
 func led(s *hpcv1alpha1.HPCSite, gpuUsed, gpuBooked int64, active int32) ledger.Ledger {
@@ -38,7 +38,7 @@ func TestDecide(t *testing.T) {
 	cases := []struct {
 		name       string
 		site       *hpcv1alpha1.HPCSite
-		job        *hpcv1alpha1.HPCJob
+		job        *hpcv1alpha1.HPCArgoWorkflowJob
 		used, book int64
 		active     int32
 		phase      hpcv1alpha1.Phase

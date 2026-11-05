@@ -76,8 +76,8 @@ spec:
             - message: spec is immutable
               rule: self == oldSelf
           status:
-            description: 'HPCOperationStatus mirrors an HPCJob''s: phase, reason and
-              the site''s report.'
+            description: 'HPCOperationStatus mirrors an HPCArgoWorkflowJob''s: phase,
+              reason and the site''s report.'
             properties:
               conditions:
                 items:
@@ -139,7 +139,7 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               phase:
-                description: Phase of an HPCJob.
+                description: Phase of an HPCArgoWorkflowJob.
                 enum:
                 - Pending
                 - Waiting

@@ -32,11 +32,11 @@ import (
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 )
 
-// Phase 0 (PRD-HPC-1461 F-26): the operator admits, books and settles HPCJobs. These specs drive
+// Phase 0 (PRD-HPC-1461 F-26): the operator admits, books and settles HPCArgoWorkflowJobs. These specs drive
 // the reconciler against a real API server (envtest).
-var _ = Describe("HPCJob admission", func() {
+var _ = Describe("HPCArgoWorkflowJob admission", func() {
 	var (
-		r       *HPCJobReconciler
+		r       *HPCArgoWorkflowJobReconciler
 		project string
 		envNS   string
 		hpcNS   string
@@ -73,37 +73,37 @@ var _ = Describe("HPCJob admission", func() {
 		return s
 	}
 
-	newJob := func(ns string, wall int32) *hpcv1alpha1.HPCJob {
+	newJob := func(ns string, wall int32) *hpcv1alpha1.HPCArgoWorkflowJob {
 		seq++
-		j := &hpcv1alpha1.HPCJob{
+		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("job-%d", seq), Namespace: ns},
-			Spec:       hpcv1alpha1.HPCJobSpec{Class: "meluxina-gpu", Image: "img", WallTimeMinutes: wall},
+			Spec:       hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "img", WallTimeMinutes: wall},
 		}
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		return j
 	}
 
-	reconcileJob := func(j *hpcv1alpha1.HPCJob) (reconcile.Result, *hpcv1alpha1.HPCJob) {
+	reconcileJob := func(j *hpcv1alpha1.HPCArgoWorkflowJob) (reconcile.Result, *hpcv1alpha1.HPCArgoWorkflowJob) {
 		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(j)})
 		Expect(err).NotTo(HaveOccurred())
-		got := &hpcv1alpha1.HPCJob{}
+		got := &hpcv1alpha1.HPCArgoWorkflowJob{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), got)).To(Succeed())
 		return res, got
 	}
 
-	report := func(j *hpcv1alpha1.HPCJob, run hpcv1alpha1.RunStatus) {
-		got := &hpcv1alpha1.HPCJob{}
+	report := func(j *hpcv1alpha1.HPCArgoWorkflowJob, run hpcv1alpha1.RunStatus) {
+		got := &hpcv1alpha1.HPCArgoWorkflowJob{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), got)).To(Succeed())
 		orig := got.DeepCopy()
 		got.Status.Run = &run
 		Expect(k8sClient.Status().Patch(ctx, got, client.MergeFrom(orig))).To(Succeed())
 	}
 
-	newResumable := func(ns string, wall int32, maxCont int32) *hpcv1alpha1.HPCJob {
+	newResumable := func(ns string, wall int32, maxCont int32) *hpcv1alpha1.HPCArgoWorkflowJob {
 		seq++
-		j := &hpcv1alpha1.HPCJob{
+		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("job-%d", seq), Namespace: ns},
-			Spec: hpcv1alpha1.HPCJobSpec{Class: "meluxina-gpu", Image: "img", WallTimeMinutes: wall,
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "img", WallTimeMinutes: wall,
 				Resumable: &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: maxCont}},
 		}
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
@@ -111,7 +111,7 @@ var _ = Describe("HPCJob admission", func() {
 	}
 
 	// end85 reports that the given attempt saved and exited 85 after the given minutes.
-	end85 := func(j *hpcv1alpha1.HPCJob, attempt int32, minutes int, ckpt string) {
+	end85 := func(j *hpcv1alpha1.HPCArgoWorkflowJob, attempt int32, minutes int, ckpt string) {
 		code := hpcv1alpha1.ExitCodeContinue
 		start := metav1.NewTime(time.Now().Add(-time.Duration(minutes) * time.Minute))
 		endT := metav1.NewTime(time.Now())
@@ -131,7 +131,7 @@ var _ = Describe("HPCJob admission", func() {
 		envNS, hpcNS = project+"-train", project+"-hpc"
 		newNS(envNS, project)
 		newNS(hpcNS, project)
-		r = &HPCJobReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		r = &HPCArgoWorkflowJobReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 	})
 
 	It("admits a job that fits and books nodes x wall time", func() {
@@ -241,7 +241,7 @@ var _ = Describe("HPCJob admission", func() {
 		Expect(*got.Status.SettledNodeMinutes).To(Equal(int64(50)))
 	})
 
-	It("continues a resumable step under the same HPCJob: settled, re-admitted, re-booked, resume info set", func() {
+	It("continues a resumable step under the same HPCArgoWorkflowJob: settled, re-admitted, re-booked, resume info set", func() {
 		newSite(10, nil)
 		j := newResumable(envNS, 60, 5)
 		_, got := reconcileJob(j)
@@ -368,12 +368,12 @@ var _ = Describe("HPCJob admission", func() {
 		j := newResumable(envNS, 60, 5)
 		reconcileJob(j)
 		end85(j, 1, 50, "c1")
-		stale := &hpcv1alpha1.HPCJob{}
+		stale := &hpcv1alpha1.HPCArgoWorkflowJob{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), stale)).To(Succeed())
 		reconcileJob(j) // the real decision: continuing, attempt 2
 		_, err := r.endAttempt(ctx, stale)
 		Expect(err).To(HaveOccurred(), "the stale write must conflict")
-		got := &hpcv1alpha1.HPCJob{}
+		got := &hpcv1alpha1.HPCArgoWorkflowJob{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), got)).To(Succeed())
 		Expect(got.Status.Attempts).To(HaveLen(1))
 		Expect(got.Status.Continuations).To(Equal(int32(1)))
@@ -389,7 +389,7 @@ var _ = Describe("HPCJob admission", func() {
 			lag.freeze = true // list calls keep returning the jobs as they were before our writes
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(j)})
 			Expect(err).NotTo(HaveOccurred())
-			got := &hpcv1alpha1.HPCJob{}
+			got := &hpcv1alpha1.HPCArgoWorkflowJob{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), got)).To(Succeed())
 			if got.Status.Phase == hpcv1alpha1.PhaseAdmitted {
 				admitted++
@@ -405,7 +405,7 @@ var _ = Describe("HPCJob admission", func() {
 	})
 })
 
-// laggingClient answers List for HPCJobs with the jobs' state from before this test's own admission
+// laggingClient answers List for HPCArgoWorkflowJobs with the jobs' state from before this test's own admission
 // writes, the way an informer cache can lag behind the controller's writes.
 type laggingClient struct {
 	client.Client
@@ -416,9 +416,9 @@ func (c *laggingClient) List(ctx context.Context, list client.ObjectList, opts .
 	if err := c.Client.List(ctx, list, opts...); err != nil {
 		return err
 	}
-	if jobs, ok := list.(*hpcv1alpha1.HPCJobList); ok && c.freeze {
+	if jobs, ok := list.(*hpcv1alpha1.HPCArgoWorkflowJobList); ok && c.freeze {
 		for i := range jobs.Items {
-			jobs.Items[i].Status = hpcv1alpha1.HPCJobStatus{} // no booking visible yet
+			jobs.Items[i].Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{} // no booking visible yet
 		}
 	}
 	return nil

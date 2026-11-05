@@ -16,7 +16,7 @@ The site's own scheduler still decides when and where a job starts.
 
 | Kind | What it is |
 |---|---|
-| `HPCJob` | One pipeline step on a site: class, image, command, wall time. Created by the pipeline; the operator admits, books and settles it |
+| `HPCArgoWorkflowJob` | One Argo Workflow step on a site: class, image, command, wall time. Created by the step, which supplies the platform and run inputs, so it does not run on its own; the operator admits, books and settles it. (`HPCJob` is kept for a future kind that runs without a workflow.) |
 | `HPCSite` | One project's whole specification for one site: the site profile (endpoint, classes), the project identity, the budget share, the limits and the at-limit policy. Its status holds the project's ledger |
 | `HPCAllocation` | An organisation's node-hours on one site and account, from which project shares are carved |
 | `HPCOperation` | A site operation the operator runs itself (staging, cache check, cleanup) |

@@ -18,8 +18,8 @@ func theSite() *hpcv1alpha1.HPCSite {
 	return s
 }
 
-func booked(uid string, phase hpcv1alpha1.Phase, minutes int64, mod func(*hpcv1alpha1.HPCJob)) hpcv1alpha1.HPCJob {
-	j := hpcv1alpha1.HPCJob{}
+func booked(uid string, phase hpcv1alpha1.Phase, minutes int64, mod func(*hpcv1alpha1.HPCArgoWorkflowJob)) hpcv1alpha1.HPCArgoWorkflowJob {
+	j := hpcv1alpha1.HPCArgoWorkflowJob{}
 	j.UID = types.UID(uid)
 	j.Status.Phase = phase
 	j.Status.Site = &hpcv1alpha1.SiteRef{Name: "meluxina", Namespace: "proj-a-hpc"}
@@ -32,8 +32,8 @@ func booked(uid string, phase hpcv1alpha1.Phase, minutes int64, mod func(*hpcv1a
 }
 
 // settled ends the job: one attempt of m node-minutes that ended at end; its booking is gone.
-func settled(m int64, end time.Time) func(*hpcv1alpha1.HPCJob) {
-	return func(j *hpcv1alpha1.HPCJob) {
+func settled(m int64, end time.Time) func(*hpcv1alpha1.HPCArgoWorkflowJob) {
+	return func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
 		j.Status.SettledNodeMinutes = &m
 		j.Status.Booking = nil
 		j.Status.Attempts = []hpcv1alpha1.AttemptRecord{{Attempt: 1, Tier: hpcv1alpha1.TierGPU,
@@ -50,7 +50,7 @@ func TestPeriodStartIsTheCalendarMonthInUTC(t *testing.T) {
 }
 
 func TestComputeBookedUsedLeftAndActive(t *testing.T) {
-	jobs := []hpcv1alpha1.HPCJob{
+	jobs := []hpcv1alpha1.HPCArgoWorkflowJob{
 		booked("a", hpcv1alpha1.PhaseAdmitted, 120, nil),
 		booked("b", hpcv1alpha1.PhaseRunning, 60, nil),
 		booked("c", hpcv1alpha1.PhaseSucceeded, 240, settled(90, now.Add(-2*time.Hour))),
@@ -73,7 +73,7 @@ func TestPendingBookingsCountUntilTheCacheShowsThem(t *testing.T) {
 		"x": {SiteName: "meluxina", SiteNamespace: "proj-a-hpc", Tier: hpcv1alpha1.TierGPU, NodeMinutes: 100},
 		"a": {SiteName: "meluxina", SiteNamespace: "proj-a-hpc", Tier: hpcv1alpha1.TierGPU, NodeMinutes: 120},
 	}
-	jobs := []hpcv1alpha1.HPCJob{booked("a", hpcv1alpha1.PhaseAdmitted, 120, nil)}
+	jobs := []hpcv1alpha1.HPCArgoWorkflowJob{booked("a", hpcv1alpha1.PhaseAdmitted, 120, nil)}
 	l := Compute(theSite(), jobs, pending, now)
 	if g := l.Tiers[hpcv1alpha1.TierGPU]; g.Booked != 220 || l.Active != 2 {
 		t.Fatalf("a counted once and x pending: got booked %d active %d", g.Booked, l.Active)
@@ -81,7 +81,7 @@ func TestPendingBookingsCountUntilTheCacheShowsThem(t *testing.T) {
 }
 
 func TestAGuestOnASharedNodeHoldsNothing(t *testing.T) {
-	jobs := []hpcv1alpha1.HPCJob{booked("g", hpcv1alpha1.PhaseRunning, 240, func(j *hpcv1alpha1.HPCJob) {
+	jobs := []hpcv1alpha1.HPCArgoWorkflowJob{booked("g", hpcv1alpha1.PhaseRunning, 240, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
 		j.Status.Run = &hpcv1alpha1.RunStatus{HostSiteJobID: "5425070"}
 	})}
 	l := Compute(theSite(), jobs, nil, now)
@@ -97,14 +97,14 @@ func TestLeftNeverBelowZero(t *testing.T) {
 }
 
 func TestAContinuedJobCountsEveryAttemptInItsOwnPeriodAndItsNextBooking(t *testing.T) {
-	j := booked("c", hpcv1alpha1.PhaseAdmitted, 60, func(j *hpcv1alpha1.HPCJob) {
+	j := booked("c", hpcv1alpha1.PhaseAdmitted, 60, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
 		j.Status.Attempt = 3
 		j.Status.Attempts = []hpcv1alpha1.AttemptRecord{
 			{Attempt: 1, Tier: hpcv1alpha1.TierGPU, SettledNodeMinutes: 50, EndTime: metav1.NewTime(time.Date(2026, 10, 31, 22, 0, 0, 0, time.UTC))},
 			{Attempt: 2, Tier: hpcv1alpha1.TierGPU, SettledNodeMinutes: 55, EndTime: metav1.NewTime(now.Add(-time.Hour))},
 		}
 	})
-	l := Compute(theSite(), []hpcv1alpha1.HPCJob{j}, nil, now)
+	l := Compute(theSite(), []hpcv1alpha1.HPCArgoWorkflowJob{j}, nil, now)
 	if g := l.Tiers[hpcv1alpha1.TierGPU]; g.Used != 55 || g.Booked != 60 || l.Active != 1 {
 		t.Fatalf("attempt 1 is last month's, attempt 2 this month's, attempt 3 is booked: got used %d booked %d active %d",
 			g.Used, g.Booked, l.Active)
@@ -112,12 +112,12 @@ func TestAContinuedJobCountsEveryAttemptInItsOwnPeriodAndItsNextBooking(t *testi
 }
 
 func TestBetweenAttemptsTheJobStillBelongsToItsSite(t *testing.T) {
-	j := booked("c", hpcv1alpha1.PhasePending, 0, func(j *hpcv1alpha1.HPCJob) {
+	j := booked("c", hpcv1alpha1.PhasePending, 0, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
 		j.Status.Booking = nil // continuing: the next attempt is not booked yet
 		j.Status.Attempts = []hpcv1alpha1.AttemptRecord{{Attempt: 1, Tier: hpcv1alpha1.TierGPU,
 			SettledNodeMinutes: 40, EndTime: metav1.NewTime(now.Add(-time.Minute))}}
 	})
-	l := Compute(theSite(), []hpcv1alpha1.HPCJob{j}, nil, now)
+	l := Compute(theSite(), []hpcv1alpha1.HPCArgoWorkflowJob{j}, nil, now)
 	if g := l.Tiers[hpcv1alpha1.TierGPU]; g.Used != 40 || g.Booked != 0 {
 		t.Fatalf("got used %d booked %d", g.Used, g.Booked)
 	}

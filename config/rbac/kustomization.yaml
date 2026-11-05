@@ -31,7 +31,7 @@ resources:
 - hpcsite_admin_role.yaml
 - hpcsite_editor_role.yaml
 - hpcsite_viewer_role.yaml
-- hpcjob_admin_role.yaml
-- hpcjob_editor_role.yaml
-- hpcjob_viewer_role.yaml
+- hpcargoworkflowjob_admin_role.yaml
+- hpcargoworkflowjob_editor_role.yaml
+- hpcargoworkflowjob_viewer_role.yaml
 

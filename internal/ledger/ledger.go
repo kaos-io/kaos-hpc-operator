@@ -40,7 +40,7 @@ func PeriodStart(now time.Time) time.Time {
 }
 
 // Holds reports whether a job currently holds its booking.
-func Holds(j *hpcv1alpha1.HPCJob) bool {
+func Holds(j *hpcv1alpha1.HPCArgoWorkflowJob) bool {
 	if j.Status.Booking == nil || j.Status.Phase.Terminal() {
 		return false
 	}
@@ -55,7 +55,7 @@ func Holds(j *hpcv1alpha1.HPCJob) bool {
 // Compute derives the ledger of one HPCSite from the jobs booked against it. pending holds
 // bookings made in this process that the informer cache may not show yet, keyed by job UID; a job
 // present in jobs with a booking takes precedence over its pending entry.
-func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCJob,
+func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 	pending map[string]hpcv1alpha1.Booking, now time.Time) Ledger {
 	start := PeriodStart(now)
 	l := Ledger{PeriodStart: start, Tiers: map[hpcv1alpha1.Tier]Tier{
@@ -101,7 +101,7 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCJob,
 
 // onSite reports whether the job's spend belongs to this HPCSite: its booking names it, or (between
 // a continuation and its next booking) its last booking did.
-func onSite(j *hpcv1alpha1.HPCJob, site *hpcv1alpha1.HPCSite) bool {
+func onSite(j *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite) bool {
 	if b := j.Status.Booking; b != nil {
 		return b.SiteName == site.Name && b.SiteNamespace == site.Namespace
 	}

@@ -4,14 +4,14 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: hpcjobs.hpc.kaos.io
+  name: hpcargoworkflowjobs.hpc.kaos.io
 spec:
   group: hpc.kaos.io
   names:
-    kind: HPCJob
-    listKind: HPCJobList
-    plural: hpcjobs
-    singular: hpcjob
+    kind: HPCArgoWorkflowJob
+    listKind: HPCArgoWorkflowJobList
+    plural: hpcargoworkflowjobs
+    singular: hpcargoworkflowjob
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -37,8 +37,10 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          HPCJob is one pipeline step run on an HPC site. The controller admits and books it against the
-          project's share before anything is submitted (PRD-HPC-1461 F-01, F-26).
+          HPCArgoWorkflowJob is one Argo Workflow step run on an HPC site. The step creates it and supplies what the job
+          needs from the platform and the run (image, command, dataset, outputs, credentials); it cannot run on its
+          own. The controller admits and books it against the project's share before anything is submitted
+          (PRD-HPC-1461 F-01, F-26). The name HPCJob is kept for a future kind that runs without a workflow.
         properties:
           apiVersion:
             description: |-
@@ -58,7 +60,8 @@ spec:
           metadata:
             type: object
           spec:
-            description: HPCJobSpec is one pipeline step to run on an HPC site (D-01).
+            description: HPCArgoWorkflowJobSpec is one pipeline step to run on an
+              HPC site (D-01).
             properties:
               class:
                 description: Class is the site class the user picked, for example
@@ -93,7 +96,7 @@ spec:
                 description: |-
                   Resumable makes the step continue across jobs: it gets the wall-time signal LeadMinutes before
                   its wall time, saves a checkpoint through the KAOS library and exits 85, and the job continues
-                  from that checkpoint in a new site job under this same HPCJob (D-38, D-44 as amended
+                  from that checkpoint in a new site job under this same HPCArgoWorkflowJob (D-38, D-44 as amended
                   2026-11-05, F-29). Absent: the step ends when its wall time is reached.
                 properties:
                   leadMinutes:
@@ -124,11 +127,11 @@ spec:
             - wallTimeMinutes
             type: object
             x-kubernetes-validations:
-            - message: spec is immutable; create a new HPCJob
+            - message: spec is immutable; create a new HPCArgoWorkflowJob
               rule: self == oldSelf
           status:
             description: |-
-              HPCJobStatus: the controller owns phase, reason, message, booking and settlement; the submitter
+              HPCArgoWorkflowJobStatus: the controller owns phase, reason, message, booking and settlement; the submitter
               owns run. The two never write the same field.
             properties:
               attempt:
@@ -138,9 +141,9 @@ spec:
                 type: integer
               attempts:
                 description: Attempts are the finished, settled site jobs of this
-                  HPCJob.
+                  HPCArgoWorkflowJob.
                 items:
-                  description: AttemptRecord is one finished site job of an HPCJob,
+                  description: AttemptRecord is one finished site job of an HPCArgoWorkflowJob,
                     settled (written by the controller).
                   properties:
                     attempt:
@@ -282,7 +285,7 @@ spec:
               message:
                 type: string
               phase:
-                description: Phase of an HPCJob.
+                description: Phase of an HPCArgoWorkflowJob.
                 enum:
                 - Pending
                 - Waiting

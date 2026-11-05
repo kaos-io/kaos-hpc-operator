@@ -45,11 +45,11 @@ const WaitingResync = 30 * time.Second
 // ContinueResync is how soon the next attempt of a continued job is judged.
 const ContinueResync = 100 * time.Millisecond
 
-// HPCJobReconciler admits, books and settles HPCJobs against their project's HPCSite (phase 0,
+// HPCArgoWorkflowJobReconciler admits, books and settles HPCArgoWorkflowJobs against their project's HPCSite (phase 0,
 // PRD-HPC-1461 F-26, D-12, D-24, D-49). Admission runs one job at a time (MaxConcurrentReconciles
 // is 1), and the ledger is derived from the jobs themselves plus the bookings this process made
 // that the cache may not show yet, so concurrent jobs never overbook.
-type HPCJobReconciler struct {
+type HPCArgoWorkflowJobReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
@@ -60,17 +60,17 @@ type HPCJobReconciler struct {
 	pending map[string]hpcv1alpha1.Booking // by job UID
 }
 
-// +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcjobs,verbs=get;list;watch
-// +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcjobs/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcargoworkflowjobs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcargoworkflowjobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcsites,verbs=get;list;watch
 // +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcsites/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile judges a new or waiting job, follows an admitted one, and settles it when it ends.
-func (r *HPCJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	var job hpcv1alpha1.HPCJob
+	var job hpcv1alpha1.HPCArgoWorkflowJob
 	if err := r.Get(ctx, req.NamespacedName, &job); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -115,7 +115,7 @@ func (r *HPCJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 // siteOf resolves the job's project from its namespace label and the project's HPCSite that offers
 // the job's class (3.11). Nothing in the job names a project or a site (T-02).
-func (r *HPCJobReconciler) siteOf(ctx context.Context, job *hpcv1alpha1.HPCJob) (*hpcv1alpha1.HPCSite, string, string, error) {
+func (r *HPCArgoWorkflowJobReconciler) siteOf(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob) (*hpcv1alpha1.HPCSite, string, string, error) {
 	var ns corev1.Namespace
 	if err := r.Get(ctx, client.ObjectKey{Name: job.Namespace}, &ns); err != nil {
 		return nil, "", "", err
@@ -138,7 +138,7 @@ func (r *HPCJobReconciler) siteOf(ctx context.Context, job *hpcv1alpha1.HPCJob) 
 }
 
 // judge decides a new or waiting job and books it when admitted.
-func (r *HPCJobReconciler) judge(ctx context.Context, job *hpcv1alpha1.HPCJob, site *hpcv1alpha1.HPCSite) (ctrl.Result, error) {
+func (r *HPCArgoWorkflowJobReconciler) judge(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite) (ctrl.Result, error) {
 	l, err := r.ledgerOf(ctx, site)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -172,7 +172,7 @@ func (r *HPCJobReconciler) judge(ctx context.Context, job *hpcv1alpha1.HPCJob, s
 // follow moves an admitted job to Running when the site job exists, and ends the attempt when the
 // submitter reports it will not run again (phase 0: the in-pod runner writes status.run). It
 // returns true when the job continues in a next attempt.
-func (r *HPCJobReconciler) follow(ctx context.Context, job *hpcv1alpha1.HPCJob) (bool, error) {
+func (r *HPCArgoWorkflowJobReconciler) follow(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob) (bool, error) {
 	run := job.Status.Run
 	if run == nil || !current(run, job.Status.Attempt) {
 		return false, nil // nothing reported yet, or a report of an earlier attempt
@@ -196,13 +196,13 @@ func current(run *hpcv1alpha1.RunStatus, attempt int32) bool {
 }
 
 // endAttempt settles the current attempt and either ends the job or continues it under this same
-// HPCJob (D-44 as amended 2026-11-05, F-29). The attempt's actual spend replaces its booking
+// HPCArgoWorkflowJob (D-44 as amended 2026-11-05, F-29). The attempt's actual spend replaces its booking
 // (D-12); phase 0 settles from the run times the site reported, phase 1 from the site's accounting
 // record (D-32). A guest on a shared node is covered by its host's booking and settles to zero
 // (D-26). A continuation needs a resumable step, a checkpoint the job staged out before it exited
 // (T-19), and a continuation left under the step's cap; it is then admitted and booked like a new
 // step (A4).
-func (r *HPCJobReconciler) endAttempt(ctx context.Context, job *hpcv1alpha1.HPCJob) (bool, error) {
+func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob) (bool, error) {
 	run := job.Status.Run
 	var used int64
 	if run.HostSiteJobID == "" && run.StartTime != nil && run.EndTime != nil {
@@ -283,8 +283,8 @@ func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 }
 
 // ledgerOf computes the site's ledger from every job booked against it.
-func (r *HPCJobReconciler) ledgerOf(ctx context.Context, site *hpcv1alpha1.HPCSite) (ledger.Ledger, error) {
-	var jobs hpcv1alpha1.HPCJobList
+func (r *HPCArgoWorkflowJobReconciler) ledgerOf(ctx context.Context, site *hpcv1alpha1.HPCSite) (ledger.Ledger, error) {
+	var jobs hpcv1alpha1.HPCArgoWorkflowJobList
 	if err := r.List(ctx, &jobs); err != nil {
 		return ledger.Ledger{}, err
 	}
@@ -299,7 +299,7 @@ func (r *HPCJobReconciler) ledgerOf(ctx context.Context, site *hpcv1alpha1.HPCSi
 }
 
 // publishLedger writes the site's ledger to its status, for people and the hub to read (F-30).
-func (r *HPCJobReconciler) publishLedger(ctx context.Context, site *hpcv1alpha1.HPCSite) error {
+func (r *HPCArgoWorkflowJobReconciler) publishLedger(ctx context.Context, site *hpcv1alpha1.HPCSite) error {
 	l, err := r.ledgerOf(ctx, site)
 	if err != nil {
 		return err
@@ -320,7 +320,7 @@ func (r *HPCJobReconciler) publishLedger(ctx context.Context, site *hpcv1alpha1.
 	return err
 }
 
-func (r *HPCJobReconciler) setPhase(ctx context.Context, job *hpcv1alpha1.HPCJob, phase hpcv1alpha1.Phase,
+func (r *HPCArgoWorkflowJobReconciler) setPhase(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob, phase hpcv1alpha1.Phase,
 	reason, msg string, booking *hpcv1alpha1.Booking) error {
 	orig := job.DeepCopy()
 	job.Status.Phase, job.Status.Reason, job.Status.Message = phase, reason, msg
@@ -337,14 +337,14 @@ func (r *HPCJobReconciler) setPhase(ctx context.Context, job *hpcv1alpha1.HPCJob
 	return r.Status().Patch(ctx, job, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{}))
 }
 
-func (r *HPCJobReconciler) now() time.Time {
+func (r *HPCArgoWorkflowJobReconciler) now() time.Time {
 	if r.Now != nil {
 		return r.Now()
 	}
 	return time.Now()
 }
 
-func (r *HPCJobReconciler) remember(uid string, b hpcv1alpha1.Booking) {
+func (r *HPCArgoWorkflowJobReconciler) remember(uid string, b hpcv1alpha1.Booking) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.pending == nil {
@@ -353,13 +353,13 @@ func (r *HPCJobReconciler) remember(uid string, b hpcv1alpha1.Booking) {
 	r.pending[uid] = b
 }
 
-func (r *HPCJobReconciler) forget(uid string) {
+func (r *HPCArgoWorkflowJobReconciler) forget(uid string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.pending, uid)
 }
 
-func (r *HPCJobReconciler) isPending(uid string) bool {
+func (r *HPCArgoWorkflowJobReconciler) isPending(uid string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_, ok := r.pending[uid]
@@ -367,10 +367,10 @@ func (r *HPCJobReconciler) isPending(uid string) bool {
 }
 
 // SetupWithManager sets up the controller with the Manager. One worker: admission is serial.
-func (r *HPCJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *HPCArgoWorkflowJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&hpcv1alpha1.HPCJob{}).
-		Named("hpcjob").
+		For(&hpcv1alpha1.HPCArgoWorkflowJob{}).
+		Named("hpcargoworkflowjob").
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }

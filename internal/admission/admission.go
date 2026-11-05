@@ -1,4 +1,4 @@
-// Package admission decides whether an HPCJob may run, waits, or is refused (PRD-HPC-1461 D-12,
+// Package admission decides whether an HPCArgoWorkflowJob may run, waits, or is refused (PRD-HPC-1461 D-12,
 // D-13, D-24, D-41, D-49, F-11). It is a pure function of the job, its site and the ledger.
 package admission
 
@@ -33,7 +33,7 @@ func ClassOf(site *hpcv1alpha1.HPCSite, class string) (hpcv1alpha1.SiteClass, bo
 }
 
 // Decide judges one job against its project's site and current ledger.
-func Decide(job *hpcv1alpha1.HPCJob, site *hpcv1alpha1.HPCSite, l ledger.Ledger) Decision {
+func Decide(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, l ledger.Ledger) Decision {
 	spec := job.Spec
 	class, ok := ClassOf(site, spec.Class)
 	if !ok {

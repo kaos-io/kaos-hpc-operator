@@ -6,10 +6,10 @@ import (
 
 // ProjectLabel names the KAOS project a namespace belongs to. kubecore-operator writes it on every
 // environment namespace and on the project's HPC namespace; tenants cannot set it (PRD-HPC-1461
-// 3.11, T-02). An HPCJob never names its project: the controller reads this label.
+// 3.11, T-02). An HPCArgoWorkflowJob never names its project: the controller reads this label.
 const ProjectLabel = "hpc.kaos.io/project"
 
-// Phase of an HPCJob.
+// Phase of an HPCArgoWorkflowJob.
 // +kubebuilder:validation:Enum=Pending;Waiting;Refused;Admitted;Running;Succeeded;Failed;Cancelled
 type Phase string
 
@@ -50,9 +50,9 @@ const (
 	ExitCodeContinue        = int32(85)
 )
 
-// HPCJobSpec is one pipeline step to run on an HPC site (D-01).
-// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable; create a new HPCJob"
-type HPCJobSpec struct {
+// HPCArgoWorkflowJobSpec is one pipeline step to run on an HPC site (D-01).
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable; create a new HPCArgoWorkflowJob"
+type HPCArgoWorkflowJobSpec struct {
 	// Class is the site class the user picked, for example meluxina-gpu.
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Class string `json:"class"`
@@ -78,7 +78,7 @@ type HPCJobSpec struct {
 	Outputs []string `json:"outputs,omitempty"`
 	// Resumable makes the step continue across jobs: it gets the wall-time signal LeadMinutes before
 	// its wall time, saves a checkpoint through the KAOS library and exits 85, and the job continues
-	// from that checkpoint in a new site job under this same HPCJob (D-38, D-44 as amended
+	// from that checkpoint in a new site job under this same HPCArgoWorkflowJob (D-38, D-44 as amended
 	// 2026-11-05, F-29). Absent: the step ends when its wall time is reached.
 	// +optional
 	Resumable *Resumable `json:"resumable,omitempty"`
@@ -157,7 +157,7 @@ type RunStatus struct {
 	CheckpointRef string `json:"checkpointRef,omitempty"`
 }
 
-// AttemptRecord is one finished site job of an HPCJob, settled (written by the controller).
+// AttemptRecord is one finished site job of an HPCArgoWorkflowJob, settled (written by the controller).
 type AttemptRecord struct {
 	Attempt   int32  `json:"attempt"`
 	SiteJobID string `json:"siteJobID,omitempty"`
@@ -179,9 +179,9 @@ type ResumeInfo struct {
 	FromAttempt   int32  `json:"fromAttempt"`
 }
 
-// HPCJobStatus: the controller owns phase, reason, message, booking and settlement; the submitter
+// HPCArgoWorkflowJobStatus: the controller owns phase, reason, message, booking and settlement; the submitter
 // owns run. The two never write the same field.
-type HPCJobStatus struct {
+type HPCArgoWorkflowJobStatus struct {
 	// +optional
 	Phase Phase `json:"phase,omitempty"`
 	// +optional
@@ -207,7 +207,7 @@ type HPCJobStatus struct {
 	// Resume is set for a continuation: the submitter passes it to the new site job.
 	// +optional
 	Resume *ResumeInfo `json:"resume,omitempty"`
-	// Attempts are the finished, settled site jobs of this HPCJob.
+	// Attempts are the finished, settled site jobs of this HPCArgoWorkflowJob.
 	// +optional
 	Attempts []AttemptRecord `json:"attempts,omitempty"`
 	// Run is the submitter's report of the site job.
@@ -228,27 +228,29 @@ type HPCJobStatus struct {
 // +kubebuilder:printcolumn:name="Site job",type=string,JSONPath=`.status.run.siteJobID`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// HPCJob is one pipeline step run on an HPC site. The controller admits and books it against the
-// project's share before anything is submitted (PRD-HPC-1461 F-01, F-26).
-type HPCJob struct {
+// HPCArgoWorkflowJob is one Argo Workflow step run on an HPC site. The step creates it and supplies what the job
+// needs from the platform and the run (image, command, dataset, outputs, credentials); it cannot run on its
+// own. The controller admits and books it against the project's share before anything is submitted
+// (PRD-HPC-1461 F-01, F-26). The name HPCJob is kept for a future kind that runs without a workflow.
+type HPCArgoWorkflowJob struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   HPCJobSpec   `json:"spec"`
-	Status HPCJobStatus `json:"status,omitempty"`
+	Spec   HPCArgoWorkflowJobSpec   `json:"spec"`
+	Status HPCArgoWorkflowJobStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// HPCJobList contains a list of HPCJob.
-type HPCJobList struct {
+// HPCArgoWorkflowJobList contains a list of HPCArgoWorkflowJob.
+type HPCArgoWorkflowJobList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []HPCJob `json:"items"`
+	Items           []HPCArgoWorkflowJob `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&HPCJob{}, &HPCJobList{})
+	SchemeBuilder.Register(&HPCArgoWorkflowJob{}, &HPCArgoWorkflowJobList{})
 }
 
 // Terminal reports whether the phase is final.
