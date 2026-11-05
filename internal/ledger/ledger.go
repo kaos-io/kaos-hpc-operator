@@ -41,7 +41,7 @@ func PeriodStart(now time.Time) time.Time {
 
 // Holds reports whether a job currently holds its booking.
 func Holds(j *hpcv1alpha1.HPCJob) bool {
-	if j.Status.Booking == nil || j.Status.SettledNodeMinutes != nil {
+	if j.Status.Booking == nil || j.Status.Phase.Terminal() {
 		return false
 	}
 	switch j.Status.Phase {
@@ -65,23 +65,27 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCJob,
 	seen := map[string]bool{}
 	for i := range jobs {
 		j := &jobs[i]
-		b := j.Status.Booking
-		if b == nil || b.SiteName != site.Name || b.SiteNamespace != site.Namespace {
+		if !onSite(j, site) {
 			continue
 		}
-		seen[string(j.UID)] = true
-		t := l.Tiers[b.Tier]
-		switch {
-		case j.Status.SettledNodeMinutes != nil:
-			if settledAt(j).Before(start) {
+		// Every finished attempt counts in the period it ended (a continued job spends per attempt).
+		for _, a := range j.Status.Attempts {
+			if a.EndTime.Time.Before(start) {
 				continue
 			}
-			t.Used += *j.Status.SettledNodeMinutes
-		case Holds(j):
-			t.Booked += b.NodeMinutes
-			l.Active++
+			t := l.Tiers[a.Tier]
+			t.Used += a.SettledNodeMinutes
+			l.Tiers[a.Tier] = t
 		}
-		l.Tiers[b.Tier] = t
+		if b := j.Status.Booking; b != nil && b.SiteName == site.Name && b.SiteNamespace == site.Namespace {
+			seen[string(j.UID)] = true
+			if Holds(j) {
+				t := l.Tiers[b.Tier]
+				t.Booked += b.NodeMinutes
+				l.Tiers[b.Tier] = t
+				l.Active++
+			}
+		}
 	}
 	for uid, b := range pending {
 		if seen[uid] || b.SiteName != site.Name || b.SiteNamespace != site.Namespace {
@@ -95,11 +99,11 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCJob,
 	return l
 }
 
-// settledAt is when a settled job's spend counts: its end time as the site reported it, else the
-// time it was booked.
-func settledAt(j *hpcv1alpha1.HPCJob) time.Time {
-	if j.Status.Run != nil && j.Status.Run.EndTime != nil {
-		return j.Status.Run.EndTime.Time
+// onSite reports whether the job's spend belongs to this HPCSite: its booking names it, or (between
+// a continuation and its next booking) its last booking did.
+func onSite(j *hpcv1alpha1.HPCJob, site *hpcv1alpha1.HPCSite) bool {
+	if b := j.Status.Booking; b != nil {
+		return b.SiteName == site.Name && b.SiteNamespace == site.Namespace
 	}
-	return j.Status.Booking.At.Time
+	return j.Status.Site != nil && j.Status.Site.Name == site.Name && j.Status.Site.Namespace == site.Namespace
 }

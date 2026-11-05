@@ -42,6 +42,9 @@ import (
 // WaitingResync is how often a Waiting job is judged again (bookings settle, limits free up).
 const WaitingResync = 30 * time.Second
 
+// ContinueResync is how soon the next attempt of a continued job is judged.
+const ContinueResync = 100 * time.Millisecond
+
 // HPCJobReconciler admits, books and settles HPCJobs against their project's HPCSite (phase 0,
 // PRD-HPC-1461 F-26, D-12, D-24, D-49). Admission runs one job at a time (MaxConcurrentReconciles
 // is 1), and the ledger is derived from the jobs themselves plus the bookings this process made
@@ -90,8 +93,13 @@ func (r *HPCJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if job.Status.Booking == nil {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
-		if err := r.follow(ctx, &job); err != nil {
+		next, err := r.follow(ctx, &job)
+		if err != nil {
 			return ctrl.Result{}, err
+		}
+		if next {
+			// A continuation: judge the next attempt right away.
+			return ctrl.Result{RequeueAfter: ContinueResync}, nil
 		}
 	default:
 		res, err := r.judge(ctx, &job, site)
@@ -161,55 +169,112 @@ func (r *HPCJobReconciler) judge(ctx context.Context, job *hpcv1alpha1.HPCJob, s
 	}
 }
 
-// follow moves an admitted job to Running when the site job exists, and settles it when the
-// submitter reports it will not run again (phase 0: the in-pod runner writes status.run).
-func (r *HPCJobReconciler) follow(ctx context.Context, job *hpcv1alpha1.HPCJob) error {
+// follow moves an admitted job to Running when the site job exists, and ends the attempt when the
+// submitter reports it will not run again (phase 0: the in-pod runner writes status.run). It
+// returns true when the job continues in a next attempt.
+func (r *HPCJobReconciler) follow(ctx context.Context, job *hpcv1alpha1.HPCJob) (bool, error) {
 	run := job.Status.Run
-	if run == nil {
-		return nil
+	if run == nil || !current(run, job.Status.Attempt) {
+		return false, nil // nothing reported yet, or a report of an earlier attempt
 	}
 	if run.Terminal {
-		return r.settle(ctx, job)
+		return r.endAttempt(ctx, job)
 	}
 	if run.SiteJobID != "" && job.Status.Phase == hpcv1alpha1.PhaseAdmitted {
-		return r.setPhase(ctx, job, hpcv1alpha1.PhaseRunning, "Submitted", "site job "+run.SiteJobID, job.Status.Booking)
+		return false, r.setPhase(ctx, job, hpcv1alpha1.PhaseRunning, "Submitted", "site job "+run.SiteJobID, job.Status.Booking)
 	}
-	return nil
+	return false, nil
 }
 
-// settle ends a job: its actual spend replaces its booking (D-12). Phase 0 settles from the run
-// times the site reported; phase 1 reads the site's accounting record (D-32). A guest on a shared
-// node is covered by its host's booking and settles to zero (D-26).
-func (r *HPCJobReconciler) settle(ctx context.Context, job *hpcv1alpha1.HPCJob) error {
+// current reports whether a submitter's report is about the job's current attempt. A report without
+// an attempt number counts only for attempt 1: after a continuation it may be the old attempt's.
+func current(run *hpcv1alpha1.RunStatus, attempt int32) bool {
+	if run.Attempt == 0 {
+		return attempt <= 1
+	}
+	return run.Attempt == attempt
+}
+
+// endAttempt settles the current attempt and either ends the job or continues it under this same
+// HPCJob (D-44 as amended 2026-11-05, F-29). The attempt's actual spend replaces its booking
+// (D-12); phase 0 settles from the run times the site reported, phase 1 from the site's accounting
+// record (D-32). A guest on a shared node is covered by its host's booking and settles to zero
+// (D-26). A continuation needs a resumable step, a checkpoint the job staged out before it exited
+// (T-19), and a continuation left under the step's cap; it is then admitted and booked like a new
+// step (A4).
+func (r *HPCJobReconciler) endAttempt(ctx context.Context, job *hpcv1alpha1.HPCJob) (bool, error) {
 	run := job.Status.Run
 	var used int64
 	if run.HostSiteJobID == "" && run.StartTime != nil && run.EndTime != nil {
 		nodes := int64(max(job.Spec.Nodes, 1))
 		used = nodes * int64(math.Ceil(run.EndTime.Sub(run.StartTime.Time).Minutes()))
 	}
+	end := metav1.NewTime(r.now())
+	if run.EndTime != nil {
+		end = *run.EndTime
+	}
 	phase, reason := outcome(run)
 	orig := job.DeepCopy()
-	job.Status.Phase, job.Status.Reason = phase, reason
-	job.Status.Message = "settled " + strconv.FormatInt(used, 10) + " node-minutes from the run times the site reported"
-	job.Status.SettledNodeMinutes = &used
-	if err := r.Status().Patch(ctx, job, client.MergeFrom(orig)); err != nil {
-		return err
+	attempt := max(job.Status.Attempt, 1)
+	tier := hpcv1alpha1.TierGPU
+	if job.Status.Booking != nil {
+		tier = job.Status.Booking.Tier
+	}
+	job.Status.Attempts = append(job.Status.Attempts, hpcv1alpha1.AttemptRecord{Attempt: attempt,
+		SiteJobID: run.SiteJobID, ExitCode: run.ExitCode, Outcome: reason, Tier: tier,
+		SettledNodeMinutes: used, EndTime: end})
+	job.Status.Booking = nil
+	msg := "attempt " + strconv.Itoa(int(attempt)) + " settled " + strconv.FormatInt(used, 10) + " node-minutes"
+
+	next := false
+	if run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeContinue {
+		res := job.Spec.Resumable
+		switch {
+		case res == nil:
+			phase, reason, msg = hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonNotResumable,
+				msg+"; the step exited 85 but is not declared resumable"
+		case run.CheckpointRef == "":
+			phase, reason, msg = hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonCheckpointMissing,
+				msg+"; checkpoint upload incomplete: no staged-out checkpoint to continue from"
+		case job.Status.Continuations >= res.MaxContinuations:
+			phase, reason, msg = hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonContinuationLimit,
+				msg+"; the step reached its "+strconv.Itoa(int(res.MaxContinuations))+" continuations"
+		default:
+			next = true
+			job.Status.Continuations++
+			job.Status.Attempt = attempt + 1
+			job.Status.Resume = &hpcv1alpha1.ResumeInfo{CheckpointRef: run.CheckpointRef, FromAttempt: attempt}
+			phase, reason = hpcv1alpha1.PhasePending, hpcv1alpha1.ReasonContinuing
+			msg += "; continuing from checkpoint " + run.CheckpointRef + " as attempt " + strconv.Itoa(int(attempt+1))
+		}
+	}
+	job.Status.Phase, job.Status.Reason, job.Status.Message = phase, reason, msg
+	if phase.Terminal() {
+		var total int64
+		for _, a := range job.Status.Attempts {
+			total += a.SettledNodeMinutes
+		}
+		job.Status.SettledNodeMinutes = &total
+	}
+	if err := r.Status().Patch(ctx, job, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{})); err != nil {
+		return false, err
 	}
 	r.forget(string(job.UID))
-	return nil
+	return next, nil
 }
 
-// outcome maps the site's final state and exit code to the job's phase.
+// outcome maps the site's final state and exit code of one attempt to the job's phase.
 func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 	state := strings.ToUpper(run.State)
 	switch {
 	case strings.HasPrefix(state, "CANCELLED"):
 		return hpcv1alpha1.PhaseCancelled, "Cancelled"
-	case run.ExitCode != nil && *run.ExitCode == 85:
-		// The step saved and continues in a new job (D-44); that attempt is a new HPCJob.
+	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeContinue:
 		return hpcv1alpha1.PhaseFailed, "Continued"
 	case state == "COMPLETED" && (run.ExitCode == nil || *run.ExitCode == 0):
 		return hpcv1alpha1.PhaseSucceeded, "Completed"
+	case state == "TIMEOUT":
+		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonWallTimeReached
 	case state == "":
 		return hpcv1alpha1.PhaseFailed, "Ended"
 	default:
@@ -261,8 +326,15 @@ func (r *HPCJobReconciler) setPhase(ctx context.Context, job *hpcv1alpha1.HPCJob
 	job.Status.Phase, job.Status.Reason, job.Status.Message = phase, reason, msg
 	if booking != nil {
 		job.Status.Booking = booking
+		if job.Status.Site == nil {
+			job.Status.Site = &hpcv1alpha1.SiteRef{Name: booking.SiteName, Namespace: booking.SiteNamespace}
+		}
+		if job.Status.Attempt == 0 {
+			job.Status.Attempt = 1
+		}
 	}
-	return r.Status().Patch(ctx, job, client.MergeFrom(orig))
+	// The optimistic lock makes a decision made on a stale read fail and be retried on fresh data.
+	return r.Status().Patch(ctx, job, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{}))
 }
 
 func (r *HPCJobReconciler) now() time.Time {

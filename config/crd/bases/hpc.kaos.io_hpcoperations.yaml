@@ -155,8 +155,20 @@ spec:
               run:
                 description: |-
                   RunStatus is written by the submitter (in phase 0 the in-pod runner, D-34): what the site says
-                  about the job. The controller only reads it.
+                  about the current attempt's site job. The controller only reads it.
                 properties:
+                  attempt:
+                    description: |-
+                      Attempt this report is about (status.attempt when it was written). A report of an earlier
+                      attempt is ignored.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  checkpointRef:
+                    description: |-
+                      CheckpointRef is set with exit code 85: the lakeFS commit (or URI) of the checkpoint the job
+                      staged out before it exited, checked by the submitter (T-19). Without it nothing continues.
+                    type: string
                   endTime:
                     format: date-time
                     type: string
