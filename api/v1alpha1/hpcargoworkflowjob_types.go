@@ -59,6 +59,14 @@ const (
 // (PRD-HPC-1461 D-04): cancel is the controller's, so a lost follower never orphans a site job.
 const CancelFinalizer = "hpc.kaos.io/cancel"
 
+// CancelRequestedAnnotation is set by the controller on the job, with an RFC3339 time, BEFORE it
+// deletes the runner Job for a real cancel (job deleted, Workflow deleted, shut down or ended). A
+// runner pod also gets SIGTERM when its node drains or evicts it; the runner cancels the site job
+// only when it finds this annotation on its HPCArgoWorkflowJob, otherwise it exits and the Job
+// starts a replacement that re-attaches. The controller waits until the annotation is in the API
+// (not just its cache) before it deletes the runner Job.
+const CancelRequestedAnnotation = "hpc.kaos.io/cancel-requested"
+
 // AllowedEnvNames are the only environment variables a job's spec may set on the runner
 // (PRD-1461 phase 1 contract section 1). Everything that names an identity, a path, a class table
 // or an endpoint comes from the HPCSite and the operator-rendered ConfigMap, never from the

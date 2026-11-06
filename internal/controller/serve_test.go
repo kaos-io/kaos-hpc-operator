@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -308,6 +309,42 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		}, "ended"),
 	)
 
+	It("marks the cancel request in the API before it deletes the runner Job", func() {
+		wf := newWorkflow()
+		j := newServeJob(wf, nil)
+		_, got := reconcileOnce(j)
+		rj := runnerJob(got, 1)
+		oc := &orderClient{Client: k8sClient, key: client.ObjectKeyFromObject(j)}
+		r.Client = oc
+		Expect(unstructured.SetNestedField(wf.Object, "Stop", "spec", "shutdown")).To(Succeed())
+		Expect(k8sClient.Update(ctx, wf)).To(Succeed())
+
+		_, got = reconcileOnce(j)
+		Expect(oc.deletes).To(Equal(1))
+		Expect(oc.markedAtDelete).To(BeTrue(), "the annotation must be in the API when the runner Job is deleted")
+		Expect(got.Annotations).To(HaveKey(hpcv1alpha1.CancelRequestedAnnotation))
+		_, perr := time.Parse(time.RFC3339, got.Annotations[hpcv1alpha1.CancelRequestedAnnotation])
+		Expect(perr).NotTo(HaveOccurred())
+		gc(rj)
+	})
+
+	It("never marks a cancel when only the runner pod is evicted (Job alive)", func() {
+		wf := newWorkflow()
+		j := newServeJob(wf, nil)
+		_, got := reconcileOnce(j)
+		rj := runnerJob(got, 1)
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "evicted", Namespace: hpcNS,
+			Labels: map[string]string{runnerjob.LabelRunnerJob: rj.Name}},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runner", Image: "x"}}}}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, pod)).To(Succeed())
+
+		_, got = reconcileOnce(j)
+		Expect(got.Annotations).NotTo(HaveKey(hpcv1alpha1.CancelRequestedAnnotation))
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
+		Expect(runnerJob(got, 1).DeletionTimestamp).To(BeNil())
+	})
+
 	It("cancels when the job itself is deleted, and then lets it go", func() {
 		j := newServeJob(nil, nil)
 		_, got := reconcileOnce(j)
@@ -363,3 +400,22 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(err).To(MatchError(ContainSubstring("--runner-image")))
 	})
 })
+
+// orderClient records whether the cancel marker was in the API when a runner Job was deleted.
+type orderClient struct {
+	client.Client
+	key            types.NamespacedName
+	deletes        int
+	markedAtDelete bool
+}
+
+func (c *orderClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if _, ok := obj.(*batchv1.Job); ok {
+		c.deletes++
+		var j hpcv1alpha1.HPCArgoWorkflowJob
+		if err := c.Get(ctx, c.key, &j); err == nil {
+			c.markedAtDelete = j.Annotations[hpcv1alpha1.CancelRequestedAnnotation] != ""
+		}
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}

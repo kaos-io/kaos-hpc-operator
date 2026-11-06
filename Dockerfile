@@ -39,12 +39,12 @@ RUN apk upgrade --no-cache && apk add --no-cache openssh-client ca-certificates 
     && rm -rf /usr/local/lib/python3.13/site-packages/pip* /usr/local/lib/python3.13/site-packages/setuptools* \
               /usr/local/lib/python3.13/site-packages/pkg_resources /usr/local/lib/python3.13/site-packages/_distutils_hack \
               /usr/local/bin/pip* /usr/local/bin/wheel \
-    && addgroup -g 65532 -S kaos && adduser -u 65532 -S -G kaos -h /home/kaos kaos
+    && addgroup -g 65532 -S kaos && adduser -u 65532 -S -G kaos -h /tmp kaos
 WORKDIR /
 COPY --from=builder /workspace/manager /manager
 COPY --from=builder /workspace/follower /follower
 COPY runner/ /runner/
 USER 65532:65532
-ENV HOME=/home/kaos PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ENV HOME=/tmp PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
 ENTRYPOINT ["/manager"]

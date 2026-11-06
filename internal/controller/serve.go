@@ -146,6 +146,10 @@ func (r *HPCArgoWorkflowJobReconciler) workflowCancelCause(ctx context.Context, 
 // cancels the site job), waits until it is gone, settles the attempt, marks the job Cancelled and
 // drops the finalizer (D-04).
 func (r *HPCArgoWorkflowJobReconciler) cancel(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob, cause string) (ctrl.Result, error) {
+	// The marker comes first: the runner tells a cancel from a node drain by it.
+	if err := r.markCancelRequested(ctx, job); err != nil {
+		return ctrl.Result{}, err
+	}
 	gone, err := r.deleteRunnerJobs(ctx, job)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -164,6 +168,29 @@ func (r *HPCArgoWorkflowJobReconciler) cancel(ctx context.Context, job *hpcv1alp
 		}
 	}
 	return ctrl.Result{}, r.setFinalizer(ctx, job, false)
+}
+
+// markCancelRequested sets hpc.kaos.io/cancel-requested on the job and returns only once the API
+// server (not the informer cache) shows it, so the runner Job's SIGTERM can never overtake it.
+func (r *HPCArgoWorkflowJobReconciler) markCancelRequested(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob) error {
+	if job.Annotations[hpcv1alpha1.CancelRequestedAnnotation] == "" {
+		orig := job.DeepCopy()
+		if job.Annotations == nil {
+			job.Annotations = map[string]string{}
+		}
+		job.Annotations[hpcv1alpha1.CancelRequestedAnnotation] = r.now().UTC().Format(time.RFC3339)
+		if err := r.Patch(ctx, job, client.MergeFrom(orig)); err != nil {
+			return fmt.Errorf("marking the cancel request: %w", err)
+		}
+	}
+	var live hpcv1alpha1.HPCArgoWorkflowJob
+	if err := r.reader().Get(ctx, client.ObjectKeyFromObject(job), &live); err != nil {
+		return fmt.Errorf("confirming the cancel request: %w", err)
+	}
+	if live.Annotations[hpcv1alpha1.CancelRequestedAnnotation] == "" {
+		return fmt.Errorf("the cancel request is not in the API yet")
+	}
+	return nil
 }
 
 // deleteRunnerJobs deletes the job's runner Jobs with Foreground propagation and reports whether
