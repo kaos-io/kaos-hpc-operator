@@ -171,6 +171,7 @@ var _ = Describe("HPCArgoWorkflowJob lane placement", func() {
 		got := reconcileOnce(refused)
 		Expect(got.Status.Placement.QOS).To(Equal("default"))
 		Expect(got.Status.Placement.Reservation).To(BeEmpty())
+		Expect(got.Status.Placement.RefusedQOS).To(Equal("test"), "the refusal stays visible after QOS is rewritten")
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRunning))
 		reconcileOnce(refused) // counted once per attempt
 		Expect(testutil.ToFloat64(metrics.LanePlacements.WithLabelValues("default", "", "true")) - before).To(Equal(1.0))

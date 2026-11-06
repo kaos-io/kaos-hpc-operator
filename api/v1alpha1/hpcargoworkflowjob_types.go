@@ -326,6 +326,11 @@ type Placement struct {
 	// Reservation is the site reservation the attempt was placed in. Empty: none.
 	// +optional
 	Reservation string `json:"reservation,omitempty"`
+	// RefusedQOS is the lane the site refused for this attempt (the runner then submitted on the
+	// class default, which QOS shows). Kept so the follower and the console can say so after QOS
+	// was rewritten. Empty: no refusal.
+	// +optional
+	RefusedQOS string `json:"refusedQOS,omitempty"`
 }
 
 // ResumeInfo is what the next attempt resumes from.

@@ -225,6 +225,7 @@ func (r *HPCArgoWorkflowJobReconciler) reflectLane(ctx context.Context, job *hpc
 	}
 	orig := job.DeepCopy()
 	job.Status.Placement = p.DeepCopy()
+	job.Status.Placement.RefusedQOS = p.QOS
 	job.Status.Placement.QOS, job.Status.Placement.Reservation = run.QOS, run.Reservation
 	if err := r.Status().Patch(ctx, job, client.MergeFrom(orig)); err != nil {
 		return err

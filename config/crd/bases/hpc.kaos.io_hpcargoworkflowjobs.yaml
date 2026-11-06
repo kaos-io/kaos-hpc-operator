@@ -406,6 +406,12 @@ spec:
                       class's own QoS. It follows the QoS the runner reports using, so a lane the site refused
                       shows the class default here.
                     type: string
+                  refusedQOS:
+                    description: |-
+                      RefusedQOS is the lane the site refused for this attempt (the runner then submitted on the
+                      class default, which QOS shows). Kept so the follower and the console can say so after QOS
+                      was rewritten. Empty: no refusal.
+                    type: string
                   reservation:
                     description: 'Reservation is the site reservation the attempt
                       was placed in. Empty: none.'

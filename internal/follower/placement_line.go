@@ -47,9 +47,8 @@ func runningLines(job *hpcv1alpha1.HPCArgoWorkflowJob) []string {
 	p := job.Status.Placement
 	lane := laneOf(p)
 	var lines []string
-	if p != nil && run.QOS != p.QOS {
-		lane = laneOf(&hpcv1alpha1.Placement{QOS: run.QOS, Reservation: run.Reservation})
-		lines = append(lines, "HPC: fast lane refused by the site; running on "+lane)
+	if p != nil && p.RefusedQOS != "" {
+		lines = append(lines, "HPC: fast lane "+p.RefusedQOS+" refused by the site; running on "+lane)
 	}
 	head := "HPC: running"
 	if run.StartTime != nil {
