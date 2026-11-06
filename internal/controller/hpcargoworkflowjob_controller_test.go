@@ -23,13 +23,17 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
+	"github.com/kaos-io/kaos-hpc-operator/internal/metrics"
 )
 
 // Phase 0 (PRD-HPC-1461 F-26): the operator admits, books and settles HPCArgoWorkflowJobs. These specs drive
@@ -365,6 +369,62 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		_, got := reconcileJob(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonWallTimeReached))
+	})
+
+	It("ends a step the idle watchdog stopped as Failed/Idle: event, metric, node-minutes saved (D-72)", func() {
+		newSite(10, nil)
+		rec := record.NewFakeRecorder(10)
+		r.Recorder = rec
+		j := newJob(envNS, 240)
+		reconcileJob(j)
+		before := testutil.ToFloat64(metrics.IdleKills.WithLabelValues(string(hpcv1alpha1.TierGPU), project))
+		code := hpcv1alpha1.ExitCodeIdle
+		start := metav1.NewTime(time.Now().Add(-30 * time.Minute))
+		endT := metav1.NewTime(time.Now())
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "1", State: "FAILED", ExitCode: &code,
+			StartTime: &start, EndTime: &endT, Terminal: true, LastLog: "epoch 3 done\nwaiting for rank 1"})
+		_, got := reconcileJob(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonIdle))
+		Expect(got.Status.Message).To(ContainSubstring("waiting for rank 1"))
+		Expect(got.Status.Attempts).To(HaveLen(1))
+		Expect(got.Status.Attempts[0].Outcome).To(Equal(hpcv1alpha1.ReasonIdle))
+		Expect(got.Status.Attempts[0].NodeMinutesSaved).To(HaveValue(Equal(int64(210))))
+		Expect(rec.Events).To(Receive(And(ContainSubstring("Warning Idle"), ContainSubstring("waiting for rank 1"))))
+		Expect(testutil.ToFloat64(metrics.IdleKills.WithLabelValues(string(hpcv1alpha1.TierGPU), project))).To(Equal(before + 1))
+		// Reconciling the ended job again counts nothing twice.
+		reconcileJob(j)
+		Expect(testutil.ToFloat64(metrics.IdleKills.WithLabelValues(string(hpcv1alpha1.TierGPU), project))).To(Equal(before + 1))
+	})
+
+	It("saves no node-minutes for an idle guest on a shared node", func() {
+		newSite(10, nil)
+		j := newJob(envNS, 240)
+		reconcileJob(j)
+		code := hpcv1alpha1.ExitCodeIdle
+		start := metav1.NewTime(time.Now().Add(-30 * time.Minute))
+		endT := metav1.NewTime(time.Now())
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "1", HostSiteJobID: "9", State: "FAILED", ExitCode: &code,
+			StartTime: &start, EndTime: &endT, Terminal: true})
+		_, got := reconcileJob(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonIdle))
+		Expect(got.Status.Attempts[0].NodeMinutesSaved).To(HaveValue(Equal(int64(0))))
+	})
+
+	It("defaults idleTimeoutMinutes to 20 and keeps an explicit 0 (watchdog off)", func() {
+		newSite(10, nil)
+		j := newJob(envNS, 60)
+		Expect(j.Spec.IdleTimeoutMinutes).To(HaveValue(Equal(int32(20))))
+		Expect(j.EffectiveIdleTimeoutMinutes()).To(Equal(int32(20)))
+		seq++
+		off := &hpcv1alpha1.HPCArgoWorkflowJob{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("job-%d", seq), Namespace: envNS},
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "img", WallTimeMinutes: 60,
+				IdleTimeoutMinutes: ptr.To(int32(0))},
+		}
+		Expect(k8sClient.Create(ctx, off)).To(Succeed())
+		Expect(off.Spec.IdleTimeoutMinutes).To(HaveValue(Equal(int32(0))))
+		Expect(off.EffectiveIdleTimeoutMinutes()).To(Equal(int32(0)))
 	})
 
 	It("ignores a report without an attempt number once the job has continued", func() {

@@ -203,3 +203,19 @@ def test_the_background_thread_polls_only_while_the_job_runs():
         assert len(stager.calls) == n
     finally:
         s.close()
+
+
+def test_the_tail_keeps_the_last_step_lines_and_leaves_the_metric_lines_out():
+    """D-72: an Idle report carries what the step last said, not the sampler's lines."""
+    body = b"".join(b"line %d\n" % i for i in range(30)) + b'KAOS_METRIC {"t":1,"gpus":[]}\nwaiting for rank 1\n'
+    s, _, _ = _streamer(LogStager({"5425070": body}))
+    s.poll()
+    lines = s.tail_text().split("\n")
+    assert lines[-1] == "waiting for rank 1" and "KAOS_METRIC" not in s.tail_text()
+    assert len(lines) == logsmod.TAIL_LINES and lines[0] == "line 11"
+
+
+def test_the_tail_is_bounded():
+    s, _, _ = _streamer(LogStager({"5425070": (b"x" * 500 + b"\n") * 10}))
+    s.poll()
+    assert len(s.tail_text()) == logsmod.TAIL_MAX_CHARS

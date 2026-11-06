@@ -257,6 +257,8 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 			kv = append(kv, [2]string{"HPC_QOS_MAX_MINUTES", strconv.Itoa(int(m))})
 		}
 	}
+	// D-72: the idle watchdog's window; the runner hands it to the job script (0 = off).
+	kv = append(kv, [2]string{"HPC_IDLE_TIMEOUT_MINUTES", strconv.Itoa(int(job.EffectiveIdleTimeoutMinutes()))})
 	if spec.Resumable != nil {
 		kv = append(kv, [2]string{"HPC_RESUMABLE_LEAD", strconv.Itoa(int(spec.Resumable.LeadMinutes))})
 	}

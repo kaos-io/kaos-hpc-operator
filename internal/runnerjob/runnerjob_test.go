@@ -7,6 +7,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 )
@@ -272,6 +273,31 @@ func TestShouldPassTheChosenLaneToTheRunnerAndNothingWithoutOne(t *testing.T) {
 				if (want != "") != set || got != want {
 					t.Fatalf("%s = %q (set %v), want %q", k, got, set, want)
 				}
+			}
+		})
+	}
+}
+
+func TestShouldPassTheIdleTimeoutToTheRunner(t *testing.T) {
+	cases := []struct {
+		name string
+		set  *int32
+		want string
+	}{
+		{"should_default_to_20_minutes_when_the_spec_has_none", nil, "20"},
+		{"should_pass_an_explicit_window", ptr.To(int32(45)), "45"},
+		{"should_pass_0_which_turns_the_watchdog_off", ptr.To(int32(0)), "0"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			job, site := fixtures()
+			job.Spec.IdleTimeoutMinutes = c.set
+			rj, err := Build(Config{Image: "kaos/op:1"}, job, site, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := envOf(t, rj.Spec.Template.Spec.Containers[0].Env)["HPC_IDLE_TIMEOUT_MINUTES"]; got != c.want {
+				t.Errorf("HPC_IDLE_TIMEOUT_MINUTES %q, want %q", got, c.want)
 			}
 		})
 	}

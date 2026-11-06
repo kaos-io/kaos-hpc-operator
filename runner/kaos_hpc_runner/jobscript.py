@@ -2,7 +2,7 @@
 
 The script is the proven program: Lmod init, SIF cache (private part-file, atomic rename),
 dataset bind, checkpoint stage-in/out, USR1 pass-through to handlers only, failure tail into the
-job comment, the PRD-1609 host hook. Phase-1 additions: a 30 s sampler writing ``KAOS_METRIC``
+job comment, the PRD-1609 host hook. D-72 idle watchdog (payload/idlewatch.py) ends a hung step with exit 236. Phase-1 additions: a 30 s sampler writing ``KAOS_METRIC``
 lines into the job output (D-65) and deletion of the staged image tar after a successful SIF
 build (D-62).
 
@@ -159,6 +159,15 @@ def batch_lines(scope, scratch):
         # it never fails the job and dies with it.
         'kaos_sample &',
         'SAMPLER_PID=$!',
+        # D-72: the idle watchdog of THIS step (on a shared node every slot's script has its own). It
+        # sees the step's process group and the job output file, writes IDLE_MARK and ends the step
+        # with TERM, a short grace, KILL when the step sat idle for the whole window. 0 = off.
+        'IDLE_MARK=$SCR/kaos-tmp/idle-$KAOS_JOB_ID; rm -f "$IDLE_MARK"; WATCHDOG_PID=""',
+        'if [ -n "$IDLEWATCH_B64" ] && [ "${KAOS_IDLE_TIMEOUT_MIN:-20}" -gt 0 ] 2>/dev/null && command -v python3 >/dev/null; then',
+        '  python3 -c "$(printf %s "$IDLEWATCH_B64" | base64 -d)" "$STEP_PID" "slurm-$KAOS_JOB_ID.out"'
+        ' "$IDLE_MARK" "${KAOS_IDLE_TIMEOUT_MIN:-20}" "${HPC_GPUS:-0}" &',
+        '  WATCHDOG_PID=$!',
+        'fi',
         'kaos_stop(){ echo "stop signal: asking the step to save its progress";'
         ' for p in $(pgrep -g $STEP_PID); do'
         ' m=$(awk \'/^SigCgt:/{print $2}\' /proc/$p/status 2>/dev/null);'
@@ -168,6 +177,11 @@ def batch_lines(scope, scratch):
         'while kill -0 $STEP_PID 2>/dev/null; do wait $STEP_PID; rc=$?; done',
         'kill $SAMPLER_PID 2>/dev/null',
         'trap - USR1',
+        '[ -n "$WATCHDOG_PID" ] && kill $WATCHDOG_PID 2>/dev/null',
+        # D-72: the watchdog ended the step. Reason Idle wins over whatever the killed step exited
+        # with (even 85: a step that was hung saved no checkpoint). Stage-out and the failure comment
+        # below run as for any failed step; the controller records Failed/Idle from exit 236.
+        'if [ -f "$IDLE_MARK" ]; then rm -f "$IDLE_MARK"; rc=236; echo "idle watchdog: the step ended as Idle (exit 236)"; fi',
         # D-44 (amended 2026-11-05, T-19): 85 = a resumable step saved its checkpoint. Before
         # the job ends, the checkpoint goes to the outputs repository and its commit into the
         # job comment; only then may the waiter continue the step. The step's outputs are not

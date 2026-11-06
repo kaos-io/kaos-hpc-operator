@@ -85,6 +85,12 @@ var (
 		Help: "Attempts by the lane they were placed in; fallback=true counts lanes the site refused.",
 	}, []string{LabelQOS, LabelReservation, LabelFallback})
 
+	// IdleKills counts steps the on-node idle watchdog ended (PRD-HPC-1461 D-72, F-46).
+	IdleKills = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kaos_hpc_idle_kills_total",
+		Help: "Steps ended with reason Idle by the on-node idle watchdog.",
+	}, []string{LabelTier, LabelProject})
+
 	// RunnerRestarts counts runner pods that failed and were replaced by their Job.
 	RunnerRestarts = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "kaos_hpc_runner_restarts_total",
@@ -94,7 +100,7 @@ var (
 
 func init() {
 	ctrlmetrics.Registry.MustRegister(JobPhase, JobQueueSeconds, JobRunSeconds, NodeMinutesBooked,
-		NodeMinutesSettled, SiteNodeMinutes, ActiveJobs, RunnerRestarts, LanePlacements)
+		NodeMinutesSettled, SiteNodeMinutes, ActiveJobs, RunnerRestarts, LanePlacements, IdleKills)
 }
 
 // SetJobPhase makes phase the only phase series of the job.

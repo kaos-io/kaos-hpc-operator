@@ -675,3 +675,42 @@ def test_an_adopting_runner_leaves_the_reported_lane_alone(rig):
     rig.make(slurm, status={"run": {"attempt": 1, "qos": "default"}}, HPC_QOS="test")
     rig.runner.run()
     assert slurm.submitted == [] and rig.kube.run["qos"] == "default"
+
+
+# ---------------------------------------------------------------- D-72: the idle watchdog
+
+def test_the_idle_window_defaults_to_20_and_zero_turns_it_off():
+    assert helpers.settings().idle_timeout == 20
+    assert helpers.settings(HPC_IDLE_TIMEOUT_MINUTES="45").idle_timeout == 45
+    assert helpers.settings(HPC_IDLE_TIMEOUT_MINUTES="0").idle_timeout == 0
+    assert helpers.settings(HPC_IDLE_TIMEOUT_MINUTES="junk").idle_timeout == 20
+
+
+def test_the_job_carries_the_idle_window_and_the_watchdog_program(rig):
+    rig.make(FakeSlurm({"5001": [acc("COMPLETED")]}), HPC_IDLE_TIMEOUT_MINUTES="35")
+    rig.runner.run()
+    env = dict(e.split("=", 1) for e in rig.slurm.submitted[0]["job"]["environment"])
+    assert env["KAOS_IDLE_TIMEOUT_MIN"] == "35" and env["IDLEWATCH_B64"]
+    assert "IDLEWATCH_B64" in rig.slurm.submitted[0]["script"]
+
+
+def test_idle_window_0_sends_no_watchdog_program(rig):
+    rig.make(FakeSlurm({"5001": [acc("COMPLETED")]}), HPC_IDLE_TIMEOUT_MINUTES="0")
+    rig.runner.run()
+    env = dict(e.split("=", 1) for e in rig.slurm.submitted[0]["job"]["environment"])
+    assert env["KAOS_IDLE_TIMEOUT_MIN"] == "0" and "IDLEWATCH_B64" not in env
+
+
+def test_an_idle_end_reports_exit_236_and_the_last_log_lines(rig):
+    rig.make(FakeSlurm({"5001": [acc("FAILED", rc=236, comment="err236:idle|")]}))
+    rig.logs.tail_text = lambda: "epoch 3 done\nwaiting for rank 1"
+    assert rig.runner.run() == 0
+    assert rig.kube.run["exitCode"] == 236 and rig.kube.run["state"] == "FAILED" and rig.kube.run["terminal"]
+    assert rig.kube.run["lastLog"] == "epoch 3 done\nwaiting for rank 1"
+
+
+def test_other_failures_report_no_last_log(rig):
+    rig.make(FakeSlurm({"5001": [acc("FAILED", rc=2, comment="err2:boom|")]}))
+    rig.logs.tail_text = lambda: "x"
+    rig.runner.run()
+    assert rig.kube.run.get("lastLog") is None

@@ -13,6 +13,7 @@ again (AC-70). A stager without `log` disables streaming with one warning; the j
 """
 
 import base64
+import collections
 import json
 import threading
 import time
@@ -23,6 +24,8 @@ POLL_S = 15
 PERSIST_S = 30
 MAX_BYTES = 1 << 20
 METRIC_PREFIX = 'KAOS_METRIC '
+TAIL_LINES = 20
+TAIL_MAX_CHARS = 2000   # status.run.lastLog allows 2048
 
 
 class LogStreamer:
@@ -37,6 +40,7 @@ class LogStreamer:
         self.carry = b''         # bytes of the last, incomplete line
         self.persisted = None    # the committed offset last written to the job
         self.last_persist = clock()
+        self.tail = collections.deque(maxlen=TAIL_LINES)   # last non-metric lines, for an Idle report
         self.disabled = False
         self.active = threading.Event()
         self.stop = threading.Event()
@@ -88,7 +92,13 @@ class LogStreamer:
                 obj['metric'] = True
             except ValueError:
                 pass
+        if not obj.get('metric') and text.strip():
+            self.tail.append(text)
         self.out(json.dumps(obj, ensure_ascii=False))
+
+    def tail_text(self):
+        """The last printed lines of the step (metric lines left out), at most TAIL_MAX_CHARS."""
+        return '\n'.join(self.tail)[-TAIL_MAX_CHARS:]
 
     def poll(self, final=False):
         """Read what the job wrote since the last call (as many reads as it takes to catch up) and print

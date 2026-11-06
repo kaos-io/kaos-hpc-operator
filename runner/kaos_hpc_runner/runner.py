@@ -21,7 +21,7 @@ from .logs import LogStreamer
 from .reporter import OutputsTooLarge, Reporter, checkpoint_uri
 from .sharing import inputs_in_script
 from .slurm import (TERMINAL, Refused, Slurm, comment_of, host_gone, lane_refusal, share_state, site_time)
-from .settings import CHECKPOINT_EXIT, OFFER_S, Settings
+from .settings import CHECKPOINT_EXIT, IDLE_EXIT, OFFER_S, Settings
 
 POLL_S = 30
 # The registry pull token (GCE metadata, 1 h) is minted at submit time and cannot be refreshed inside
@@ -83,6 +83,10 @@ class Runner:
                'KAOS_ATTEMPT=%d' % cfg.attempt]
         if cfg.resumable_lead:
             env.append('KAOS_RESUMABLE=1')
+        # D-72: the idle watchdog the job script starts beside the step (its window; 0 = none).
+        env.append('KAOS_IDLE_TIMEOUT_MIN=%d' % cfg.idle_timeout)
+        if cfg.idle_timeout > 0:
+            env.append('IDLEWATCH_B64=' + payloads.b64(payloads.IDLEWATCH))
         if cfg.resume:
             env += ['KAOS_RESUME_REF=' + cfg.resume[0], 'KAOS_RESUME_PREFIX=' + cfg.resume[1]]
         # Same outputs location + run id as the in-cluster copy (outputs-<app>). Only when set: step
@@ -494,6 +498,10 @@ class Runner:
                       # knows the host's booking covers it.
                       hostSiteJobID=share.get('host'),
                       slot=int(share['slot']) if (share.get('slot') or '').isdigit() else None)
+        if rc == IDLE_EXIT and 'COMPLETED' not in st:
+            # D-72: the job ended a hung step; the controller records Failed/Idle and, in its event, the
+            # last lines the step wrote (printed above from the same log).
+            fields['lastLog'] = self.logs.tail_text() or None
         if rc == CHECKPOINT_EXIT and not any(x in st for x in ('COMPLETED', 'CANCELLED')):
             # D-44 (amended 2026-11-05), A2/A4: a checkpoint is reported only for a resumable step, only
             # from a checkpoint that reached the outputs repository. The controller continues the step
