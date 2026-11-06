@@ -77,6 +77,11 @@ class Settings:
         # naive join destroys embedded quoting (live job 5140493).
         self.command = ' '.join(shlex.quote(t) for t in self.command_tokens)
         self.time_limit = int(g('SLURM_TIME_LIMIT') or 240)
+        # PRD-HPC-1461 D-68: the lane (site QoS, reservation) the controller placed this attempt in;
+        # empty = the class's own QoS, no reservation. qos_max is the lane's wall-time maximum (0 = unknown).
+        self.qos = g('HPC_QOS') or ''
+        self.reservation = g('HPC_RESERVATION') or ''
+        self.qos_max = int(g('HPC_QOS_MAX_MINUTES') or 0)
         # PRD-HPC-1461 D-44 (amended 2026-11-05): only a step declared resumable gets the stop
         # signal, this many minutes before its wall time; 0 = not resumable.
         self.resumable_lead = int(g('HPC_RESUMABLE_LEAD') or 0)
@@ -148,6 +153,12 @@ class Settings:
     @staticmethod
     def class_cap(cls):
         return int(cls.get('maxTimeLimitMinutes') or cls.get('maxWallTimeMinutes') or 0)
+
+    def lane_cap(self, cls):
+        """The longest limit this attempt's job may ask for: the class's maximum, and the lane's when
+        the attempt is placed in one (a request above the lane's maximum is refused)."""
+        caps = [c for c in (self.class_cap(cls), self.qos_max if self.qos else 0) if c > 0]
+        return min(caps) if caps else 0
 
     # ---- dataset
 

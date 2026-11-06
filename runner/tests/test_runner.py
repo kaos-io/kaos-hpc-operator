@@ -142,7 +142,7 @@ def test_a_successful_attempt_submits_once_reports_each_state_and_the_outputs(ri
     assert len(slurm.submitted) == 1 and rig.runner.jid == 5001
     run, status = rig.kube.run, rig.kube.status
     assert run == {"attempt": 1, "siteJobID": "5001", "state": "COMPLETED", "exitCode": 0, "terminal": True,
-                   "startTime": "2025-11-05T00:00:00Z", "endTime": "2025-11-05T01:00:00Z"}
+                   "startTime": "2025-11-05T00:00:00Z", "endTime": "2025-11-05T01:00:00Z", "qos": "default"}
     assert status["outputs"] == {"training-result": '{"map50": 0.71}'}
     assert "pendingReason" not in status, "cleared once the job left the queue"
     states = [c[2]["status"]["run"]["state"] for c in rig.kube.patches() if "run" in c[2]["status"]]
@@ -576,3 +576,102 @@ def test_main_builds_the_runner_from_the_environment(monkeypatch):
     monkeypatch.setattr(runmod.Runner, "run", lambda self: seen.setdefault("cfg", self.cfg) and 0)
     assert runmod.main(dict(helpers.BASE_ENV)) == 0
     assert seen["cfg"].job_name == "hpc-0123456789abcdef0123"
+
+
+# ---------------------------------------------------------------- lanes (PRD-HPC-1461 D-68)
+
+class LaneSlurm(FakeSlurm):
+    """Refuses the first submits with the given texts; records a copy of every body."""
+
+    def __init__(self, refusals=(), **kw):
+        super().__init__(**kw)
+        self.refusals = list(refusals)
+
+    def submit(self, body):
+        import copy
+        self.submitted.append(copy.deepcopy(body))
+        if self.refusals:
+            raise slurmmod.Refused(self.refusals.pop(0))
+        self.next_id += 1
+        return {"job_id": self.next_id, "errors": []}
+
+
+def test_a_lane_is_submitted_with_its_qos_and_reservation_and_reported(rig):
+    slurm = LaneSlurm(jobs={"5001": [acc("COMPLETED")]})
+    rig.make(slurm, HPC_QOS="dev", HPC_RESERVATION="gpudev", SLURM_TIME_LIMIT="120")
+    rig.runner.run()
+    assert len(slurm.submitted) == 1
+    job = slurm.submitted[0]["job"]
+    assert (job["qos"], job["reservation"], job["time_limit"]) == ("dev", "gpudev", 120)
+    assert (rig.kube.run["qos"], rig.kube.run.get("reservation")) == ("dev", "gpudev")
+
+
+def test_without_a_lane_the_class_qos_is_used_reported_and_no_reservation_is_sent(rig):
+    slurm = LaneSlurm(jobs={"5001": [acc("COMPLETED")]})
+    rig.make(slurm)
+    rig.runner.run()
+    assert "reservation" not in slurm.submitted[0]["job"] and slurm.submitted[0]["job"]["qos"] == "default"
+    assert rig.kube.run["qos"] == "default" and rig.kube.run.get("reservation") is None
+
+
+@pytest.mark.parametrize("text", [
+    "HTTP 500 {'errors': [{'error': 'Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)'}]}",
+    "HTTP 500 {'errors': [{'error': 'Invalid qos specification'}]}",
+    "HTTP 500 {'errors': [{'error': 'Requested reservation is invalid'}]}",
+    "HTTP 500 {'errors': [{'error': 'Access denied to requested reservation'}]}",
+    "HTTP 500 {'errors': [{'error': 'Requested time limit is invalid (missing or exceeds some limit)'}]}",
+    "HTTP 500 {'errors': [{'error': 'QOSMaxJobsPerUserLimit'}]}",
+])
+def test_a_refused_lane_is_retried_once_on_the_class_default_without_a_reservation(rig, text, capsys):
+    slurm = LaneSlurm([text], jobs={"5001": [acc("COMPLETED")]})
+    rig.make(slurm, HPC_QOS="test", HPC_RESERVATION="gpudev")
+    assert rig.runner.run() == 0
+    first, second = (s["job"] for s in slurm.submitted)
+    assert (first["qos"], first["reservation"]) == ("test", "gpudev")
+    assert second["qos"] == "default" and "reservation" not in second
+    assert "refused by the site" in capsys.readouterr().out
+    assert rig.kube.run["qos"] == "default" and rig.kube.run.get("reservation") is None
+
+
+def test_a_second_refusal_after_the_fallback_still_fails_loudly(rig):
+    slurm = LaneSlurm(["HTTP 500 QOSMaxJobsPerUserLimit", "HTTP 500 Invalid account or account/partition"])
+    rig.make(slurm, HPC_QOS="test")
+    with pytest.raises(SystemExit) as e:
+        rig.runner.run()
+    assert e.value.code == 1 and len(slurm.submitted) == 2
+
+
+def test_a_refusal_unrelated_to_the_lane_is_not_retried(rig):
+    slurm = LaneSlurm(["HTTP 500 Invalid account or account/partition combination specified"])
+    rig.make(slurm, HPC_QOS="test")
+    with pytest.raises(SystemExit):
+        rig.runner.run()
+    assert len(slurm.submitted) == 1
+
+
+def test_a_shared_node_host_pads_its_limit_only_up_to_the_lane_maximum(rig):
+    slurm = LaneSlurm(jobs={"5001": [acc("COMPLETED")]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", SLURM_TIME_LIMIT="20",
+             HPC_QOS="test", HPC_QOS_MAX_MINUTES="30")
+    rig.runner.run()
+    assert slurm.submitted[0]["job"]["time_limit"] == 30, "2 x 20 shrinks to the test lane's 30"
+    slurm = LaneSlurm(jobs={"5001": [acc("COMPLETED")]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", SLURM_TIME_LIMIT="20")
+    rig.runner.run()
+    assert slurm.submitted[0]["job"]["time_limit"] == 40, "no lane: today's padding"
+
+
+def test_a_guest_never_inherits_the_hosts_reservation(rig):
+    slurm = LaneSlurm(jobs={"5001": [acc("COMPLETED")]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", HPC_QOS="dev", HPC_RESERVATION="gpudev")
+    rig.runner.run()
+    sub = slurm.submitted[0]
+    assert sub["job"]["reservation"] == "gpudev"
+    assert "gpudev" not in sub["script"] and "reservation" not in sub["script"].lower()
+
+
+def test_an_adopting_runner_leaves_the_reported_lane_alone(rig):
+    slurm = LaneSlurm(jobs={"5001": [acc("COMPLETED")]}, active="5001")
+    rig.make(slurm, status={"run": {"attempt": 1, "qos": "default"}}, HPC_QOS="test")
+    rig.runner.run()
+    assert slurm.submitted == [] and rig.kube.run["qos"] == "default"

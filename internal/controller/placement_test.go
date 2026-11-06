@@ -84,3 +84,31 @@ func TestTimeoutRetry(t *testing.T) {
 		})
 	}
 }
+
+func TestHeldQOS(t *testing.T) {
+	placed := &hpcv1alpha1.Placement{QOS: "test"}
+	cases := []struct {
+		name string
+		p    *hpcv1alpha1.Placement
+		run  *hpcv1alpha1.RunStatus
+		want string
+	}{
+		{"should_hold_the_placed_lane", placed, nil, "test"},
+		{"should_hold_the_lane_the_runner_really_used", placed, &hpcv1alpha1.RunStatus{Attempt: 1, QOS: "default"}, "default"},
+		{"should_ignore_a_report_of_another_attempt", placed, &hpcv1alpha1.RunStatus{Attempt: 1, QOS: "default"}, "test"},
+		{"should_release_the_lane_once_a_host_took_the_guest", placed, &hpcv1alpha1.RunStatus{Attempt: 1, QOS: "test", HostSiteJobID: "77"}, ""},
+		{"should_hold_no_lane_without_a_placement", nil, nil, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			j := &hpcv1alpha1.HPCArgoWorkflowJob{}
+			j.Status.Placement, j.Status.Run, j.Status.Attempt = c.p, c.run, 1
+			if c.name == "should_ignore_a_report_of_another_attempt" {
+				j.Status.Attempt = 2
+			}
+			if got := heldQOS(j); got != c.want {
+				t.Fatalf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}

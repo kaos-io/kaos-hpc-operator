@@ -390,6 +390,16 @@ spec:
                   Placement is the time limit chosen for the current attempt, set when it is admitted. Absent
                   on jobs admitted before the field existed: the spec's wallTimeMinutes applies.
                 properties:
+                  qos:
+                    description: |-
+                      QOS is the lane (site QoS) the attempt was placed in (PRD-HPC-1461 D-68, F-42). Empty: the
+                      class's own QoS. It follows the QoS the runner reports using, so a lane the site refused
+                      shows the class default here.
+                    type: string
+                  reservation:
+                    description: 'Reservation is the site reservation the attempt
+                      was placed in. Empty: none.'
+                    type: string
                   samples:
                     description: Samples is how many earlier runs of the same step
                       the decision looked at.
@@ -464,6 +474,13 @@ spec:
                     format: int64
                     minimum: 0
                     type: integer
+                  qos:
+                    description: |-
+                      QOS and Reservation are what the site job was actually submitted with. The submitter reports
+                      them because it may fall back from a lane the site refused (PRD-HPC-1461 D-68).
+                    type: string
+                  reservation:
+                    type: string
                   siteJobID:
                     description: SiteJobID is the scheduler's job id.
                     type: string

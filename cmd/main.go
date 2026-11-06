@@ -45,6 +45,7 @@ import (
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 	"github.com/kaos-io/kaos-hpc-operator/internal/controller"
+	"github.com/kaos-io/kaos-hpc-operator/internal/lanes"
 	"github.com/kaos-io/kaos-hpc-operator/internal/runnerjob"
 	// +kubebuilder:scaffold:imports
 )
@@ -71,7 +72,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
-	var runnerImage, runnerScheduling string
+	var runnerImage, runnerScheduling, laneCandidates string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -93,6 +94,10 @@ func main() {
 		"Image of the runner Jobs of serve-mode jobs (the same image as the controller). Default: $RUNNER_IMAGE.")
 	flag.StringVar(&runnerScheduling, "runner-scheduling", os.Getenv("RUNNER_SCHEDULING"),
 		"JSON {nodeSelector, tolerations, affinity} for runner pods. Default: $RUNNER_SCHEDULING.")
+	flag.StringVar(&laneCandidates, "lane-candidates", os.Getenv("LANE_CANDIDATES"),
+		"JSON list of lanes tried in order for serve-mode attempts, for example "+
+			`[{"qos":"test"},{"qos":"dev","reservationByPartition":{"gpu":"gpudev"}}]`+
+			". Empty (default): every attempt uses its class's own QoS. Default: $LANE_CANDIDATES.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -201,6 +206,15 @@ func main() {
 		setupLog.Info("no --runner-image: serve-mode jobs (spec.stepName) cannot start until it is set")
 	}
 
+	candidates, err := lanes.Parse(laneCandidates)
+	if err != nil {
+		setupLog.Error(err, "invalid --lane-candidates")
+		os.Exit(1)
+	}
+	if len(candidates) > 0 {
+		setupLog.Info("lane placement on", "candidates", len(candidates))
+	}
+
 	// Only the runner Jobs and their pods are cached, not every Job and Pod of the cluster.
 	jobSel, err := labels.Parse(runnerjob.LabelJobUID)
 	if err != nil {
@@ -249,6 +263,7 @@ func main() {
 		APIReader:        mgr.GetAPIReader(),
 		RunnerImage:      runnerImage,
 		RunnerScheduling: scheduling,
+		LaneCandidates:   candidates,
 	}
 	if err := jobs.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HPCArgoWorkflowJob")

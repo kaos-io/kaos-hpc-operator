@@ -6,10 +6,13 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 	"github.com/kaos-io/kaos-hpc-operator/internal/admission"
+	"github.com/kaos-io/kaos-hpc-operator/internal/lanes"
+	"github.com/kaos-io/kaos-hpc-operator/internal/metrics"
 	"github.com/kaos-io/kaos-hpc-operator/internal/timelimit"
 )
 
@@ -98,4 +101,154 @@ func timeoutRetry(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite
 func retryMessage(from, to, attempt int32) string {
 	return "; the learned limit of " + strconv.Itoa(int(from)) + " min was reached, retrying once with " +
 		strconv.Itoa(int(to)) + " min as attempt " + strconv.Itoa(int(attempt))
+}
+
+// Lane placement (PRD-HPC-1461 F-42, F-44, D-68, D-69). The controller knows no site: the ordered
+// candidates come from its configuration, the facts from the HPCSite profile. The lane is chosen
+// once per attempt, at admission, after the time limit is known, and written to status.placement.
+
+// withLane returns pl with the first eligible lane of r.LaneCandidates, or pl unchanged (the
+// class's own QoS) when there are none configured, the job is not in serve mode, or no candidate
+// is eligible. It never changes pl in place: a timeout retry hands in the job's own placement.
+func (r *HPCArgoWorkflowJobReconciler) withLane(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
+	site *hpcv1alpha1.HPCSite, pl *hpcv1alpha1.Placement) (*hpcv1alpha1.Placement, error) {
+	out := *pl
+	out.QOS, out.Reservation = "", ""
+	class, ok := admission.ClassOf(site, job.Spec.Class)
+	if len(r.LaneCandidates) == 0 || job.Spec.StepName == "" || !ok {
+		return &out, nil
+	}
+	inUse, err := r.laneUse(ctx, job, site)
+	if err != nil {
+		return nil, err
+	}
+	lane, found := lanes.Choose(r.LaneCandidates, lanes.Request{Class: class, Profile: site.Spec.Profile,
+		LimitMinutes: pl.TimeLimitMinutes, Now: r.now(), InUse: inUse})
+	if found {
+		out.QOS, out.Reservation = lane.QOS, lane.Reservation
+	}
+	return &out, nil
+}
+
+// identityOf names the site user a job runs as: lanes' per-user limits are per site user (D-69).
+func identityOf(site *hpcv1alpha1.HPCSite) string {
+	return site.Spec.Site + "/" + site.Spec.Identity.User
+}
+
+// laneUse returns how many jobs of the same site identity as site hold each QoS: every job with a
+// booking in any HPCSite the controller sees (admitted, submitted or running; a settled attempt
+// has none), plus the bookings this process made that the cache may not show yet. The job itself
+// is not counted.
+func (r *HPCArgoWorkflowJobReconciler) laneUse(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
+	site *hpcv1alpha1.HPCSite) (func(string) int32, error) {
+	var jobs hpcv1alpha1.HPCArgoWorkflowJobList
+	if err := r.List(ctx, &jobs); err != nil {
+		return nil, err
+	}
+	var sites hpcv1alpha1.HPCSiteList
+	if err := r.List(ctx, &sites); err != nil {
+		return nil, err
+	}
+	identity := map[client.ObjectKey]string{}
+	for i := range sites.Items {
+		identity[client.ObjectKeyFromObject(&sites.Items[i])] = identityOf(&sites.Items[i])
+	}
+	mine, count, seen := identityOf(site), map[string]int32{}, map[string]bool{}
+	hold := func(uid string, b *hpcv1alpha1.Booking, qos string) {
+		seen[uid] = true
+		if qos != "" && identity[client.ObjectKey{Namespace: b.SiteNamespace, Name: b.SiteName}] == mine {
+			count[qos]++
+		}
+	}
+	for i := range jobs.Items {
+		o := &jobs.Items[i]
+		if o.UID != job.UID && o.Status.Booking != nil && !o.Status.Phase.Terminal() {
+			hold(string(o.UID), o.Status.Booking, heldQOS(o))
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for uid, qos := range r.pendingLane {
+		if b, ok := r.pending[uid]; ok && !seen[uid] && uid != string(job.UID) {
+			hold(uid, &b, qos)
+		}
+	}
+	return func(qos string) int32 { return count[qos] }, nil
+}
+
+// heldQOS is the lane a booked job occupies at the site: what its runner reports it was submitted
+// with (a refused lane falls back to the class default), else the lane it was placed in; none once
+// a host took it.
+func heldQOS(o *hpcv1alpha1.HPCArgoWorkflowJob) string {
+	if run := o.Status.Run; run != nil && current(run, o.Status.Attempt) {
+		// A guest a host took runs in the host's allocation and its own site job is only held until
+		// the host cancels it: it no longer uses a slot of its lane (PRD-1609).
+		if run.HostSiteJobID != "" {
+			return ""
+		}
+		if run.QOS != "" {
+			return run.QOS
+		}
+	}
+	if p := o.Status.Placement; p != nil {
+		return p.QOS
+	}
+	return ""
+}
+
+// countLanePlacement records the lane chosen at admission. Nothing is counted while no candidates
+// are configured, so the metric appears only where lanes are in use.
+func (r *HPCArgoWorkflowJobReconciler) countLanePlacement(job *hpcv1alpha1.HPCArgoWorkflowJob,
+	site *hpcv1alpha1.HPCSite, pl *hpcv1alpha1.Placement) {
+	if len(r.LaneCandidates) == 0 || job.Spec.StepName == "" {
+		return
+	}
+	qos := pl.QOS
+	if class, ok := admission.ClassOf(site, job.Spec.Class); qos == "" && ok {
+		qos = class.QOS
+	}
+	if qos == "" {
+		qos = "default"
+	}
+	metrics.LanePlacements.WithLabelValues(qos, pl.Reservation, "false").Inc()
+}
+
+// reflectLane makes status.placement show the lane the runner really submitted with. The runner
+// retries once on the class default when the site refuses a lane; without this the placement, the
+// lane semaphore and the metric would keep claiming the lane. Jobs not placed in a lane are left
+// alone, so nothing changes while no candidates are configured.
+func (r *HPCArgoWorkflowJobReconciler) reflectLane(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
+	run *hpcv1alpha1.RunStatus) error {
+	p := job.Status.Placement
+	if p == nil || p.QOS == "" || run.QOS == "" || (run.QOS == p.QOS && run.Reservation == p.Reservation) {
+		return nil
+	}
+	orig := job.DeepCopy()
+	job.Status.Placement = p.DeepCopy()
+	job.Status.Placement.QOS, job.Status.Placement.Reservation = run.QOS, run.Reservation
+	if err := r.Status().Patch(ctx, job, client.MergeFrom(orig)); err != nil {
+		return err
+	}
+	r.noteRefusedLane(job, orig.Status.Placement, run)
+	return nil
+}
+
+// noteRefusedLane raises the event and the metric once per attempt, however often the cache lags.
+func (r *HPCArgoWorkflowJobReconciler) noteRefusedLane(job *hpcv1alpha1.HPCArgoWorkflowJob,
+	was *hpcv1alpha1.Placement, run *hpcv1alpha1.RunStatus) {
+	r.mu.Lock()
+	if r.laneNoted == nil {
+		r.laneNoted = map[string]int32{}
+	}
+	done := r.laneNoted[string(job.UID)] == job.Status.Attempt
+	r.laneNoted[string(job.UID)] = job.Status.Attempt
+	r.mu.Unlock()
+	if done {
+		return
+	}
+	metrics.LanePlacements.WithLabelValues(run.QOS, run.Reservation, "true").Inc()
+	if r.Recorder != nil {
+		r.Recorder.Event(job, corev1.EventTypeNormal, "LaneRefused",
+			"the site refused lane "+was.QOS+" "+was.Reservation+"; the attempt runs on QoS "+run.QOS)
+	}
 }
