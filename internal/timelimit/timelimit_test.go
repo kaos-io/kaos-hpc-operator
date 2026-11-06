@@ -61,18 +61,16 @@ func TestLearn(t *testing.T) {
 func TestRetry(t *testing.T) {
 	cases := []struct {
 		name string
-		prev int32
 		caps Caps
 		want int32
 	}{
-		{"doubles_the_previous_limit", 30, Caps{Spec: 240, Class: 2880}, 60},
-		{"capped_by_the_spec", 30, Caps{Spec: 45, Class: 2880}, 45},
-		{"capped_by_the_class", 30, Caps{Spec: 240, Class: 50}, 50},
-		{"capped_by_the_site", 30, Caps{Spec: 240, Class: 2880, Site: 40}, 40},
+		{"goes_straight_to_the_declared_limit", Caps{Spec: 240, Class: 2880}, 240},
+		{"capped_by_the_class", Caps{Spec: 240, Class: 50}, 50},
+		{"capped_by_the_site", Caps{Spec: 240, Class: 2880, Site: 40}, 40},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := Retry(c.prev, c.caps); got != c.want {
+			if got := Retry(c.caps); got != c.want {
 				t.Fatalf("got %d want %d", got, c.want)
 			}
 		})

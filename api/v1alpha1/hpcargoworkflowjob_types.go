@@ -54,7 +54,7 @@ const (
 	// the allowlist). Terminal, with the phase Refused.
 	ReasonInvalidSpec = "InvalidSpec"
 	// ReasonTimeLimitRetry: the attempt hit a learned time limit (Slurm TIMEOUT) below the spec's
-	// cap; the job runs once more with the limit doubled (PRD-HPC-1461 D-67).
+	// cap; the job runs once more at the declared limit (PRD-HPC-1461 D-67).
 	ReasonTimeLimitRetry = "TimeLimitRetry"
 )
 
@@ -271,7 +271,7 @@ const (
 	PlacementDeclared PlacementSource = "declared"
 	// PlacementLearned: derived from earlier runs of the same step (D-67).
 	PlacementLearned PlacementSource = "learned"
-	// PlacementTimeoutRetry: the learned limit timed out; this is the one retry with twice the limit.
+	// PlacementTimeoutRetry: the learned limit timed out; this is the one retry at the declared limit.
 	PlacementTimeoutRetry PlacementSource = "timeout-retry"
 )
 

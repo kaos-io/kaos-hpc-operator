@@ -65,7 +65,7 @@ func TestTimeoutRetry(t *testing.T) {
 		state string
 		want  int32
 	}{
-		{"should_retry_once_with_the_doubled_limit", job(learned, 240), "TIMEOUT", 60},
+		{"should_retry_once_at_the_declared_limit", job(learned, 240), "TIMEOUT", 240},
 		{"should_cap_the_retry_at_the_spec", job(learned, 45), "TIMEOUT", 45},
 		{"should_not_retry_a_declared_limit", job(&hpcv1alpha1.Placement{TimeLimitMinutes: 240, Source: hpcv1alpha1.PlacementDeclared}, 240), "TIMEOUT", 0},
 		{"should_not_retry_twice", job(&hpcv1alpha1.Placement{TimeLimitMinutes: 60, Source: hpcv1alpha1.PlacementTimeoutRetry}, 240), "TIMEOUT", 0},
