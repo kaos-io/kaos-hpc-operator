@@ -202,6 +202,27 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(st.GPU.BookedNodeMinutes).To(Equal(int64(120)))
 	})
 
+	It("never settles a negative or absurd attempt: the live node-sharing garbage (2026-11-06)", func() {
+		newSite(100, nil)
+		guest := newJob(envNS, 60)
+		host := newJob(envNS, 60)
+		reconcileJob(guest)
+		reconcileJob(host)
+		noVal := metav1.NewTime(time.Date(2106, 2, 7, 6, 28, 14, 0, time.UTC)) // Slurm NO_VAL seconds
+		gEnd := metav1.NewTime(time.Now())
+		zero := int32(0)
+		report(guest, hpcv1alpha1.RunStatus{SiteJobID: "5427315", State: "CANCELLED", ExitCode: &zero,
+			StartTime: &noVal, EndTime: &gEnd, Terminal: true})
+		hStart := metav1.NewTime(time.Now().Add(-4 * time.Minute))
+		report(host, hpcv1alpha1.RunStatus{SiteJobID: "5427313", State: "COMPLETED", ExitCode: &zero,
+			StartTime: &hStart, Terminal: true}) // no endTime
+		_, got := reconcileJob(guest)
+		Expect(*got.Status.SettledNodeMinutes).To(BeZero(), "a never-started guest settles 0, not -41683737")
+		_, got = reconcileJob(host)
+		Expect(*got.Status.SettledNodeMinutes).To(BeNumerically("~", 4, 1), "a host without endTime settles up to now")
+		Expect(siteStatus().GPU.UsedNodeMinutes).To(BeNumerically("~", 4, 1))
+	})
+
 	It("waits at the concurrency limit and is never refused for it (D-49)", func() {
 		newSite(100, func(s *hpcv1alpha1.HPCSite) { s.Spec.Limits.MaxConcurrentJobs = 1 })
 		_, got := reconcileJob(newJob(envNS, 60))

@@ -80,7 +80,8 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 				continue
 			}
 			t := l.Tiers[a.Tier]
-			t.Used += a.SettledNodeMinutes
+			// Records stored before settlement was validated can carry garbage (negative) minutes.
+			t.Used += max(a.SettledNodeMinutes, 0)
 			l.Tiers[a.Tier] = t
 		}
 		if b := j.Status.Booking; b != nil && b.SiteName == site.Name && b.SiteNamespace == site.Namespace {

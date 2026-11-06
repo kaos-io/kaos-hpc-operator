@@ -151,3 +151,20 @@ func TestASpentSiteAllocationLeavesNothing(t *testing.T) {
 		t.Fatalf("a spent CPU allocation must leave nothing, got %d", g.Left())
 	}
 }
+
+func TestComputeClampsGarbageAttempts(t *testing.T) {
+	end := now.Add(-time.Hour)
+	jobs := []hpcv1alpha1.HPCArgoWorkflowJob{
+		booked("g1", hpcv1alpha1.PhaseSucceeded, 0, settled(-41683737, end)),
+		booked("g2", hpcv1alpha1.PhaseSucceeded, 0, settled(-41683737, end)),
+		booked("ok", hpcv1alpha1.PhaseSucceeded, 0, settled(30, end)),
+	}
+	l := Compute(theSite(), jobs, nil, now)
+	if got := l.Tiers[hpcv1alpha1.TierGPU]; got.Used != 30 || got.Left() != 570 {
+		t.Fatalf("used=%d left=%d; want 30 and 570 (garbage attempts count 0)", got.Used, got.Left())
+	}
+	only := Compute(theSite(), jobs[:2], nil, now)
+	if only.Tiers[hpcv1alpha1.TierGPU].Used != 0 {
+		t.Fatalf("used went negative or nonzero: %d", only.Tiers[hpcv1alpha1.TierGPU].Used)
+	}
+}

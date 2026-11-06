@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -256,14 +255,11 @@ func current(run *hpcv1alpha1.RunStatus, attempt int32) bool {
 func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
 	site *hpcv1alpha1.HPCSite) (bool, error) {
 	run := job.Status.Run
-	var used int64
-	if run.HostSiteJobID == "" && run.StartTime != nil && run.EndTime != nil {
-		nodes := int64(max(job.Spec.Nodes, 1))
-		used = nodes * int64(math.Ceil(run.EndTime.Sub(run.StartTime.Time).Minutes()))
-	}
-	end := metav1.NewTime(r.now())
-	if run.EndTime != nil {
-		end = *run.EndTime
+	st := settle(job.Spec.Nodes, run, r.now())
+	used, end := st.Minutes, st.End
+	if len(st.Discarded) > 0 && r.Recorder != nil {
+		r.Recorder.Event(job, corev1.EventTypeWarning, "ReportedTimeDiscarded",
+			"discarded implausible site times, settled "+strconv.FormatInt(used, 10)+" node-minutes: "+strings.Join(st.Discarded, ", "))
 	}
 	phase, reason := outcome(run)
 	orig := job.DeepCopy()

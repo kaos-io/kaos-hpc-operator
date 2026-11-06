@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"math"
 	"sort"
 	"strconv"
 	"time"
@@ -400,14 +399,10 @@ func (r *HPCArgoWorkflowJobReconciler) noteBlocked(ctx context.Context, job *hpc
 // its end, or to now when it has not ended. A guest on a shared node is covered by its host (D-26).
 func (r *HPCArgoWorkflowJobReconciler) usedMinutes(job *hpcv1alpha1.HPCArgoWorkflowJob) int64 {
 	run := job.Status.Run
-	if run == nil || !current(run, job.Status.Attempt) || run.HostSiteJobID != "" || run.StartTime == nil {
+	if run == nil || !current(run, job.Status.Attempt) {
 		return 0
 	}
-	end := r.now()
-	if run.EndTime != nil {
-		end = run.EndTime.Time
-	}
-	return int64(max(job.Spec.Nodes, 1)) * int64(math.Ceil(end.Sub(run.StartTime.Time).Minutes()))
+	return settle(job.Spec.Nodes, run, r.now()).Minutes
 }
 
 // failAttempt ends the job in a terminal phase without a continuation: it settles the booked
@@ -443,13 +438,13 @@ func (r *HPCArgoWorkflowJobReconciler) failAttempt(ctx context.Context, job *hpc
 // observeSettled feeds the settlement metrics of one ended attempt.
 func observeSettled(site *hpcv1alpha1.HPCSite, tier hpcv1alpha1.Tier, used int64, run *hpcv1alpha1.RunStatus, admittedAt *metav1.Time) {
 	metrics.NodeMinutesSettled.WithLabelValues(string(tier), projectOf(site)).Add(float64(used))
-	if run == nil || run.StartTime == nil {
+	if run == nil || !validSiteTime(run.StartTime, time.Now()) {
 		return
 	}
 	if admittedAt != nil {
 		metrics.JobQueueSeconds.WithLabelValues(string(tier)).Observe(max(run.StartTime.Sub(admittedAt.Time).Seconds(), 0))
 	}
-	if run.EndTime != nil {
+	if validSiteTime(run.EndTime, time.Now()) {
 		metrics.JobRunSeconds.WithLabelValues(string(tier)).Observe(max(run.EndTime.Sub(run.StartTime.Time).Seconds(), 0))
 	}
 }

@@ -426,6 +426,20 @@ def test_a_job_a_host_took_is_never_replaced_for_its_wallet(rig, monkeypatch):
     assert patch[2]["status"]["run"]["hostSiteJobID"] == "4000" and patch[2]["status"]["run"]["slot"] == 1
 
 
+def test_a_guest_that_never_started_reports_its_host_slot_and_an_end(rig, monkeypatch):
+    """Live 2026-11-06: the guest's record had a NO_VAL start, no end, and a done comment naming the host."""
+    taken = acc("PENDING", comment="kaos-state=taken host=5427313 slot=2 attempt=1")
+    done = acc("CANCELLED", comment="kaos-state=done rc=0 host=5427313", start=4294967294, end=0)
+    slurm = FakeSlurm({"5001": [taken, done], "5427313": [acc("RUNNING")]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    monkeypatch.setattr(runmod.time, "time", lambda: 1762304400.0)
+    rig.runner.run()
+    run = rig.kube.run
+    assert run["terminal"] and run["hostSiteJobID"] == "5427313" and run["slot"] == 2
+    assert "startTime" not in run, "NO_VAL is not a start"
+    assert run["endTime"] == "2025-11-05T01:00:00Z", "no end from Slurm: when the runner saw it over"
+
+
 def test_a_host_that_died_with_the_job_starts_it_over_bounded(rig):
     taken = acc("PENDING", comment="kaos-state=taken host=4000 slot=0 attempt=1")
     slurm = FakeSlurm({"5001": [taken], "5002": [acc("COMPLETED")], "4000": [acc("NODE_FAIL")]})

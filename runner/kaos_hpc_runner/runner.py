@@ -441,19 +441,29 @@ class Runner:
                         self.resubmit('pull failed - resubmitting with fresh credentials (%d/%d)'
                                       % (self.resubmits, PULL_RESUBMITS))
                         continue
-                    return self.end(job, st, rc)
+                    return self.end(job, st, rc, share)
             except SystemExit:
                 raise
             except Exception as e:
                 print('poll error (transient):', e, flush=True)
 
-    def end(self, job, st, rc):
+    def end(self, job, st, rc, share=None):
         """The attempt's site job is over: its last log lines, then the one terminal report. The runner
         exits 0 after it (the controller decides what follows: success, failure or a continuation)."""
         jid = self.jid
         self.logs.finish()
+        share = dict(share or {})
+        if self.hosted and not share.get('slot') and self.hosted.get('host') == share.get('host'):
+            share['slot'] = self.hosted.get('slot')   # the done comment drops the slot the taken one had
+        # The end is Slurm's, else when this runner saw the job over: the controller settles the
+        # attempt from it and must never be left to guess.
+        end_time = site_time(job, 'end') or time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time()))
         fields = dict(siteJobID=str(jid), state=','.join(st), exitCode=rc,
-                      startTime=site_time(job, 'start'), endTime=site_time(job, 'end'), terminal=True)
+                      startTime=site_time(job, 'start'), endTime=end_time, terminal=True,
+                      # A guest names its host (parsed from the job comment) so the controller
+                      # knows the host's booking covers it.
+                      hostSiteJobID=share.get('host'),
+                      slot=int(share['slot']) if (share.get('slot') or '').isdigit() else None)
         if rc == CHECKPOINT_EXIT and not any(x in st for x in ('COMPLETED', 'CANCELLED')):
             # D-44 (amended 2026-11-05), A2/A4: a checkpoint is reported only for a resumable step, only
             # from a checkpoint that reached the outputs repository. The controller continues the step

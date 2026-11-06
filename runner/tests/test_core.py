@@ -181,6 +181,19 @@ def test_site_times_are_utc():
     assert slurm.site_time({"time": {"end": 0}}, "end") is None
 
 
+def test_slurm_no_val_and_infinite_times_are_absent():
+    """The live guests of 2026-11-06 reported a start of 2106-02-07 (NO_VAL seconds)."""
+    def t(v):
+        return slurm.site_time({"time": {"start": v}}, "start")
+    assert t({"set": True, "infinite": False, "number": 4294967294}) is None
+    assert t({"set": True, "infinite": False, "number": 4294967295}) is None
+    assert t({"set": False, "infinite": False, "number": 1762300800}) is None
+    assert t({"set": True, "infinite": True, "number": 1762300800}) is None
+    assert t(4294967294) is None and t(None) is None and t(-5) is None
+    assert t({"set": True, "infinite": False, "number": 1762300800}) == "2025-11-05T00:00:00Z"
+    assert t(1762300800) == "2025-11-05T00:00:00Z"
+
+
 class _Acc:
     def __init__(self, records):
         self.records = records
