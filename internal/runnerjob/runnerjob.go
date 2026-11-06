@@ -244,6 +244,19 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 		{"HPC_REST_VERSION", site.Spec.Profile.RESTVersion},
 		{"ZITADEL_MACHINE_KEY_FILE", MountMLflow + "/ZITADEL_MACHINE_KEY"},
 	}
+	if p := job.Status.Placement; p != nil {
+		// The lane the controller chose (PRD-HPC-1461 D-68). Unset: the runner uses the class's QoS.
+		if p.QOS != "" {
+			kv = append(kv, [2]string{"HPC_QOS", p.QOS})
+		}
+		if p.Reservation != "" {
+			kv = append(kv, [2]string{"HPC_RESERVATION", p.Reservation})
+		}
+		// A shared-node host pads its limit up to the class cap: in a lane, up to the lane's.
+		if m := qosMaxMinutes(site, p.QOS); m > 0 {
+			kv = append(kv, [2]string{"HPC_QOS_MAX_MINUTES", strconv.Itoa(int(m))})
+		}
+	}
 	if spec.Resumable != nil {
 		kv = append(kv, [2]string{"HPC_RESUMABLE_LEAD", strconv.Itoa(int(spec.Resumable.LeadMinutes))})
 	}
@@ -290,4 +303,14 @@ func classesJSON(site *hpcv1alpha1.HPCSite) (string, error) {
 		return "", fmt.Errorf("marshal classes: %w", err)
 	}
 	return string(b), nil
+}
+
+// qosMaxMinutes is the maximum wall time of a QoS of the site profile (0: none or unknown).
+func qosMaxMinutes(site *hpcv1alpha1.HPCSite, name string) int32 {
+	for _, q := range site.Spec.Profile.QOS {
+		if q.Name == name && name != "" {
+			return q.MaxWallTimeMinutes
+		}
+	}
+	return 0
 }

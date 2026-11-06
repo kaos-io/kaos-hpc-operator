@@ -45,6 +45,10 @@ spec:
             {{- if $out }}
             - {{ printf "--runner-scheduling=%s" (toJson $out) | quote }}
             {{- end }}
+            {{- /* Lane placement (F-42): empty candidates leave every attempt on its class's QoS. */}}
+            {{- if .Values.lanes.candidates }}
+            - {{ printf "--lane-candidates=%s" (toJson .Values.lanes.candidates) | quote }}
+            {{- end }}
           command:
             - /manager
           image: {{ required "controllerManager.container.image.repository is required" .Values.controllerManager.container.image.repository }}:{{ .Values.controllerManager.container.image.tag | default .Chart.AppVersion }}

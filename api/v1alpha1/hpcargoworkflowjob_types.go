@@ -237,6 +237,12 @@ type RunStatus struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	LogOffset int64 `json:"logOffset,omitempty"`
+	// QOS and Reservation are what the site job was actually submitted with. The submitter reports
+	// them because it may fall back from a lane the site refused (PRD-HPC-1461 D-68).
+	// +optional
+	QOS string `json:"qos,omitempty"`
+	// +optional
+	Reservation string `json:"reservation,omitempty"`
 }
 
 // RunnerRef names the runner Job of the current attempt (written by the controller).
@@ -287,6 +293,14 @@ type Placement struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	Samples int32 `json:"samples,omitempty"`
+	// QOS is the lane (site QoS) the attempt was placed in (PRD-HPC-1461 D-68, F-42). Empty: the
+	// class's own QoS. It follows the QoS the runner reports using, so a lane the site refused
+	// shows the class default here.
+	// +optional
+	QOS string `json:"qos,omitempty"`
+	// Reservation is the site reservation the attempt was placed in. Empty: none.
+	// +optional
+	Reservation string `json:"reservation,omitempty"`
 }
 
 // ResumeInfo is what the next attempt resumes from.

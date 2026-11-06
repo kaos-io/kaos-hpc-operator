@@ -40,6 +40,7 @@ import (
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 	"github.com/kaos-io/kaos-hpc-operator/internal/admission"
+	"github.com/kaos-io/kaos-hpc-operator/internal/lanes"
 	"github.com/kaos-io/kaos-hpc-operator/internal/ledger"
 	"github.com/kaos-io/kaos-hpc-operator/internal/metrics"
 	"github.com/kaos-io/kaos-hpc-operator/internal/runnerjob"
@@ -68,10 +69,15 @@ type HPCArgoWorkflowJobReconciler struct {
 	// APIReader reads without the informer cache where a stale answer would be wrong (are the
 	// runner Jobs gone?). Defaults to the client.
 	APIReader client.Reader
+	// LaneCandidates are the lanes (QoS, reservation) tried in order for serve-mode attempts
+	// (PRD-HPC-1461 F-42, F-44). Empty: every attempt uses its class's own QoS, as before.
+	LaneCandidates []lanes.Candidate
 
-	mu      sync.Mutex
-	pending map[string]hpcv1alpha1.Booking // by job UID
-	failed  map[string]int32               // failed runner pods seen, by runner Job UID
+	mu          sync.Mutex
+	pending     map[string]hpcv1alpha1.Booking // by job UID
+	pendingLane map[string]string              // QoS of the pending bookings that were placed in a lane, by job UID
+	laneNoted   map[string]int32               // attempt whose refused lane was counted, by job UID
+	failed      map[string]int32               // failed runner pods seen, by runner Job UID
 }
 
 // +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcargoworkflowjobs,verbs=get;list;watch;patch
@@ -198,14 +204,21 @@ func (r *HPCArgoWorkflowJobReconciler) judge(ctx context.Context, job *hpcv1alph
 	d := admission.DecideFor(job, site, l, pl.TimeLimitMinutes)
 	switch d.Phase {
 	case hpcv1alpha1.PhaseAdmitted:
+		// The lane is chosen with the booking, in the same serial step, so the one-job semaphore
+		// (D-69) sees every lane this process has handed out.
+		if pl, err = r.withLane(ctx, job, site, pl); err != nil {
+			return ctrl.Result{}, err
+		}
 		b := &hpcv1alpha1.Booking{Site: site.Spec.Site, SiteName: site.Name, SiteNamespace: site.Namespace,
 			Tier: d.Tier, NodeMinutes: d.Cost, At: metav1.NewTime(r.now())}
 		r.remember(string(job.UID), *b)
+		r.rememberLane(string(job.UID), pl.QOS)
 		if err := r.setPhasePlaced(ctx, job, d.Phase, d.Reason, d.Message, b, pl); err != nil {
 			r.forget(string(job.UID))
 			return ctrl.Result{}, err
 		}
 		metrics.NodeMinutesBooked.WithLabelValues(string(d.Tier), projectOf(site)).Add(float64(d.Cost))
+		r.countLanePlacement(job, site, pl)
 		if d.OverShare && r.Recorder != nil {
 			r.Recorder.Event(job, corev1.EventTypeWarning, "OverShare", d.Message)
 		}
@@ -230,6 +243,9 @@ func (r *HPCArgoWorkflowJobReconciler) follow(ctx context.Context, job *hpcv1alp
 	run := job.Status.Run
 	if run == nil || !current(run, job.Status.Attempt) {
 		return false, nil // nothing reported yet, or a report of an earlier attempt
+	}
+	if err := r.reflectLane(ctx, job, run); err != nil {
+		return false, err
 	}
 	if run.Terminal {
 		return r.endAttempt(ctx, job, site)
@@ -357,6 +373,7 @@ func (r *HPCArgoWorkflowJobReconciler) ledgerOf(ctx context.Context, site *hpcv1
 	for i := range jobs.Items {
 		if jobs.Items[i].Status.Booking != nil {
 			delete(r.pending, string(jobs.Items[i].UID)) // the cache shows it now
+			delete(r.pendingLane, string(jobs.Items[i].UID))
 		}
 	}
 	return ledger.Compute(site, jobs.Items, r.pending, r.now()), nil
@@ -433,6 +450,22 @@ func (r *HPCArgoWorkflowJobReconciler) forget(uid string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.pending, uid)
+	delete(r.pendingLane, uid)
+	delete(r.laneNoted, uid)
+}
+
+// rememberLane keeps the QoS of a booking this process made until the cache shows it, so the lane
+// semaphore never misses a job it admitted a moment ago. An empty qos (class default) is not kept.
+func (r *HPCArgoWorkflowJobReconciler) rememberLane(uid, qos string) {
+	if qos == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pendingLane == nil {
+		r.pendingLane = map[string]string{}
+	}
+	r.pendingLane[uid] = qos
 }
 
 func (r *HPCArgoWorkflowJobReconciler) isPending(uid string) bool {

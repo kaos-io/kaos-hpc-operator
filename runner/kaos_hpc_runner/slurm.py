@@ -74,6 +74,21 @@ class Refused(Exception):
     pass
 
 
+# Why a site refuses a job because of its lane (QoS or reservation) rather than the job itself. The
+# texts are Slurm's own (slurm_errno / QOS reasons) and appear in the REST error body; matched
+# case-insensitively so a changed wording around them still counts.
+LANE_REFUSALS = ('qos',                       # Invalid qos specification, Job violates accounting/QOS policy,
+                                              # QOSMaxJobsPerUserLimit, QOSMaxSubmitJobPerUserLimit, ...
+                 'reservation',               # Requested reservation is invalid, Access denied to requested reservation
+                 'time limit is invalid')     # Requested time limit is invalid (missing or exceeds some limit)
+
+
+def lane_refusal(text):
+    """True when a refusal text names the lane (QoS, reservation or a limit above its maximum)."""
+    t = str(text).lower()
+    return any(m in t for m in LANE_REFUSALS)
+
+
 def submit_refusal(e):
     """slurmrestd refuses a job with an HTTP error whose body names why (errors/warnings: an account,
     partition or QOS it rejects, a time limit above the QOS); without it the step dies on a bare

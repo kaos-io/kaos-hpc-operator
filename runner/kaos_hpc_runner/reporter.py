@@ -55,6 +55,10 @@ class Reporter:
         self.cfg, self.kube, self.sleep = cfg, kube or Kube(), sleep
         self.attempt = cfg.attempt
         self.log_offset = None      # the log streamer's committed offset, written with every report
+        # The QoS and reservation the site job was submitted with (None: not known to this runner,
+        # e.g. it adopted a job; the report then leaves the earlier values alone).
+        self.qos = None
+        self.reservation = None
 
     def path(self, sub=''):
         return '/apis/hpc.kaos.io/v1alpha1/namespaces/%s/hpcargoworkflowjobs/%s%s' % (
@@ -105,6 +109,8 @@ class Reporter:
         if 'logOffset' not in run:
             run['logOffset'] = self.log_offset
         status = {'run': {k: run.get(k) for k in RUN_FIELDS}}
+        if self.qos is not None:
+            status['run'].update(qos=self.qos, reservation=self.reservation or None)
         if outputs is not None:
             status['outputs'] = check_outputs(outputs)
         for n in range(60 if must else 1):

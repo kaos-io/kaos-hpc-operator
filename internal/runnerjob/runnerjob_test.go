@@ -241,3 +241,38 @@ func TestShouldFallBackToTheSpecLimitWithoutAPlacement(t *testing.T) {
 		t.Errorf("SLURM_TIME_LIMIT %q, want the spec's 120", got)
 	}
 }
+
+func TestShouldPassTheChosenLaneToTheRunnerAndNothingWithoutOne(t *testing.T) {
+	cases := []struct {
+		name       string
+		placement  *hpcv1alpha1.Placement
+		qos, resrv string
+	}{
+		{"should_pass_qos_and_reservation_of_a_reserved_lane", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, QOS: "dev", Reservation: "gpudev"}, "dev", "gpudev"},
+		{"should_pass_only_the_qos_of_a_lane_without_reservation", &hpcv1alpha1.Placement{TimeLimitMinutes: 20, QOS: "test"}, "test", ""},
+		{"should_pass_nothing_when_the_class_default_applies", &hpcv1alpha1.Placement{TimeLimitMinutes: 60}, "", ""},
+		{"should_pass_nothing_without_a_placement", nil, "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			job, site := fixtures()
+			site.Spec.Profile.QOS = []hpcv1alpha1.SiteQOS{{Name: "test", MaxWallTimeMinutes: 30}, {Name: "dev"}}
+			job.Status.Placement = c.placement
+			vars, err := Env(job, site, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			env := envOf(t, vars)
+			maxWant := ""
+			if c.qos == "test" {
+				maxWant = "30" // the lane's maximum bounds the host's padding
+			}
+			for k, want := range map[string]string{"HPC_QOS": c.qos, "HPC_RESERVATION": c.resrv, "HPC_QOS_MAX_MINUTES": maxWant} {
+				got, set := env[k]
+				if (want != "") != set || got != want {
+					t.Fatalf("%s = %q (set %v), want %q", k, got, set, want)
+				}
+			}
+		})
+	}
+}

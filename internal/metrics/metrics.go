@@ -18,6 +18,10 @@ const (
 	LabelProject   = "project"
 	LabelSite      = "site"
 	LabelKind      = "kind"
+
+	LabelQOS         = "qos"
+	LabelReservation = "reservation"
+	LabelFallback    = "fallback"
 )
 
 // Kinds of the kaos_hpc_site_node_minutes gauge.
@@ -72,6 +76,15 @@ var (
 		Help: "Admitted jobs that have not ended.",
 	}, []string{LabelProject, LabelSite})
 
+	// LanePlacements counts attempts by the lane (QoS and reservation) they were placed in
+	// (PRD-HPC-1461 F-42). fallback is "false" at admission, when the controller chose the lane,
+	// and "true" when the runner reports that the site refused it and the attempt ran on the
+	// class default: a refused attempt is counted in both, so fallback="true" is the refusal count.
+	LanePlacements = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kaos_hpc_lane_placements_total",
+		Help: "Attempts by the lane they were placed in; fallback=true counts lanes the site refused.",
+	}, []string{LabelQOS, LabelReservation, LabelFallback})
+
 	// RunnerRestarts counts runner pods that failed and were replaced by their Job.
 	RunnerRestarts = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "kaos_hpc_runner_restarts_total",
@@ -81,7 +94,7 @@ var (
 
 func init() {
 	ctrlmetrics.Registry.MustRegister(JobPhase, JobQueueSeconds, JobRunSeconds, NodeMinutesBooked,
-		NodeMinutesSettled, SiteNodeMinutes, ActiveJobs, RunnerRestarts)
+		NodeMinutesSettled, SiteNodeMinutes, ActiveJobs, RunnerRestarts, LanePlacements)
 }
 
 // SetJobPhase makes phase the only phase series of the job.

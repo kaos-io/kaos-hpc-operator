@@ -20,7 +20,7 @@ from . import jobscript, payloads, settings, staging, wallet
 from .logs import LogStreamer
 from .reporter import OutputsTooLarge, Reporter, checkpoint_uri
 from .sharing import inputs_in_script
-from .slurm import (TERMINAL, Refused, Slurm, comment_of, host_gone, share_state, site_time)
+from .slurm import (TERMINAL, Refused, Slurm, comment_of, host_gone, lane_refusal, share_state, site_time)
 from .settings import CHECKPOINT_EXIT, OFFER_S, Settings
 
 POLL_S = 30
@@ -116,6 +116,7 @@ class Runner:
             env.append('KAOS_COMMIT=' + commit)   # fail() keeps the dataset lease
         step_limit = cfg.time_limit
         job_limit = step_limit
+        class_qos = hpc.get('qos') or 'default'
         hosting = cfg.sharing and int(hpc.get('gpus') or 0) > 0
         if hosting:
             # F-03: the batch step becomes the host (slot manager); one slot per GPU.
@@ -127,7 +128,7 @@ class Runner:
             # class's maximum (partition/QOS). Every step still runs with its own limit, and the
             # host releases the node 2 minutes after its last step. No known maximum: no padding (a
             # request above the QOS cap would pend forever).
-            cap = cfg.class_cap(hpc)
+            cap = cfg.lane_cap(hpc)
             if cap:
                 job_limit = max(step_limit, min(2 * step_limit, cap))
             if self.wallet_exp:
@@ -136,7 +137,7 @@ class Runner:
             batch, env = inputs_in_script(batch, env)
         body = {'job': {'name': cfg.job_site_name, 'partition': hpc['partition'],
                         'account': ident['account'],
-                        'qos': hpc.get('qos') or 'default',
+                        'qos': cfg.qos or class_qos,
                         'time_limit': job_limit,
                         'current_working_directory': ident['home'],
                         'environment': env, 'tasks': 1, 'nodes': '1'},
@@ -165,10 +166,11 @@ class Runner:
             # never shares a node, so this job's limit is its step's.
             body['job'].update({'kill_warning_signal': 'USR1', 'kill_warning_flags': ['BATCH_JOB'],
                                 'kill_warning_delay': {'set': True, 'number': cfg.resumable_lead * 60}})
-        try:
-            resp = self.slurm.submit(body)
-        except Refused as e:
-            settings.fail_start('job submit refused: %s' % e, 1)
+        if cfg.reservation:
+            # Only this job's own submit names the reservation: a guest is a job of its own, in the
+            # lane it was given, and never rides on the host's.
+            body['job']['reservation'] = cfg.reservation
+        resp = self.submit_in_lane(body, class_qos)
         j = resp.get('job_id')
         print('submitted job', j, 'errors:', resp.get('errors'), flush=True)
         if not j:
@@ -177,6 +179,34 @@ class Runner:
         self.reporter.log_offset = None
         self.reporter.report(siteJobID=str(j), state='PENDING')
         return j
+
+    def submit_in_lane(self, body, class_qos):
+        """POST the job in its lane. A site that refuses the lane (QoS limit, reservation, a limit above
+        the lane's maximum) gets the same job once more on the class's own QoS with no reservation: a
+        fast lane is opportunistic and never fails a step. Reports the QoS actually used."""
+        cfg = self.cfg
+        lane = bool(cfg.reservation or (cfg.qos and cfg.qos != class_qos))
+        why, resp = None, {}
+        try:
+            resp = self.slurm.submit(body)
+            if not resp.get('job_id') and lane and lane_refusal(resp.get('errors')):
+                why = resp.get('errors')
+        except Refused as e:
+            if not (lane and lane_refusal(e)):
+                settings.fail_start('job submit refused: %s' % e, 1)
+            why = e
+        if why is not None:
+            print('lane qos=%s reservation=%s refused by the site (%s): submitting again on QoS %s '
+                  'without a reservation' % (body['job']['qos'], cfg.reservation or '-', why, class_qos), flush=True)
+            body['job']['qos'] = class_qos
+            body['job'].pop('reservation', None)
+            try:
+                resp = self.slurm.submit(body)
+            except Refused as e:
+                settings.fail_start('job submit refused: %s' % e, 1)
+        self.reporter.qos = body['job']['qos']
+        self.reporter.reservation = body['job'].get('reservation')
+        return resp
 
     def resubmit(self, why):
         """Replace the site job of this attempt (cancel, then submit a fresh one)."""
