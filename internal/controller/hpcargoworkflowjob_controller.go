@@ -295,6 +295,13 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		SettledNodeMinutes: used, EndTime: end})
 	job.Status.Booking = nil
 	msg := "attempt " + strconv.Itoa(int(attempt)) + " settled " + strconv.FormatInt(used, 10) + " node-minutes"
+	if reason == hpcv1alpha1.ReasonIdle {
+		// D-72: the on-node watchdog ended a hung step; name it, count it, record what it spared.
+		saved := nodeMinutesSaved(job, run, end)
+		job.Status.Attempts[len(job.Status.Attempts)-1].NodeMinutesSaved = &saved
+		msg = idleMessage(job, run, saved, msg)
+		r.noteIdleKill(job, site, tier, msg)
+	}
 
 	next := false
 	if run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeContinue {
@@ -351,6 +358,8 @@ func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 		return hpcv1alpha1.PhaseCancelled, "Cancelled"
 	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeContinue:
 		return hpcv1alpha1.PhaseFailed, "Continued"
+	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeIdle && state == "FAILED":
+		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonIdle
 	case state == "COMPLETED" && (run.ExitCode == nil || *run.ExitCode == 0):
 		return hpcv1alpha1.PhaseSucceeded, "Completed"
 	case state == "TIMEOUT":

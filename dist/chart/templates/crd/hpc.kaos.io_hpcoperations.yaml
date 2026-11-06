@@ -188,6 +188,12 @@ spec:
                       HostSiteJobID is set when a host job of the same project took this job onto its node
                       (node sharing, PRD-1609 D-26). The host's booking then covers the node.
                     type: string
+                  lastLog:
+                    description: |-
+                      LastLog is the tail of the step's log (a few lines, at most 2 KiB), reported only when the
+                      idle watchdog ended the step, so the controller can name what the step last said (D-72).
+                    maxLength: 2048
+                    type: string
                   logOffset:
                     description: |-
                       LogOffset is how far into the site job's output file the runner has printed (bytes), so a

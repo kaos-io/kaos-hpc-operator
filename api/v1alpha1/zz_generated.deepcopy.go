@@ -33,6 +33,11 @@ func (in *AttemptRecord) DeepCopyInto(out *AttemptRecord) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.NodeMinutesSaved != nil {
+		in, out := &in.NodeMinutesSaved, &out.NodeMinutesSaved
+		*out = new(int64)
+		**out = **in
+	}
 	in.EndTime.DeepCopyInto(&out.EndTime)
 }
 
@@ -262,6 +267,11 @@ func (in *HPCArgoWorkflowJobSpec) DeepCopyInto(out *HPCArgoWorkflowJobSpec) {
 	if in.Sharing != nil {
 		in, out := &in.Sharing, &out.Sharing
 		*out = new(Sharing)
+		**out = **in
+	}
+	if in.IdleTimeoutMinutes != nil {
+		in, out := &in.IdleTimeoutMinutes, &out.IdleTimeoutMinutes
+		*out = new(int32)
 		**out = **in
 	}
 	if in.Env != nil {

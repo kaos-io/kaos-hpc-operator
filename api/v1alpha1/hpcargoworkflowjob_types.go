@@ -48,6 +48,14 @@ const (
 	ReasonCheckpointMissing = "Timeout"
 	ReasonWallTimeReached   = "WallTimeReached"
 	ExitCodeContinue        = int32(85)
+	// ReasonIdle: the on-node idle watchdog ended a hung step (PRD-HPC-1461 D-72, F-46). The job
+	// script exits ExitCodeIdle for it; the attempt is Failed with this reason.
+	ReasonIdle = "Idle"
+	// ExitCodeIdle is the job script's exit code for a step the idle watchdog ended. It sits in the
+	// script's own range (231-235), clear of any code a step is likely to choose.
+	ExitCodeIdle = int32(236)
+	// DefaultIdleTimeoutMinutes is the idle window of a step that does not set one (D-72).
+	DefaultIdleTimeoutMinutes = int32(20)
 	// ReasonRunnerFailed: the runner Job ended (backoff exhausted) without a terminal report (phase 1).
 	ReasonRunnerFailed = "RunnerFailed"
 	// ReasonInvalidSpec: the spec asks for something the API does not allow (phase 1: env outside
@@ -150,6 +158,13 @@ type HPCArgoWorkflowJobSpec struct {
 	// Sharing opts the job into node sharing under a scope (PRD-1609). Absent: no sharing.
 	// +optional
 	Sharing *Sharing `json:"sharing,omitempty"`
+	// IdleTimeoutMinutes is the idle watchdog's window (D-72, F-46): when the step's GPU (CPU on a
+	// CPU class) utilisation stays below 5 % and its log does not grow for this many consecutive
+	// minutes, the job ends the step with reason Idle. 0 disables the watchdog. Absent: 20.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=20
+	// +optional
+	IdleTimeoutMinutes *int32 `json:"idleTimeoutMinutes,omitempty"`
 	// Env is extra environment for the runner, from a fixed allowlist: OUTPUTS_REPO, OUTPUTS_REF,
 	// CHECKPOINT_BUCKET, CHECKPOINT_PREFIX, KAOS_LIB_SUPPORT. Nothing else is accepted (T-02).
 	// +kubebuilder:validation:MaxItems=16
@@ -237,6 +252,11 @@ type RunStatus struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	LogOffset int64 `json:"logOffset,omitempty"`
+	// LastLog is the tail of the step's log (a few lines, at most 2 KiB), reported only when the
+	// idle watchdog ended the step, so the controller can name what the step last said (D-72).
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	LastLog string `json:"lastLog,omitempty"`
 	// QOS and Reservation are what the site job was actually submitted with. The submitter reports
 	// them because it may fall back from a lane the site refused (PRD-HPC-1461 D-68).
 	// +optional
@@ -264,6 +284,11 @@ type AttemptRecord struct {
 	// Tier and SettledNodeMinutes: what the attempt spent.
 	Tier               Tier  `json:"tier"`
 	SettledNodeMinutes int64 `json:"settledNodeMinutes"`
+	// NodeMinutesSaved is set for an attempt the idle watchdog ended (reason Idle): the step's
+	// limit minus the time it ran, times the nodes. A guest on a shared node reports 0 (its host's
+	// booking covers the node).
+	// +optional
+	NodeMinutesSaved *int64 `json:"nodeMinutesSaved,omitempty"`
 	// EndTime decides the budget period the spend counts in.
 	EndTime metav1.Time `json:"endTime"`
 }
@@ -407,6 +432,15 @@ func (p Phase) Terminal() bool {
 		return true
 	}
 	return false
+}
+
+// EffectiveIdleTimeoutMinutes is the idle watchdog's window in minutes: the spec's value, 20 when
+// absent (a job created before the field existed), 0 meaning the watchdog is off.
+func (j *HPCArgoWorkflowJob) EffectiveIdleTimeoutMinutes() int32 {
+	if j.Spec.IdleTimeoutMinutes == nil {
+		return DefaultIdleTimeoutMinutes
+	}
+	return *j.Spec.IdleTimeoutMinutes
 }
 
 // EffectiveWallMinutes is the time limit of the job's current attempt: the controller's

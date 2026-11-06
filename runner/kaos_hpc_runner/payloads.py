@@ -2,7 +2,7 @@
 
 They are plain files next to this module (`payload/`) because they are not part of the runner:
 STAGEIN / STAGEOUT / CKPTIN / CKPTOUT run under the node's system python3 (3.6, stdlib only), SLOTS
-is the PRD-1609 slot manager. Byte-for-byte the programs the in-pod waiter embedded, except for the
+is the PRD-1609 slot manager, IDLEWATCH the D-72 idle watchdog the job script starts beside its step. Byte-for-byte the programs the in-pod waiter embedded, except for the
 `kaos-image=` lease SLOTS keeps on every host write (D-62).
 """
 
@@ -21,6 +21,7 @@ STAGEOUT = _read('stageout')
 CKPTIN = _read('ckptin')
 CKPTOUT = _read('ckptout')
 SLOTS = _read('slots')
+IDLEWATCH = _read('idlewatch')
 
 
 def b64(text):

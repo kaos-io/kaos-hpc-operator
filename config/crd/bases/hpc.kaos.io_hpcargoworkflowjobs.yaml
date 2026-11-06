@@ -107,6 +107,15 @@ spec:
                     repository
                   rule: self.all(e, !(e.name in ['OUTPUTS_REPO','CHECKPOINT_BUCKET'])
                     || e.value.matches('^outputs-[a-z0-9-]{1,55}$'))
+              idleTimeoutMinutes:
+                default: 20
+                description: |-
+                  IdleTimeoutMinutes is the idle watchdog's window (D-72, F-46): when the step's GPU (CPU on a
+                  CPU class) utilisation stays below 5 % and its log does not grow for this many consecutive
+                  minutes, the job ends the step with reason Idle. 0 disables the watchdog. Absent: 20.
+                format: int32
+                minimum: 0
+                type: integer
               image:
                 description: Image of the step.
                 minLength: 1
@@ -226,6 +235,13 @@ spec:
                       type: string
                     exitCode:
                       format: int32
+                      type: integer
+                    nodeMinutesSaved:
+                      description: |-
+                        NodeMinutesSaved is set for an attempt the idle watchdog ended (reason Idle): the step's
+                        limit minus the time it ran, times the nodes. A guest on a shared node reports 0 (its host's
+                        booking covers the node).
+                      format: int64
                       type: integer
                     outcome:
                       description: 'Outcome: Continued, Succeeded, Failed, Cancelled,
@@ -460,6 +476,12 @@ spec:
                     description: |-
                       HostSiteJobID is set when a host job of the same project took this job onto its node
                       (node sharing, PRD-1609 D-26). The host's booking then covers the node.
+                    type: string
+                  lastLog:
+                    description: |-
+                      LastLog is the tail of the step's log (a few lines, at most 2 KiB), reported only when the
+                      idle watchdog ended the step, so the controller can name what the step last said (D-72).
+                    maxLength: 2048
                     type: string
                   logOffset:
                     description: |-

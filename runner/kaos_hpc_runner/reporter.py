@@ -17,7 +17,7 @@ import urllib.request
 K8S_SA = '/var/run/secrets/kubernetes.io/serviceaccount'
 K8S_API = 'https://kubernetes.default.svc'
 RUN_FIELDS = ('attempt', 'siteJobID', 'state', 'exitCode', 'startTime', 'endTime', 'terminal',
-              'hostSiteJobID', 'slot', 'checkpointRef', 'logOffset')
+              'hostSiteJobID', 'slot', 'checkpointRef', 'logOffset', 'lastLog')
 CANCEL_ANNOTATION = 'hpc.kaos.io/cancel-requested'
 OUTPUTS_MAX_BYTES = 64 * 1024   # total of the declared outputs' JSON text (contract section 1)
 

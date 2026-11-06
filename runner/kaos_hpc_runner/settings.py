@@ -23,6 +23,9 @@ MACHINE_KEY_FILE = '/etc/mlflow-svc/ZITADEL_MACHINE_KEY'
 
 # PRD-HPC-1461 D-44: exit 85 = the step saved its checkpoint.
 CHECKPOINT_EXIT = 85
+# PRD-HPC-1461 D-72: the job script's exit code for a step the idle watchdog ended (reason Idle).
+IDLE_EXIT = 236
+DEFAULT_IDLE_TIMEOUT_MIN = 20
 OFFER_S = 60   # PRD-1609: a sharing job waits this long for a host of its scope to take it
 
 
@@ -85,6 +88,10 @@ class Settings:
         # PRD-HPC-1461 D-44 (amended 2026-11-05): only a step declared resumable gets the stop
         # signal, this many minutes before its wall time; 0 = not resumable.
         self.resumable_lead = int(g('HPC_RESUMABLE_LEAD') or 0)
+        # D-72: minutes of idleness (GPU/CPU below 5 % and a silent log) after which the job ends
+        # the step as Idle; 0 = off. The controller always sets it; 20 when it is absent or unreadable.
+        raw = (g('HPC_IDLE_TIMEOUT_MINUTES') or '').strip()
+        self.idle_timeout = int(raw) if raw.isdigit() else DEFAULT_IDLE_TIMEOUT_MIN
         self.output_names = [n for n in (g('STEP_OUTPUTS') or '').split(',') if n]
         self.dataset = (g('DATASET') or '').strip()
         # PRD-1609 node sharing: off unless the operator turned it on for this project and gave
