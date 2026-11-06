@@ -170,19 +170,19 @@ func TestComputeClampsGarbageAttempts(t *testing.T) {
 	}
 }
 
-func withState(attempt int32, state string) func(*hpcv1alpha1.HPCArgoWorkflowJob) {
+func withState(state string) func(*hpcv1alpha1.HPCArgoWorkflowJob) {
 	return func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
-		j.Status.Attempt = attempt
-		j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: attempt, SiteJobID: "1", State: state}
+		j.Status.Attempt = 1
+		j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "1", State: state}
 	}
 }
 
 func TestSubmittedJobsAreQueuedUntilTheSiteSaysRunning(t *testing.T) {
 	jobs := []hpcv1alpha1.HPCArgoWorkflowJob{
 		booked("admitted", hpcv1alpha1.PhaseAdmitted, 60, nil),
-		booked("submitted-pending", hpcv1alpha1.PhaseRunning, 60, withState(1, "PENDING")),
-		booked("submitted-no-state", hpcv1alpha1.PhaseRunning, 60, withState(1, "")),
-		booked("running", hpcv1alpha1.PhaseRunning, 60, withState(1, "RUNNING")),
+		booked("submitted-pending", hpcv1alpha1.PhaseRunning, 60, withState("PENDING")),
+		booked("submitted-no-state", hpcv1alpha1.PhaseRunning, 60, withState("")),
+		booked("running", hpcv1alpha1.PhaseRunning, 60, withState("RUNNING")),
 		booked("stale-report", hpcv1alpha1.PhaseRunning, 60, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
 			j.Status.Attempt = 2
 			j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, State: "RUNNING"} // earlier attempt's report
@@ -190,7 +190,7 @@ func TestSubmittedJobsAreQueuedUntilTheSiteSaysRunning(t *testing.T) {
 		booked("guest", hpcv1alpha1.PhaseRunning, 60, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
 			j.Status.Run = &hpcv1alpha1.RunStatus{HostSiteJobID: "9"}
 		}),
-		booked("done", hpcv1alpha1.PhaseSucceeded, 60, withState(1, "COMPLETED")),
+		booked("done", hpcv1alpha1.PhaseSucceeded, 60, withState("COMPLETED")),
 	}
 	pending := map[string]hpcv1alpha1.Booking{
 		"x": {SiteName: "meluxina", SiteNamespace: "proj-a-hpc", Tier: hpcv1alpha1.TierGPU, NodeMinutes: 10},
