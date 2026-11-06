@@ -50,6 +50,54 @@ type SiteClass struct {
 	// MaxWallTimeMinutes is the site's limit for the class's partition and QOS.
 	// +kubebuilder:validation:Minimum=1
 	MaxWallTimeMinutes int32 `json:"maxWallTimeMinutes"`
+	// Lanes are the names of the profile's QoS this class may use (D-66). Empty means only QOS.
+	// +listType=set
+	// +optional
+	Lanes []string `json:"lanes,omitempty"`
+}
+
+// SiteQOS is one QoS (lane) the project's account may use on the site, as the site reports it (D-66).
+type SiteQOS struct {
+	// Name of the QoS at the site, for example dev.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// Priority is the QoS priority.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Priority int64 `json:"priority,omitempty"`
+	// MaxWallTimeMinutes is the QoS's wall-time limit. Zero means the site reports none.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxWallTimeMinutes int32 `json:"maxWallTimeMinutes,omitempty"`
+	// MaxJobsPerUser is the QoS's running-jobs-per-user limit. Zero means the site reports none.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxJobsPerUser int32 `json:"maxJobsPerUser,omitempty"`
+	// Preempts names the QoS this one preempts.
+	// +listType=set
+	// +optional
+	Preempts []string `json:"preempts,omitempty"`
+	// UsageFactorMilli is the usage factor times 1000 (1.0 is 1000), an integer so the CRD carries no float.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	UsageFactorMilli int32 `json:"usageFactorMilli,omitempty"`
+}
+
+// SiteReservation is a reservation the project's account may use on the site (D-66).
+type SiteReservation struct {
+	// Name of the reservation at the site, for example gpudev.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// Partition the reservation covers.
+	// +optional
+	Partition string `json:"partition,omitempty"`
+	// NodeCount is the number of reserved nodes.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	NodeCount int32 `json:"nodeCount,omitempty"`
+	// EndTime is when the reservation ends.
+	// +optional
+	EndTime *metav1.Time `json:"endTime,omitempty"`
 }
 
 // SiteProfile is the site part of an HPCSite, rendered from the KAOS-curated profile (F-03, D-47).
@@ -79,6 +127,16 @@ type SiteProfile struct {
 	// +listType=map
 	// +listMapKey=name
 	Classes []SiteClass `json:"classes"`
+	// QOS are the lanes the project's account may use, with their limits (D-66). Discovered, optional.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	QOS []SiteQOS `json:"qos,omitempty"`
+	// Reservations the project's account may use (D-66). Discovered, optional.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Reservations []SiteReservation `json:"reservations,omitempty"`
 }
 
 // SecretKeyRef names one key of a Secret in the HPCSite's namespace.
