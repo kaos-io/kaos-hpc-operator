@@ -210,6 +210,11 @@ spec:
                     description: Endpoint of the scheduler API, for example https://slurm-api.example.org.
                     pattern: ^https://
                     type: string
+                  homeRoot:
+                    description: |-
+                      HomeRoot is the directory holding the users' home directories on the site, for example
+                      /home/users. The runner's HOME is HomeRoot/<identity.user>. Empty means /home/users.
+                    type: string
                   loginHosts:
                     description: LoginHosts the controller may SSH to for token minting
                       (host:port).

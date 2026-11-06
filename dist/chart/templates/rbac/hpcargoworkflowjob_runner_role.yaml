@@ -1,0 +1,26 @@
+{{- if .Values.rbac.enable }}
+# The runner Job's service account (hpc-runner in the project's HPC namespace, PRD-HPC-1461 D-59,
+# D-64): it reads the job it runs for and reports the site job in status. Bind it (RoleBinding) to
+# that service account in each environment namespace of the project; kubecore-operator renders the
+# bindings. It cannot create, list or delete jobs, nor touch any other namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+  name: hpcargoworkflowjob-runner-role
+rules:
+- apiGroups:
+  - hpc.kaos.io
+  resources:
+  - hpcargoworkflowjobs
+  verbs:
+  - get
+- apiGroups:
+  - hpc.kaos.io
+  resources:
+  - hpcargoworkflowjobs/status
+  verbs:
+  - get
+  - patch
+{{- end -}}

@@ -182,6 +182,13 @@ spec:
                       HostSiteJobID is set when a host job of the same project took this job onto its node
                       (node sharing, PRD-1609 D-26). The host's booking then covers the node.
                     type: string
+                  logOffset:
+                    description: |-
+                      LogOffset is how far into the site job's output file the runner has printed (bytes), so a
+                      restarted runner prints each line once (PRD-1461 D-65, AC-70).
+                    format: int64
+                    minimum: 0
+                    type: integer
                   siteJobID:
                     description: SiteJobID is the scheduler's job id.
                     type: string

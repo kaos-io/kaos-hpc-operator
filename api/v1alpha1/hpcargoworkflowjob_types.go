@@ -48,7 +48,50 @@ const (
 	ReasonCheckpointMissing = "Timeout"
 	ReasonWallTimeReached   = "WallTimeReached"
 	ExitCodeContinue        = int32(85)
+	// ReasonRunnerFailed: the runner Job ended (backoff exhausted) without a terminal report (phase 1).
+	ReasonRunnerFailed = "RunnerFailed"
+	// ReasonInvalidSpec: the spec asks for something the API does not allow (phase 1: env outside
+	// the allowlist). Terminal, with the phase Refused.
+	ReasonInvalidSpec = "InvalidSpec"
 )
+
+// CancelFinalizer holds a serve-mode job until its runner Job is gone and its attempt is settled
+// (PRD-HPC-1461 D-04): cancel is the controller's, so a lost follower never orphans a site job.
+const CancelFinalizer = "hpc.kaos.io/cancel"
+
+// AllowedEnvNames are the only environment variables a job's spec may set on the runner
+// (PRD-1461 phase 1 contract section 1). Everything that names an identity, a path, a class table
+// or an endpoint comes from the HPCSite and the operator-rendered ConfigMap, never from the
+// tenant (T-02). The CRD enforces the list with CEL; the controller enforces it again.
+var AllowedEnvNames = []string{"OUTPUTS_REPO", "OUTPUTS_REF", "CHECKPOINT_BUCKET", "CHECKPOINT_PREFIX", "KAOS_LIB_SUPPORT"}
+
+// WorkflowRef names the Argo Workflow a serve-mode job belongs to.
+type WorkflowRef struct {
+	// Name of the Workflow, in the job's namespace.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+	// UID of the Workflow. A Workflow of that name with another UID counts as deleted.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	UID string `json:"uid"`
+}
+
+// Sharing is the job's node-sharing scope (PRD-1609).
+type Sharing struct {
+	// Scope jobs must have in common to share a node.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]{8,16}$`
+	Scope string `json:"scope"`
+}
+
+// NameValue is one environment variable.
+type NameValue struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	Name string `json:"name"`
+	// +kubebuilder:validation:MaxLength=2048
+	Value string `json:"value"`
+}
 
 // HPCArgoWorkflowJobSpec is one pipeline step to run on an HPC site (D-01).
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable; create a new HPCArgoWorkflowJob"
@@ -82,6 +125,29 @@ type HPCArgoWorkflowJobSpec struct {
 	// 2026-11-05, F-29). Absent: the step ends when its wall time is reached.
 	// +optional
 	Resumable *Resumable `json:"resumable,omitempty"`
+	// StepName is the DAG step's name (the Argo step-name input). Setting it turns on
+	// serve mode: the controller runs the job through a runner Job (PRD-HPC-1461 D-58, D-64).
+	// Without it the job behaves as in phase 0 (observe and admit; the in-pod runner submits).
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	StepName string `json:"stepName,omitempty"`
+	// Workflow is the Argo Workflow that owns the step. The controller cancels the job when the
+	// Workflow is deleted, shut down or ended (D-04).
+	// +optional
+	Workflow *WorkflowRef `json:"workflow,omitempty"`
+	// Sharing opts the job into node sharing under a scope (PRD-1609). Absent: no sharing.
+	// +optional
+	Sharing *Sharing `json:"sharing,omitempty"`
+	// Env is extra environment for the runner, from a fixed allowlist: OUTPUTS_REPO, OUTPUTS_REF,
+	// CHECKPOINT_BUCKET, CHECKPOINT_PREFIX, KAOS_LIB_SUPPORT. Nothing else is accepted (T-02).
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:XValidation:rule="self.all(e, e.name in ['OUTPUTS_REPO','OUTPUTS_REF','CHECKPOINT_BUCKET','CHECKPOINT_PREFIX','KAOS_LIB_SUPPORT'])",message="env may only set OUTPUTS_REPO, OUTPUTS_REF, CHECKPOINT_BUCKET, CHECKPOINT_PREFIX, KAOS_LIB_SUPPORT"
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['OUTPUTS_REPO','CHECKPOINT_BUCKET']) || e.value.matches('^outputs-[a-z0-9-]{1,55}$'))",message="OUTPUTS_REPO and CHECKPOINT_BUCKET must be an outputs-<name> repository"
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Env []NameValue `json:"env,omitempty"`
 }
 
 // Resumable is a step's declaration that it saves and continues (step(..., resumable=...)).
@@ -155,6 +221,19 @@ type RunStatus struct {
 	// staged out before it exited, checked by the submitter (T-19). Without it nothing continues.
 	// +optional
 	CheckpointRef string `json:"checkpointRef,omitempty"`
+	// LogOffset is how far into the site job's output file the runner has printed (bytes), so a
+	// restarted runner prints each line once (PRD-1461 D-65, AC-70).
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	LogOffset int64 `json:"logOffset,omitempty"`
+}
+
+// RunnerRef names the runner Job of the current attempt (written by the controller).
+type RunnerRef struct {
+	// JobName of the Kubernetes Job, in the HPCSite's namespace.
+	JobName string `json:"jobName"`
+	// Attempt the Job runs.
+	Attempt int32 `json:"attempt"`
 }
 
 // AttemptRecord is one finished site job of an HPCArgoWorkflowJob, settled (written by the controller).
@@ -213,6 +292,18 @@ type HPCArgoWorkflowJobStatus struct {
 	// Run is the submitter's report of the site job.
 	// +optional
 	Run *RunStatus `json:"run,omitempty"`
+	// Outputs are the step's declared outputs, JSON text each (at most 64 KiB in all), written by
+	// the runner after stage-out and before it reports run.terminal. The follower turns them into
+	// the Argo step's outputs.
+	// +kubebuilder:validation:MaxProperties=64
+	// +optional
+	Outputs map[string]string `json:"outputs,omitempty"`
+	// PendingReason is the scheduler's pending reason while the site job is queued (runner's poll).
+	// +optional
+	PendingReason string `json:"pendingReason,omitempty"`
+	// Runner is the runner Job of the current attempt (serve mode).
+	// +optional
+	Runner *RunnerRef `json:"runner,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional

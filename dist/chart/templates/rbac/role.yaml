@@ -18,7 +18,32 @@ rules:
   - ""
   resources:
   - namespaces
+  - pods
   verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workflows
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
   - get
   - list
   - watch
@@ -26,10 +51,10 @@ rules:
   - hpc.kaos.io
   resources:
   - hpcargoworkflowjobs
-  - hpcsites
   verbs:
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - hpc.kaos.io
@@ -40,4 +65,12 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - hpc.kaos.io
+  resources:
+  - hpcsites
+  verbs:
+  - get
+  - list
+  - watch
 {{- end -}}

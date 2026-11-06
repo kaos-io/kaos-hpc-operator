@@ -41,6 +41,47 @@ another job of the same project holds is covered by that job's booking.
 
 See [docs/design.md](docs/design.md) for the full design.
 
+## Serve mode (phase 1, PRD-HPC-1461 D-58, D-64)
+
+An `HPCArgoWorkflowJob` with `spec.stepName` set is *served*: after admission the controller runs it
+through a **runner Job per attempt** in the project's HPC namespace (the `HPCSite`'s namespace),
+named `hpcr-<hash8(job uid)>-a<attempt>`. A job without `stepName` behaves as in phase 0.
+
+One image holds everything; the entrypoint is chosen by `command`:
+
+| Entrypoint | Who runs it |
+|---|---|
+| `/manager` | the controller (chart Deployment) |
+| `/follower` | the credential-free pipeline step: creates the job (`hpc-<20 hex of sha256(WF_UID/NODE_KEY)>`, owned by the Workflow), prints changes, writes `/tmp/outputs/<n>.json` and `/tmp/slurm-job-id`, exits 0 only on `Succeeded` |
+| `python3 -u /runner/main.py` | the runner Job (source in `runner/`) |
+
+The runner's environment is built **only by the controller**: from the spec (`IMAGE_REF`,
+`STEP_COMMAND`, `SLURM_TIME_LIMIT`, `STEP_OUTPUTS`, `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `DATASET`,
+`HPC_SCOPE`, resume info `KAOS_RESUME_REF`, and the allowlisted `spec.env`: `OUTPUTS_REPO`,
+`OUTPUTS_REF`, `CHECKPOINT_BUCKET`, `CHECKPOINT_PREFIX`, `KAOS_LIB_SUPPORT`), from the HPCSite
+(`HPC_ACCOUNT`, `HPC_USER`, `HPC_SCRATCH`, `HPC_HOME`, `HPC_CLASSES_JSON`, `HPC_ENDPOINT`), and
+from the operator-rendered ConfigMap `hpc-runner-config` (`envFrom`). The CRD (CEL) and the
+controller both refuse any other `spec.env` name. Secrets `meluxina-jwt`, `meluxina-staging` and
+`mlflow-svc` are mounted from the HPC namespace.
+
+Cancel (D-04): the finalizer `hpc.kaos.io/cancel` holds the job until its runner Job is deleted
+(Foreground, so the runner's SIGTERM handler cancels the Slurm job). It fires when the job is
+deleted, or its Argo Workflow is deleted, shut down (`spec.shutdown`) or ended while the job had not.
+The Workflow is read as unstructured (no Argo dependency) and polled every `ServeResync` (15 s).
+
+RBAC roles shipped by the chart (bound per namespace by kubecore-operator):
+
+| ClusterRole | For | Verbs |
+|---|---|---|
+| `hpcargoworkflowjob-submitter-role` | pipeline service accounts (follower) | `hpcargoworkflowjobs`: create, delete, get, list, watch. **No status verbs.** |
+| `hpcargoworkflowjob-runner-role` | `hpc-runner` in each env namespace | `hpcargoworkflowjobs`: get; `/status`: get, patch |
+| `hpcargoworkflowjob-reporter-role` | **phase 0 only**: the in-pod runner's service account, next to the submitter role | `hpcargoworkflowjobs/status`: get, patch |
+
+Metrics (`:8443`, authn/authz-protected; the chart renders a `VMServiceScrape`, else a
+`ServiceMonitor`, when the API exists): `kaos_hpc_job_phase`, `kaos_hpc_job_queue_seconds`,
+`kaos_hpc_job_run_seconds`, `kaos_hpc_node_minutes_booked`, `kaos_hpc_node_minutes_settled`,
+`kaos_hpc_site_node_minutes`, `kaos_hpc_active_jobs`, `kaos_hpc_runner_restarts_total`.
+
 ## Development
 
 ```sh

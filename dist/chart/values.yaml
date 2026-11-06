@@ -46,6 +46,15 @@ controllerManager:
   affinity: {}
   serviceAccountName: kaos-hpc-operator-controller-manager
 
+# [RUNNER]: runner Jobs of serve-mode jobs (spec.stepName), created by the controller in the
+# HPCSite's namespace. They run the controller's own image (entrypoint /runner/main.py).
+# Image of the runner Jobs. Empty: the controller image above (one image, one version).
+runnerImage: ""
+runner:
+  # Where runner pods go: {nodeSelector, tolerations, affinity}. Empty: like the controller
+  # (controllerManager.nodeSelector, tolerations, affinity).
+  scheduling: {}
+
 # [RBAC]: To enable RBAC (Permissions) configurations
 rbac:
   enable: true
@@ -69,9 +78,12 @@ crd:
 metrics:
   enable: true
 
-# [PROMETHEUS]: To enable a ServiceMonitor to export metrics to Prometheus set true
+# [SCRAPE]: a VMServiceScrape (operator.victoriametrics.com/v1beta1) when that API exists in the
+# cluster, else a ServiceMonitor (monitoring.coreos.com/v1) when that exists, else nothing. The
+# endpoint is HTTPS with authn/authz: bind the scraper's service account to the chart's
+# kaos-hpc-operator-metrics-reader ClusterRole.
 prometheus:
-  enable: false
+  enable: true
 
 # [CERT-MANAGER]: To enable cert-manager injection to webhooks set true
 certmanager:

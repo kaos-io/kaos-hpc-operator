@@ -18,6 +18,7 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"os"
 	"path/filepath"
@@ -26,11 +27,16 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -39,6 +45,7 @@ import (
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 	"github.com/kaos-io/kaos-hpc-operator/internal/controller"
+	"github.com/kaos-io/kaos-hpc-operator/internal/runnerjob"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -64,6 +71,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	var runnerImage, runnerScheduling string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -81,6 +89,10 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&runnerImage, "runner-image", os.Getenv("RUNNER_IMAGE"),
+		"Image of the runner Jobs of serve-mode jobs (the same image as the controller). Default: $RUNNER_IMAGE.")
+	flag.StringVar(&runnerScheduling, "runner-scheduling", os.Getenv("RUNNER_SCHEDULING"),
+		"JSON {nodeSelector, tolerations, affinity} for runner pods. Default: $RUNNER_SCHEDULING.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -178,13 +190,40 @@ func main() {
 		})
 	}
 
+	var scheduling runnerjob.Scheduling
+	if runnerScheduling != "" {
+		if err := json.Unmarshal([]byte(runnerScheduling), &scheduling); err != nil {
+			setupLog.Error(err, "invalid --runner-scheduling")
+			os.Exit(1)
+		}
+	}
+	if runnerImage == "" {
+		setupLog.Info("no --runner-image: serve-mode jobs (spec.stepName) cannot start until it is set")
+	}
+
+	// Only the runner Jobs and their pods are cached, not every Job and Pod of the cluster.
+	jobSel, err := labels.Parse(runnerjob.LabelJobUID)
+	if err != nil {
+		setupLog.Error(err, "invalid runner Job selector")
+		os.Exit(1)
+	}
+	podSel, err := labels.Parse(runnerjob.LabelRunnerJob)
+	if err != nil {
+		setupLog.Error(err, "invalid runner pod selector")
+		os.Exit(1)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "65fe7cb2.kaos.io",
+		Cache: cache.Options{ByObject: map[client.Object]cache.ByObject{
+			&batchv1.Job{}: {Label: jobSel},
+			&corev1.Pod{}:  {Label: podSel},
+		}},
+		LeaderElection:   enableLeaderElection,
+		LeaderElectionID: "65fe7cb2.kaos.io",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -206,6 +245,10 @@ func main() {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("kaos-hpc-operator"),
+		// Reads that must not be stale (are the runner Jobs gone?) skip the cache.
+		APIReader:        mgr.GetAPIReader(),
+		RunnerImage:      runnerImage,
+		RunnerScheduling: scheduling,
 	}
 	if err := jobs.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HPCArgoWorkflowJob")

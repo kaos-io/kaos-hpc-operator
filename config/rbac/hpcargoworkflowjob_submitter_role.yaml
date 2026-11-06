@@ -1,7 +1,9 @@
-# The workflow step that runs a pipeline step on an HPC site: it creates the step's
-# HPCArgoWorkflowJob, waits for the controller's admission and reports the site job in
-# status.run. Bind it (RoleBinding) to that step's service account in each namespace whose
-# workflows may use HPC; nothing else needs it.
+# The pipeline-side follower step (serve mode, PRD-HPC-1461 D-59): it creates the step's
+# HPCArgoWorkflowJob, watches it and, on cancel, may delete it. It has NO status verbs: only the
+# controller and the runner write status. Bind it (RoleBinding) to the step's service account in
+# each namespace whose workflows may use HPC; nothing else needs it.
+# A pool still in phase-0 mode (the in-pod runner patches status.run) also binds
+# hpcargoworkflowjob-reporter-role to the same service account.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -16,12 +18,7 @@ rules:
   - hpcargoworkflowjobs
   verbs:
   - create
+  - delete
   - get
+  - list
   - watch
-- apiGroups:
-  - hpc.kaos.io
-  resources:
-  - hpcargoworkflowjobs/status
-  verbs:
-  - get
-  - patch

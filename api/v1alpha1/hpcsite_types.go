@@ -70,6 +70,10 @@ type SiteProfile struct {
 	// ScratchRoot is the per-project working area on the site's shared filesystem.
 	// +optional
 	ScratchRoot string `json:"scratchRoot,omitempty"`
+	// HomeRoot is the directory holding the users' home directories on the site, for example
+	// /home/users. The runner's HOME is HomeRoot/<identity.user>. Empty means /home/users.
+	// +optional
+	HomeRoot string `json:"homeRoot,omitempty"`
 	// Classes offered by the site.
 	// +kubebuilder:validation:MinItems=1
 	// +listType=map
