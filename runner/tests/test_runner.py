@@ -478,23 +478,49 @@ def test_a_long_job_gets_a_fresh_wallet_for_its_outputs(rig, monkeypatch):
 
 # ---------------------------------------------------------------- SIGTERM (the controller deleted the runner Job)
 
-def test_sigterm_cancels_a_queued_job_and_reports_it(rig):
-    slurm = FakeSlurm({}, live={"5001": {"job_state": ["PENDING"]}})
+def _term(rig, slurm, cancel, state="PENDING"):
     r = rig.make(slurm)
     r.runner.jid = "5001"
+    if cancel:
+        r.kube.job["metadata"]["annotations"] = {"hpc.kaos.io/cancel-requested": "2026-11-06T10:00:00Z"}
+    return r
+
+
+@pytest.mark.parametrize("state", ["PENDING", "RUNNING"])
+def test_sigterm_with_a_cancel_request_stops_the_site_job_and_reports_it(rig, state):
+    slurm = FakeSlurm({}, live={"5001": {"job_state": [state]}})
+    r = _term(rig, slurm, True)
     with pytest.raises(SystemExit) as e:
         r.runner.on_term(15, None)
-    assert e.value.code == 143 and slurm.cancelled == ["5001"]
+    assert e.value.code == 0 and slurm.cancelled == ["5001"]
     assert r.kube.run["state"] == "CANCELLED" and r.kube.run["terminal"] is True
 
 
-def test_sigterm_leaves_a_running_job_to_finish(rig):
-    slurm = FakeSlurm({}, live={"5001": {"job_state": ["RUNNING"]}})
-    r = rig.make(slurm)
-    r.runner.jid = "5001"
+def test_sigterm_without_a_cancel_request_leaves_the_site_job_for_the_next_runner(rig):
+    slurm = FakeSlurm({}, live={"5001": {"job_state": ["PENDING"]}})
+    r = _term(rig, slurm, False)
+    with pytest.raises(SystemExit) as e:
+        r.runner.on_term(15, None)
+    assert e.value.code == 143 and slurm.cancelled == [] and r.kube.run == {}, "no cancel, no terminal report"
+
+
+def test_sigterm_with_an_unreadable_job_does_not_cancel(rig):
+    slurm = FakeSlurm({}, live={"5001": {"job_state": ["PENDING"]}})
+    r = _term(rig, slurm, True)
+    r.kube.fail = [500, OSError("reset"), 503]       # the first read and both retries fail
     with pytest.raises(SystemExit) as e:
         r.runner.on_term(15, None)
     assert e.value.code == 143 and slurm.cancelled == [] and r.kube.run == {}
+    assert len([c for c in r.kube.calls if c[0] == "GET"]) == 3
+
+
+def test_a_cancel_check_that_works_on_a_retry_still_cancels(rig):
+    slurm = FakeSlurm({}, live={})
+    r = _term(rig, slurm, True)
+    r.kube.fail = [500]
+    with pytest.raises(SystemExit) as e:
+        r.runner.on_term(15, None)
+    assert e.value.code == 0 and slurm.cancelled == ["5001"]
 
 
 def test_sigterm_during_staging_just_exits(rig):

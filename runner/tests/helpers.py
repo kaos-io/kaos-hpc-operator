@@ -55,7 +55,7 @@ class FakeKube:
         self.job = {"metadata": {"name": name, "namespace": ns}, "status": status or {}} if exists else None
         self.calls, self.fail = [], []     # fail: HTTP codes / exceptions answered to the next calls
 
-    def __call__(self, method, path, body=None, ctype="application/json"):
+    def __call__(self, method, path, body=None, ctype="application/json", timeout=30):
         self.calls.append((method, path, body, ctype))
         if self.fail:
             f = self.fail.pop(0)

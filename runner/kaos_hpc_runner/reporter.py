@@ -18,6 +18,7 @@ K8S_SA = '/var/run/secrets/kubernetes.io/serviceaccount'
 K8S_API = 'https://kubernetes.default.svc'
 RUN_FIELDS = ('attempt', 'siteJobID', 'state', 'exitCode', 'startTime', 'endTime', 'terminal',
               'hostSiteJobID', 'slot', 'checkpointRef', 'logOffset')
+CANCEL_ANNOTATION = 'hpc.kaos.io/cancel-requested'
 OUTPUTS_MAX_BYTES = 64 * 1024   # total of the declared outputs' JSON text (contract section 1)
 
 
@@ -38,14 +39,14 @@ class Kube:
     def __init__(self, sa=K8S_SA, api=K8S_API):
         self.sa, self.api = sa, api
 
-    def __call__(self, method, path, body=None, ctype='application/json'):
+    def __call__(self, method, path, body=None, ctype='application/json', timeout=30):
         tok = open(self.sa + '/token').read().strip()          # re-read: projected tokens rotate
         req = urllib.request.Request(
             self.api + path, method=method,
             data=json.dumps(body).encode() if body is not None else None,
             headers={'Authorization': 'Bearer ' + tok, 'Content-Type': ctype, 'Accept': 'application/json'})
         ctx = ssl.create_default_context(cafile=self.sa + '/ca.crt')
-        with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
             return json.load(r)
 
 
@@ -78,6 +79,19 @@ class Reporter:
             self.sleep(10)
         print('HPC job: the API server did not answer for 5 minutes', flush=True)
         sys.exit(1)
+
+    def cancel_requested(self):
+        """Did the controller ask for a real cancel (annotation hpc.kaos.io/cancel-requested, set before it
+        deletes the runner Job)? A fresh read with a short timeout and 2 retries. None when it cannot be
+        read: the caller must then not cancel (fail safe)."""
+        for n in range(3):
+            try:
+                job = self.kube('GET', self.path(), timeout=5)
+                return CANCEL_ANNOTATION in ((job.get('metadata') or {}).get('annotations') or {})
+            except Exception as e:
+                print('cancel check: job not readable (%s)' % e, flush=True)
+                self.sleep(1)
+        return None
 
     def patch(self, status):
         self.kube('PATCH', self.path('/status'), {'status': status}, 'application/merge-patch+json')

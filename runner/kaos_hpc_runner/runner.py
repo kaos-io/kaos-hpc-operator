@@ -278,17 +278,26 @@ class Runner:
     # ------------------------------------------------------------------ signals
 
     def on_term(self, signum, frame):
-        # The controller deletes this runner Job to cancel (D-04). A PENDING site job never started:
-        # cancel it so it does not run unobserved hours later (live job 5143859 did exactly that). A
-        # RUNNING job is deliberately left to finish.
+        # SIGTERM is either a real cancel (D-04: the controller sets the cancel-requested annotation on
+        # the job BEFORE it deletes this runner Job) or a disruption (eviction, drain, node loss).
+        # Real cancel: stop the site job, PENDING or RUNNING, and report it. Anything else, including a
+        # job that cannot be read: leave the site job alone and exit without a terminal report, so the
+        # replacement pod re-attaches by key.
+        cancel = False
         try:
-            if self.jid is not None:
-                j = self.slurm.live(self.jid)
-                if 'PENDING' in (j.get('job_state') or []):
-                    self.slurm.cancel(self.jid)
-                    self.reporter.report(siteJobID=str(self.jid), state='CANCELLED', terminal=True)
+            cancel = self.reporter.cancel_requested() is True
         except Exception:
             pass
+        if cancel and self.jid is not None:
+            try:
+                self.logs.finish()
+            except Exception:
+                pass
+            self.slurm.cancel(self.jid)
+            self.reporter.report(siteJobID=str(self.jid), state='CANCELLED', terminal=True)
+            sys.exit(0)
+        print('SIGTERM without a cancel request: the site job %s is left alone for the next runner'
+              % self.jid, flush=True)
         try:
             self.logs.persist(force=True)    # a restarted runner resumes from here, without duplicates
         except Exception:
