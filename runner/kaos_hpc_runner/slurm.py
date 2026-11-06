@@ -100,10 +100,22 @@ def share_state(comment):
     return dict(re.findall(r'(?:^|\s)(kaos-state|host|slot|attempt|rc|reason)=(\S+)', comment))
 
 
+# Slurm's "no value" sentinels: NO_VAL (0xFFFFFFFE) and INFINITE (0xFFFFFFFF) seconds. A job that
+# never started carries one as its start; read as a date it is February 2106.
+NO_VAL = 4294967294
+
+
 def site_time(job, key):
+    """The job's start/end as an RFC 3339 UTC string, or None when Slurm has no such time: a REST
+    time object with set=false or infinite=true, or a number at or above NO_VAL, is absent."""
     t = ((job.get('time') or {}).get(key))
-    t = t.get('number') if isinstance(t, dict) else t
-    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t)) if t else None
+    if isinstance(t, dict):
+        if t.get('set') is False or t.get('infinite'):
+            return None
+        t = t.get('number')
+    if not isinstance(t, (int, float)) or isinstance(t, bool) or t <= 0 or t >= NO_VAL:
+        return None
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t))
 
 
 # Slurm states in which a job will not run again; HOST_ALIVE: states in which a host job still lives.
