@@ -41,9 +41,9 @@ RUN apk upgrade --no-cache && apk add --no-cache openssh-client ca-certificates 
               /usr/local/bin/pip* /usr/local/bin/wheel \
     && addgroup -g 65532 -S kaos && adduser -u 65532 -S -G kaos -h /tmp kaos
 WORKDIR /
-COPY --from=builder /workspace/manager /manager
-COPY --from=builder /workspace/follower /follower
-COPY runner/ /runner/
+COPY --chmod=0555 --from=builder /workspace/manager /manager
+COPY --chmod=0555 --from=builder /workspace/follower /follower
+COPY --chmod=0555 runner/ /runner/
 USER 65532:65532
 ENV HOME=/tmp PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
