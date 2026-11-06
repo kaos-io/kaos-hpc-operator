@@ -20,7 +20,7 @@ import time
 
 from .staging import EX_USAGE
 
-POLL_S = 15
+POLL_S = 30   # one stager call per 30 s per running step, over the shared SSH connection (AC-68: < 60 s)
 PERSIST_S = 30
 MAX_BYTES = 1 << 20
 METRIC_PREFIX = 'KAOS_METRIC '

@@ -12,6 +12,7 @@ memory only). Any failure returns '' and the job stages in-job as before, saying
 `Stager` is also what image staging, log streaming and the tar lease go through.
 """
 
+import atexit
 import json
 import os
 import shlex
@@ -80,10 +81,80 @@ def stage_plan(api, commit, base, prefix, wallet):
 
 
 class Stager:
-    """One stager subcommand on a login node per call: (exit code, JSON events)."""
+    """One stager subcommand on a login node per call: (exit code, JSON events).
+
+    All calls of one runner share ONE SSH connection to the login node (OpenSSH multiplexing): the
+    runner calls the stager many times (staging, log tail every 30 s), and a new login per call loads
+    the site's shared login nodes (50 running steps were ~200 logins a minute). The master is started
+    explicitly with its output on /dev/null (a ControlPersist master started by a call would inherit
+    that call's pipes and hang it), lives at most MASTER_PERSIST_S after the last call, and if it
+    cannot be started the runner falls back to one connection per call, as before."""
+
+    MASTER_PERSIST_S = 300
 
     def __init__(self, cfg, staging_dir=settings.STAGING_DIR):
         self.cfg, self.staging_dir = cfg, staging_dir
+        self._home = None      # private HOME for ssh (the pod's may not be writable); holds the socket
+        self._mux = None       # None: not tried; True: master up; False: multiplexing off for this runner
+        self._mux_lock = threading.Lock()   # the log streamer thread and the runner call concurrently
+
+    def _ssh_home(self):
+        if self._home is None:
+            self._home = tempfile.mkdtemp(prefix='kaos-ssh-')   # short path: a socket path is <= 104 bytes
+            atexit.register(self.close)
+        return self._home
+
+    def _base(self):
+        d = self.staging_dir
+        return ['-F', '/dev/null', '-i', d + '/id_ed25519', '-p', self.cfg.login_port,
+                '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+                '-o', 'UserKnownHostsFile=' + d + '/known_hosts',
+                '-o', 'ConnectTimeout=20', '-o', 'ServerAliveInterval=30',
+                '-o', 'ServerAliveCountMax=4']
+
+    def _target(self):
+        return self.cfg.identity()['user'] + '@' + self.cfg.login_host
+
+    def _run_quiet(self, args, timeout):
+        try:
+            return subprocess.run(['ssh'] + args, env=dict(os.environ, HOME=self._ssh_home()),
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=timeout).returncode
+        except (OSError, subprocess.TimeoutExpired):
+            return 255
+
+    def _mux_opts(self):
+        """ControlPath options for a call over the shared connection, or [] to connect directly."""
+        with self._mux_lock:
+            return self._mux_opts_locked()
+
+    def _mux_opts_locked(self):
+        if self._mux is False:
+            return []
+        sock = self._ssh_home() + '/cm'
+        path = ['-o', 'ControlPath=' + sock]
+        if self._run_quiet(['-F', '/dev/null'] + path + ['-O', 'check', self._target()], 10) != 0:
+            rc = self._run_quiet(self._base() + path + ['-o', 'ControlMaster=yes',
+                                 '-o', 'ControlPersist=%d' % self.MASTER_PERSIST_S, '-N', '-f',
+                                 self._target()], 60)
+            if rc != 0:
+                if self._mux is None:
+                    print('stager: shared SSH connection unavailable (rc %d), one connection per call'
+                          % rc, flush=True)
+                self._mux = False
+                return []
+        self._mux = True
+        return path + ['-o', 'ControlMaster=no']
+
+    def close(self):
+        """Stop the shared connection and remove the private HOME (also run at exit)."""
+        if self._home is None:
+            return
+        if self._mux:
+            self._run_quiet(['-F', '/dev/null', '-o', 'ControlPath=' + self._home + '/cm', '-O', 'exit',
+                             self._target()], 10)
+        shutil.rmtree(self._home, ignore_errors=True)
+        self._home, self._mux = None, None
 
     def have_key(self):
         import os
@@ -93,16 +164,10 @@ class Stager:
         # The feed's records are written while the stager downloads; a feed that fails mid-way closes
         # stdin without the end record, which the stager keeps as resumable partial state (exit 75).
         # quiet: do not echo the events (the log subcommand's data is printed by the log streamer).
-        d = self.staging_dir
-        cmd = ['ssh', '-F', '/dev/null', '-i', d + '/id_ed25519', '-p', self.cfg.login_port,
-               '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
-               '-o', 'UserKnownHostsFile=' + d + '/known_hosts',
-               '-o', 'ConnectTimeout=20', '-o', 'ServerAliveInterval=30',
-               '-o', 'ServerAliveCountMax=4',
-               self.cfg.identity()['user'] + '@' + self.cfg.login_host,
-               ' '.join(shlex.quote(str(w)) for w in words)]
+        cmd = (['ssh'] + self._base() + self._mux_opts() +
+               [self._target(), ' '.join(shlex.quote(str(w)) for w in words)])
         # The pod runs as uid 65532 with a HOME that may not be writable: ssh gets a private one.
-        home = tempfile.mkdtemp(prefix='kaos-ssh-')
+        home = self._ssh_home()
         p = subprocess.Popen(cmd, env=dict(os.environ, HOME=home), stdin=subprocess.PIPE if feed is not None else subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              universal_newlines=True)
@@ -139,7 +204,6 @@ class Stager:
             except BrokenPipeError:
                 pass
         rc = p.wait()
-        shutil.rmtree(home, ignore_errors=True)
         reader.join(30)
         err = p.stderr.read().strip()
         if err:
