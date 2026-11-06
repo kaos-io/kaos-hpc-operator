@@ -66,6 +66,8 @@ type follower struct {
 	o    Options
 	key  types.NamespacedName
 	last view
+	// lastPlacement is the last placement text printed (see showPlacement).
+	lastPlacement string
 }
 
 // view is what a change of is printed for.
@@ -162,6 +164,7 @@ func (f *follower) show(job *hpcv1alpha1.HPCArgoWorkflowJob) {
 	if job.Status.Run != nil {
 		v.siteJob = job.Status.Run.SiteJobID
 	}
+	defer f.showPlacement(job)
 	if v == f.last {
 		return
 	}
