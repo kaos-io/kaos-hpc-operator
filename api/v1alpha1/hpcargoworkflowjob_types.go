@@ -53,6 +53,9 @@ const (
 	// ReasonInvalidSpec: the spec asks for something the API does not allow (phase 1: env outside
 	// the allowlist). Terminal, with the phase Refused.
 	ReasonInvalidSpec = "InvalidSpec"
+	// ReasonTimeLimitRetry: the attempt hit a learned time limit (Slurm TIMEOUT) below the spec's
+	// cap; the job runs once more with the limit doubled (PRD-HPC-1461 D-67).
+	ReasonTimeLimitRetry = "TimeLimitRetry"
 )
 
 // CancelFinalizer holds a serve-mode job until its runner Job is gone and its attempt is settled
@@ -259,6 +262,33 @@ type AttemptRecord struct {
 	EndTime metav1.Time `json:"endTime"`
 }
 
+// PlacementSource says where a Placement's time limit came from.
+// +kubebuilder:validation:Enum=declared;learned;timeout-retry
+type PlacementSource string
+
+const (
+	// PlacementDeclared: the spec's wallTimeMinutes (too few samples, or the step is resumable).
+	PlacementDeclared PlacementSource = "declared"
+	// PlacementLearned: derived from earlier runs of the same step (D-67).
+	PlacementLearned PlacementSource = "learned"
+	// PlacementTimeoutRetry: the learned limit timed out; this is the one retry with twice the limit.
+	PlacementTimeoutRetry PlacementSource = "timeout-retry"
+)
+
+// Placement is the time limit the controller chose for the job's current attempt (PRD-HPC-1461
+// D-67, F-41). The spec's wallTimeMinutes is the cap: the limit never exceeds it.
+type Placement struct {
+	// TimeLimitMinutes is the limit the booking and the site job use.
+	// +kubebuilder:validation:Minimum=1
+	TimeLimitMinutes int32 `json:"timeLimitMinutes"`
+	// Source of the limit.
+	Source PlacementSource `json:"source"`
+	// Samples is how many earlier runs of the same step the decision looked at.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Samples int32 `json:"samples,omitempty"`
+}
+
 // ResumeInfo is what the next attempt resumes from.
 type ResumeInfo struct {
 	// CheckpointRef of the attempt that saved it.
@@ -291,6 +321,10 @@ type HPCArgoWorkflowJobStatus struct {
 	// Continuations so far (exit 85 with a checkpoint), counted apart from failure retries.
 	// +optional
 	Continuations int32 `json:"continuations,omitempty"`
+	// Placement is the time limit chosen for the current attempt, set when it is admitted. Absent
+	// on jobs admitted before the field existed: the spec's wallTimeMinutes applies.
+	// +optional
+	Placement *Placement `json:"placement,omitempty"`
 	// Resume is set for a continuation: the submitter passes it to the new site job.
 	// +optional
 	Resume *ResumeInfo `json:"resume,omitempty"`
@@ -359,4 +393,13 @@ func (p Phase) Terminal() bool {
 		return true
 	}
 	return false
+}
+
+// EffectiveWallMinutes is the time limit of the job's current attempt: the controller's
+// placement when it chose one, else the spec's wallTimeMinutes (the cap).
+func (j *HPCArgoWorkflowJob) EffectiveWallMinutes() int32 {
+	if p := j.Status.Placement; p != nil && p.TimeLimitMinutes > 0 {
+		return p.TimeLimitMinutes
+	}
+	return j.Spec.WallTimeMinutes
 }

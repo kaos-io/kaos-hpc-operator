@@ -385,6 +385,34 @@ spec:
                 - Failed
                 - Cancelled
                 type: string
+              placement:
+                description: |-
+                  Placement is the time limit chosen for the current attempt, set when it is admitted. Absent
+                  on jobs admitted before the field existed: the spec's wallTimeMinutes applies.
+                properties:
+                  samples:
+                    description: Samples is how many earlier runs of the same step
+                      the decision looked at.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  source:
+                    description: Source of the limit.
+                    enum:
+                    - declared
+                    - learned
+                    - timeout-retry
+                    type: string
+                  timeLimitMinutes:
+                    description: TimeLimitMinutes is the limit the booking and the
+                      site job use.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - source
+                - timeLimitMinutes
+                type: object
               reason:
                 type: string
               resume:

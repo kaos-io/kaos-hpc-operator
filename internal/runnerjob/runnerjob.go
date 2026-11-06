@@ -137,7 +137,7 @@ func Build(cfg Config, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HP
 		LabelAttempt:                   strconv.Itoa(int(attempt)),
 		LabelRunnerJob:                 name,
 	}
-	deadline := (int64(job.Spec.WallTimeMinutes) + queueAllowanceMinutes + teardownMarginMinutes) * 60
+	deadline := (int64(job.EffectiveWallMinutes()) + queueAllowanceMinutes + teardownMarginMinutes) * 60
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: site.Namespace, Labels: labels,
@@ -233,7 +233,7 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 		{"HPC_JOB_NAMESPACE", job.Namespace}, {"HPC_JOB_NAME", job.Name},
 		{"KAOS_ATTEMPT", strconv.Itoa(int(attempt))},
 		{"IMAGE_REF", spec.Image}, {"STEP_COMMAND", string(cmd)},
-		{"SLURM_TIME_LIMIT", strconv.Itoa(int(spec.WallTimeMinutes))},
+		{"SLURM_TIME_LIMIT", strconv.Itoa(int(job.EffectiveWallMinutes()))},
 		{"STEP_OUTPUTS", strings.Join(spec.Outputs, ",")}, {"HPC_CLASS", spec.Class},
 		{"STEP_NAME", spec.StepName}, {"WF_UID", wfUID},
 		{"KUBECORE_WORKFLOW_NAME", wfName}, {"KUBECORE_RUN_ID", wfName},
