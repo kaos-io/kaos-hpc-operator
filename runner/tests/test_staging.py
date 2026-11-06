@@ -202,3 +202,60 @@ def test_the_first_step_pins_the_commit_by_resolving_the_dataset_ref(monkeypatch
     assert path.endswith(COMMIT) and pinned == COMMIT
     assert any("/repositories/dataset-poulaki/refs/v3/commits?amount=1" in u for u in lakefs.urls)
 
+
+
+def _fake_ssh(tmp_path, master_rc=0):
+    """A fake ssh: `-O check` succeeds once a master was started, `-N -f` starts one (or fails with
+    master_rc), anything else is a stager call; every invocation is logged."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    ssh = bindir / "ssh"
+    ssh.write_text('''#!/bin/sh
+echo "$*" >> %(d)s/calls
+case " $* " in
+  *" -O check "*) [ -e %(d)s/master ] && exit 0 || exit 255 ;;
+  *" -O exit "*) rm -f %(d)s/master; exit 0 ;;
+  *" -N -f "*) [ %(rc)d = 0 ] && touch %(d)s/master; exit %(rc)d ;;
+esac
+echo '{"event": "status", "ready": true}'
+''' % {"d": tmp_path, "rc": master_rc})
+    ssh.chmod(0o755)
+    return str(bindir)
+
+
+def test_one_runner_logs_in_once_and_reuses_the_connection(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", _fake_ssh(tmp_path) + os.pathsep + os.environ["PATH"])
+    stager = staging.Stager(helpers.settings(), staging_dir=str(tmp_path))
+    for _ in range(3):
+        rc, ev = stager(["status", "--repo", "r"])
+        assert rc == 0 and ev == [{"event": "status", "ready": True}]
+    calls = (tmp_path / "calls").read_text().splitlines()
+    masters = [c for c in calls if " -N -f " in " %s " % c]
+    stager_calls = [c for c in calls if c.endswith("status --repo r")]
+    assert len(masters) == 1, calls
+    assert "ControlMaster=yes" in masters[0] and "ControlPersist=300" in masters[0]
+    assert len(stager_calls) == 3 and all("ControlMaster=no" in c and "ControlPath=" in c for c in stager_calls)
+    stager.close()
+    assert any(" -O exit " in " %s " % c for c in (tmp_path / "calls").read_text().splitlines())
+
+
+def test_without_a_shared_connection_each_call_connects_directly(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", _fake_ssh(tmp_path, master_rc=255) + os.pathsep + os.environ["PATH"])
+    stager = staging.Stager(helpers.settings(), staging_dir=str(tmp_path))
+    for _ in range(2):
+        rc, _ = stager(["status"])
+        assert rc == 0
+    calls = (tmp_path / "calls").read_text().splitlines()
+    assert len([c for c in calls if " -N -f " in " %s " % c]) == 1, "the master is tried once per runner"
+    assert all("ControlPath" not in c for c in calls if c.endswith(" status"))
+
+
+def test_concurrent_calls_start_one_master(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", _fake_ssh(tmp_path) + os.pathsep + os.environ["PATH"])
+    stager = staging.Stager(helpers.settings(), staging_dir=str(tmp_path))
+    import threading as th
+    ts = [th.Thread(target=stager, args=(["status"],)) for _ in range(4)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    calls = (tmp_path / "calls").read_text().splitlines()
+    assert len([c for c in calls if " -N -f " in " %s " % c]) == 1, calls
