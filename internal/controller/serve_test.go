@@ -489,7 +489,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(60)))
 	})
 
-	It("retries once with twice the limit when a learned limit times out, then fails as today on a second TIMEOUT", func() {
+	It("retries once at the declared limit when a learned limit times out, then fails as today on a second TIMEOUT", func() {
 		for range 3 {
 			seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
 		}
@@ -509,11 +509,11 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(30)))
 
 		got = settleTo(j, hpcv1alpha1.PhaseAdmitted)
-		Expect(got.Status.Placement).To(Equal(&hpcv1alpha1.Placement{TimeLimitMinutes: 60, Source: hpcv1alpha1.PlacementTimeoutRetry, Samples: 3}))
-		Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(60)))
-		Expect(envMap(runnerJob(got, 2))).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "60"))
+		Expect(got.Status.Placement).To(Equal(&hpcv1alpha1.Placement{TimeLimitMinutes: 240, Source: hpcv1alpha1.PlacementTimeoutRetry, Samples: 3}))
+		Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(240)))
+		Expect(envMap(runnerJob(got, 2))).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "240"))
 
-		timeout(j, 2, 60)
+		timeout(j, 2, 240)
 		_, got = reconcileOnce(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonWallTimeReached))
@@ -531,7 +531,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		timeout(j, 1, 30)
 		reconcileOnce(j)
 		got = settleTo(j, hpcv1alpha1.PhaseAdmitted)
-		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(40)), "min(2 x 30, cap 40)")
+		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(40)), "the declared cap")
 
 		declared := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg/lab/fresh:v1" })
 		reconcileOnce(declared)

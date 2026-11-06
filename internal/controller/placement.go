@@ -87,7 +87,7 @@ func timeoutRetry(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite
 	if p == nil || p.Source != hpcv1alpha1.PlacementLearned || !strings.EqualFold(run.State, "TIMEOUT") {
 		return nil
 	}
-	limit := timelimit.Retry(p.TimeLimitMinutes, capsOf(job, site))
+	limit := timelimit.Retry(capsOf(job, site))
 	if limit <= p.TimeLimitMinutes {
 		return nil
 	}

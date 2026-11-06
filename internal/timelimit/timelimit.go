@@ -21,8 +21,6 @@ const (
 	Margin = 1.5
 	// RoundMinutes is the granularity of a learned limit; it is also the smallest limit.
 	RoundMinutes = 15
-	// RetryFactor multiplies the limit of the one retry after a TIMEOUT.
-	RetryFactor = 2
 )
 
 // Key identifies "the same step of the same app on the same class": jobs with an equal Key share
@@ -84,9 +82,13 @@ func Learn(samples []time.Duration, caps Caps) (int32, hpcv1alpha1.PlacementSour
 	return limit, hpcv1alpha1.PlacementLearned
 }
 
-// Retry is the limit of the one attempt after a TIMEOUT: twice the previous, up to the lowest cap.
-func Retry(previous int32, caps Caps) int32 {
-	return min(previous*RetryFactor, caps.lowest())
+// Retry is the limit of the one attempt after a TIMEOUT under a learned limit: the declared limit
+// (the lowest cap), not a multiple of the learned one. A step whose run time depends on its inputs
+// (epochs=1 for weeks, then epochs=50) would otherwise be killed again at 2x and fail where the
+// declared limit passes; each kill wastes the node time it ran. So a step is killed at most once,
+// and the worst case is today's behaviour plus one queue wait.
+func Retry(caps Caps) int32 {
+	return caps.lowest()
 }
 
 // percentile is the nearest-rank percentile of a non-empty sample set.
