@@ -172,6 +172,13 @@ spec:
                           format: int32
                           minimum: 0
                           type: integer
+                        lanes:
+                          description: Lanes are the names of the profile's QoS this
+                            class may use (D-66). Empty means only QOS.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: set
                         maxWallTimeMinutes:
                           description: MaxWallTimeMinutes is the site's limit for
                             the class's partition and QOS.
@@ -221,6 +228,84 @@ spec:
                     items:
                       type: string
                     type: array
+                  qos:
+                    description: QOS are the lanes the project's account may use,
+                      with their limits (D-66). Discovered, optional.
+                    items:
+                      description: SiteQOS is one QoS (lane) the project's account
+                        may use on the site, as the site reports it (D-66).
+                      properties:
+                        maxJobsPerUser:
+                          description: MaxJobsPerUser is the QoS's running-jobs-per-user
+                            limit. Zero means the site reports none.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        maxWallTimeMinutes:
+                          description: MaxWallTimeMinutes is the QoS's wall-time limit.
+                            Zero means the site reports none.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        name:
+                          description: Name of the QoS at the site, for example dev.
+                          minLength: 1
+                          type: string
+                        preempts:
+                          description: Preempts names the QoS this one preempts.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: set
+                        priority:
+                          description: Priority is the QoS priority.
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        usageFactorMilli:
+                          description: UsageFactorMilli is the usage factor times
+                            1000 (1.0 is 1000), an integer so the CRD carries no float.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  reservations:
+                    description: Reservations the project's account may use (D-66).
+                      Discovered, optional.
+                    items:
+                      description: SiteReservation is a reservation the project's
+                        account may use on the site (D-66).
+                      properties:
+                        endTime:
+                          description: EndTime is when the reservation ends.
+                          format: date-time
+                          type: string
+                        name:
+                          description: Name of the reservation at the site, for example
+                            gpudev.
+                          minLength: 1
+                          type: string
+                        nodeCount:
+                          description: NodeCount is the number of reserved nodes.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        partition:
+                          description: Partition the reservation covers.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   restVersion:
                     description: RESTVersion of the scheduler API, for example v0.0.44.
                     pattern: ^v[0-9]+\.[0-9]+\.[0-9]+$
