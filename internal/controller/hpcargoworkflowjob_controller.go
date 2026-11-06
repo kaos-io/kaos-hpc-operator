@@ -18,25 +18,32 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"math"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 	"github.com/kaos-io/kaos-hpc-operator/internal/admission"
 	"github.com/kaos-io/kaos-hpc-operator/internal/ledger"
+	"github.com/kaos-io/kaos-hpc-operator/internal/metrics"
+	"github.com/kaos-io/kaos-hpc-operator/internal/runnerjob"
 )
 
 // WaitingResync is how often a Waiting job is judged again (bookings settle, limits free up).
@@ -55,12 +62,24 @@ type HPCArgoWorkflowJobReconciler struct {
 	Recorder record.EventRecorder
 	// Now is the clock; tests replace it.
 	Now func() time.Time
+	// RunnerImage is the image of the runner Jobs of serve-mode jobs (--runner-image).
+	RunnerImage string
+	// RunnerScheduling is where runner pods go (chart values pass it through).
+	RunnerScheduling runnerjob.Scheduling
+	// APIReader reads without the informer cache where a stale answer would be wrong (are the
+	// runner Jobs gone?). Defaults to the client.
+	APIReader client.Reader
 
 	mu      sync.Mutex
 	pending map[string]hpcv1alpha1.Booking // by job UID
+	failed  map[string]int32               // failed runner pods seen, by runner Job UID
 }
 
-// +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcargoworkflowjobs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcargoworkflowjobs,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
+// +kubebuilder:rbac:groups=argoproj.io,resources=workflows,verbs=get;list;watch
 // +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcargoworkflowjobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcsites,verbs=get;list;watch
 // +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcsites/status,verbs=get;update;patch
@@ -68,18 +87,35 @@ type HPCArgoWorkflowJobReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile judges a new or waiting job, follows an admitted one, and settles it when it ends.
+// A job with spec.stepName set is in serve mode (phase 1): the controller also runs it through a
+// runner Job per attempt and cancels it with its Workflow (serve.go). Without it, the job behaves
+// as in phase 0.
 func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	var job hpcv1alpha1.HPCArgoWorkflowJob
 	if err := r.Get(ctx, req.NamespacedName, &job); err != nil {
+		if apierrors.IsNotFound(err) {
+			metrics.ForgetJob(req.Namespace, req.Name)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	serve := job.Spec.StepName != ""
+	var site *hpcv1alpha1.HPCSite
+	defer func() { r.observePhase(&job, site) }()
+
+	if serve {
+		if res, done, err := r.serveGate(ctx, &job); done {
+			return res, err
+		}
 	}
 	if job.Status.Phase.Terminal() {
 		r.forget(string(job.UID))
 		return ctrl.Result{}, nil
 	}
 
-	site, reason, msg, err := r.siteOf(ctx, &job)
+	var reason, msg string
+	var err error
+	site, reason, msg, err = r.siteOf(ctx, &job)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -93,7 +129,7 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if job.Status.Booking == nil {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
-		next, err := r.follow(ctx, &job)
+		next, err := r.follow(ctx, &job, site)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -107,8 +143,21 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return res, err
 		}
 	}
+	if serve && job.Status.Booking != nil && !job.Status.Phase.Terminal() {
+		if err := r.driveRunner(ctx, &job, site); err != nil {
+			var wait *requeueError
+			if errors.As(err, &wait) {
+				return ctrl.Result{RequeueAfter: wait.after}, nil
+			}
+			return ctrl.Result{}, err
+		}
+	}
 	if err := r.publishLedger(ctx, site); err != nil {
 		log.Error(err, "publishing the ledger", "site", client.ObjectKeyFromObject(site))
+	}
+	if serve && !job.Status.Phase.Terminal() {
+		// The Workflow is polled, not watched: it can be huge and is cached nowhere else.
+		return ctrl.Result{RequeueAfter: ServeResync}, nil
 	}
 	return ctrl.Result{}, nil
 }
@@ -153,6 +202,7 @@ func (r *HPCArgoWorkflowJobReconciler) judge(ctx context.Context, job *hpcv1alph
 			r.forget(string(job.UID))
 			return ctrl.Result{}, err
 		}
+		metrics.NodeMinutesBooked.WithLabelValues(string(d.Tier), projectOf(site)).Add(float64(d.Cost))
 		if d.OverShare && r.Recorder != nil {
 			r.Recorder.Event(job, corev1.EventTypeWarning, "OverShare", d.Message)
 		}
@@ -172,13 +222,14 @@ func (r *HPCArgoWorkflowJobReconciler) judge(ctx context.Context, job *hpcv1alph
 // follow moves an admitted job to Running when the site job exists, and ends the attempt when the
 // submitter reports it will not run again (phase 0: the in-pod runner writes status.run). It
 // returns true when the job continues in a next attempt.
-func (r *HPCArgoWorkflowJobReconciler) follow(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob) (bool, error) {
+func (r *HPCArgoWorkflowJobReconciler) follow(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
+	site *hpcv1alpha1.HPCSite) (bool, error) {
 	run := job.Status.Run
 	if run == nil || !current(run, job.Status.Attempt) {
 		return false, nil // nothing reported yet, or a report of an earlier attempt
 	}
 	if run.Terminal {
-		return r.endAttempt(ctx, job)
+		return r.endAttempt(ctx, job, site)
 	}
 	if run.SiteJobID != "" && job.Status.Phase == hpcv1alpha1.PhaseAdmitted {
 		return false, r.setPhase(ctx, job, hpcv1alpha1.PhaseRunning, "Submitted", "site job "+run.SiteJobID, job.Status.Booking)
@@ -202,7 +253,8 @@ func current(run *hpcv1alpha1.RunStatus, attempt int32) bool {
 // (D-26). A continuation needs a resumable step, a checkpoint the job staged out before it exited
 // (T-19), and a continuation left under the step's cap; it is then admitted and booked like a new
 // step (A4).
-func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob) (bool, error) {
+func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
+	site *hpcv1alpha1.HPCSite) (bool, error) {
 	run := job.Status.Run
 	var used int64
 	if run.HostSiteJobID == "" && run.StartTime != nil && run.EndTime != nil {
@@ -217,8 +269,10 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 	orig := job.DeepCopy()
 	attempt := max(job.Status.Attempt, 1)
 	tier := hpcv1alpha1.TierGPU
+	var admittedAt *metav1.Time
 	if job.Status.Booking != nil {
 		tier = job.Status.Booking.Tier
+		admittedAt = &job.Status.Booking.At
 	}
 	job.Status.Attempts = append(job.Status.Attempts, hpcv1alpha1.AttemptRecord{Attempt: attempt,
 		SiteJobID: run.SiteJobID, ExitCode: run.ExitCode, Outcome: reason, Tier: tier,
@@ -260,6 +314,7 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		return false, err
 	}
 	r.forget(string(job.UID))
+	observeSettled(site, tier, used, run, admittedAt)
 	return next, nil
 }
 
@@ -312,7 +367,9 @@ func (r *HPCArgoWorkflowJobReconciler) publishLedger(ctx context.Context, site *
 		hpcv1alpha1.TierGPU: &site.Status.GPU, hpcv1alpha1.TierCPU: &site.Status.CPU} {
 		t := l.Tiers[tier]
 		*dst = &hpcv1alpha1.TierLedger{UsedNodeMinutes: t.Used, BookedNodeMinutes: t.Booked, LeftNodeMinutes: t.Left()}
+		metrics.SetSiteLedger(site.Spec.Site, projectOf(site), string(tier), t.Used, t.Booked, t.Left())
 	}
+	metrics.ActiveJobs.WithLabelValues(projectOf(site), site.Spec.Site).Set(float64(l.Active))
 	err = r.Status().Patch(ctx, site, client.MergeFrom(orig))
 	if apierrors.IsNotFound(err) {
 		return nil
@@ -370,6 +427,9 @@ func (r *HPCArgoWorkflowJobReconciler) isPending(uid string) bool {
 func (r *HPCArgoWorkflowJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&hpcv1alpha1.HPCArgoWorkflowJob{}).
+		// A runner Job's change (failed, finished, gone) wakes the job it runs for.
+		Watches(&batchv1.Job{}, handler.EnqueueRequestsFromMapFunc(jobOfRunner),
+			builder.WithPredicates(predicate.NewPredicateFuncs(isRunnerJob))).
 		Named("hpcargoworkflowjob").
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)

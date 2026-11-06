@@ -31,6 +31,20 @@ spec:
             {{- range .Values.controllerManager.container.args }}
             - {{ . }}
             {{- end }}
+            {{- /* Runner Jobs (serve mode) run this same image unless runnerImage says otherwise. */}}
+            - {{ printf "--runner-image=%s" (.Values.runnerImage | default (printf "%s:%s" .Values.controllerManager.container.image.repository (.Values.controllerManager.container.image.tag | default .Chart.AppVersion))) | quote }}
+            {{- /* Runner pods are scheduled like the controller unless runner.scheduling is set. */}}
+            {{- $sched := .Values.runner.scheduling }}
+            {{- if not $sched }}
+            {{- $sched = dict "nodeSelector" .Values.controllerManager.nodeSelector "tolerations" .Values.controllerManager.tolerations "affinity" .Values.controllerManager.affinity }}
+            {{- end }}
+            {{- $out := dict }}
+            {{- range $k := list "nodeSelector" "tolerations" "affinity" }}
+            {{- if index $sched $k }}{{ $_ := set $out $k (index $sched $k) }}{{ end }}
+            {{- end }}
+            {{- if $out }}
+            - {{ printf "--runner-scheduling=%s" (toJson $out) | quote }}
+            {{- end }}
           command:
             - /manager
           image: {{ required "controllerManager.container.image.repository is required" .Values.controllerManager.container.image.repository }}:{{ .Values.controllerManager.container.image.tag | default .Chart.AppVersion }}

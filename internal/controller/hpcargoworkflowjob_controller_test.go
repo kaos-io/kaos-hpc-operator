@@ -387,7 +387,7 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		stale := &hpcv1alpha1.HPCArgoWorkflowJob{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), stale)).To(Succeed())
 		reconcileJob(j) // the real decision: continuing, attempt 2
-		_, err := r.endAttempt(ctx, stale)
+		_, err := r.endAttempt(ctx, stale, nil)
 		Expect(err).To(HaveOccurred(), "the stale write must conflict")
 		got := &hpcv1alpha1.HPCArgoWorkflowJob{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), got)).To(Succeed())

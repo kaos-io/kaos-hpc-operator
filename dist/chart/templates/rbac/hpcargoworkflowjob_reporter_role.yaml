@@ -1,0 +1,21 @@
+{{- if .Values.rbac.enable }}
+# PHASE 0 ONLY (the in-pod runner, PRD-HPC-1461 D-34): the workflow step reports the site job in
+# status.run itself. Bind it, next to hpcargoworkflowjob-submitter-role, only on pools whose
+# controller does not serve the project. In serve mode the runner Job reports (see
+# hpcargoworkflowjob-runner-role) and pipeline service accounts must NOT have status verbs.
+# Retire this role with the in-pod path (F-35).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+  name: hpcargoworkflowjob-reporter-role
+rules:
+- apiGroups:
+  - hpc.kaos.io
+  resources:
+  - hpcargoworkflowjobs/status
+  verbs:
+  - get
+  - patch
+{{- end -}}

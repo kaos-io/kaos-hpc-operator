@@ -76,6 +76,37 @@ spec:
               datasetRef:
                 description: DatasetRef the step reads, <dataset-repo>@<version>.
                 type: string
+              env:
+                description: |-
+                  Env is extra environment for the runner, from a fixed allowlist: OUTPUTS_REPO, OUTPUTS_REF,
+                  CHECKPOINT_BUCKET, CHECKPOINT_PREFIX, KAOS_LIB_SUPPORT. Nothing else is accepted (T-02).
+                items:
+                  description: NameValue is one environment variable.
+                  properties:
+                    name:
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    value:
+                      maxLength: 2048
+                      type: string
+                  required:
+                  - name
+                  - value
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+                x-kubernetes-validations:
+                - message: env may only set OUTPUTS_REPO, OUTPUTS_REF, CHECKPOINT_BUCKET,
+                    CHECKPOINT_PREFIX, KAOS_LIB_SUPPORT
+                  rule: self.all(e, e.name in ['OUTPUTS_REPO','OUTPUTS_REF','CHECKPOINT_BUCKET','CHECKPOINT_PREFIX','KAOS_LIB_SUPPORT'])
+                - message: OUTPUTS_REPO and CHECKPOINT_BUCKET must be an outputs-<name>
+                    repository
+                  rule: self.all(e, !(e.name in ['OUTPUTS_REPO','CHECKPOINT_BUCKET'])
+                    || e.value.matches('^outputs-[a-z0-9-]{1,55}$'))
               image:
                 description: Image of the step.
                 minLength: 1
@@ -115,12 +146,51 @@ spec:
                     minimum: 0
                     type: integer
                 type: object
+              sharing:
+                description: 'Sharing opts the job into node sharing under a scope
+                  (PRD-1609). Absent: no sharing.'
+                properties:
+                  scope:
+                    description: Scope jobs must have in common to share a node.
+                    pattern: ^[a-z0-9]{8,16}$
+                    type: string
+                required:
+                - scope
+                type: object
+              stepName:
+                description: |-
+                  StepName is the DAG step's name (the Argo step-name input). Setting it turns on
+                  serve mode: the controller runs the job through a runner Job (PRD-HPC-1461 D-58, D-64).
+                  Without it the job behaves as in phase 0 (observe and admit; the in-pod runner submits).
+                maxLength: 253
+                minLength: 1
+                type: string
               wallTimeMinutes:
                 description: WallTimeMinutes is the job's run limit once started (Slurm
                   --time).
                 format: int32
                 minimum: 1
                 type: integer
+              workflow:
+                description: |-
+                  Workflow is the Argo Workflow that owns the step. The controller cancels the job when the
+                  Workflow is deleted, shut down or ended (D-04).
+                properties:
+                  name:
+                    description: Name of the Workflow, in the job's namespace.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: UID of the Workflow. A Workflow of that name with
+                      another UID counts as deleted.
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
             required:
             - class
             - image
@@ -284,6 +354,19 @@ spec:
                 type: integer
               message:
                 type: string
+              outputs:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Outputs are the step's declared outputs, JSON text each (at most 64 KiB in all), written by
+                  the runner after stage-out and before it reports run.terminal. The follower turns them into
+                  the Argo step's outputs.
+                maxProperties: 64
+                type: object
+              pendingReason:
+                description: PendingReason is the scheduler's pending reason while
+                  the site job is queued (runner's poll).
+                type: string
               phase:
                 description: Phase of an HPCArgoWorkflowJob.
                 enum:
@@ -340,6 +423,13 @@ spec:
                       HostSiteJobID is set when a host job of the same project took this job onto its node
                       (node sharing, PRD-1609 D-26). The host's booking then covers the node.
                     type: string
+                  logOffset:
+                    description: |-
+                      LogOffset is how far into the site job's output file the runner has printed (bytes), so a
+                      restarted runner prints each line once (PRD-1461 D-65, AC-70).
+                    format: int64
+                    minimum: 0
+                    type: integer
                   siteJobID:
                     description: SiteJobID is the scheduler's job id.
                     type: string
@@ -359,6 +449,21 @@ spec:
                     description: Terminal is set by the submitter once the job will
                       not run again (it gave up retrying).
                     type: boolean
+                type: object
+              runner:
+                description: Runner is the runner Job of the current attempt (serve
+                  mode).
+                properties:
+                  attempt:
+                    description: Attempt the Job runs.
+                    format: int32
+                    type: integer
+                  jobName:
+                    description: JobName of the Kubernetes Job, in the HPCSite's namespace.
+                    type: string
+                required:
+                - attempt
+                - jobName
                 type: object
               settledNodeMinutes:
                 description: SettledNodeMinutes is the job's actual spend over all

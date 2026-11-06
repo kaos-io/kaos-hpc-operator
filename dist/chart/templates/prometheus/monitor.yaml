@@ -1,5 +1,36 @@
-# To integrate with Prometheus.
-{{- if .Values.prometheus.enable }}
+# Scrape object for the controller's metrics (PRD-HPC-1461 D-65, F-39): a VMServiceScrape when the
+# VictoriaMetrics operator's API is installed, else a ServiceMonitor when the Prometheus
+# operator's is, else nothing.
+{{- $vm := .Capabilities.APIVersions.Has "operator.victoriametrics.com/v1beta1/VMServiceScrape" }}
+{{- $sm := .Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor" }}
+{{- if and .Values.prometheus.enable .Values.metrics.enable (or $vm $sm) }}
+{{- $serverName := printf "kaos-hpc-operator-controller-manager-metrics-service.%s.svc" .Release.Namespace }}
+{{- if $vm }}
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+    control-plane: controller-manager
+  name: kaos-hpc-operator-controller-manager-metrics-monitor
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpoints:
+    - path: /metrics
+      port: https
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        # The controller serves a certificate the scraper cannot verify; access is guarded by
+        # authn/authz (kaos-hpc-operator-metrics-reader), not by the transport.
+        insecureSkipVerify: true
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+{{- else }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -16,7 +47,7 @@ spec:
       bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
       tlsConfig:
         {{- if .Values.certmanager.enable }}
-        serverName: kaos-hpc-operator-controller-manager-metrics-service.{{ .Release.Namespace }}.svc
+        serverName: {{ $serverName }}
         # Apply secure TLS configuration with cert-manager
         insecureSkipVerify: false
         ca:
@@ -37,4 +68,5 @@ spec:
   selector:
     matchLabels:
       control-plane: controller-manager
+{{- end }}
 {{- end }}
