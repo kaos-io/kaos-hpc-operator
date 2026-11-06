@@ -29,7 +29,8 @@ type settlement struct {
 // validSiteTime reports whether a reported time is usable: set, not before 2000, not after now+1h.
 // Slurm's NO_VAL (0xFFFFFFFE seconds, year 2106) for a never-started job fails the last test.
 func validSiteTime(t *metav1.Time, now time.Time) bool {
-	return t != nil && !t.IsZero() && !t.Before(earliestSiteTime) && !t.After(now.Add(futureSlack))
+	//nolint:staticcheck // t.Time is explicit: metav1.Time has its own Before(*Time)
+	return t != nil && !t.IsZero() && !t.Time.Before(earliestSiteTime) && !t.Time.After(now.Add(futureSlack))
 }
 
 // settle computes the node-minutes an attempt spent. The result is never negative and never
