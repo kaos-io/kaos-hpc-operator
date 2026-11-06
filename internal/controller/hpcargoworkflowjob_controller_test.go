@@ -165,6 +165,8 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(st.GPU.BookedNodeMinutes).To(Equal(int64(240)))
 		Expect(st.GPU.LeftNodeMinutes).To(Equal(int64(360)))
 		Expect(st.ActiveJobs).To(Equal(int32(1)))
+		Expect(st.QueuedJobs).To(Equal(int32(1))) // admitted, not started at the site
+		Expect(st.RunningJobs).To(BeZero())
 	})
 
 	It("never overbooks: of five 4-hour jobs on a 10-hour share, two are admitted and three wait", func() {

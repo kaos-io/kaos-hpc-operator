@@ -345,7 +345,7 @@ spec:
             properties:
               activeJobs:
                 description: ActiveJobs is the number of admitted jobs that have not
-                  ended.
+                  ended (= queuedJobs + runningJobs).
                 format: int32
                 type: integer
               conditions:
@@ -458,6 +458,18 @@ spec:
                   (calendar month, UTC).
                 format: date-time
                 type: string
+              queuedJobs:
+                description: |-
+                  QueuedJobs is the number of active jobs the site has not started yet: admitted, submitted
+                  or pending in the site's queue.
+                format: int32
+                type: integer
+              runningJobs:
+                description: |-
+                  RunningJobs is the number of active jobs the site reports RUNNING, plus guests running on a
+                  running host's node.
+                format: int32
+                type: integer
             type: object
         required:
         - spec
