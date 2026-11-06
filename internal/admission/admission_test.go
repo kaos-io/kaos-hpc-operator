@@ -116,3 +116,22 @@ func TestDecide(t *testing.T) {
 		})
 	}
 }
+
+func TestDecideForBooksTheEffectiveWallTime(t *testing.T) {
+	s := site(nil)
+	// A 240 min cap, learned down to 30: cost is nodes x 30, not x 240 (PRD-HPC-1461 D-67).
+	d := DecideFor(job("meluxina-gpu", 240, 1), s, led(s, 0, 0, 0), 30)
+	if d.Phase != hpcv1alpha1.PhaseAdmitted || d.Cost != 30 {
+		t.Fatalf("got %s cost %d, want Admitted 30", d.Phase, d.Cost)
+	}
+	// What the job asked for is still checked against the site limits.
+	d = DecideFor(job("meluxina-gpu", 2881, 1), s, led(s, 0, 0, 0), 30)
+	if d.Reason != hpcv1alpha1.ReasonWallTimeOverLimit {
+		t.Fatalf("got %s, want WallTimeOverLimit", d.Reason)
+	}
+	// A cap that does not fit the share fits once learned down.
+	d = DecideFor(job("meluxina-gpu", 700, 1), s, led(s, 0, 0, 0), 30)
+	if d.Phase != hpcv1alpha1.PhaseAdmitted {
+		t.Fatalf("got %s, want Admitted", d.Phase)
+	}
+}

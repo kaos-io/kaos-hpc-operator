@@ -191,13 +191,17 @@ func (r *HPCArgoWorkflowJobReconciler) judge(ctx context.Context, job *hpcv1alph
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	d := admission.Decide(job, site, l)
+	pl, err := r.placementFor(ctx, job, site)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	d := admission.DecideFor(job, site, l, pl.TimeLimitMinutes)
 	switch d.Phase {
 	case hpcv1alpha1.PhaseAdmitted:
 		b := &hpcv1alpha1.Booking{Site: site.Spec.Site, SiteName: site.Name, SiteNamespace: site.Namespace,
 			Tier: d.Tier, NodeMinutes: d.Cost, At: metav1.NewTime(r.now())}
 		r.remember(string(job.UID), *b)
-		if err := r.setPhase(ctx, job, d.Phase, d.Reason, d.Message, b); err != nil {
+		if err := r.setPhasePlaced(ctx, job, d.Phase, d.Reason, d.Message, b, pl); err != nil {
 			r.forget(string(job.UID))
 			return ctrl.Result{}, err
 		}
@@ -298,6 +302,15 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 			msg += "; continuing from checkpoint " + run.CheckpointRef + " as attempt " + strconv.Itoa(int(attempt+1))
 		}
 	}
+	if retry := timeoutRetry(job, site, run); !next && reason == hpcv1alpha1.ReasonWallTimeReached && retry != nil {
+		// D-67: a learned limit that was too tight is not a failure; one more attempt with twice
+		// the limit, up to the spec's cap. The job is re-admitted and re-booked like a continuation.
+		msg += retryMessage(job.Status.Placement.TimeLimitMinutes, retry.TimeLimitMinutes, attempt+1)
+		next = true
+		job.Status.Attempt = attempt + 1
+		job.Status.Placement = retry
+		phase, reason = hpcv1alpha1.PhasePending, hpcv1alpha1.ReasonTimeLimitRetry
+	}
 	job.Status.Phase, job.Status.Reason, job.Status.Message = phase, reason, msg
 	if phase.Terminal() {
 		var total int64
@@ -375,7 +388,17 @@ func (r *HPCArgoWorkflowJobReconciler) publishLedger(ctx context.Context, site *
 
 func (r *HPCArgoWorkflowJobReconciler) setPhase(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob, phase hpcv1alpha1.Phase,
 	reason, msg string, booking *hpcv1alpha1.Booking) error {
+	return r.setPhasePlaced(ctx, job, phase, reason, msg, booking, nil)
+}
+
+// setPhasePlaced is setPhase that also records the attempt's time limit in the same write, so a
+// booking never exists without the limit it was made for.
+func (r *HPCArgoWorkflowJobReconciler) setPhasePlaced(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob, phase hpcv1alpha1.Phase,
+	reason, msg string, booking *hpcv1alpha1.Booking, placement *hpcv1alpha1.Placement) error {
 	orig := job.DeepCopy()
+	if placement != nil {
+		job.Status.Placement = placement
+	}
 	job.Status.Phase, job.Status.Reason, job.Status.Message = phase, reason, msg
 	if booking != nil {
 		job.Status.Booking = booking

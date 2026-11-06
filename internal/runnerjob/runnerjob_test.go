@@ -215,3 +215,29 @@ func TestNameIsDeterministicPerUIDAndAttempt(t *testing.T) {
 		t.Fatal("name must be stable and unique per uid and attempt")
 	}
 }
+
+func TestShouldUseThePlacementLimitForTheEnvAndTheDeadline(t *testing.T) {
+	job, site := fixtures()
+	job.Status.Placement = &hpcv1alpha1.Placement{TimeLimitMinutes: 30, Source: hpcv1alpha1.PlacementLearned, Samples: 5}
+	rj, err := Build(Config{Image: "kaos/op:1"}, job, site, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *rj.Spec.ActiveDeadlineSeconds; got != (30+480+30)*60 {
+		t.Errorf("deadline %d, want it computed from the learned 30 min", got)
+	}
+	if got := envOf(t, rj.Spec.Template.Spec.Containers[0].Env)["SLURM_TIME_LIMIT"]; got != "30" {
+		t.Errorf("SLURM_TIME_LIMIT %q, want 30", got)
+	}
+}
+
+func TestShouldFallBackToTheSpecLimitWithoutAPlacement(t *testing.T) {
+	job, site := fixtures()
+	rj, err := Build(Config{Image: "kaos/op:1"}, job, site, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envOf(t, rj.Spec.Template.Spec.Containers[0].Env)["SLURM_TIME_LIMIT"]; got != "120" {
+		t.Errorf("SLURM_TIME_LIMIT %q, want the spec's 120", got)
+	}
+}

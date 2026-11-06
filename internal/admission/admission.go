@@ -32,8 +32,16 @@ func ClassOf(site *hpcv1alpha1.HPCSite, class string) (hpcv1alpha1.SiteClass, bo
 	return hpcv1alpha1.SiteClass{}, false
 }
 
-// Decide judges one job against its project's site and current ledger.
+// Decide judges one job against its project's site and current ledger, booking its declared
+// wall time.
 func Decide(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, l ledger.Ledger) Decision {
+	return DecideFor(job, site, l, job.Spec.WallTimeMinutes)
+}
+
+// DecideFor is Decide with the wall time the attempt will run with (PRD-HPC-1461 D-67): the cost
+// booked is nodes x effectiveWall, not nodes x the spec's cap. The spec's wall time is still
+// checked against the site's limits, since that is what the job asked for.
+func DecideFor(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, l ledger.Ledger, effectiveWall int32) Decision {
 	spec := job.Spec
 	class, ok := ClassOf(site, spec.Class)
 	if !ok {
@@ -59,7 +67,7 @@ func Decide(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, l le
 			"wall time %d min is above the limit of %d min", spec.WallTimeMinutes, limit)
 	}
 
-	cost := int64(nodes) * int64(spec.WallTimeMinutes)
+	cost := int64(nodes) * int64(effectiveWall)
 	t := l.Tiers[class.Tier]
 	block := site.Spec.Budget.AtLimit != hpcv1alpha1.AtLimitWarn
 	if block && cost > t.Share-t.Used {

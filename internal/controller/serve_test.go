@@ -399,6 +399,147 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(j)})
 		Expect(err).To(MatchError(ContainSubstring("--runner-image")))
 	})
+
+	// Learned time limit (PRD-HPC-1461 F-41, D-67).
+	const appImage = "reg/lab/app:v1"
+	// seedRun plays an earlier job of a step: terminal in the given phase with a run of the given minutes.
+	seedRun := func(image string, phase hpcv1alpha1.Phase, runMinutes int, mod func(*hpcv1alpha1.HPCArgoWorkflowJob)) {
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = image })
+		got := &hpcv1alpha1.HPCArgoWorkflowJob{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), got)).To(Succeed())
+		orig := got.DeepCopy()
+		end := metav1.NewTime(time.Now().Add(-time.Hour))
+		start := metav1.NewTime(end.Add(-time.Duration(runMinutes) * time.Minute))
+		got.Status.Phase = phase
+		got.Status.Attempt = 1
+		got.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, State: "COMPLETED", StartTime: &start, EndTime: &end, Terminal: true}
+		if mod != nil {
+			mod(got)
+		}
+		Expect(k8sClient.Status().Patch(ctx, got, client.MergeFrom(orig))).To(Succeed())
+	}
+
+	timeout := func(j *hpcv1alpha1.HPCArgoWorkflowJob, attempt int32, minutes int) {
+		start := metav1.NewTime(time.Now().Add(-time.Duration(minutes) * time.Minute))
+		end := metav1.NewTime(time.Now())
+		report(j, hpcv1alpha1.RunStatus{Attempt: attempt, SiteJobID: fmt.Sprintf("20%d", attempt), State: "TIMEOUT",
+			StartTime: &start, EndTime: &end, Terminal: true})
+	}
+
+	// settle reconciles until the job leaves the given phase (a retry is judged on a later pass).
+	settleTo := func(j *hpcv1alpha1.HPCArgoWorkflowJob, want hpcv1alpha1.Phase) *hpcv1alpha1.HPCArgoWorkflowJob {
+		var got *hpcv1alpha1.HPCArgoWorkflowJob
+		for range 4 {
+			_, got = reconcileOnce(j)
+			if got.Status.Phase == want && got.Status.Booking != nil {
+				break
+			}
+		}
+		return got
+	}
+
+	It("books and submits the learned limit: p95 x 1.5 of the same app's runs, never another app's or an invalid one", func() {
+		for range 3 {
+			seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil) // earlier builds of the same app
+		}
+		for range 5 {
+			seedRun("reg/lab/other:v1", hpcv1alpha1.PhaseSucceeded, 200, nil) // another app, same namespace
+		}
+		seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseFailed, 200, nil) // not successful
+		seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 200, func(g *hpcv1alpha1.HPCArgoWorkflowJob) {
+			g.Status.Run.StartTime, g.Status.Run.EndTime = g.Status.Run.EndTime, g.Status.Run.StartTime // end < start
+		})
+		seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 200, func(g *hpcv1alpha1.HPCArgoWorkflowJob) {
+			g.Status.Continuations = 1 // a continued job's last segment is not the step's run time
+		})
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg/lab/app:v9"; j.Spec.WallTimeMinutes = 240 })
+
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
+		Expect(got.Status.Placement).To(Equal(&hpcv1alpha1.Placement{TimeLimitMinutes: 30, Source: hpcv1alpha1.PlacementLearned, Samples: 3}))
+		Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(30)), "admission books the learned limit")
+		rj := runnerJob(got, 1)
+		Expect(envMap(rj)).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "30"))
+		Expect(*rj.Spec.ActiveDeadlineSeconds).To(Equal(int64((30 + 480 + 30) * 60)))
+	})
+
+	It("keeps the declared limit with fewer than three samples of its own app", func() {
+		seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 5, nil)
+		seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 5, nil)
+		for range 4 {
+			seedRun("reg/lab/yolo:v1", hpcv1alpha1.PhaseSucceeded, 5, nil)
+		}
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Placement).To(Equal(&hpcv1alpha1.Placement{TimeLimitMinutes: 60, Source: hpcv1alpha1.PlacementDeclared, Samples: 2}))
+		Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(60)))
+		Expect(envMap(runnerJob(got, 1))).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "60"))
+	})
+
+	It("never learns for a resumable step: its checkpoint signal is timed from the declared limit", func() {
+		for range 4 {
+			seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 5, nil)
+		}
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+			j.Spec.Image = appImage
+			j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: 5}
+		})
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Placement.Source).To(Equal(hpcv1alpha1.PlacementDeclared))
+		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(60)))
+	})
+
+	It("retries once with twice the limit when a learned limit times out, then fails as today on a second TIMEOUT", func() {
+		for range 3 {
+			seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
+		}
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage; j.Spec.WallTimeMinutes = 240 })
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(30)))
+
+		timeout(j, 1, 30)
+		res, got := reconcileOnce(j)
+		Expect(res.RequeueAfter).To(Equal(ContinueResync))
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhasePending))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonTimeLimitRetry))
+		Expect(got.Status.Attempt).To(Equal(int32(2)))
+		Expect(got.Status.Continuations).To(BeZero(), "a retry is not a continuation")
+		Expect(got.Status.Resume).To(BeNil())
+		Expect(got.Status.Attempts).To(HaveLen(1))
+		Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(30)))
+
+		got = settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		Expect(got.Status.Placement).To(Equal(&hpcv1alpha1.Placement{TimeLimitMinutes: 60, Source: hpcv1alpha1.PlacementTimeoutRetry, Samples: 3}))
+		Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(60)))
+		Expect(envMap(runnerJob(got, 2))).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "60"))
+
+		timeout(j, 2, 60)
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonWallTimeReached))
+		Expect(got.Status.Attempts).To(HaveLen(2))
+		Expect(got.Status.Attempt).To(Equal(int32(2)), "no third attempt")
+	})
+
+	It("caps the timeout retry at the spec's wall time and does not retry a declared limit", func() {
+		for range 3 {
+			seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
+		}
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage; j.Spec.WallTimeMinutes = 40 })
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(30)))
+		timeout(j, 1, 30)
+		reconcileOnce(j)
+		got = settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(40)), "min(2 x 30, cap 40)")
+
+		declared := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg/lab/fresh:v1" })
+		reconcileOnce(declared)
+		timeout(declared, 1, 60)
+		_, got = reconcileOnce(declared)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed), "a declared limit that times out fails as before")
+		Expect(got.Status.Attempts).To(HaveLen(1))
+	})
 })
 
 // orderClient records whether the cancel marker was in the API when a runner Job was deleted.
