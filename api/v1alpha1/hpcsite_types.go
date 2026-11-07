@@ -350,6 +350,48 @@ type RecentJob struct {
 	SettledNodeMinutes int64 `json:"settledNodeMinutes,omitempty"`
 }
 
+// SiteStorage is the project's scratch storage on the site: the quota (the whole subscription's,
+// shared with its other users) and which of KAOS's own categories use it. All sizes are bytes.
+type SiteStorage struct {
+	// SpaceUsed and SpaceLimit are the quota's used and limit bytes; a limit of 0 means none set.
+	// +optional
+	SpaceUsed int64 `json:"spaceUsed,omitempty"`
+	// +optional
+	SpaceLimit int64 `json:"spaceLimit,omitempty"`
+	// FilesUsed and FilesLimit are the quota's used and limit file counts (0 limit: none set).
+	// +optional
+	FilesUsed int64 `json:"filesUsed,omitempty"`
+	// +optional
+	FilesLimit int64 `json:"filesLimit,omitempty"`
+	// ByCategory splits the used space and files: datasets, images, checkpoints, work, and
+	// other (the rest of the quota: other users and projects of the subscription).
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=atomic
+	// +optional
+	ByCategory []StorageCategory `json:"byCategory,omitempty"`
+	// ObservedAt is when the quota was read; MeasuredAt is when the category sizes were last
+	// measured (re-measured at most hourly, the quota on every report).
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
+	// +optional
+	MeasuredAt *metav1.Time `json:"measuredAt,omitempty"`
+}
+
+// StorageCategory is one use of the project's scratch storage.
+type StorageCategory struct {
+	// Name is datasets, images, checkpoints, work or other.
+	Name string `json:"name"`
+	// Space is bytes and Files the file (and folder) count, as the site's quota counts them.
+	// +optional
+	Space int64 `json:"space,omitempty"`
+	// +optional
+	Files int64 `json:"files,omitempty"`
+	// Partial is true when the measurement hit its time bound: the figure is a lower bound (for
+	// other, an upper bound).
+	// +optional
+	Partial bool `json:"partial,omitempty"`
+}
+
 // HPCSiteStatus is the controller's view of the project's site use.
 type HPCSiteStatus struct {
 	// PeriodStart is the start of the current budget period (calendar month, UTC).
@@ -377,6 +419,12 @@ type HPCSiteStatus struct {
 	// +listType=atomic
 	// +optional
 	RecentJobs []RecentJob `json:"recentJobs,omitempty"`
+	// Storage is the project's scratch quota on the site and what uses it. It is NOT written by
+	// this controller: the project's snapshot job (it holds the staging key) patches this one
+	// field every 10 minutes from the site stager's `usage` report. The controller's status patches
+	// are merge patches of its own fields, so they leave it alone.
+	// +optional
+	Storage *SiteStorage `json:"storage,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional
