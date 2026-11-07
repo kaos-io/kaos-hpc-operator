@@ -1,0 +1,48 @@
+{{- if and .Values.rbac.enable .Values.idleWatchdog.metricsUrl }}
+{{- /*
+Extra permissions of the idle watchdog for in-cluster GPU steps (PRD-HPC-1461 D-72, D-76). Not
+generated from kubebuilder markers on purpose: they are granted only on pools that turn the
+watchdog on. The watchdog acts only on pods with the Argo workflow label and a GPU limit.
+  pods get/list      judge the pool's running workflow pods (the base role already reads them)
+  pods patch         mark an ended pod (label, annotation)
+  pods/status patch  set the ended pod Failed with the Idle message so Argo records the step
+  pods delete        free the GPU once Argo has recorded the step
+  pods/log get       the last log line of the main container (the base role already has it)
+  workflows get      whether Argo recorded the step as finished (the base role already has it)
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+  name: kaos-hpc-operator-idle-watchdog-role
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods/status"]
+  verbs: ["patch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+- apiGroups: ["argoproj.io"]
+  resources: ["workflows"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+  name: kaos-hpc-operator-idle-watchdog-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kaos-hpc-operator-idle-watchdog-role
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.controllerManager.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -91,6 +91,19 @@ var (
 		Help: "Steps ended with reason Idle by the on-node idle watchdog.",
 	}, []string{LabelTier, LabelProject})
 
+	// K8sIdleKills counts in-cluster GPU steps the idle watchdog ended (PRD-HPC-1461 D-72, D-76).
+	K8sIdleKills = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kaos_k8s_idle_kills_total",
+		Help: "In-cluster GPU steps ended with reason Idle by the pool's idle watchdog.",
+	}, []string{LabelNamespace})
+
+	// K8sIdleErrors counts failed steps of the in-cluster idle watchdog, by stage; a watchdog that
+	// cannot read its metric or logs ends nothing, so this is the alert signal.
+	K8sIdleErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kaos_k8s_idle_watchdog_errors_total",
+		Help: "Failed steps of the in-cluster idle watchdog, by stage.",
+	}, []string{"stage"})
+
 	// RunnerRestarts counts runner pods that failed and were replaced by their Job.
 	RunnerRestarts = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "kaos_hpc_runner_restarts_total",
@@ -100,7 +113,8 @@ var (
 
 func init() {
 	ctrlmetrics.Registry.MustRegister(JobPhase, JobQueueSeconds, JobRunSeconds, NodeMinutesBooked,
-		NodeMinutesSettled, SiteNodeMinutes, ActiveJobs, RunnerRestarts, LanePlacements, IdleKills)
+		NodeMinutesSettled, SiteNodeMinutes, ActiveJobs, RunnerRestarts, LanePlacements, IdleKills,
+		K8sIdleKills, K8sIdleErrors)
 }
 
 // SetJobPhase makes phase the only phase series of the job.

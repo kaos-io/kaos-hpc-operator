@@ -15,6 +15,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 )
@@ -42,6 +43,7 @@ type Config struct {
 	Outputs          []string // STEP_OUTPUTS, comma separated
 	Dataset          string
 	Scope            string // HPC_SCOPE: set means node sharing
+	IdleTimeout      *int32 // HPC_IDLE_TIMEOUT_MINUTES: nil = the platform's 20, 0 = off (step idle_timeout=)
 	Env              []hpcv1alpha1.NameValue
 }
 
@@ -75,6 +77,13 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 	c.WallTimeMinutes = int32(wall)
 	if err := c.readResumable(get); err != nil {
 		return c, err
+	}
+	if raw := get("HPC_IDLE_TIMEOUT_MINUTES"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return c, fmt.Errorf("HPC_IDLE_TIMEOUT_MINUTES must be a number of minutes (0 = off), got %q", raw)
+		}
+		c.IdleTimeout = ptr.To(int32(n))
 	}
 	for _, o := range strings.Split(get("STEP_OUTPUTS"), ",") {
 		if o = strings.TrimSpace(o); o != "" {
@@ -133,6 +142,7 @@ func (c Config) Job() *hpcv1alpha1.HPCArgoWorkflowJob {
 		spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: c.ResumableLead, MaxContinuations: c.MaxContinuations}
 	}
 	spec.ResumableOptOut = c.ResumableOptOut
+	spec.IdleTimeoutMinutes = c.IdleTimeout
 	if c.Scope != "" {
 		spec.Sharing = &hpcv1alpha1.Sharing{Scope: c.Scope}
 	}

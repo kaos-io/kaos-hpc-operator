@@ -49,6 +49,17 @@ spec:
             {{- if .Values.lanes.candidates }}
             - {{ printf "--lane-candidates=%s" (toJson .Values.lanes.candidates) | quote }}
             {{- end }}
+            {{- /* Idle watchdog for in-cluster GPU steps (D-72, D-76): on while a metrics URL is set. */}}
+            {{- with .Values.idleWatchdog }}
+            {{- if .metricsUrl }}
+            - {{ printf "--idle-metrics-url=%s" .metricsUrl | quote }}
+            - {{ printf "--idle-gpu-metric=%s" .metric | quote }}
+            - {{ printf "--idle-namespace-label=%s" .namespaceLabel | quote }}
+            - {{ printf "--idle-pod-label=%s" .podLabel | quote }}
+            - {{ printf "--idle-window=%s" .window | quote }}
+            - {{ printf "--idle-scrape-interval=%s" .scrapeInterval | quote }}
+            {{- end }}
+            {{- end }}
           command:
             - /manager
           image: {{ required "controllerManager.container.image.repository is required" .Values.controllerManager.container.image.repository }}:{{ .Values.controllerManager.container.image.tag | default .Chart.AppVersion }}

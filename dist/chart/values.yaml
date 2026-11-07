@@ -68,6 +68,22 @@ runner:
 lanes:
   candidates: []
 
+# [IDLE WATCHDOG]: ends an in-cluster (Kubernetes) GPU step as Idle when its GPU utilisation stays
+# below 5 % AND its log does not grow for the window (PRD-HPC-1461 D-72, D-76); per step
+# platform.kubecore.io/idle-timeout (minutes, 0 = off). Needs a per-pod GPU metric in the pool's
+# metrics store: metricsUrl is its PromQL API (vmselect). Off while metricsUrl is empty.
+# Enabling it adds a ClusterRole that lets the controller patch the status of and delete pods that
+# carry the Argo workflow label and a GPU limit (nothing else is judged), and read their logs.
+idleWatchdog:
+  metricsUrl: ""
+  # GKE accelerator duty cycle (stackdriver exporter). DCGM pools: DCGM_FI_DEV_GPU_UTIL with
+  # namespaceLabel "namespace" and podLabel "pod".
+  metric: stackdriver_k_8_s_container_kubernetes_io_container_accelerator_duty_cycle
+  namespaceLabel: namespace_name
+  podLabel: pod_name
+  window: 20m
+  scrapeInterval: 1m
+
 # [RBAC]: To enable RBAC (Permissions) configurations
 rbac:
   enable: true

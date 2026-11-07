@@ -126,6 +126,15 @@ Metrics (`:8443`, authn/authz-protected; the chart renders a `VMServiceScrape`, 
 - **Reported:** `status.run.checkpoint` (progress, size of the newest copy, the step's and the project's total,
   why a copy was skipped) and `HPCSite.status.checkpoints` (scratch held by steps that have not succeeded).
 
+## Idle watchdog for in-cluster GPU steps (PRD-HPC-1461 D-72, D-76)
+
+The same binary can end idle Kubernetes GPU steps on the pool: GPU use below 5 % and no log output
+for 20 minutes (per step `platform.kubecore.io/idle-timeout`, minutes, 0 = off). Enable it with the
+chart value `idleWatchdog.metricsUrl` (the pool's PromQL API); it then also installs a ClusterRole
+to patch the status of and delete Argo workflow pods that hold a GPU. Design, metric sources and the
+interplay with the template's re-run: [internal/idlewatch/README.md](internal/idlewatch/README.md).
+Metrics: `kaos_k8s_idle_kills_total`, `kaos_k8s_idle_watchdog_errors_total`.
+
 ## Development
 
 ```sh

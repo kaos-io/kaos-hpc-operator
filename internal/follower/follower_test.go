@@ -314,6 +314,22 @@ func TestConfigFromEnv(t *testing.T) {
 					t.Errorf("%+v", s)
 				}
 			}},
+		{"should_leave_the_idle_window_to_the_platform_when_unset", with(), "", func(t *testing.T, c Config) {
+			if c.Job().Spec.IdleTimeoutMinutes != nil {
+				t.Errorf("idleTimeoutMinutes = %v", *c.Job().Spec.IdleTimeoutMinutes)
+			}
+		}},
+		{"should_carry_a_step_idle_timeout_to_the_job", with("HPC_IDLE_TIMEOUT_MINUTES", "45"), "", func(t *testing.T, c Config) {
+			if got := c.Job().Spec.IdleTimeoutMinutes; got == nil || *got != 45 {
+				t.Errorf("idleTimeoutMinutes = %v", got)
+			}
+		}},
+		{"should_carry_idle_timeout_zero_as_off", with("HPC_IDLE_TIMEOUT_MINUTES", "0"), "", func(t *testing.T, c Config) {
+			if got := c.Job().Spec.IdleTimeoutMinutes; got == nil || *got != 0 {
+				t.Errorf("idleTimeoutMinutes = %v", got)
+			}
+		}},
+		{"should_fail_on_a_bad_idle_timeout", with("HPC_IDLE_TIMEOUT_MINUTES", "soon"), "HPC_IDLE_TIMEOUT_MINUTES", nil},
 		{"should_fail_when_a_required_variable_is_missing", with("NODE_KEY", ""), "NODE_KEY", nil},
 		{"should_fail_on_a_bad_wall_time", with("SLURM_TIME_LIMIT", "abc"), "SLURM_TIME_LIMIT", nil},
 		{"should_fail_on_a_command_that_is_not_json", with("STEP_COMMAND", "python x"), "STEP_COMMAND", nil},
