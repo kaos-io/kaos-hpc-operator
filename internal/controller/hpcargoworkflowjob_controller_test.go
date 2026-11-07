@@ -181,6 +181,48 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(siteStatus().GPU.BookedNodeMinutes).To(Equal(int64(480)))
 	})
 
+	// PRD-HPC-1461 D-10..D-13, AC-21: the project's own share, bounded by what the site reports left.
+	shareOf := func(share, siteLeft int64) func(*hpcv1alpha1.HPCSite) {
+		return func(s *hpcv1alpha1.HPCSite) {
+			at := metav1.NewTime(time.Now())
+			s.Spec.Budget = hpcv1alpha1.Budget{Source: hpcv1alpha1.BudgetSourceShare, GPUNodeHours: share,
+				SiteLeft: &hpcv1alpha1.SiteLeft{GPUNodeHours: siteLeft, ObservedAt: &at}}
+		}
+	}
+
+	It("share budget: never overbooks the share, five 4-hour jobs on a 10-hour share bounded by a larger site remainder", func() {
+		newSite(0, shareOf(10, 100))
+		var phases []hpcv1alpha1.Phase
+		for range 5 {
+			_, got := reconcileJob(newJob(envNS, 240))
+			phases = append(phases, got.Status.Phase)
+		}
+		Expect(phases).To(Equal([]hpcv1alpha1.Phase{hpcv1alpha1.PhaseAdmitted, hpcv1alpha1.PhaseAdmitted,
+			hpcv1alpha1.PhaseWaiting, hpcv1alpha1.PhaseWaiting, hpcv1alpha1.PhaseWaiting}))
+		Expect(siteStatus().GPU.BookedNodeMinutes).To(Equal(int64(480)))
+		Expect(siteStatus().GPU.LeftNodeMinutes).To(Equal(int64(120)))
+	})
+
+	It("share budget: the site remainder below the share is the limit (min of share left and site left)", func() {
+		newSite(0, shareOf(10, 3)) // 180 node-minutes at the site
+		_, got := reconcileJob(newJob(envNS, 240))
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonBudgetBlocked))
+		_, got = reconcileJob(newJob(envNS, 120))
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
+		_, got = reconcileJob(newJob(envNS, 120)) // fits the site's 180 only once the first settles
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseWaiting))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonWaitingForBudget))
+		Expect(siteStatus().GPU.LeftNodeMinutes).To(Equal(int64(60)))
+	})
+
+	It("share budget: a project with no site figure is limited by its share alone, and block refuses at the limit", func() {
+		newSite(1, nil) // source share is the default, 60 node-minutes
+		_, got := reconcileJob(newJob(envNS, 120))
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonBudgetBlocked))
+	})
+
 	It("admits a waiting job once a running job settles below its booking", func() {
 		newSite(5, nil) // 300 node-minutes
 		first := newJob(envNS, 240)

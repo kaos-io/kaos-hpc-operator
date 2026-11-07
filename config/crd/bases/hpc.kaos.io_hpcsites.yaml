@@ -63,8 +63,8 @@ spec:
                 description: Budget is the project's share of the org allocation.
                 properties:
                   allocationRef:
-                    description: AllocationRef names the org's HPCAllocation the share
-                      is carved from (checked on the hub, D-48).
+                    description: 'AllocationRef is reserved and unused: the share
+                      is the project''s own cap, with no org allocation.'
                     type: string
                   atLimit:
                     default: block
@@ -90,6 +90,29 @@ spec:
                       node-hours (source site).
                     format: date-time
                     type: string
+                  siteLeft:
+                    description: |-
+                      SiteLeft is what the site reported left on the project's account (source share only): an
+                      upper bound beside the share. Admission counts against the smaller of the share left this
+                      month and SiteLeft less what ended since it was observed. Absent: the share alone.
+                    properties:
+                      cpuNodeHours:
+                        description: CPUNodeHours left on the account.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      gpuNodeHours:
+                        description: GPUNodeHours left on the account.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      observedAt:
+                        description: |-
+                          ObservedAt is when the site reported it. Without it, or from before the current period, the
+                          figure is ignored: it cannot be placed against what ended since.
+                        format: date-time
+                        type: string
+                    type: object
                   source:
                     default: share
                     description: |-

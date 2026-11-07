@@ -39,6 +39,20 @@ The ledger is derived from the jobs themselves every time, never kept as a count
 runs one job at a time, so concurrent jobs never overbook. A job running as a guest on a node
 another job of the same project holds is covered by that job's booking.
 
+### Budget sources (`HPCSite.spec.budget.source`)
+
+| Source | Admission counts against |
+|---|---|
+| `site` | What the site reported left on the project's account at `observedAt`, less the attempts that ended since and the bookings |
+| `share` | The project's own optional cap, `gpuNodeHours` / `cpuNodeHours` per calendar month (UTC), less what its own settled attempts used this month and its bookings. With `siteLeft{gpuNodeHours,cpuNodeHours,observedAt}` the site's remainder is an upper bound too: the limit is `min(share left, site left)` |
+
+For `share`, `used` restarts on the 1st at 00:00 UTC, with no re-render needed. A `siteLeft` observed
+before the current month is ignored (the share alone governs until the next observation). A job that
+can never fit the lower of the two is `Refused` / `BudgetBlocked` (the message says which one binds);
+one that fits it once bookings settle is `Waiting` / `WaitingForBudget`. Policy `warn` admits beyond
+it and raises the `OverShare` event. A zero in a tier means no spend in that tier. There is no org
+allocation and no cross-project sum: each project's share is its own.
+
 See [docs/design.md](docs/design.md) for the full design.
 
 ## Serve mode (phase 1, PRD-HPC-1461 D-58, D-64)

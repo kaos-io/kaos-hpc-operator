@@ -160,7 +160,8 @@ type ProjectIdentity struct {
 type BudgetSource string
 
 const (
-	// BudgetSourceShare: a fixed share per calendar month (D-10, D-11).
+	// BudgetSourceShare: the project's own cap per calendar month UTC (D-10, D-11), bounded by
+	// SiteLeft when the hub renders it: the controller admits against min(share left, site left).
 	BudgetSourceShare BudgetSource = "share"
 	// BudgetSourceSite: what the site reports is left on the project's own account, polled
 	// (PRD-HPC-1461 D-56). The project owns its account, so no share has to be typed in.
@@ -179,9 +180,14 @@ type Budget struct {
 	// ObservedAt is when the site reported the remaining node-hours (source site).
 	// +optional
 	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
-	// AllocationRef names the org's HPCAllocation the share is carved from (checked on the hub, D-48).
+	// AllocationRef is reserved and unused: the share is the project's own cap, with no org allocation.
 	// +optional
 	AllocationRef string `json:"allocationRef,omitempty"`
+	// SiteLeft is what the site reported left on the project's account (source share only): an
+	// upper bound beside the share. Admission counts against the smaller of the share left this
+	// month and SiteLeft less what ended since it was observed. Absent: the share alone.
+	// +optional
+	SiteLeft *SiteLeft `json:"siteLeft,omitempty"`
 	// GPUNodeHours per period (source share) or left on the account (source site). Zero means
 	// the project may not spend GPU node-hours.
 	// +kubebuilder:validation:Minimum=0
@@ -201,6 +207,22 @@ type Budget struct {
 	// +kubebuilder:default=80
 	// +optional
 	WarnAtPercent int32 `json:"warnAtPercent,omitempty"`
+}
+
+// SiteLeft is the site's remaining node-hours per tier, as the site reported at ObservedAt.
+type SiteLeft struct {
+	// GPUNodeHours left on the account.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	GPUNodeHours int64 `json:"gpuNodeHours,omitempty"`
+	// CPUNodeHours left on the account.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	CPUNodeHours int64 `json:"cpuNodeHours,omitempty"`
+	// ObservedAt is when the site reported it. Without it, or from before the current period, the
+	// figure is ignored: it cannot be placed against what ended since.
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
 }
 
 // Limits are the project's central job limits (F-11, D-49).
