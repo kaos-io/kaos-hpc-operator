@@ -62,6 +62,12 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
+# The scale test runs the real controller binary against envtest, fake runner pods and fake Slurm sites
+# (test/scale/README.md). SCALE_L_JOBS shrinks the large scenarios (default 1000) for a quick smoke run.
+.PHONY: scale-test
+scale-test: setup-envtest ## Run the load/scale test against a fake Slurm site (about 10 minutes); writes test/scale/REPORT.md.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -tags scale ./test/scale/ -count=1 -timeout 90m -v
+
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # CertManager is installed by default; skip with:

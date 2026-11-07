@@ -101,7 +101,12 @@ Site polling (D-36, T-25): the controller reads the state of every non-terminal 
 namespace (read live, never cached). It writes `status.siteObservation` (job id, state, pending reason and
 comment when the site reports them, time, interval). A failed poll writes nothing. Runners read their state from
 it and call the site themselves only for submit, cancel and the final record, or every 120 s when the
-observation is older than three intervals (controller down).
+observation is older than three intervals (controller down). A list the site rejects with 422 (one unknown
+ID) is split in halves until the unknown ID stands alone, so it costs about 2*log2(n) calls, not n.
+
+The ledger (`HPCSite.status`: used, booked, left, recent jobs) is written at most once per
+`--ledger-publish-interval` (default 1 s) and site; a change inside the interval is written when it has passed,
+and the last job to end publishes again once the cache shows its end.
 
 RBAC roles shipped by the chart (bound per namespace by kubecore-operator):
 
@@ -153,6 +158,7 @@ make test       # unit tests and envtest (a real API server)
 make lint       # golangci-lint
 make manifests  # CRDs and RBAC from the Go types
 make build      # the manager binary
+make scale-test # load test of the real controller against fake Slurm sites (about 10 minutes, test/scale/README.md)
 ```
 
 Requires Go 1.24+.
