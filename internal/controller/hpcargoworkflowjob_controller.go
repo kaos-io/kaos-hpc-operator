@@ -77,6 +77,10 @@ type HPCArgoWorkflowJobReconciler struct {
 	SiteMissingGrace time.Duration
 	// SweepGiveUp is how long an orphan sweep waits for the site's confirmation (DefaultSweepGiveUp).
 	SweepGiveUp time.Duration
+	// LedgerPublishInterval is the shortest time between two writes of one HPCSite's status
+	// (DefaultLedgerPublishInterval in the manager). A request inside the interval is not lost: the
+	// newest state is written once the interval has passed. Zero (tests): every request writes.
+	LedgerPublishInterval time.Duration
 
 	mu          sync.Mutex
 	pending     map[string]hpcv1alpha1.Booking // by job UID
@@ -84,6 +88,8 @@ type HPCArgoWorkflowJobReconciler struct {
 	laneNoted   map[string]int32               // attempt whose refused lane was counted, by job UID
 	failed      map[string]int32               // failed runner pods seen, by runner Job UID
 	ended       map[string]struct{}            // jobs whose end this process wrote and whose ledger is not published yet, by job UID
+	published   map[client.ObjectKey]time.Time // when each HPCSite's status was last written (ledger_throttle.go)
+	trailing    map[client.ObjectKey]bool      // sites with a deferred write scheduled
 }
 
 // +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcargoworkflowjobs,verbs=get;list;watch;patch
@@ -431,8 +437,8 @@ func (r *HPCArgoWorkflowJobReconciler) ledgerAndJobs(ctx context.Context, site *
 	return ledger.Compute(site, jobs.Items, r.pending, r.now()), jobs.Items, nil
 }
 
-// publishLedger writes the site's ledger to its status, for people and the hub to read (F-30).
-func (r *HPCArgoWorkflowJobReconciler) publishLedger(ctx context.Context, site *hpcv1alpha1.HPCSite) error {
+// publishLedgerNow writes the site's ledger to its status, for people and the hub to read (F-30).
+func (r *HPCArgoWorkflowJobReconciler) publishLedgerNow(ctx context.Context, site *hpcv1alpha1.HPCSite) error {
 	l, jobs, err := r.ledgerAndJobs(ctx, site)
 	if err != nil {
 		return err
