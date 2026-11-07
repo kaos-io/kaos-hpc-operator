@@ -87,6 +87,36 @@ func Name(uid types.UID, attempt int32) string {
 	return fmt.Sprintf("hpcr-%s-a%d", hex.EncodeToString(sum[:])[:8], attempt)
 }
 
+// LabelCancelOnly marks the runner Jobs that only stop an attempt's site job (the orphan sweep, AC-08).
+const LabelCancelOnly = "hpc.kaos.io/cancel-only"
+
+// cancelOnlyDeadlineMinutes bounds one cancel-only runner Job; the runner's own budget is shorter.
+const cancelOnlyDeadlineMinutes = 60
+
+// CancelName is the name of the n-th cancel-only runner Job of an attempt: hpcc-<hash8>-a<attempt>-<n>.
+func CancelName(uid types.UID, attempt, n int32) string {
+	sum := sha256.Sum256([]byte(uid))
+	return fmt.Sprintf("hpcc-%s-a%d-%d", hex.EncodeToString(sum[:])[:8], attempt, n)
+}
+
+// BuildCancel returns a cancel-only runner Job of an attempt: the runner image started with
+// --cancel-only. It adopts the attempt's site job by key, cancels it, and reports its final state.
+func BuildCancel(cfg Config, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt, n int32) (*batchv1.Job, error) {
+	rj, err := Build(cfg, job, site, attempt)
+	if err != nil {
+		return nil, err
+	}
+	name := CancelName(job.UID, attempt, n)
+	rj.Name = name
+	rj.Labels[LabelCancelOnly] = "true"
+	rj.Labels[LabelRunnerJob] = name
+	rj.Spec.Template.Labels = rj.Labels
+	rj.Spec.BackoffLimit = ptr.To(int32(2))
+	rj.Spec.ActiveDeadlineSeconds = ptr.To(int64(cancelOnlyDeadlineMinutes * 60))
+	rj.Spec.Template.Spec.Containers[0].Args = []string{"--cancel-only"}
+	return rj, nil
+}
+
 // ValidateEnv enforces the allowlist on spec.env (the CRD enforces it too; this is the second lock).
 func ValidateEnv(env []hpcv1alpha1.NameValue) error {
 	if len(env) > maxEnvItems {

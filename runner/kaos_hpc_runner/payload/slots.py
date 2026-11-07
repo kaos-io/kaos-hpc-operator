@@ -142,7 +142,7 @@ def launch(slot, job, script, log_to, limit=None):
     env = dict(os.environ, KUBECORE_SLOT_GPUS='1', KUBECORE_SLOT_CPUS=str(CPUS),
                KUBECORE_SLOT_MEM_GIB=str(SHARE >> 30), KUBECORE_SLOT_SHARED='1')
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT if out else None,
-                            env=env)
+                            env=env, preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM}))
     return proc
 
 
@@ -230,6 +230,10 @@ def take(slot, job, name, job_limit):
     # The claim folder is a lock: only its owner holds or releases the job, so two
     # hosts never undo each other. A taken job stays held, so it never also starts alone.
     keep = False
+    # A TERM between writing `taken` and registering the guest in `slots` would leave the guest held and
+    # marked taken with nobody to hand it back: hold the signal until the guest is registered (it is then
+    # delivered, and the handler sees the guest).
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
     try:
         run('scontrol', 'hold', job)
         if not q(job, '%T|%r').startswith('PENDING|JobHeld'):
@@ -248,6 +252,7 @@ def take(slot, job, name, job_limit):
         if not keep:
             run('scontrol', 'release', job)
             unlock(claim)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
 
 
 def unlock(claim):

@@ -25,6 +25,12 @@ from .slurm import (TERMINAL, Refused, Slurm, comment_of, host_gone, lane_refusa
 from .settings import CHECKPOINT_EXIT, IDLE_EXIT, OFFER_S, Settings
 
 POLL_S = 30
+# --cancel-only (the controller's orphan sweep, PRD AC-08): how long one such runner works before it gives up
+# (the controller starts another), how often it looks, and how long a site that no longer knows the job
+# must say so before that counts as an answer.
+CANCEL_ONLY_BUDGET_S = 30 * 60
+CANCEL_ONLY_POLL_S = 10
+SITE_UNKNOWN_S = 10 * 60
 # A host's runner follows the host job past its step until the job itself is over; this is the margin
 # added to the job's time limit before it gives up waiting for that end.
 HOST_END_MARGIN_S = 10 * 60
@@ -365,9 +371,14 @@ class Runner:
                 self.logs.finish()
             except Exception:
                 pass
-            self.slurm.cancel(self.jid)
-            self.reporter.report(siteJobID=str(self.jid), state='CANCELLED', terminal=True)
-            sys.exit(0)
+            if self.slurm.cancel(self.jid):
+                self.reporter.report(siteJobID=str(self.jid), state='CANCELLED', terminal=True)
+                sys.exit(0)
+            # The site did not take the cancel: CANCELLED would be a lie. No terminal report: the controller
+            # then sweeps (a cancel-only runner keeps trying and reports what the site confirms).
+            print('the site job %s could not be cancelled: leaving the confirmation to the controller\'s sweep'
+                  % self.jid, flush=True)
+            sys.exit(143)
         print('SIGTERM without a cancel request: the site job %s is left alone for the next runner'
               % self.jid, flush=True)
         try:
@@ -429,6 +440,72 @@ class Runner:
             return rc
         finally:
             self.logs.close()
+
+    def cancel_only(self):
+        """The orphan sweep's runner (--cancel-only): stop this attempt's site job and report its final state.
+
+        It never submits. It finds the job by key (or the one the dead runner reported), cancels it (the cancel is
+        retried), and reports a terminal state only on the site's own word: the job's accounting state, or
+        SITE_UNKNOWN once the site has said for SITE_UNKNOWN_S that it does not know the job. When the site does not
+        answer within CANCEL_ONLY_BUDGET_S it exits 1 without a report; the controller keeps the booking and starts
+        another one."""
+        cfg = self.cfg
+        job = self.reporter.get_job()
+        if job is None:
+            print('the HPCArgoWorkflowJob %s/%s is gone: nothing to cancel' % (cfg.namespace, cfg.job_name), flush=True)
+            return 0
+        run = (job.get('status') or {}).get('run') or {}
+        mine = int(run.get('attempt') or 0) == cfg.attempt
+        if mine and run.get('terminal'):
+            print('attempt %d already reported its end (%s): nothing to cancel' % (cfg.attempt, run.get('state')), flush=True)
+            return 0
+        prev = str(run['siteJobID']) if mine and run.get('siteJobID') else None
+        deadline = self.clock() + CANCEL_ONLY_BUDGET_S
+        unknown_since = None
+        while True:
+            try:
+                active = self.slurm.find_active()
+                jid = str(active) if active is not None else prev
+                if jid is None:
+                    return self.report_swept('-', 'NOT_SUBMITTED', None, None, run)
+                if active is not None:
+                    self.slurm.cancel(jid)
+                rec = {}
+                try:
+                    rec = self.slurm.accounting(jid)
+                except urllib.error.HTTPError as e:
+                    if e.code != 404:
+                        raise
+                st = (rec.get('state') or {}).get('current') or []
+                if st and any(x in TERMINAL for x in st):
+                    rc = ((rec.get('exit_code') or {}).get('return_code') or {}).get('number')
+                    return self.report_swept(jid, ','.join(st), rc, rec, run)
+                if st or active is not None:
+                    unknown_since = None          # the site knows the job: it is not over yet
+                else:
+                    unknown_since = unknown_since if unknown_since is not None else self.clock()
+                    if self.clock() - unknown_since >= SITE_UNKNOWN_S:
+                        return self.report_swept(jid, 'SITE_UNKNOWN', None, None, run)
+            except SystemExit:
+                raise
+            except Exception as e:
+                print('cancel-only: site error (transient):', e, flush=True)
+            if self.clock() >= deadline:
+                settings.fail_start('the site did not confirm the end of site job %s within %d min' % (
+                    prev or '?', CANCEL_ONLY_BUDGET_S // 60), 1)
+            self.sleep(CANCEL_ONLY_POLL_S)
+
+    def report_swept(self, jid, state, rc, rec, run):
+        """The one terminal report of a cancel-only runner. Times are the site's; a start the dead runner had
+        already reported is kept when the site gives none."""
+        start = site_time(rec, 'start') if rec else None
+        end = (site_time(rec, 'end') if rec else None) or time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(self.clock()))
+        if not start and state != 'NOT_SUBMITTED':
+            start = run.get('startTime')
+        print('cancel-only: site job', jid, 'is', state, flush=True)
+        self.reporter.report(must=True, siteJobID=jid if jid != '-' else None, state=state, exitCode=rc,
+                             startTime=start, endTime=end if state != 'NOT_SUBMITTED' else None, terminal=True)
+        return 0
 
     def poll_loop(self):
         cfg, slurm, reporter = self.cfg, self.slurm, self.reporter
@@ -687,6 +764,9 @@ class Runner:
             pass
 
 
-def main(env=None):
+def main(env=None, argv=None):
+    argv = sys.argv[1:] if argv is None else argv
     cfg = Settings(env)
+    if '--cancel-only' in argv:
+        return Runner(cfg).cancel_only()
     return Runner(cfg).run()

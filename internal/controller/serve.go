@@ -161,6 +161,13 @@ func (r *HPCArgoWorkflowJobReconciler) cancel(ctx context.Context, job *hpcv1alp
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	site, _, _, _ := r.siteOf(ctx, job)
+	if !job.Status.Phase.Terminal() && (job.Status.Sweep != nil || siteJobMayLive(job)) {
+		// The runner is gone without proof that the site job ended: the site must confirm it first.
+		if err := r.beginSweep(ctx, job, hpcv1alpha1.PhaseCancelled, "Cancelled", "cancelled: "+cause); err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.continueSweep(ctx, job, site)
+	}
 	if !job.Status.Phase.Terminal() {
 		if err := r.failAttempt(ctx, job, site, hpcv1alpha1.PhaseCancelled, "Cancelled", "Cancelled", "cancelled: "+cause); err != nil {
 			return ctrl.Result{}, err
@@ -204,8 +211,13 @@ func (r *HPCArgoWorkflowJobReconciler) deleteRunnerJobs(ctx context.Context, job
 		client.MatchingLabels{runnerjob.LabelJobUID: string(job.UID)}); err != nil {
 		return false, err
 	}
+	live := 0
 	for i := range jobs.Items {
 		rj := &jobs.Items[i]
+		if rj.Labels[runnerjob.LabelCancelOnly] != "" {
+			continue // the sweep's own runner finishes the cancel; it is not the one being stopped
+		}
+		live++
 		if !rj.DeletionTimestamp.IsZero() {
 			continue
 		}
@@ -213,7 +225,7 @@ func (r *HPCArgoWorkflowJobReconciler) deleteRunnerJobs(ctx context.Context, job
 			return false, err
 		}
 	}
-	return len(jobs.Items) == 0, nil
+	return live == 0, nil
 }
 
 func (r *HPCArgoWorkflowJobReconciler) reader() client.Reader {
@@ -331,6 +343,13 @@ func (r *HPCArgoWorkflowJobReconciler) runnerFailed(ctx context.Context, job *hp
 	if m := r.lastPodMessage(ctx, rj); m != "" {
 		why += ": " + m
 	}
+	if siteJobMayLive(job) {
+		// The runner is over but its site job may not be: stop it before the booking is released (AC-08).
+		if err := r.beginSweep(ctx, job, hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonRunnerFailed, truncate(why)); err != nil {
+			return err
+		}
+		return &requeueError{after: SweepPoll}
+	}
 	return r.failAttempt(ctx, job, site, hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonRunnerFailed, hpcv1alpha1.ReasonRunnerFailed, truncate(why))
 }
 
@@ -422,6 +441,7 @@ func (r *HPCArgoWorkflowJobReconciler) failAttempt(ctx context.Context, job *hpc
 		observeSettled(site, b.Tier, used, job.Status.Run, &b.At)
 	}
 	job.Status.Booking = nil
+	job.Status.Sweep, job.Status.SiteMissingSince = nil, nil
 	job.Status.Phase, job.Status.Reason, job.Status.Message = phase, reason, msg
 	var total int64
 	for _, a := range job.Status.Attempts {

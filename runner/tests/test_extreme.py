@@ -385,3 +385,128 @@ def test_should_not_retry_a_cancel_of_a_job_the_site_does_not_know(monkeypatch):
     sleeps = []
     calls = _delete_urlopen(monkeypatch, [_http(404)])
     assert s.cancel("5001", sleep=sleeps.append) is True and len(calls) == 1 and sleeps == []
+
+
+# ------------------------------------------------------------------------------------------------
+# 2/3/9. The orphan sweep's runner: --cancel-only (PRD AC-08, D-20)
+
+class Sweepable(FakeSlurm):
+    """cancel() ends the active job (accounting then shows it CANCELLED), like the site."""
+
+    def cancel(self, jid):
+        self.cancelled.append(str(jid))
+        self.jobs[str(jid)] = [acc("CANCELLED", start=1762300800, end=1762301000)]
+        self.active = None
+        return True
+
+
+def _ticking(runner, step=10):
+    """A clock that only moves when the runner sleeps; returns the list of sleeps."""
+    t = [1_000_000.0]
+    sleeps = []
+
+    def sleep(s):
+        sleeps.append(s)
+        t[0] += s
+    runner.clock, runner.sleep = lambda: t[0], sleep
+    return sleeps
+
+
+def test_cancel_only_should_cancel_the_active_site_job_and_report_what_the_site_confirms(rig):
+    slurm = Sweepable({"5001": [acc("RUNNING")]}, active="5001")
+    rig.make(slurm, status={"run": {"attempt": 1, "siteJobID": "5001", "state": "RUNNING"}})
+    _ticking(rig.runner)
+    assert rig.runner.cancel_only() == 0
+    assert slurm.cancelled == ["5001"] and slurm.submitted == [], "it cancels and never submits"
+    run = rig.kube.run
+    assert run["terminal"] is True and run["state"] == "CANCELLED" and run["siteJobID"] == "5001"
+    assert run["startTime"] == "2025-11-05T00:00:00Z" and run["endTime"] == "2025-11-05T00:03:20Z"
+    assert run["attempt"] == 1
+
+
+def test_cancel_only_should_report_a_job_that_ended_by_itself_without_cancelling_it(rig):
+    slurm = Sweepable({"5001": [acc("COMPLETED")]}, active=None)
+    rig.make(slurm, status={"run": {"attempt": 1, "siteJobID": "5001", "state": "RUNNING"}})
+    _ticking(rig.runner)
+    assert rig.runner.cancel_only() == 0
+    assert slurm.cancelled == [] and rig.kube.run["state"] == "COMPLETED" and rig.kube.run["terminal"] is True
+
+
+def test_cancel_only_should_keep_asking_a_site_that_does_not_answer_then_stop_with_no_report(rig):
+    class Dead(Sweepable):
+        def find_active(self):
+            raise socket.timeout("down")
+    slurm = Dead({}, active=None)
+    rig.make(slurm, status={"run": {"attempt": 1, "siteJobID": "5001", "state": "RUNNING"}})
+    sleeps = _ticking(rig.runner)
+    with pytest.raises(SystemExit) as e:
+        rig.runner.cancel_only()
+    assert e.value.code == 1
+    assert runmod.CANCEL_ONLY_BUDGET_S // runmod.CANCEL_ONLY_POLL_S - 2 <= len(sleeps) <= runmod.CANCEL_ONLY_BUDGET_S // runmod.CANCEL_ONLY_POLL_S + 1
+    assert slurm.submitted == [] and not rig.kube.run.get("terminal"), "no terminal report without the site's word"
+
+
+def test_cancel_only_should_call_a_job_the_site_has_forgotten_unknown_only_after_ten_minutes(rig):
+    slurm = Sweepable({}, active=None)            # accounting answers 404 for 5001
+    start = "2025-11-05T00:00:00Z"
+    rig.make(slurm, status={"run": {"attempt": 1, "siteJobID": "5001", "state": "RUNNING", "startTime": start}})
+    sleeps = _ticking(rig.runner)
+    assert rig.runner.cancel_only() == 0
+    assert sum(sleeps) >= runmod.SITE_UNKNOWN_S, "not before the site has said so for 10 minutes"
+    run = rig.kube.run
+    assert run["state"] == "SITE_UNKNOWN" and run["terminal"] is True and run["startTime"] == start
+
+
+def test_cancel_only_should_not_call_a_job_unknown_while_the_site_still_lists_it(rig):
+    class Stubborn(Sweepable):
+        n = 0
+
+        def cancel(self, jid):                    # the site is slow: the job stays active a long time
+            self.cancelled.append(str(jid))
+            Stubborn.n += 1
+            if Stubborn.n >= 100:
+                return super().cancel(jid)
+            return True
+    slurm = Stubborn({"5001": [acc("RUNNING")]}, active="5001")
+    rig.make(slurm, status={"run": {"attempt": 1, "siteJobID": "5001", "state": "RUNNING"}})
+    _ticking(rig.runner)
+    assert rig.runner.cancel_only() == 0
+    assert rig.kube.run["state"] == "CANCELLED" and len(slurm.cancelled) >= 100, "it kept cancelling until the site agreed"
+
+
+def test_cancel_only_should_report_not_submitted_when_there_is_nothing_to_cancel(rig):
+    slurm = Sweepable({}, active=None)
+    rig.make(slurm, status={})
+    _ticking(rig.runner)
+    assert rig.runner.cancel_only() == 0
+    assert rig.kube.run["state"] == "NOT_SUBMITTED" and rig.kube.run["terminal"] is True
+
+
+def test_cancel_only_should_do_nothing_for_an_attempt_that_already_reported_its_end(rig):
+    slurm = Sweepable({}, active="5001")
+    rig.make(slurm, status={"run": {"attempt": 1, "siteJobID": "5001", "state": "COMPLETED", "terminal": True}})
+    assert rig.runner.cancel_only() == 0
+    assert slurm.cancelled == [] and rig.kube.patches() == []
+
+
+def test_main_should_run_the_cancel_only_mode_with_the_flag(monkeypatch):
+    seen = []
+    monkeypatch.setattr(runmod.Runner, "cancel_only", lambda self: seen.append("cancel") or 0)
+    monkeypatch.setattr(runmod.Runner, "run", lambda self: seen.append("run") or 0)
+    assert runmod.main(dict(helpers.BASE_ENV), argv=["--cancel-only"]) == 0
+    assert runmod.main(dict(helpers.BASE_ENV), argv=[]) == 0
+    assert seen == ["cancel", "run"]
+
+
+def test_sigterm_should_not_report_cancelled_when_the_site_did_not_take_the_cancel(rig):
+    from test_runner import _term
+
+    class Refusing(FakeSlurm):
+        def cancel(self, jid):
+            self.cancelled.append(str(jid))
+            return False
+    slurm = Refusing({}, live={"5001": {"job_state": ["RUNNING"]}})
+    r = _term(rig, slurm, True)
+    with pytest.raises(SystemExit) as e:
+        r.runner.on_term(15, None)
+    assert e.value.code == 143 and r.kube.run == {}, "no CANCELLED on the site's silence: the controller sweeps"

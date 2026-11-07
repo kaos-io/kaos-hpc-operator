@@ -73,6 +73,10 @@ type HPCArgoWorkflowJobReconciler struct {
 	// LaneCandidates are the lanes (QoS, reservation) tried in order for serve-mode attempts
 	// (PRD-HPC-1461 F-42, F-44). Empty: every attempt uses its class's own QoS, as before.
 	LaneCandidates []lanes.Candidate
+	// SiteMissingGrace is how long a booked job survives its HPCSite being gone (DefaultSiteMissingGrace).
+	SiteMissingGrace time.Duration
+	// SweepGiveUp is how long an orphan sweep waits for the site's confirmation (DefaultSweepGiveUp).
+	SweepGiveUp time.Duration
 
 	mu          sync.Mutex
 	pending     map[string]hpcv1alpha1.Booking // by job UID
@@ -120,6 +124,11 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, r.resettleHostEnd(ctx, &job)
 	}
 
+	if serve && job.Status.Sweep != nil && job.Status.Booking != nil {
+		// The attempt is ending but the site has not confirmed it: only the sweep acts (no normal settlement).
+		site, _, _, _ = r.siteOf(ctx, &job)
+		return r.continueSweep(ctx, &job, site)
+	}
 	var reason, msg string
 	var err error
 	site, reason, msg, err = r.siteOf(ctx, &job)
@@ -129,14 +138,16 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if site == nil {
 		if serve && job.Status.Booking != nil {
 			// Already admitted: a site job may be queued or running under this booking. Refusing it here would
-			// drop the booking while the site job lives on, unsettled and unwatched. Stop it like any other
-			// cancel (D-04): the runner Job's SIGTERM cancels the site job, the attempt is settled.
-			res, err := r.cancel(ctx, &job, "its HPCSite binding is gone ("+msg+")")
-			return res, err
+			// drop the booking while the site job lives on, unsettled and unwatched. A transient loss (a GitOps
+			// prune and re-create) must not kill a training either: wait out the grace period, then cancel.
+			return r.siteMissing(ctx, &job, msg)
 		}
 		return ctrl.Result{}, r.setPhase(ctx, &job, hpcv1alpha1.PhaseRefused, reason, msg, nil)
 	}
 
+	if err := r.siteBack(ctx, &job); err != nil {
+		return ctrl.Result{}, err
+	}
 	switch {
 	case job.Status.Booking != nil || r.isPending(string(job.UID)):
 		// Admitted already (the cache may lag behind our own write): follow it.

@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -281,7 +282,10 @@ var _ = Describe("HPCArgoWorkflowJob extreme cases", func() {
 	// ---------------------------------------------------------------- 9. lifecycle
 
 	Context("a running serve-mode job whose project binding disappears", func() {
+		var clock time.Time
 		runningJob := func() (*hpcv1alpha1.HPCArgoWorkflowJob, *batchv1.Job) {
+			clock = time.Now()
+			r.Now = func() time.Time { return clock }
 			j := newJob(true, 60)
 			_, got := reconcileOnce(j)
 			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
@@ -292,39 +296,104 @@ var _ = Describe("HPCArgoWorkflowJob extreme cases", func() {
 			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRunning))
 			return j, rj
 		}
-
-		expectCancelledThroughTheRunner := func(j *hpcv1alpha1.HPCArgoWorkflowJob, rj *batchv1.Job, why string) {
+		deleteSite := func() {
+			site := &hpcv1alpha1.HPCSite{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "meluxina", Namespace: hpcNS}, site)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, site)).To(Succeed())
+		}
+		unlabel := func(on bool) {
+			ns := &corev1.Namespace{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: envNS}, ns)).To(Succeed())
+			if on {
+				ns.Labels[hpcv1alpha1.ProjectLabel] = project
+			} else {
+				delete(ns.Labels, hpcv1alpha1.ProjectLabel)
+			}
+			Expect(k8sClient.Update(ctx, ns)).To(Succeed())
+		}
+		expectWatchedAndUntouched := func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+			_, got := reconcileOnce(j)
+			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRunning))
+			Expect(got.Status.Booking).NotTo(BeNil(), "the booking is kept")
+			Expect(got.Annotations).NotTo(HaveKey(hpcv1alpha1.CancelRequestedAnnotation))
+			Expect(runnerJob(got).DeletionTimestamp).To(BeNil(), "the runner keeps watching the site job")
+		}
+		// stopThroughTheRunner: the grace is over; the runner Job is deleted first, its SIGTERM cancels the
+		// site job and reports it; the attempt is then settled and the booking released.
+		stopThroughTheRunner := func(j *hpcv1alpha1.HPCArgoWorkflowJob, rj *batchv1.Job, why string) {
 			res, got := reconcileOnce(j)
-			Expect(res.RequeueAfter).To(Equal(CancelPoll), "the runner Job is deleted first: its SIGTERM cancels the site job")
+			Expect(res.RequeueAfter).To(Equal(CancelPoll), "the runner Job is deleted first")
 			Expect(got.Annotations).To(HaveKey(hpcv1alpha1.CancelRequestedAnnotation))
 			Expect(got.Status.Phase).NotTo(Equal(hpcv1alpha1.PhaseRefused), "a live site job is never abandoned as Refused")
 			gc(rj)
+			start := got.Status.Run.StartTime
+			end := metav1.NewTime(clock)
+			report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "800", State: "CANCELLED", StartTime: start, EndTime: &end, Terminal: true})
 			_, got = reconcileOnce(j)
 			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseCancelled))
 			Expect(got.Status.Message).To(ContainSubstring(why))
 			Expect(got.Status.Booking).To(BeNil(), "the booking is released")
 			Expect(got.Status.Attempts).To(HaveLen(1), "and the attempt is settled")
 			Expect(got.Status.Attempts[0].SettledNodeMinutes).To(BeNumerically(">=", 10))
+			_, got = reconcileOnce(j)
 			Expect(got.Finalizers).NotTo(ContainElement(hpcv1alpha1.CancelFinalizer))
 		}
 
-		It("should_cancel_the_site_job_and_settle_it_when_the_hpcsite_is_deleted", func() {
+		It("should_keep_a_training_untouched_when_the_hpcsite_is_recreated_within_the_grace_period", func() {
 			newSite(100)
-			j, rj := runningJob()
-			site := &hpcv1alpha1.HPCSite{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "meluxina", Namespace: hpcNS}, site)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, site)).To(Succeed())
-			expectCancelledThroughTheRunner(j, rj, "HPCSite")
+			j, _ := runningJob()
+			deleteSite()
+			res, got := reconcileOnce(j)
+			Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonSiteMissing))
+			Expect(got.Status.Message).To(ContainSubstring("HPCSiteMissing since "))
+			Expect(got.Status.SiteMissingSince).NotTo(BeNil())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+			clock = clock.Add(DefaultSiteMissingGrace - time.Minute)
+			expectWatchedAndUntouched(j)
+			newSite(100) // GitOps put it back
+			clock = clock.Add(30 * time.Second)
+			expectWatchedAndUntouched(j)
+			got = get(j)
+			Expect(got.Status.SiteMissingSince).To(BeNil())
+			Expect(got.Status.Reason).To(Equal("Submitted"))
+			clock = clock.Add(time.Hour) // the old marker must not linger: a later loss starts a new grace period
+			deleteSite()
+			_, got = reconcileOnce(j)
+			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRunning))
+			Expect(got.Status.SiteMissingSince.Time).To(BeTemporally("~", clock, time.Second))
 		})
 
-		It("should_cancel_the_site_job_and_settle_it_when_the_namespace_loses_its_project_label", func() {
+		It("should_cancel_settle_and_release_when_the_hpcsite_is_still_gone_after_the_grace_period_even_across_a_restart", func() {
 			newSite(100)
 			j, rj := runningJob()
-			ns := &corev1.Namespace{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: envNS}, ns)).To(Succeed())
-			delete(ns.Labels, hpcv1alpha1.ProjectLabel)
-			Expect(k8sClient.Update(ctx, ns)).To(Succeed())
-			expectCancelledThroughTheRunner(j, rj, "project")
+			deleteSite()
+			reconcileOnce(j) // first observation, persisted in status
+			r = newReconciler()
+			clock = clock.Add(DefaultSiteMissingGrace - time.Minute)
+			r.Now = func() time.Time { return clock }
+			expectWatchedAndUntouched(j) // the restarted controller did not reset the clock...
+			clock = clock.Add(2 * time.Minute)
+			stopThroughTheRunner(j, rj, "HPCSite") // ...so one minute later the grace is over
+		})
+
+		It("should_cancel_when_the_namespace_stays_without_its_project_label_after_the_grace_period", func() {
+			newSite(100)
+			j, rj := runningJob()
+			unlabel(false)
+			expectWatchedAndUntouched(j)
+			clock = clock.Add(DefaultSiteMissingGrace + time.Minute)
+			stopThroughTheRunner(j, rj, "project")
+		})
+
+		It("should_keep_the_job_when_the_project_label_comes_back_within_the_grace_period", func() {
+			newSite(100)
+			j, _ := runningJob()
+			unlabel(false)
+			expectWatchedAndUntouched(j)
+			unlabel(true)
+			clock = clock.Add(time.Minute)
+			expectWatchedAndUntouched(j)
+			Expect(get(j).Status.SiteMissingSince).To(BeNil())
 		})
 
 		It("should_refuse_a_job_that_was_never_booked_when_its_hpcsite_is_gone", func() {
@@ -353,26 +422,132 @@ var _ = Describe("HPCArgoWorkflowJob extreme cases", func() {
 			Expect(runnerJob(got).DeletionTimestamp).To(BeNil())
 			Expect(testutil.ToFloat64(metrics.RunnerRestarts) - before).To(Equal(2.0))
 		})
+	})
 
-		It("should_name_the_deadline_when_the_runner_Job_ran_out_of_time_and_release_the_booking", func() {
-			newSite(100)
+	// ---------------------------------------------------------------- the orphan sweep (AC-08)
+
+	Context("the orphan sweep", func() {
+		var clock time.Time
+		var rec *record.FakeRecorder
+		// liveJob: admitted, submitted and RUNNING at the site since 15 minutes.
+		liveJob := func() (*hpcv1alpha1.HPCArgoWorkflowJob, *batchv1.Job) {
+			clock = time.Now()
+			rec = record.NewFakeRecorder(20)
+			r.Now, r.Recorder = func() time.Time { return clock }, rec
 			j := newJob(true, 60)
 			_, got := reconcileOnce(j)
 			rj := runnerJob(got)
-			start := metav1.NewTime(time.Now().Add(-15 * time.Minute))
+			start := metav1.NewTime(time.Now().Truncate(time.Second).Add(-15 * time.Minute))
 			report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "801", State: "RUNNING", StartTime: &start})
+			reconcileOnce(j)
+			return j, rj
+		}
+		failRunner := func(rj *batchv1.Job, reason string) {
 			now := metav1.Now()
 			rj.Status.StartTime = &now
 			rj.Status.Conditions = []batchv1.JobCondition{
-				{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, Reason: "DeadlineExceeded"},
-				{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "DeadlineExceeded"}}
+				{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, Reason: reason},
+				{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: reason}}
 			Expect(k8sClient.Status().Update(ctx, rj)).To(Succeed())
+		}
+		cancelRunner := func(j *hpcv1alpha1.HPCArgoWorkflowJob, n int32) *batchv1.Job {
+			rj := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: hpcNS, Name: runnerjob.CancelName(j.UID, 1, n)}, rj)).To(Succeed())
+			return rj
+		}
+		// siteConfirms plays the cancel-only runner: it reports the site's final state.
+		siteConfirms := func(j *hpcv1alpha1.HPCArgoWorkflowJob, state string, minutes int) {
+			end := metav1.NewTime(time.Now().Truncate(time.Second))
+			start := metav1.NewTime(end.Add(-time.Duration(minutes) * time.Minute))
+			report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "801", State: state, StartTime: &start, EndTime: &end, Terminal: true})
+		}
+
+		It("should_stop_the_site_job_before_it_releases_the_booking_when_the_runner_Job_ran_out_of_time", func() {
+			newSite(100)
+			j, rj := liveJob()
+			failRunner(rj, "DeadlineExceeded")
+			_, got := reconcileOnce(j)
+			Expect(got.Status.Sweep).NotTo(BeNil())
+			Expect(got.Status.Booking).NotTo(BeNil(), "the booking is kept: the site job may still run")
+			Expect(got.Status.Phase.Terminal()).To(BeFalse())
+			Expect(got.Status.Message).To(ContainSubstring("DeadlineExceeded"))
+			reconcileOnce(j)
+			c := cancelRunner(j, 0)
+			Expect(c.Spec.Template.Spec.Containers[0].Args).To(Equal([]string{"--cancel-only"}))
+			Expect(c.Labels).To(HaveKeyWithValue(runnerjob.LabelCancelOnly, "true"))
+			Expect(c.Annotations).To(HaveKeyWithValue(runnerjob.AnnotationJobName, j.Name))
+			Expect(get(j).Status.Booking).NotTo(BeNil())
+
+			siteConfirms(j, "CANCELLED", 15)
 			_, got = reconcileOnce(j)
 			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
 			Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRunnerFailed))
-			Expect(got.Status.Message).To(ContainSubstring("DeadlineExceeded"))
+			Expect(got.Status.Message).To(And(ContainSubstring("DeadlineExceeded"), ContainSubstring("the site confirmed")))
 			Expect(got.Status.Booking).To(BeNil())
-			Expect(*got.Status.SettledNodeMinutes).To(BeNumerically(">=", 15), "the time it ran is charged")
+			Expect(got.Status.Sweep).To(BeNil())
+			Expect(*got.Status.SettledNodeMinutes).To(Equal(int64(15)), "the time the site job ran is charged")
+		})
+
+		It("should_prove_a_cancel_requested_after_the_runner_is_gone", func() {
+			newSite(100)
+			j, rj := liveJob()
+			// the runner Job vanished (node loss, manual delete) without a terminal report
+			Expect(k8sClient.Delete(ctx, rj, client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
+			Expect(k8sClient.Delete(ctx, get(j))).To(Succeed())
+			_, got := reconcileOnce(j)
+			Expect(got.Status.Sweep).NotTo(BeNil(), "no 'Cancelled' on the runner's absence alone")
+			Expect(got.Status.Phase.Terminal()).To(BeFalse())
+			reconcileOnce(j)
+			cancelRunner(j, 0)
+			siteConfirms(j, "CANCELLED", 15)
+			_, got = reconcileOnce(j)
+			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseCancelled))
+			Expect(got.Status.Message).To(ContainSubstring("the site confirmed"))
+			Expect(got.Status.Booking).To(BeNil())
+			Expect(*got.Status.SettledNodeMinutes).To(Equal(int64(15)))
+			reconcileOnce(j)
+			Expect(get(j)).To(BeNil(), "the finalizer is dropped once the cancel is proven")
+		})
+
+		It("should_keep_the_booking_while_the_site_stays_silent_and_decide_without_proof_only_after_the_give_up_time", func() {
+			newSite(100)
+			j, rj := liveJob()
+			failRunner(rj, "BackoffLimitExceeded")
+			reconcileOnce(j)
+			reconcileOnce(j)
+			// the first cancel-only runner could not reach the site either
+			failRunner(cancelRunner(j, 0), "BackoffLimitExceeded")
+			clock = clock.Add(time.Hour)
+			reconcileOnce(j)
+			_, got := reconcileOnce(j)
+			Expect(got.Status.Sweep.Launches).To(Equal(int32(1)))
+			cancelRunner(j, 1) // the next one is running
+			Expect(got.Status.Booking).NotTo(BeNil(), "an hour in, still no proof: the booking stays")
+			Expect(got.Status.Phase.Terminal()).To(BeFalse())
+
+			clock = clock.Add(DefaultSweepGiveUp)
+			_, got = reconcileOnce(j)
+			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+			Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRunnerFailed))
+			Expect(got.Status.Message).To(And(ContainSubstring("did not confirm"), ContainSubstring("801 may still be running")))
+			Expect(got.Status.Booking).To(BeNil())
+			Expect(*got.Status.SettledNodeMinutes).To(BeNumerically(">=", int64(DefaultSweepGiveUp.Minutes())), "settled up to now: conservative")
+			var events []string
+			for len(rec.Events) > 0 {
+				events = append(events, <-rec.Events)
+			}
+			Expect(events).To(ContainElement(ContainSubstring("SiteJobUnconfirmed")))
+		})
+
+		It("should_not_start_a_sweep_when_no_site_job_is_known", func() {
+			newSite(100)
+			clock = time.Now()
+			j := newJob(true, 60)
+			_, got := reconcileOnce(j)
+			failRunner(runnerJob(got), "BackoffLimitExceeded")
+			_, got = reconcileOnce(j)
+			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+			Expect(got.Status.Sweep).To(BeNil())
 		})
 	})
 

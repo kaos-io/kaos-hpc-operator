@@ -302,3 +302,32 @@ func TestShouldPassTheIdleTimeoutToTheRunner(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldBuildACancelOnlyRunnerThatNeverCollidesWithTheAttemptsRunner(t *testing.T) {
+	job, site := fixtures()
+	job.UID = "uid-1"
+	normal, err := Build(Config{Image: "img"}, job, site, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := BuildCancel(Config{Image: "img"}, job, site, 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Name == normal.Name || c.Name != CancelName(job.UID, 1, 2) || CancelName(job.UID, 1, 2) == CancelName(job.UID, 1, 3) {
+		t.Fatalf("names: %s %s", c.Name, normal.Name)
+	}
+	if c.Labels[LabelCancelOnly] != "true" || c.Labels[LabelJobUID] != string(job.UID) || c.Labels[LabelRunnerJob] != c.Name ||
+		c.Spec.Template.Labels[LabelRunnerJob] != c.Name {
+		t.Fatalf("labels: %v", c.Labels)
+	}
+	if got := c.Spec.Template.Spec.Containers[0].Args; len(got) != 1 || got[0] != "--cancel-only" {
+		t.Fatalf("args: %v", got)
+	}
+	if *c.Spec.ActiveDeadlineSeconds != 3600 || *c.Spec.BackoffLimit != 2 {
+		t.Fatalf("bounds: %d %d", *c.Spec.ActiveDeadlineSeconds, *c.Spec.BackoffLimit)
+	}
+	if normal.Spec.Template.Spec.Containers[0].Args != nil || normal.Labels[LabelCancelOnly] != "" {
+		t.Fatal("the attempt's own runner must be untouched")
+	}
+}

@@ -58,3 +58,21 @@ def test_a_host_killed_hard_leaves_its_guest_held_for_its_runner_to_find(tmp_pat
     node.finish()
     j = node.jobs()["101"]
     assert j["state"] == "PENDING" and j["held"] and "kaos-state=taken host=100" in j["comment"]
+
+
+def test_a_term_while_a_guest_is_being_taken_still_hands_it_back(tmp_path):
+    """F-7: the TERM arrives between writing `taken` and registering the guest. It is held until the guest is
+    registered, so the guest goes back to the queue instead of staying held forever. Repeated to catch the window."""
+    import signal as sig
+    for i in range(6):
+        d = tmp_path / str(i)
+        d.mkdir()
+        guests = dict([_guest(1, 10)])
+        guests["101"]["script"] = guests["101"]["script"].replace("exit 0", "sleep 60")
+        node = Node(d, guests, own_body="sleep 60\n")
+        # the comment is written first: TERM as soon as it shows, the worst moment
+        assert node.wait_for(lambda j: "kaos-state=taken" in j["101"]["comment"])
+        node.proc.send_signal(sig.SIGTERM)
+        node.finish()
+        j = node.jobs()["101"]
+        assert j["state"] == "PENDING" and not j["held"] and "requeued" in j["comment"], (i, j)
