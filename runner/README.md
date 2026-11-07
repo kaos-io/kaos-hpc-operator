@@ -27,8 +27,8 @@ Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /ru
 | `runner.py` | the attempt: submit/adopt, poll loop, resubmits, end |
 
 ## Inputs
-Env (controller): `HPC_JOB_NAMESPACE`, `HPC_JOB_NAME`, `KAOS_ATTEMPT`, `KAOS_RESUME_REF` (+ `KAOS_RESUME_PREFIX`
-or `KAOS_RESUME_FROM_ATTEMPT`, or a `lakefs://` URI), `IMAGE_REF`, `STEP_COMMAND`, `SLURM_TIME_LIMIT`,
+Env (controller): `HPC_JOB_NAMESPACE`, `HPC_JOB_NAME`, `KAOS_ATTEMPT`, `KAOS_RESUME_REF` (a
+`scratch://<tar path>#<sha256>` checkpoint reference), `HPC_CKPT_BUDGET_PERCENT`, `IMAGE_REF`, `STEP_COMMAND`, `SLURM_TIME_LIMIT`,
 `HPC_RESUMABLE_LEAD`, `STEP_OUTPUTS`, `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `KUBECORE_WORKFLOW_NAME`, `KUBECORE_RUN_ID`,
 `DATASET`, `HPC_SHARING` (`on`/`1`) + `HPC_SCOPE`, allowlisted `OUTPUTS_REPO`/`OUTPUTS_REF`/`CHECKPOINT_*`/
 `KAOS_LIB_SUPPORT`, site: `HPC_ACCOUNT`, `HPC_USER`, `HPC_SCRATCH`, `HPC_HOME`, `HPC_CLASSES_JSON`, `HPC_ENDPOINT`,

@@ -108,6 +108,24 @@ Metrics (`:8443`, authn/authz-protected; the chart renders a `VMServiceScrape`, 
 `kaos_hpc_job_run_seconds`, `kaos_hpc_node_minutes_booked`, `kaos_hpc_node_minutes_settled`,
 `kaos_hpc_site_node_minutes`, `kaos_hpc_active_jobs`, `kaos_hpc_runner_restarts_total`.
 
+## Interruptions and checkpoints (PRD-HPC-1461 D-74, D-75, D-76)
+
+- **Tier 1, every step, no code:** a step with no checkpoint is re-run from the start after a node failure,
+  maintenance or pre-emption, at most twice (`status.reruns`; reasons `RerunNodeFailure`, `RerunPreempted`,
+  `RerunLimit`). Never after the step's own error, an out-of-memory kill, a cancel or a wall-time kill.
+- **Tier 2, the checkpoint folder:** every job gets `KAOS_CHECKPOINT_DIR` (`/work/ckpt`, on scratch). The job keeps at
+  most two copies of it per step (one tar + one manifest each), copies it periodically and when the wall-time signal
+  arrives, and deletes the copies when the step succeeds or after 7 days. A periodic copy is skipped when it would
+  take the project over 80 % of its scratch space or file quota or past its checkpoint budget
+  (`HPCSite.spec.limits.checkpointBudgetPercent`, default 10 % of the space quota). Details: `runner/README.md`.
+- **Continuation:** on exit 85, wall time, node failure, pre-emption or an idle kill, a step that left a copy continues
+  from the newest verified one (cap 5, or `spec.resumable.maxContinuations`). A continuation that does not get past its
+  checkpoint ends `NoProgress`; one that does marks the step key verified (`status.placement.resumable`), after
+  which it keeps its declared limit and gets the wall-time signal. `spec.resumableOptOut` (`resumable=False`) turns
+  continuing off; the follower passes it from `HPC_RESUMABLE=0`.
+- **Reported:** `status.run.checkpoint` (progress, size of the newest copy, the step's and the project's total,
+  why a copy was skipped) and `HPCSite.status.checkpoints` (scratch held by steps that have not succeeded).
+
 ## Development
 
 ```sh

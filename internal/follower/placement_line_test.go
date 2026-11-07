@@ -126,6 +126,8 @@ func TestShowPlacementPrintsTheWarningOnce(t *testing.T) {
 		Placement: &hpcv1alpha1.Placement{TimeLimitMinutes: 240, Source: hpcv1alpha1.PlacementDeclared}}))
 	if strings.Contains(quiet.String(), "Warning") {
 		t.Fatalf("unexpected warning: %s", quiet.String())
+	}
+}
 
 func TestResumableAndRecoveryLines(t *testing.T) {
 	since := metav1.NewTime(time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC))

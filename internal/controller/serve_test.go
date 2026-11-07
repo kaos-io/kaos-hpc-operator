@@ -609,6 +609,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
 		_, got := reconcileOnce(j)
 		Expect(got.Status.Placement.Warning).To(BeEmpty())
+	})
 
 	// ---- D-74, D-75: recovery from interrupted attempts, discovered resumability ----
 
