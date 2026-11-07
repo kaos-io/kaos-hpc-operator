@@ -115,7 +115,7 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	if job.Status.Phase.Terminal() {
 		r.forget(string(job.UID))
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.resettleHostEnd(ctx, &job)
 	}
 
 	var reason, msg string

@@ -24,6 +24,9 @@ from .slurm import (TERMINAL, Refused, Slurm, comment_of, host_gone, lane_refusa
 from .settings import CHECKPOINT_EXIT, IDLE_EXIT, OFFER_S, Settings
 
 POLL_S = 30
+# A host's runner follows the host job past its step until the job itself is over; this is the margin
+# added to the job's time limit before it gives up waiting for that end.
+HOST_END_MARGIN_S = 10 * 60
 # The registry pull token (GCE metadata, 1 h) is minted at submit time and cannot be refreshed inside
 # a queued job, so every queue wait longer than an hour costs one failed pull (exit 231) and a
 # resubmission. Bounded, not once: a second long wait after the first resubmit must not strand the run.
@@ -50,6 +53,8 @@ class Runner:
         self.reported = None
         self.pending_reason = None
         self.hosted = None
+        self.job_limit_min = None    # the time limit this runner submitted the site job with
+        self.host_job_open = False   # the terminal report was made while the host's Slurm job still ran
 
     # ------------------------------------------------------------------ submit
 
@@ -139,6 +144,7 @@ class Runner:
                 env.append('KAOS_TOKEN_EXP=%d' % self.wallet_exp)   # the host's fit rule (D-07)
         if cfg.sharing:
             batch, env = inputs_in_script(batch, env)
+        self.job_limit_min = job_limit
         body = {'job': {'name': cfg.job_site_name, 'partition': hpc['partition'],
                         'account': ident['account'],
                         'qos': cfg.qos or class_qos,
@@ -386,7 +392,9 @@ class Runner:
         self.logs.attach(self.jid, offset)
         self.logs.start()
         try:
-            return self.poll_loop()
+            rc = self.poll_loop()
+            self.follow_host_job_end()
+            return rc
         finally:
             self.logs.close()
 
@@ -457,6 +465,9 @@ class Runner:
                     continue
                 if any(x in TERMINAL for x in st) or ('RUNNING' in st and share.get('kaos-state') == 'done'):
                     rc = ((job.get('exit_code') or {}).get('return_code') or {}).get('number')
+                    # A host's own step is over while its Slurm job still runs (it waits for more guests):
+                    # the step is reported now, the job's end afterwards (follow_host_job_end).
+                    self.host_job_open = (not any(x in TERMINAL for x in st) and not share.get('host'))
                     print('terminal:', st, 'exit:', rc, flush=True)
                     print('job comment:', job.get('comment'), flush=True)
                     if share.get('kaos-state') == 'done':
@@ -480,6 +491,34 @@ class Runner:
                 raise
             except Exception as e:
                 print('poll error (transient):', e, flush=True)
+
+    def follow_host_job_end(self):
+        """A shared-node host settles from its Slurm job, not its step: the site charges the whole node
+        until the job ends, ~2 minutes after the last step (it waits for guests). The step's result and
+        outputs were reported at its end (nothing waits for them); this follows the job until it is
+        terminal, bounded by its time limit plus a margin, and resends the same terminal report with the
+        job's own end time. The controller only ever raises the settlement from it (idempotent)."""
+        if not self.host_job_open or not self.reporter.last_run:
+            return
+        limit_s = (self.job_limit_min or self.cfg.time_limit * 2) * 60
+        deadline = time.time() + limit_s + HOST_END_MARGIN_S
+        print('following host job', self.jid, 'until it ends (settlement counts the whole node)', flush=True)
+        while time.time() < deadline:
+            self.sleep(POLL_S)
+            try:
+                job = self.slurm.accounting(self.jid)
+            except Exception as e:
+                print('host job end: poll error (transient):', e, flush=True)
+                continue
+            if any(x in TERMINAL for x in (job.get('state') or {}).get('current') or []):
+                end_time = site_time(job, 'end')
+                if end_time:
+                    run = {k: v for k, v in self.reporter.last_run.items() if k not in ('attempt', 'logOffset')}
+                    run['endTime'] = end_time
+                    self.reporter.report(must=True, **run)
+                    print('host job ended at', end_time, flush=True)
+                return
+        print('host job did not end within its time limit + margin: settled from its step', flush=True)
 
     def end(self, job, st, rc, share=None):
         """The attempt's site job is over: its last log lines, then the one terminal report. The runner
