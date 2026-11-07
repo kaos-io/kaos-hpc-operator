@@ -7,6 +7,9 @@ controllerManager:
       repository: ""
       # Defaults to the chart's appVersion.
       tag: ""
+    # Besides these, the chart adds --runner-image, --runner-scheduling and --lane-candidates from
+    # the values below. More flags go here, for example "--site-poll-interval=15s" (default 30s,
+    # 0 = runners poll the site themselves), "--site-rest-rate=2", "--site-rest-burst=5".
     args:
       - "--leader-elect"
       - "--metrics-bind-address=:8443"
@@ -56,11 +59,16 @@ runner:
   scheduling: {}
 
 # [LANES]: site lanes (QoS, reservation) the controller tries in order for each serve-mode attempt,
-# after its time limit is known (PRD-HPC-1461 F-42, F-44). A candidate is used only if the HPCSite
-# profile lists the QoS (and the class allows it), the limit fits the QoS's maximum wall time, its
-# reservation for the class's partition is listed and not over, and the project's site user holds
-# fewer jobs in that QoS than the QoS allows. No candidate fits: the class's own QoS.
-# Empty (default): lane placement is off. Example, production pools leave it empty:
+# after its time limit is known (PRD-HPC-1461 F-42, F-44, D-68, D-69). The FIRST candidate that
+# passes is used: the HPCSite profile lists the QoS and the class may use it, the QoS is not
+# preemptible, the limit fits the QoS's maximum wall time, its reservation for the class's partition
+# is listed and not ended, and the project's site user holds fewer jobs in that QoS than the QoS
+# allows (a per-user lane semaphore). No candidate passes: the class's own QoS. The controller does
+# not ask the site for start estimates; the order is the policy. A lane the site refuses at submit
+# falls back once to the class's QoS (status.placement.refusedQOS).
+# Empty (default): lane placement is off. Under KAOS, kubecore-operator fills this per control plane
+# (HPC_LANES): "all" on the dev hub (test, then dev in the dev reservation), "reservations" in
+# production (dev reservation only, the default), "none" for off. Example:
 #   candidates:
 #     - qos: test
 #     - qos: dev

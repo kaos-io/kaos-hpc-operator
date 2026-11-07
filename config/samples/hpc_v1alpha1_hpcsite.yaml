@@ -1,9 +1,45 @@
+# One project's HPCSite. kubecore-operator renders it from the KubeProject and the site profile;
+# this sample shows the shape. Its namespace carries the label hpc.kaos.io/project: <project>.
 apiVersion: hpc.kaos.io/v1alpha1
 kind: HPCSite
 metadata:
   labels:
     app.kubernetes.io/name: kaos-hpc-operator
     app.kubernetes.io/managed-by: kustomize
-  name: hpcsite-sample
+    hpc.kaos.io/project: demo
+  name: demo-meluxina
 spec:
-  # TODO(user): Add fields here
+  site: meluxina
+  profile:
+    transport: slurmrestd
+    endpoint: https://slurmrestd.example.org
+    restVersion: v0.0.44
+    scratchRoot: /project/scratch/p200000
+    homeRoot: /home/users
+    classes:
+      - name: meluxina-gpu
+        partition: gpu
+        qos: default
+        tier: gpu
+        gpus: 4
+        maxWallTimeMinutes: 2880
+        lanes: [default, test, dev]
+    qos:
+      - {name: default, maxWallTimeMinutes: 2880}
+      - {name: test, maxWallTimeMinutes: 30, maxJobsPerUser: 1}
+      - {name: dev, maxWallTimeMinutes: 360, maxJobsPerUser: 1}
+    reservations:
+      - {name: gpudev, partition: gpu, nodeCount: 2}
+  identity:
+    user: u100001
+    account: p200000
+    sshKeySecretRef: {name: meluxina-ssh, key: id_ed25519}
+  budget:
+    source: site            # what the account has left, polled; or "share" with fixed node-hours
+    gpuNodeHours: 800
+    atLimit: block
+    warnAtPercent: 80
+  limits:
+    maxConcurrentJobs: 6
+    maxWallTimeMinutes: 2880
+  sharing: true
