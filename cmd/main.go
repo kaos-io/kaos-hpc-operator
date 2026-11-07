@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -47,6 +48,7 @@ import (
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 	"github.com/kaos-io/kaos-hpc-operator/internal/controller"
+	"github.com/kaos-io/kaos-hpc-operator/internal/idlewatch"
 	"github.com/kaos-io/kaos-hpc-operator/internal/lanes"
 	"github.com/kaos-io/kaos-hpc-operator/internal/runnerjob"
 	"github.com/kaos-io/kaos-hpc-operator/internal/sitestate"
@@ -71,6 +73,26 @@ func defaultSitePollInterval() time.Duration {
 		return d
 	}
 	return controller.DefaultSitePollInterval
+}
+
+// addIdleWatchdog adds the in-cluster GPU idle watchdog (PRD-HPC-1461 D-72, D-76). It lists pods
+// and reads Workflows through the uncached API reader and pod logs through a clientset.
+func addIdleWatchdog(mgr ctrl.Manager, cfg idlewatch.Config) error {
+	kube, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return err
+	}
+	return mgr.Add(&idlewatch.Watchdog{
+		Cfg:   cfg,
+		Pods:  &idlewatch.APIPodLister{Reader: mgr.GetAPIReader()},
+		Util:  &idlewatch.PromSource{HTTP: &http.Client{Timeout: 30 * time.Second}, Cfg: cfg},
+		Logs:  &idlewatch.KubeLogReader{Client: kube},
+		Flows: &idlewatch.ArgoWorkflowReader{Reader: mgr.GetAPIReader()},
+		Ender: &idlewatch.KubeEnder{Client: mgr.GetClient(),
+			Recorder: mgr.GetEventRecorderFor("kaos-hpc-operator-idle-watchdog")},
+		Now: time.Now,
+		Log: ctrl.Log.WithName("idle-watchdog"),
+	})
 }
 
 // nolint:gocyclo
@@ -123,6 +145,27 @@ func main() {
 	flag.DurationVar(&sweepGiveUp, "sweep-give-up", controller.DefaultSweepGiveUp,
 		"How long the controller waits for the site to confirm that a job's site job ended before it settles without proof.")
 	flag.IntVar(&siteRestBurst, "site-rest-burst", 5, "Token bucket per site profile: burst size.")
+	var idleCfg idlewatch.Config
+	flag.StringVar(&idleCfg.MetricsURL, "idle-metrics-url", os.Getenv("IDLE_METRICS_URL"),
+		"PromQL API base of the pool's metrics (vmselect). Set: the idle watchdog for in-cluster GPU steps runs "+
+			"(PRD-HPC-1461 D-72, D-76). Empty (default): it does not. Default: $IDLE_METRICS_URL.")
+	flag.StringVar(&idleCfg.Metric, "idle-gpu-metric", idlewatch.DefaultMetric,
+		"Gauge of GPU utilisation in percent per pod (GKE accelerator duty cycle; DCGM_FI_DEV_GPU_UTIL on DCGM pools).")
+	flag.StringVar(&idleCfg.NamespaceLabel, "idle-namespace-label", idlewatch.DefaultNamespaceLabel,
+		"Label of the gpu metric that holds the pod's namespace.")
+	flag.StringVar(&idleCfg.PodLabel, "idle-pod-label", idlewatch.DefaultPodLabel,
+		"Label of the gpu metric that holds the pod's name.")
+	flag.DurationVar(&idleCfg.Window, "idle-window", idlewatch.DefaultWindow,
+		"A GPU step with no GPU use and no log output for this long is ended Idle (annotation "+
+			idlewatch.AnnotationIdleTimeout+" per step; 0 there turns it off).")
+	flag.Float64Var(&idleCfg.BusyPercent, "idle-busy-percent", idlewatch.DefaultBusyPercent,
+		"GPU utilisation (percent) at or above which the GPU counts as in use.")
+	flag.DurationVar(&idleCfg.ScanInterval, "idle-scan-interval", idlewatch.DefaultScanInterval,
+		"How often the idle watchdog looks at the pool's GPU steps.")
+	flag.DurationVar(&idleCfg.ScrapeInterval, "idle-scrape-interval", idlewatch.DefaultScrapeInterval,
+		"Scrape interval of the gpu metric; with --idle-window it sets how many samples a window must hold.")
+	flag.DurationVar(&idleCfg.ConfirmTimeout, "idle-confirm-timeout", idlewatch.DefaultConfirmTimeout,
+		"Longest an ended pod waits for Argo to record the step before it is deleted anyway.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -310,6 +353,13 @@ func main() {
 			setupLog.Error(err, "unable to add the site poller")
 			os.Exit(1)
 		}
+	}
+	if idleCfg.MetricsURL != "" {
+		if err := addIdleWatchdog(mgr, idleCfg.WithDefaults()); err != nil {
+			setupLog.Error(err, "unable to add the idle watchdog")
+			os.Exit(1)
+		}
+		setupLog.Info("idle watchdog on", "window", idleCfg.WithDefaults().Window, "metrics", idleCfg.MetricsURL)
 	}
 	// +kubebuilder:scaffold:builder
 
