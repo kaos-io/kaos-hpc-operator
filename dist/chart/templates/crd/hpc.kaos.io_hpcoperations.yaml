@@ -247,6 +247,12 @@ spec:
                     format: int64
                     minimum: 0
                     type: integer
+                  message:
+                    description: |-
+                      Message is a plain sentence from the submitter about why the attempt ended, set when the controller
+                      cannot know it from the site (InsufficientQuota: what did not fit). At most 512 characters.
+                    maxLength: 512
+                    type: string
                   qos:
                     description: |-
                       QOS and Reservation are what the site job was actually submitted with. The submitter reports

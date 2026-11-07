@@ -9,6 +9,7 @@ import stat
 import urllib.request
 
 import helpers
+import pytest
 from kaos_hpc_runner import staging
 
 COMMIT = "c2" * 32
@@ -123,15 +124,17 @@ def test_a_ready_copy_is_never_listed_again(monkeypatch):
     assert lakefs.urls == [] and [w[0] for w, _ in stager.calls] == ["status"]
 
 
-def test_retry_resumes_and_no_space_gives_up(monkeypatch):
+def test_retry_resumes_and_no_space_stops_insufficient_quota(monkeypatch):
     lakefs = _LakeFS({"images/a.jpg": 1})
     stager = _Stager({"ready": False, "base": None}, stage_rcs=[75, 0])
     cfg = _twin(monkeypatch, lakefs, stager)
     assert _stage(cfg, stager)[0], "exit 75 (dropped session, busy lock) is retried"
     stager = _Stager({"ready": False, "base": None}, stage_rcs=[76, 0])
     cfg = _twin(monkeypatch, lakefs, stager)
-    assert _stage(cfg, stager)[0] == "", "no space is not retried: the job stages in-job"
-    assert sum(w[0] == "stage" for w, _ in stager.calls) == 1
+    with pytest.raises(staging.InsufficientQuota) as e:
+        _stage(cfg, stager)
+    assert "Nothing was copied" in str(e.value) and "dataset-poulaki@" in str(e.value), "AC-33: a stop, not a fallback"
+    assert sum(w[0] == "stage" for w, _ in stager.calls) == 1, "no space is not retried"
 
 
 def test_without_the_staging_key_the_job_stages_in_job(monkeypatch):

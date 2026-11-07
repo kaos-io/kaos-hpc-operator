@@ -20,6 +20,9 @@ type Tier struct {
 	SiteBound bool
 	SiteLeft  int64
 	SiteUsed  int64
+	// SiteSource is true when the budget is the site's own remainder (source site): there is no
+	// project share, so the site's limit is the only one.
+	SiteSource bool
 }
 
 // Ceiling is the most the project can still spend this period before counting bookings: the share
@@ -33,9 +36,26 @@ func (t Tier) Ceiling() int64 {
 	return c
 }
 
-// SiteBinds reports whether the site's remainder, not the share, is the lower bound.
+// SiteBinds reports whether the site's remainder, not a project share, is the limit: the budget
+// is the site's own (source site), or the site's figure is the lower bound beside a share. This
+// decides the refusal reason, SiteLimit or BudgetBlocked (AC-23).
 func (t Tier) SiteBinds() bool {
-	return t.SiteBound && t.SiteLeft-t.SiteUsed < t.Share-t.Used
+	return t.SiteSource || (t.SiteBound && t.SiteLeft-t.SiteUsed < t.Share-t.Used)
+}
+
+// Total is the most the project can spend in this period as things stand: what was used plus what
+// the ceiling still allows (the lower of the share and the site's remainder). It is the base of the
+// warning percentage (AC-22). May be zero or negative when nothing may be spent.
+func (t Tier) Total() int64 { return t.Used + t.Ceiling() }
+
+// Percent is used plus booked as a share of Total, rounded down, capped at 100 000 so a tiny total
+// cannot overflow a gauge. -1 when the total is not positive (nothing may be spent: no percentage).
+func (t Tier) Percent() int64 {
+	total := t.Total()
+	if total <= 0 {
+		return -1
+	}
+	return min((t.Used+t.Booked)*100/total, 100000)
 }
 
 // Left is the ceiling minus what is booked, never below zero.
@@ -119,6 +139,7 @@ func Holds(j *hpcv1alpha1.HPCArgoWorkflowJob) bool {
 func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 	pending map[string]hpcv1alpha1.Booking, now time.Time) Ledger {
 	start := PeriodStart(now)
+	siteSource := site.Spec.Budget.Source == hpcv1alpha1.BudgetSourceSite
 	// Source site (D-56): the share is what the site reported left at ObservedAt, which already
 	// counts every job that ended before it, so only later ends are used against it. An attempt
 	// that was running at ObservedAt is counted whole: conservative, never an overspend.
@@ -126,8 +147,8 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 		start = b.ObservedAt.UTC()
 	}
 	l := Ledger{PeriodStart: start, Tiers: map[hpcv1alpha1.Tier]Tier{
-		hpcv1alpha1.TierGPU: {Share: site.Spec.Budget.GPUNodeHours * 60},
-		hpcv1alpha1.TierCPU: {Share: site.Spec.Budget.CPUNodeHours * 60},
+		hpcv1alpha1.TierGPU: {Share: site.Spec.Budget.GPUNodeHours * 60, SiteSource: siteSource},
+		hpcv1alpha1.TierCPU: {Share: site.Spec.Budget.CPUNodeHours * 60, SiteSource: siteSource},
 	}}
 	// Source share with siteLeft: the site's remainder is an upper bound beside the share. It counts
 	// only when observed within this period, since what ended before the observation is already in

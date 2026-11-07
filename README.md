@@ -32,7 +32,9 @@ the job's class.
 | `Admitted` | It fits the share. Nodes × wall time is booked |
 | `Waiting` / `WaitingForBudget` | It fits only once running jobs settle |
 | `Waiting` / `ConcurrencyLimit` | The project is at its job limit. The job waits; it is never refused for this |
-| `Refused` / `BudgetBlocked` | It can never fit this period (policy `block`; `warn` admits it and raises an event) |
+| `Refused` / `BudgetBlocked` | It can never fit this period within the project's own share (policy `block`; `warn` admits it and raises `OverShare`) |
+| `Refused` / `SiteLimit` | It can never fit this period because the site's own monthly limit on the account is what runs out (same policy rule). A submitted job queued behind that limit (Slurm `AssocGrp...Minutes`) shows `SiteLimit` as well |
+| `Failed` / `InsufficientQuota` | Staging the dataset or image would exceed the project's scratch quota (space or files) even after evicting everything unused: the runner stops before any copy and submits nothing |
 | `Refused` / `MultiNodeUnsupported`, `WallTimeOverLimit`, `ClassNotAllowed`, `NoProject`, `NoSite` | It can never run as asked |
 
 The ledger is derived from the jobs themselves every time, never kept as a counter, and admission
@@ -48,10 +50,19 @@ another job of the same project holds is covered by that job's booking.
 
 For `share`, `used` restarts on the 1st at 00:00 UTC, with no re-render needed. A `siteLeft` observed
 before the current month is ignored (the share alone governs until the next observation). A job that
-can never fit the lower of the two is `Refused` / `BudgetBlocked` (the message says which one binds);
+can never fit the lower of the two is `Refused`: `BudgetBlocked` when the project's share is the lower,
+`SiteLimit` when the site's remainder is (a project without a share has only the site's limit, so it is
+`SiteLimit`); the message says which binds;
 one that fits it once bookings settle is `Waiting` / `WaitingForBudget`. Policy `warn` admits beyond
 it and raises the `OverShare` event. A zero in a tier means no spend in that tier. There is no org
 allocation and no cross-project sum: each project's share is its own.
+
+**Warning threshold (AC-22).** `budget.warnAtPercent` (default 80) is a percentage of what the project
+may spend this month: used plus booked, over used plus the ceiling (the lower of share left and site left).
+While a tier is at or above it, the `HPCSite` condition `BudgetWarning` is `True` (reason
+`ThresholdCrossed`), a `Warning` event `BudgetWarning` is raised when it turns true or another tier crosses,
+and `kaos_hpc_budget_warning{site,project,tier}` is 1 (`kaos_hpc_budget_percent` carries the number).
+The policy (`budget.atLimit`) decides only what happens at the limit; the warning is raised either way.
 
 See [docs/design.md](docs/design.md) for the full design.
 

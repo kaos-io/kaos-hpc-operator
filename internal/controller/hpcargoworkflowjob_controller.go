@@ -340,6 +340,13 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		r.noteIdleKill(job, site, tier, msg)
 	}
 
+	if reason == hpcv1alpha1.ReasonInsufficientQuota {
+		msg = quotaMessage(run)
+		if r.Recorder != nil {
+			r.Recorder.Event(job, corev1.EventTypeWarning, hpcv1alpha1.ReasonInsufficientQuota, msg)
+		}
+	}
+
 	v := r.recoverAttempt(job, run, attempt, attemptEnd{phase: phase, reason: reason, msg: msg})
 	phase, reason, msg, next := v.phase, v.reason, v.msg, v.next
 	if retry := timeoutRetry(job, site, run); !next && reason == hpcv1alpha1.ReasonWallTimeReached && retry != nil {
@@ -385,6 +392,8 @@ func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 		return hpcv1alpha1.PhaseFailed, "Continued"
 	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeIdle && state == "FAILED":
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonIdle
+	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeInsufficientQuota && state == "FAILED":
+		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonInsufficientQuota
 	case state == "COMPLETED" && (run.ExitCode == nil || *run.ExitCode == 0):
 		return hpcv1alpha1.PhaseSucceeded, "Completed"
 	case state == "TIMEOUT":
@@ -443,6 +452,7 @@ func (r *HPCArgoWorkflowJobReconciler) publishLedger(ctx context.Context, site *
 		metrics.SetSiteLedger(site.Spec.Site, projectOf(site), string(tier), t.Used, t.Booked, t.Left())
 	}
 	metrics.ActiveJobs.WithLabelValues(projectOf(site), site.Spec.Site).Set(float64(l.Active))
+	r.noteBudgetWarning(site, l)
 	if u, uerr := r.checkpointUsage(ctx, site); uerr == nil {
 		site.Status.Checkpoints = &u
 	}
@@ -535,4 +545,15 @@ func (r *HPCArgoWorkflowJobReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Named("hpcargoworkflowjob").
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
+}
+
+// quotaMessage is the plain sentence of an attempt that stopped before staging for want of scratch
+// quota (AC-33): what the runner said did not fit, else a generic line. Nothing was copied and
+// nothing in use was deleted.
+func quotaMessage(run *hpcv1alpha1.RunStatus) string {
+	if m := strings.TrimSpace(run.Message); m != "" {
+		return m
+	}
+	return "not enough scratch space or files left on the site for the dataset or image this step needs; " +
+		"nothing was copied and nothing in use was deleted. Free space on the project's scratch or raise its quota"
 }

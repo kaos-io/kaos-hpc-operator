@@ -32,10 +32,18 @@ const (
 
 // Reasons the controller writes in status.reason.
 const (
-	ReasonAdmitted             = "Admitted"
-	ReasonWaitingForBudget     = "WaitingForBudget"
-	ReasonConcurrencyLimit     = "ConcurrencyLimit"
-	ReasonBudgetBlocked        = "BudgetBlocked"
+	ReasonAdmitted         = "Admitted"
+	ReasonWaitingForBudget = "WaitingForBudget"
+	ReasonConcurrencyLimit = "ConcurrencyLimit"
+	ReasonBudgetBlocked    = "BudgetBlocked"
+	// ReasonSiteLimit: the site's own monthly account limit, not the project's share, stops the job
+	// (PRD-HPC-1461 AC-23). Refused at admission when the site's remainder is what the job cannot fit;
+	// shown instead of Slurm's AssocGrp*Minutes while a submitted job queues behind that limit.
+	ReasonSiteLimit = "SiteLimit"
+	// ReasonInsufficientQuota: staging the dataset or the image would exceed the project's scratch
+	// quota (space or files) even after evicting everything unused; the step stops before any copy
+	// (PRD-HPC-1461 AC-33, D-06). Terminal. The runner reports it with ExitCodeInsufficientQuota.
+	ReasonInsufficientQuota    = "InsufficientQuota"
 	ReasonMultiNodeUnsupported = "MultiNodeUnsupported"
 	ReasonWallTimeOverLimit    = "WallTimeOverLimit"
 	ReasonClassNotAllowed      = "ClassNotAllowed"
@@ -54,6 +62,9 @@ const (
 	// ExitCodeIdle is the job script's exit code for a step the idle watchdog ended. It sits in the
 	// script's own range (231-235), clear of any code a step is likely to choose.
 	ExitCodeIdle = int32(236)
+	// ExitCodeInsufficientQuota is the exit code the runner reports (state FAILED, no site job) when staging
+	// stopped for want of scratch quota. Next to ExitCodeIdle, in the same reserved range.
+	ExitCodeInsufficientQuota = int32(237)
 	// DefaultIdleTimeoutMinutes is the idle window of a step that does not set one (D-72).
 	DefaultIdleTimeoutMinutes = int32(20)
 	// ReasonRunnerFailed: the runner Job ended (backoff exhausted) without a terminal report (phase 1).
@@ -276,6 +287,11 @@ type RunStatus struct {
 	// +kubebuilder:validation:MaxLength=2048
 	// +optional
 	LastLog string `json:"lastLog,omitempty"`
+	// Message is a plain sentence from the submitter about why the attempt ended, set when the controller
+	// cannot know it from the site (InsufficientQuota: what did not fit). At most 512 characters.
+	// +kubebuilder:validation:MaxLength=512
+	// +optional
+	Message string `json:"message,omitempty"`
 	// Checkpoint is what the job reported about the checkpoint copies it keeps (D-74, D-75): the newest
 	// copy's progress and size, and the step's and project's total. Reported with every attempt end.
 	// +optional

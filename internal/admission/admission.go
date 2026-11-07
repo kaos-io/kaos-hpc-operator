@@ -72,12 +72,13 @@ func DecideFor(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, l
 	block := site.Spec.Budget.AtLimit != hpcv1alpha1.AtLimitWarn
 	if block && cost > t.Ceiling() {
 		// Can never fit this period, whatever settles: the lower of the share and the site's remainder.
-		what := "the project's share has"
+		// Whose limit it is decides the reason (AC-23): the site's monthly account limit is SiteLimit,
+		// the project's own share is BudgetBlocked.
+		reason, what := hpcv1alpha1.ReasonBudgetBlocked, "the project's share has"
 		if t.SiteBinds() {
-			what = "the site reports the account has"
+			reason, what = hpcv1alpha1.ReasonSiteLimit, "the site reports the account has"
 		}
-		return refuse(hpcv1alpha1.ReasonBudgetBlocked,
-			"needs %d %s node-minutes; %s %d left this period after what was used",
+		return refuse(reason, "needs %d %s node-minutes; %s %d left this period after what was used",
 			cost, class.Tier, what, max(t.Ceiling(), 0))
 	}
 	if m := site.Spec.Limits.MaxConcurrentJobs; m > 0 && l.Active >= m {
