@@ -116,3 +116,50 @@ func TestKeyOfIsolatesAppsOfOneNamespace(t *testing.T) {
 		}
 	}
 }
+
+// Extreme cases (docs/extreme-cases.md, section 6).
+
+func TestLearnNeverLeavesItsBoundsWhateverTheHistoryHolds(t *testing.T) {
+	// Garbage in the history: zero, negative and absurdly large run times, in every mix.
+	pool := []time.Duration{0, -time.Hour, time.Second, 3 * time.Minute, 2 * time.Hour, 10000 * time.Hour}
+	caps := Caps{Spec: 240, Class: 2880, Site: 600}
+	for a := range pool {
+		for b := range pool {
+			for c := range pool {
+				for d := range pool {
+					got, src := Learn([]time.Duration{pool[a], pool[b], pool[c], pool[d]}, caps)
+					if got < RoundMinutes || got > caps.Spec {
+						t.Fatalf("limit %d outside [%d, %d] for %v", got, RoundMinutes, caps.Spec,
+							[]time.Duration{pool[a], pool[b], pool[c], pool[d]})
+					}
+					if src == hpcv1alpha1.PlacementDeclared && got != caps.Spec {
+						t.Fatalf("declared source with limit %d, want the cap %d", got, caps.Spec)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestLearnIgnoresOneHugeOutlierWhenThereAreEnoughRuns(t *testing.T) {
+	samples := append(slow(30, 10), 24*60*time.Minute) // 30 runs of 10 min and one of a day
+	got, src := Learn(samples, Caps{Spec: 2880, Class: 2880})
+	if got != 15 || src != hpcv1alpha1.PlacementLearned {
+		t.Fatalf("got %d %s: one outlier in 31 runs is above the 95th percentile", got, src)
+	}
+}
+
+func TestLearnWithAHugeOutlierAmongFewRunsFallsBackToTheCap(t *testing.T) {
+	got, src := Learn(mins(10, 10, 24*60), Caps{Spec: 240, Class: 2880})
+	if got != 240 || src != hpcv1alpha1.PlacementDeclared {
+		t.Fatalf("got %d %s: with three runs the slowest is the p95, and it is over the cap", got, src)
+	}
+}
+
+func TestRetryNeverExceedsAnyCapAndNeverShrinks(t *testing.T) {
+	for _, c := range []Caps{{Spec: 240}, {Spec: 240, Class: 100}, {Spec: 240, Site: 30}, {Spec: 10, Class: 2880}} {
+		if got := Retry(c); got > c.Spec || got <= 0 {
+			t.Fatalf("Retry(%+v) = %d", c, got)
+		}
+	}
+}

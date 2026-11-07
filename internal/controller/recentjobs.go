@@ -12,6 +12,9 @@ import (
 	"github.com/kaos-io/kaos-hpc-operator/internal/admission"
 )
 
+// siteStateRunning is Slurm's state of a job that holds its nodes.
+const siteStateRunning = "RUNNING"
+
 // Recent jobs (PRD-HPC-1461 F-43, AC-76): the console reads a bounded list of the project's jobs
 // from HPCSite.status, because the hub holds no pool kubeconfig. It is built from the jobs the
 // ledger already read, so it costs no site call.
@@ -111,7 +114,7 @@ func recentJobOf(j *hpcv1alpha1.HPCArgoWorkflowJob) hpcv1alpha1.RecentJob {
 			rj.QOS, rj.Reservation = run.QOS, run.Reservation
 		}
 	}
-	if !st.Phase.Terminal() && rj.SiteState != "RUNNING" && rj.HostSiteJobID == "" {
+	if !st.Phase.Terminal() && rj.SiteState != siteStateRunning && rj.HostSiteJobID == "" {
 		rj.PendingReason = pendingReasonOf(st)
 	}
 	rj.BookedNodeMinutes = bookedOf(j)

@@ -87,6 +87,7 @@ func main() {
 	var sitePollInterval time.Duration
 	var siteRestRate float64
 	var siteRestBurst int
+	var siteMissingGrace, sweepGiveUp time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -117,6 +118,10 @@ func main() {
 			"0 turns the poller off and runners poll the site themselves. Default: $SITE_POLL_INTERVAL or 30s.")
 	flag.Float64Var(&siteRestRate, "site-rest-rate", 2,
 		"Token bucket per site profile: REST calls per second the controller may make.")
+	flag.DurationVar(&siteMissingGrace, "site-missing-grace", controller.DefaultSiteMissingGrace,
+		"How long a booked job survives its HPCSite (or project label) being gone before it is cancelled.")
+	flag.DurationVar(&sweepGiveUp, "sweep-give-up", controller.DefaultSweepGiveUp,
+		"How long the controller waits for the site to confirm that a job's site job ended before it settles without proof.")
 	flag.IntVar(&siteRestBurst, "site-rest-burst", 5, "Token bucket per site profile: burst size.")
 	opts := zap.Options{
 		Development: true,
@@ -284,6 +289,8 @@ func main() {
 		RunnerImage:      runnerImage,
 		RunnerScheduling: scheduling,
 		LaneCandidates:   candidates,
+		SiteMissingGrace: siteMissingGrace,
+		SweepGiveUp:      sweepGiveUp,
 	}
 	if err := jobs.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HPCArgoWorkflowJob")

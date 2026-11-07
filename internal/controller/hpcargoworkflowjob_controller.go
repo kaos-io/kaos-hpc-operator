@@ -73,6 +73,10 @@ type HPCArgoWorkflowJobReconciler struct {
 	// LaneCandidates are the lanes (QoS, reservation) tried in order for serve-mode attempts
 	// (PRD-HPC-1461 F-42, F-44). Empty: every attempt uses its class's own QoS, as before.
 	LaneCandidates []lanes.Candidate
+	// SiteMissingGrace is how long a booked job survives its HPCSite being gone (DefaultSiteMissingGrace).
+	SiteMissingGrace time.Duration
+	// SweepGiveUp is how long an orphan sweep waits for the site's confirmation (DefaultSweepGiveUp).
+	SweepGiveUp time.Duration
 
 	mu          sync.Mutex
 	pending     map[string]hpcv1alpha1.Booking // by job UID
@@ -120,6 +124,11 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, r.resettleHostEnd(ctx, &job)
 	}
 
+	if serve && job.Status.Sweep != nil && job.Status.Booking != nil {
+		// The attempt is ending but the site has not confirmed it: only the sweep acts (no normal settlement).
+		site, _, _, _ = r.siteOf(ctx, &job)
+		return r.continueSweep(ctx, &job, site)
+	}
 	var reason, msg string
 	var err error
 	site, reason, msg, err = r.siteOf(ctx, &job)
@@ -127,9 +136,18 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 	if site == nil {
+		if serve && job.Status.Booking != nil {
+			// Already admitted: a site job may be queued or running under this booking. Refusing it here would
+			// drop the booking while the site job lives on, unsettled and unwatched. A transient loss (a GitOps
+			// prune and re-create) must not kill a training either: wait out the grace period, then cancel.
+			return r.siteMissing(ctx, &job, msg)
+		}
 		return ctrl.Result{}, r.setPhase(ctx, &job, hpcv1alpha1.PhaseRefused, reason, msg, nil)
 	}
 
+	if err := r.siteBack(ctx, &job); err != nil {
+		return ctrl.Result{}, err
+	}
 	switch {
 	case job.Status.Booking != nil || r.isPending(string(job.UID)):
 		// Admitted already (the cache may lag behind our own write): follow it.
@@ -145,15 +163,7 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{RequeueAfter: ContinueResync}, nil
 		}
 	default:
-		res, err := r.judge(ctx, &job, site)
-		if err != nil || res.RequeueAfter > 0 {
-			if err == nil {
-				// A waiting job is listed (with its reason) in the site's recentJobs now, not at the
-				// next 10-minute resync (F-43).
-				if perr := r.publishLedger(ctx, site); perr != nil {
-					log.Error(perr, "publishing the ledger", "site", client.ObjectKeyFromObject(site))
-				}
-			}
+		if res, done, err := r.judgeAndPublish(ctx, &job, site); done {
 			return res, err
 		}
 	}
@@ -174,6 +184,24 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: ServeResync}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// judgeAndPublish judges a new or waiting job. A job that is not admitted yet (or failed) ends this
+// reconcile; a waiting one is listed (with its reason) in the site's recentJobs now, not at the next
+// 10-minute resync (F-43).
+func (r *HPCArgoWorkflowJobReconciler) judgeAndPublish(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
+	site *hpcv1alpha1.HPCSite) (ctrl.Result, bool, error) {
+	res, err := r.judge(ctx, job, site)
+	if err != nil {
+		return res, true, err
+	}
+	if res.RequeueAfter == 0 {
+		return res, false, nil
+	}
+	if perr := r.publishLedger(ctx, site); perr != nil {
+		logf.FromContext(ctx).Error(perr, "publishing the ledger", "site", client.ObjectKeyFromObject(site))
+	}
+	return res, true, nil
 }
 
 // siteOf resolves the job's project from its namespace label and the project's HPCSite that offers

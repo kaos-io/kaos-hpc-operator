@@ -125,12 +125,14 @@ func samplesOf(history []*hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) []time.
 }
 
 // runTime is start to end of the job's final attempt, when the report is current and both times
-// are valid (the rules of settle: set, after 2000, not in the future, end not before start).
+// are valid (the rules of settle: set, after 2000, not in the future) and the run took time (end after start).
 func runTime(run *hpcv1alpha1.RunStatus, attempt int32, now time.Time) (time.Duration, bool) {
 	if run == nil || !current(run, attempt) || !validSiteTime(run.StartTime, now) || !validSiteTime(run.EndTime, now) {
 		return 0, false
 	}
-	if d := run.EndTime.Sub(run.StartTime.Time); d >= 0 {
+	// A run of no length (start == end, both bogus or sub-second) is not a sample: three of them would
+	// teach the 15-minute floor to a step that runs for hours.
+	if d := run.EndTime.Sub(run.StartTime.Time); d > 0 {
 		return d, true
 	}
 	return 0, false

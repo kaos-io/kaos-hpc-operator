@@ -58,6 +58,8 @@ const (
 	DefaultIdleTimeoutMinutes = int32(20)
 	// ReasonRunnerFailed: the runner Job ended (backoff exhausted) without a terminal report (phase 1).
 	ReasonRunnerFailed = "RunnerFailed"
+	// ReasonSiteMissing is the reason while the job's HPCSite is gone and the grace period runs.
+	ReasonSiteMissing = "HPCSiteMissing"
 	// ReasonInvalidSpec: the spec asks for something the API does not allow (phase 1: env outside
 	// the allowlist). Terminal, with the phase Refused.
 	ReasonInvalidSpec = "InvalidSpec"
@@ -427,10 +429,31 @@ type HPCArgoWorkflowJobStatus struct {
 	// Runner is the runner Job of the current attempt (serve mode).
 	// +optional
 	Runner *RunnerRef `json:"runner,omitempty"`
+	// SiteMissingSince is when the controller first found the job's HPCSite (or its project label) gone while
+	// the job holds a booking; cleared when it is back. After the grace period the job is cancelled.
+	// +optional
+	SiteMissingSince *metav1.Time `json:"siteMissingSince,omitempty"`
+	// Sweep is set while the attempt is ending but the site has not yet confirmed that its job is over
+	// (the runner Job failed or was deleted, or a cancel was requested): the booking is kept until it has.
+	// +optional
+	Sweep *SweepStatus `json:"sweep,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// SweepStatus is the pending end of an attempt whose site job is not yet proven over (PRD-HPC-1461 AC-08).
+type SweepStatus struct {
+	// Phase, Reason and Message are what the job becomes once the site has confirmed the end.
+	Phase   Phase  `json:"phase"`
+	Reason  string `json:"reason"`
+	Message string `json:"message,omitempty"`
+	// Since is when the sweep began; the give-up time counts from it.
+	Since metav1.Time `json:"since"`
+	// Launches is how many cancel-only runner Jobs were started for it.
+	// +optional
+	Launches int32 `json:"launches,omitempty"`
 }
 
 // +kubebuilder:object:root=true

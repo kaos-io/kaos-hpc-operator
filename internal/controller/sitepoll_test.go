@@ -188,7 +188,7 @@ func TestShouldNotCallTheSiteWithoutAToken(t *testing.T) {
 func TestShouldDropAnObservationOfASiteJobTheRunnerHasReplaced(t *testing.T) {
 	objs := append(pollSite("hpc", "https://s.example"), pollJob("env", "j", "hpc", "1"))
 	r := newPollRig(t, objs...)
-	obs := &hpcv1alpha1.SiteObservation{JobID: "OLD", State: "RUNNING", ObservedAt: metav1.NewTime(r.now)}
+	obs := &hpcv1alpha1.SiteObservation{JobID: "OLD", State: siteStateRunning, ObservedAt: metav1.NewTime(r.now)}
 	if err := r.poller.write(context.Background(), client.ObjectKey{Namespace: "env", Name: "j"}, obs); err != nil {
 		t.Fatal(err)
 	}

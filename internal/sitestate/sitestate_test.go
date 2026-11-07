@@ -221,3 +221,68 @@ func TestShouldRefuseAnIDThatIsNotDigits(t *testing.T) {
 		t.Fatalf("err %v", err)
 	}
 }
+
+// Extreme cases (docs/extreme-cases.md, section 7).
+
+func TestBucketShouldHoldTheRateWhenManyPollersWaitAtOnce(t *testing.T) {
+	const waiters, rate = 21, 200.0 // burst 1: the 21 calls need at least 20 refills of 1/200 s
+	b := NewBucket(rate, 1)
+	var wg sync.WaitGroup
+	t0 := time.Now()
+	for range waiters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := b.Wait(context.Background()); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if min := time.Duration(float64(waiters-1) / rate * float64(time.Second)); time.Since(t0) < min-5*time.Millisecond {
+		t.Fatalf("%d concurrent calls passed in %v, the rate allows no less than %v", waiters, time.Since(t0), min)
+	}
+}
+
+func TestShouldFailTheWholePollWhenTheSiteNeverAnswersAndStopAtTheContext(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	t0 := time.Now()
+	got, err := (&Client{HTTP: srv.Client()}).States(ctx, site(srv.URL), &noWait{}, []string{"1"})
+	if err == nil || got != nil || time.Since(t0) > 5*time.Second {
+		t.Fatalf("got %v, %v after %v; want an error and no map, quickly", got, err, time.Since(t0))
+	}
+}
+
+func TestShouldDiscardEverythingWhenALaterChunkFails(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer((&recorder{}).handler(func(ids []string) (int, string) {
+		calls++
+		if calls == 2 {
+			return 503, ""
+		}
+		var parts []string
+		for _, id := range ids {
+			parts = append(parts, fmt.Sprintf(`{"job_id":"%s","state":["RUNNING"]}`, id))
+		}
+		return 200, `{"jobs":[` + strings.Join(parts, ",") + `]}`
+	}))
+	defer srv.Close()
+	var ids []string
+	for i := 1; i <= 250; i++ {
+		ids = append(ids, fmt.Sprint(i))
+	}
+	got, err := (&Client{HTTP: srv.Client(), Chunk: 100}).States(context.Background(), site(srv.URL), &noWait{}, ids)
+	if err == nil || got != nil {
+		t.Fatalf("a partial picture was returned: %d jobs, %v", len(got), err)
+	}
+}

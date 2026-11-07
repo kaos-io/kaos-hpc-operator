@@ -147,7 +147,7 @@ func TestRecentJobOfPendingReasonOnlyWhileQueued(t *testing.T) {
 	if got := recentJobOf(&j).PendingReason; got != "Priority" {
 		t.Fatalf("queued job: got %q, want the controller's reading", got)
 	}
-	j.Status.Run.State = "RUNNING"
+	j.Status.Run.State = siteStateRunning
 	if got := recentJobOf(&j).PendingReason; got != "" {
 		t.Fatalf("running job: got %q, want none", got)
 	}

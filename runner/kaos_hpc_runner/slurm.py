@@ -10,6 +10,10 @@ import urllib.request
 from . import settings
 
 
+# Tries of one cancel (2 + 4 + 8 + 16 s of backoff between them: inside the runner pod's 60 s grace).
+CANCEL_TRIES = 5
+
+
 class Slurm:
     def __init__(self, cfg, token_file=settings.TOKEN_FILE):
         self.cfg, self.token_file = cfg, token_file
@@ -52,13 +56,28 @@ class Slurm:
                 return j.get('job_id')
         return None
 
-    def cancel(self, jid):
-        try:
-            urllib.request.urlopen(urllib.request.Request(
-                self.cfg.api + '/job/' + str(jid), headers=self.hdrs(), method='DELETE'), timeout=30)
-            print('cancelled job', jid, flush=True)
-        except Exception as e:
-            print('cancel failed:', e, flush=True)
+    def cancel(self, jid, sleep=time.sleep):
+        """DELETE the site job; retried with backoff while the site errs (PRD D-20: a cancel is retried until
+        the site confirms; one 503 during an outage must not leave the job alive). True when the site accepted
+        it or no longer knows the job (404); False when every try failed."""
+        for n in range(CANCEL_TRIES):
+            try:
+                urllib.request.urlopen(urllib.request.Request(
+                    self.cfg.api + '/job/' + str(jid), headers=self.hdrs(), method='DELETE'), timeout=30)
+                print('cancelled job', jid, flush=True)
+                return True
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    print('cancel: the site does not know job', jid, flush=True)
+                    return True
+                err = e
+            except Exception as e:
+                err = e
+            print('cancel failed (%d/%d): %s' % (n + 1, CANCEL_TRIES, err), flush=True)
+            if n + 1 < CANCEL_TRIES:
+                sleep(2 ** (n + 1))
+        print('cancel gave up: job', jid, 'may still be alive at the site', flush=True)
+        return False
 
     def submit(self, body):
         """POST a job: the parsed response. A refusal is raised as Refused with the site's reason."""

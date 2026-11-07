@@ -54,6 +54,7 @@ class FakeSlurm:
 
     def cancel(self, jid):
         self.cancelled.append(str(jid))
+        return True
 
     def submit(self, body):
         self.next_id += 1

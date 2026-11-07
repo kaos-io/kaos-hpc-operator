@@ -562,6 +562,12 @@ spec:
                 - name
                 - namespace
                 type: object
+              siteMissingSince:
+                description: |-
+                  SiteMissingSince is when the controller first found the job's HPCSite (or its project label) gone while
+                  the job holds a booking; cleared when it is back. After the grace period the job is cancelled.
+                format: date-time
+                type: string
               siteObservation:
                 description: |-
                   SiteObservation is the controller's batched reading of the site job's state (D-36). Optional:
@@ -601,6 +607,43 @@ spec:
                 required:
                 - jobID
                 - observedAt
+                type: object
+              sweep:
+                description: |-
+                  Sweep is set while the attempt is ending but the site has not yet confirmed that its job is over
+                  (the runner Job failed or was deleted, or a cancel was requested): the booking is kept until it has.
+                properties:
+                  launches:
+                    description: Launches is how many cancel-only runner Jobs were
+                      started for it.
+                    format: int32
+                    type: integer
+                  message:
+                    type: string
+                  phase:
+                    description: Phase, Reason and Message are what the job becomes
+                      once the site has confirmed the end.
+                    enum:
+                    - Pending
+                    - Waiting
+                    - Refused
+                    - Admitted
+                    - Running
+                    - Succeeded
+                    - Failed
+                    - Cancelled
+                    type: string
+                  reason:
+                    type: string
+                  since:
+                    description: Since is when the sweep began; the give-up time counts
+                      from it.
+                    format: date-time
+                    type: string
+                required:
+                - phase
+                - reason
+                - since
                 type: object
             type: object
         required:
