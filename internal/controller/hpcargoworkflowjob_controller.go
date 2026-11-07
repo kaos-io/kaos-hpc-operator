@@ -147,6 +147,13 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 	default:
 		res, err := r.judge(ctx, &job, site)
 		if err != nil || res.RequeueAfter > 0 {
+			if err == nil {
+				// A waiting job is listed (with its reason) in the site's recentJobs now, not at the
+				// next 10-minute resync (F-43).
+				if perr := r.publishLedger(ctx, site); perr != nil {
+					log.Error(perr, "publishing the ledger", "site", client.ObjectKeyFromObject(site))
+				}
+			}
 			return res, err
 		}
 	}
@@ -383,9 +390,15 @@ func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 
 // ledgerOf computes the site's ledger from every job booked against it.
 func (r *HPCArgoWorkflowJobReconciler) ledgerOf(ctx context.Context, site *hpcv1alpha1.HPCSite) (ledger.Ledger, error) {
+	l, _, err := r.ledgerAndJobs(ctx, site)
+	return l, err
+}
+
+// ledgerAndJobs is ledgerOf that also returns the jobs it read, so the publisher can list them.
+func (r *HPCArgoWorkflowJobReconciler) ledgerAndJobs(ctx context.Context, site *hpcv1alpha1.HPCSite) (ledger.Ledger, []hpcv1alpha1.HPCArgoWorkflowJob, error) {
 	var jobs hpcv1alpha1.HPCArgoWorkflowJobList
 	if err := r.List(ctx, &jobs); err != nil {
-		return ledger.Ledger{}, err
+		return ledger.Ledger{}, nil, err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -395,12 +408,16 @@ func (r *HPCArgoWorkflowJobReconciler) ledgerOf(ctx context.Context, site *hpcv1
 			delete(r.pendingLane, string(jobs.Items[i].UID))
 		}
 	}
-	return ledger.Compute(site, jobs.Items, r.pending, r.now()), nil
+	return ledger.Compute(site, jobs.Items, r.pending, r.now()), jobs.Items, nil
 }
 
 // publishLedger writes the site's ledger to its status, for people and the hub to read (F-30).
 func (r *HPCArgoWorkflowJobReconciler) publishLedger(ctx context.Context, site *hpcv1alpha1.HPCSite) error {
-	l, err := r.ledgerOf(ctx, site)
+	l, jobs, err := r.ledgerAndJobs(ctx, site)
+	if err != nil {
+		return err
+	}
+	recent, err := r.recentJobsOf(ctx, site, jobs)
 	if err != nil {
 		return err
 	}
@@ -410,6 +427,7 @@ func (r *HPCArgoWorkflowJobReconciler) publishLedger(ctx context.Context, site *
 	site.Status.ActiveJobs = l.Active
 	site.Status.QueuedJobs = l.Queued
 	site.Status.RunningJobs = l.Running
+	site.Status.RecentJobs = recent
 	for tier, dst := range map[hpcv1alpha1.Tier]**hpcv1alpha1.TierLedger{
 		hpcv1alpha1.TierGPU: &site.Status.GPU, hpcv1alpha1.TierCPU: &site.Status.CPU} {
 		t := l.Tiers[tier]
