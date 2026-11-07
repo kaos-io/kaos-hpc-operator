@@ -120,7 +120,7 @@ func TestRecentJobOfCopiesLaneLimitAndSpend(t *testing.T) {
 	j.Status.Run = &hpcv1alpha1.RunStatus{SiteJobID: "77", State: "FAILED", StartTime: &start, EndTime: &end, QOS: "default"}
 	j.Status.Attempts = []hpcv1alpha1.AttemptRecord{{SettledNodeMinutes: 30}, {SettledNodeMinutes: 12}}
 
-	rj := recentJobOf(&j)
+	rj := recentJobOf(&j, time.Now())
 	if rj.Workflow != "wf-1" || rj.Step != "train" || rj.Reason != "Idle" || rj.Attempt != 2 {
 		t.Fatalf("identity fields: %+v", rj)
 	}
@@ -144,11 +144,25 @@ func TestRecentJobOfPendingReasonOnlyWhileQueued(t *testing.T) {
 	j.Status.PendingReason = "Resources"
 	j.Status.SiteObservation = &hpcv1alpha1.SiteObservation{JobID: "1", State: "PENDING", PendingReason: "Priority"}
 	j.Status.Run = &hpcv1alpha1.RunStatus{SiteJobID: "1", State: "PENDING"}
-	if got := recentJobOf(&j).PendingReason; got != "Priority" {
+	if got := recentJobOf(&j, time.Now()).PendingReason; got != "Priority" {
 		t.Fatalf("queued job: got %q, want the controller's reading", got)
 	}
 	j.Status.Run.State = siteStateRunning
-	if got := recentJobOf(&j).PendingReason; got != "" {
+	if got := recentJobOf(&j, time.Now()).PendingReason; got != "" {
 		t.Fatalf("running job: got %q, want none", got)
+	}
+}
+
+func TestRecentJobShouldDropTheSitesNeverStartedSentinel(t *testing.T) {
+	never := metav1.NewTime(time.Unix(4294967294, 0)) // Slurm NO_VAL: year 2106
+	start := metav1.NewTime(time.Now().Add(-time.Hour))
+	j := hpcv1alpha1.HPCArgoWorkflowJob{}
+	j.Status.Run = &hpcv1alpha1.RunStatus{StartTime: &never, EndTime: &never}
+	if rj := recentJobOf(&j, time.Now()); rj.StartTime != nil || rj.EndTime != nil {
+		t.Fatalf("sentinel times copied: %v %v", rj.StartTime, rj.EndTime)
+	}
+	j.Status.Run = &hpcv1alpha1.RunStatus{StartTime: &start}
+	if rj := recentJobOf(&j, time.Now()); rj.StartTime == nil || !rj.StartTime.Equal(&start) {
+		t.Fatalf("a real start was dropped: %v", rj.StartTime)
 	}
 }

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,8 +48,9 @@ func (r *HPCArgoWorkflowJobReconciler) recentJobsOf(ctx context.Context, site *h
 		mine = mine[:hpcv1alpha1.RecentJobsMax]
 	}
 	out := make([]hpcv1alpha1.RecentJob, 0, len(mine))
+	now := r.now()
 	for _, j := range mine {
-		out = append(out, recentJobOf(j))
+		out = append(out, recentJobOf(j, now))
 	}
 	if len(out) == 0 {
 		return nil, nil
@@ -91,7 +93,7 @@ func jobOfSite(j *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, pro
 }
 
 // recentJobOf copies the console-relevant fields of one job.
-func recentJobOf(j *hpcv1alpha1.HPCArgoWorkflowJob) hpcv1alpha1.RecentJob {
+func recentJobOf(j *hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) hpcv1alpha1.RecentJob {
 	st := &j.Status
 	rj := hpcv1alpha1.RecentJob{
 		Name: j.Name, Namespace: j.Namespace, Step: j.Spec.StepName,
@@ -109,7 +111,7 @@ func recentJobOf(j *hpcv1alpha1.HPCArgoWorkflowJob) hpcv1alpha1.RecentJob {
 	}
 	if run := st.Run; run != nil {
 		rj.SiteState, rj.SiteJobID, rj.HostSiteJobID = run.State, run.SiteJobID, run.HostSiteJobID
-		rj.StartTime, rj.EndTime = copyTime(run.StartTime), copyTime(run.EndTime)
+		rj.StartTime, rj.EndTime = siteTime(run.StartTime, now), siteTime(run.EndTime, now)
 		if run.QOS != "" { // what the site job was actually submitted with
 			rj.QOS, rj.Reservation = run.QOS, run.Reservation
 		}
@@ -140,8 +142,10 @@ func bookedOf(j *hpcv1alpha1.HPCArgoWorkflowJob) int64 {
 	return int64(j.EffectiveWallMinutes()) * int64(max(j.Spec.Nodes, 1))
 }
 
-func copyTime(t *metav1.Time) *metav1.Time {
-	if t == nil {
+// siteTime copies a site-reported time for the console, or nil when the site reported none it can
+// use (validSiteTime: Slurm's NO_VAL for a never-started job is year 2106 and must never show as a start).
+func siteTime(t *metav1.Time, now time.Time) *metav1.Time {
+	if !validSiteTime(t, now) {
 		return nil
 	}
 	c := *t
