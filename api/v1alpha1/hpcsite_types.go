@@ -259,9 +259,17 @@ type HPCSiteStatus struct {
 	GPU *TierLedger `json:"gpu,omitempty"`
 	// +optional
 	CPU *TierLedger `json:"cpu,omitempty"`
-	// ActiveJobs is the number of admitted jobs that have not ended.
+	// ActiveJobs is the number of admitted jobs that have not ended (= queuedJobs + runningJobs).
 	// +optional
 	ActiveJobs int32 `json:"activeJobs,omitempty"`
+	// QueuedJobs is the number of active jobs the site has not started yet: admitted, submitted
+	// or pending in the site's queue.
+	// +optional
+	QueuedJobs int32 `json:"queuedJobs,omitempty"`
+	// RunningJobs is the number of active jobs the site reports RUNNING, plus guests running on a
+	// running host's node.
+	// +optional
+	RunningJobs int32 `json:"runningJobs,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional

@@ -85,8 +85,9 @@ func TestAGuestOnASharedNodeHoldsNothing(t *testing.T) {
 		j.Status.Run = &hpcv1alpha1.RunStatus{HostSiteJobID: "5425070"}
 	})}
 	l := Compute(theSite(), jobs, nil, now)
-	if g := l.Tiers[hpcv1alpha1.TierGPU]; g.Booked != 0 || l.Active != 0 {
-		t.Fatalf("the host's booking covers the node: got booked %d active %d", g.Booked, l.Active)
+	if g := l.Tiers[hpcv1alpha1.TierGPU]; g.Booked != 0 || l.Active != 1 || l.Running != 1 || l.Queued != 0 {
+		t.Fatalf("the host's booking covers the node, the guest is a running job: got booked %d active %d running %d queued %d",
+			g.Booked, l.Active, l.Running, l.Queued)
 	}
 }
 
@@ -166,5 +167,43 @@ func TestComputeClampsGarbageAttempts(t *testing.T) {
 	only := Compute(theSite(), jobs[:2], nil, now)
 	if only.Tiers[hpcv1alpha1.TierGPU].Used != 0 {
 		t.Fatalf("used went negative or nonzero: %d", only.Tiers[hpcv1alpha1.TierGPU].Used)
+	}
+}
+
+func withState(state string) func(*hpcv1alpha1.HPCArgoWorkflowJob) {
+	return func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+		j.Status.Attempt = 1
+		j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "1", State: state}
+	}
+}
+
+func TestSubmittedJobsAreQueuedUntilTheSiteSaysRunning(t *testing.T) {
+	jobs := []hpcv1alpha1.HPCArgoWorkflowJob{
+		booked("admitted", hpcv1alpha1.PhaseAdmitted, 60, nil),
+		booked("submitted-pending", hpcv1alpha1.PhaseRunning, 60, withState("PENDING")),
+		booked("submitted-no-state", hpcv1alpha1.PhaseRunning, 60, withState("")),
+		booked("running", hpcv1alpha1.PhaseRunning, 60, withState("RUNNING")),
+		booked("stale-report", hpcv1alpha1.PhaseRunning, 60, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+			j.Status.Attempt = 2
+			j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, State: "RUNNING"} // earlier attempt's report
+		}),
+		booked("guest", hpcv1alpha1.PhaseRunning, 60, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+			j.Status.Run = &hpcv1alpha1.RunStatus{HostSiteJobID: "9"}
+		}),
+		booked("done", hpcv1alpha1.PhaseSucceeded, 60, withState("COMPLETED")),
+	}
+	pending := map[string]hpcv1alpha1.Booking{
+		"x": {SiteName: "meluxina", SiteNamespace: "proj-a-hpc", Tier: hpcv1alpha1.TierGPU, NodeMinutes: 10},
+	}
+	l := Compute(theSite(), jobs, pending, now)
+	if l.Queued != 5 || l.Running != 2 || l.Active != 7 {
+		t.Fatalf("got queued %d running %d active %d, want 5, 2, 7", l.Queued, l.Running, l.Active)
+	}
+}
+
+func TestNoJobsMeansNoCounts(t *testing.T) {
+	l := Compute(theSite(), nil, nil, now)
+	if l.Queued != 0 || l.Running != 0 || l.Active != 0 {
+		t.Fatalf("got %+v", l)
 	}
 }

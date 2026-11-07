@@ -398,6 +398,8 @@ func (r *HPCArgoWorkflowJobReconciler) publishLedger(ctx context.Context, site *
 	start := metav1.NewTime(l.PeriodStart)
 	site.Status.PeriodStart = &start
 	site.Status.ActiveJobs = l.Active
+	site.Status.QueuedJobs = l.Queued
+	site.Status.RunningJobs = l.Running
 	for tier, dst := range map[hpcv1alpha1.Tier]**hpcv1alpha1.TierLedger{
 		hpcv1alpha1.TierGPU: &site.Status.GPU, hpcv1alpha1.TierCPU: &site.Status.CPU} {
 		t := l.Tiers[tier]

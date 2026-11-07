@@ -29,8 +29,48 @@ func (t Tier) Left() int64 {
 type Ledger struct {
 	PeriodStart time.Time
 	Tiers       map[hpcv1alpha1.Tier]Tier
-	// Active is the number of jobs holding a booking (admitted or running, not ended).
+	// Active is the number of jobs holding a booking or running as a guest: Queued + Running.
 	Active int32
+	// Queued is the number of active jobs the site has not started: admitted, submitted or pending.
+	Queued int32
+	// Running is the number of active jobs the site reports RUNNING, plus guests on a running host.
+	Running int32
+}
+
+// SiteStateRunning is the scheduler state of a site job that has started.
+const SiteStateRunning = "RUNNING"
+
+// count adds one active job to the ledger, as running or queued.
+func (l *Ledger) count(running bool) {
+	l.Active++
+	if running {
+		l.Running++
+	} else {
+		l.Queued++
+	}
+}
+
+// isRunning reports whether the job's site job has started. Phase Running only means the job was
+// submitted, so the site's own state decides; a guest runs on its host's node by definition.
+func isRunning(j *hpcv1alpha1.HPCArgoWorkflowJob) bool {
+	r := j.Status.Run
+	if r == nil {
+		return false
+	}
+	if r.HostSiteJobID != "" {
+		return true
+	}
+	// A report without an attempt number counts only for attempt 1 (as the controller's current()).
+	current := r.Attempt == j.Status.Attempt || (r.Attempt == 0 && j.Status.Attempt <= 1)
+	return current && r.State == SiteStateRunning
+}
+
+// holdsOrGuest reports whether the job is active: it holds a booking, or is a guest on a host.
+func holdsOrGuest(j *hpcv1alpha1.HPCArgoWorkflowJob) bool {
+	if j.Status.Booking == nil || j.Status.Phase.Terminal() {
+		return false
+	}
+	return j.Status.Phase == hpcv1alpha1.PhaseAdmitted || j.Status.Phase == hpcv1alpha1.PhaseRunning
 }
 
 // PeriodStart is the start of the budget period containing now: the calendar month in UTC (D-11).
@@ -90,7 +130,10 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 				t := l.Tiers[b.Tier]
 				t.Booked += b.NodeMinutes
 				l.Tiers[b.Tier] = t
-				l.Active++
+			}
+			// A guest holds no booking of its own (its host's covers the node) but is still active.
+			if holdsOrGuest(j) {
+				l.count(isRunning(j))
 			}
 		}
 	}
@@ -101,7 +144,7 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 		t := l.Tiers[b.Tier]
 		t.Booked += b.NodeMinutes
 		l.Tiers[b.Tier] = t
-		l.Active++
+		l.count(false) // booked in this process, not yet submitted
 	}
 	return l
 }
