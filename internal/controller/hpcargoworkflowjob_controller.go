@@ -127,6 +127,13 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 	if site == nil {
+		if serve && job.Status.Booking != nil {
+			// Already admitted: a site job may be queued or running under this booking. Refusing it here would
+			// drop the booking while the site job lives on, unsettled and unwatched. Stop it like any other
+			// cancel (D-04): the runner Job's SIGTERM cancels the site job, the attempt is settled.
+			res, err := r.cancel(ctx, &job, "its HPCSite binding is gone ("+msg+")")
+			return res, err
+		}
 		return ctrl.Result{}, r.setPhase(ctx, &job, hpcv1alpha1.PhaseRefused, reason, msg, nil)
 	}
 

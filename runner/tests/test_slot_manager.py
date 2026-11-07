@@ -35,7 +35,7 @@ class Node:
     """One MeluXina node with a fake Slurm and the slot manager as host job 100."""
 
     def __init__(self, tmp_path, guests, own_body="echo own $KAOS_JOB_ID $CUDA_VISIBLE_DEVICES > $OUT/own\nexit 0\n",
-                 mem_mb=491520, extra_env=None):
+                 mem_mb=491520, extra_env=None, host_secs=3600):
         self.tmp = tmp_path
         self.out = tmp_path / "out"
         self.out.mkdir()
@@ -46,8 +46,8 @@ class Node:
             (bindir / tool).symlink_to(ROOT / "tests" / "fakeslurm.py")
         (ROOT / "tests" / "fakeslurm.py").chmod(0o755)
         jobs = {"100": _job("kaos-%s-wfhost-train" % SCOPE, own_body, state="RUNNING", comment="kaos-commit=aaaaaaa1")}
-        # A real host ends at its own time limit: one hour from now.
-        jobs["100"]["end"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() + 3600))
+        # A real host ends at its own time limit: one hour from now (host_secs; the test lane is 30 min).
+        jobs["100"]["end"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() + host_secs))
         jobs.update(guests)
         for j in jobs.values():   # like the runner's scripts: every input is exported in the script
             head, sep, rest = j["script"].partition("set +e\n")
