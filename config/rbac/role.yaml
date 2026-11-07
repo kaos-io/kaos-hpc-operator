@@ -24,6 +24,13 @@ rules:
   - ""
   resources:
   - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resourceNames:
+  - meluxina-jwt
+  resources:
   - secrets
   verbs:
   - get
