@@ -52,7 +52,8 @@ func TestShouldAskOnceWithAnExplicitStringJobIDListAndTheSiteIdentity(t *testing
 	if len(rec.calls) != 1 || w.n != 1 {
 		t.Fatalf("calls %v, waits %d, want exactly one", rec.calls, w.n)
 	}
-	if want := "/slurm/v0.0.44/jobs/state?job_id=11%2C12"; rec.calls[0] != want {
+	// A plain comma list: slurmrestd does not decode %2C (HTTP 422 live on MeluXina, 2026-11-07).
+	if want := "/slurm/v0.0.44/jobs/state?job_id=11,12"; rec.calls[0] != want {
 		t.Fatalf("request %q, want %q", rec.calls[0], want)
 	}
 	if rec.hdr.Get("X-SLURM-USER-NAME") != "u1" || rec.hdr.Get("X-SLURM-USER-TOKEN") != "secret-jwt" {
@@ -171,5 +172,52 @@ func TestBucketShouldStopWaitingWhenTheContextEnds(t *testing.T) {
 	cancel()
 	if err := b.Wait(ctx); err == nil {
 		t.Fatal("want the context's error")
+	}
+}
+
+// Live on MeluXina 2026-11-07: one unknown ID (a guest's job already purged) makes the site reject
+// the whole list with 422. The poll then asks one by one, skips the unknown ID and keeps the rest.
+func TestShouldAskOneByOneWhenOneUnknownIDFailsTheList(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(rec.handler(func(ids []string) (int, string) {
+		for _, id := range ids {
+			if id == "7" {
+				return 422, `{"errors":[{"description":"Invalid job id specified","error":"Invalid job id specified"}]}`
+			}
+		}
+		return 200, fmt.Sprintf(`{"jobs":[{"job_id":"%s","state":["PENDING"]}]}`, ids[0])
+	}))
+	defer srv.Close()
+	w := &noWait{}
+	got, err := (&Client{HTTP: srv.Client()}).States(context.Background(), site(srv.URL), w, []string{"5", "7", "9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || len(got["5"].State) == 0 || len(got["9"].State) == 0 {
+		t.Fatalf("got %v, want 5 and 9", got)
+	}
+	if len(rec.calls) != 4 || w.n != 4 {
+		t.Fatalf("calls %v, waits %d: want the list once, then each ID through the bucket", rec.calls, w.n)
+	}
+}
+
+func TestShouldReportTheSitesErrorTextWithoutTheToken(t *testing.T) {
+	srv := httptest.NewServer((&recorder{}).handler(func([]string) (int, string) {
+		return 500, `{"errors":[{"description":"slurmctld down secret-jwt","error":"Unable to contact slurm controller"}]}`
+	}))
+	defer srv.Close()
+	_, err := (&Client{HTTP: srv.Client()}).States(context.Background(), site(srv.URL), &noWait{}, []string{"1", "2"})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 500") || !strings.Contains(err.Error(), "slurmctld down") {
+		t.Fatalf("err %v", err)
+	}
+	if strings.Contains(err.Error(), "secret-jwt") {
+		t.Fatalf("token leaked: %v", err)
+	}
+}
+
+func TestShouldRefuseAnIDThatIsNotDigits(t *testing.T) {
+	_, err := (&Client{}).States(context.Background(), site("http://unused"), &noWait{}, []string{"1&x=y"})
+	if err == nil || !strings.Contains(err.Error(), "not a job ID") {
+		t.Fatalf("err %v", err)
 	}
 }
