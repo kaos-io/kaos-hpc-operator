@@ -6,6 +6,7 @@ package timelimit
 import (
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -105,4 +106,50 @@ func percentile(samples []time.Duration, p float64) time.Duration {
 	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
 	rank := int(math.Ceil(p*float64(len(s)))) - 1
 	return s[min(max(rank, 0), len(s)-1)]
+}
+
+// Max is the longest limit the class and the site allow (the lowest known of the two), or 0 when
+// neither reports one. Unlike lowest it ignores the spec: it is what a user could raise walltime to.
+func (c Caps) Max() int32 {
+	var m int32
+	for _, v := range []int32{c.Class, c.Site} {
+		if v > 0 && (m == 0 || v < m) {
+			m = v
+		}
+	}
+	return m
+}
+
+// FormatMinutes writes a limit the way a person says it: whole hours as "4 h", else minutes.
+func FormatMinutes(m int32) string {
+	if m >= 60 && m%60 == 0 {
+		return strconv.Itoa(int(m/60)) + " h"
+	}
+	return strconv.Itoa(int(m)) + " min"
+}
+
+// StopMessage tells a pipeline author, in plain words, that a step ended at its declared time
+// limit and what to do about it. max is the longest limit the site allows (0: unknown).
+func StopMessage(limit, max int32, resumable bool) string {
+	head := "This step ran its full " + FormatMinutes(limit) + " time limit and was stopped"
+	if resumable {
+		return head + " before it saved a checkpoint; save more often or ask to be signalled earlier."
+	}
+	const resume = "make it resumable so it continues automatically from a checkpoint."
+	switch {
+	case max > 0 && limit >= max:
+		return head + ". Its limit is already the longest this site allows (" + FormatMinutes(max) + "); " + resume
+	case max > 0:
+		return head + ". Set a longer limit for it (`walltime`, up to " + FormatMinutes(max) + " on this site) or " + resume
+	}
+	return head + ". Set a longer limit for it (`walltime`) or " + resume
+}
+
+// WarnMessage warns, before a step starts, that an earlier run of it was stopped at this same limit.
+func WarnMessage(limit int32, resumable bool) string {
+	head := "Warning: this step was stopped at its " + FormatMinutes(limit) + " limit in an earlier run"
+	if resumable {
+		return head + " before it saved a checkpoint; save more often or ask to be signalled earlier."
+	}
+	return head + " and will be again unless you raise its limit (`walltime`) or make it resumable."
 }
