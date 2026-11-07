@@ -83,6 +83,7 @@ type HPCArgoWorkflowJobReconciler struct {
 	pendingLane map[string]string              // QoS of the pending bookings that were placed in a lane, by job UID
 	laneNoted   map[string]int32               // attempt whose refused lane was counted, by job UID
 	failed      map[string]int32               // failed runner pods seen, by runner Job UID
+	ended       map[string]struct{}            // jobs whose end this process wrote and whose ledger is not published yet, by job UID
 }
 
 // +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcargoworkflowjobs,verbs=get;list;watch;patch
@@ -121,6 +122,7 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	if job.Status.Phase.Terminal() {
 		r.forget(string(job.UID))
+		r.publishAfterEnd(ctx, &job)
 		return ctrl.Result{}, r.resettleHostEnd(ctx, &job)
 	}
 
@@ -375,6 +377,7 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		return false, err
 	}
 	r.forget(string(job.UID))
+	r.noteEnded(string(job.UID))
 	observeSettled(site, tier, used, run, admittedAt)
 	if stopped && r.Recorder != nil {
 		r.Recorder.Event(job, corev1.EventTypeWarning, hpcv1alpha1.ReasonWallTimeReached, msg)
@@ -512,6 +515,39 @@ func (r *HPCArgoWorkflowJobReconciler) forget(uid string) {
 	delete(r.pending, uid)
 	delete(r.pendingLane, uid)
 	delete(r.laneNoted, uid)
+}
+
+// noteEnded remembers that this process just wrote the job's end. The ledger published in the same
+// reconcile is computed from the informer cache, which does not show that write yet, so it still
+// counts the job's booking; publishAfterEnd publishes it again once the cache has caught up.
+func (r *HPCArgoWorkflowJobReconciler) noteEnded(uid string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ended == nil {
+		r.ended = map[string]struct{}{}
+	}
+	r.ended[uid] = struct{}{}
+}
+
+// publishAfterEnd republishes the ledger of the site of a job this process ended, once. It runs in
+// the reconcile that the job's own end event wakes, when the cache shows the end (a job reconcile
+// that reads a terminal job from the cache has seen that write). Without it the last job to end
+// leaves its booking in HPCSite.status until the 10-minute resync.
+func (r *HPCArgoWorkflowJobReconciler) publishAfterEnd(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob) {
+	r.mu.Lock()
+	_, owed := r.ended[string(job.UID)]
+	delete(r.ended, string(job.UID))
+	r.mu.Unlock()
+	if !owed || job.Status.Site == nil {
+		return
+	}
+	var site hpcv1alpha1.HPCSite
+	if err := r.Get(ctx, client.ObjectKey{Namespace: job.Status.Site.Namespace, Name: job.Status.Site.Name}, &site); err != nil {
+		return
+	}
+	if err := r.publishLedger(ctx, &site); err != nil {
+		logf.FromContext(ctx).Error(err, "publishing the ledger after a job ended", "site", client.ObjectKeyFromObject(&site))
+	}
 }
 
 // rememberLane keeps the QoS of a booking this process made until the cache shows it, so the lane
