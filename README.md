@@ -99,6 +99,9 @@ RBAC roles shipped by the chart (bound per namespace by kubecore-operator):
 | `hpcargoworkflowjob-submitter-role` | pipeline service accounts (follower) | `hpcargoworkflowjobs`: create, delete, get, list, watch. **No status verbs.** |
 | `hpcargoworkflowjob-runner-role` | `hpc-runner` in each env namespace | `hpcargoworkflowjobs`: get; `/status`: get, patch |
 | `hpcargoworkflowjob-reporter-role` | **phase 0 only**: the in-pod runner's service account, next to the submitter role | `hpcargoworkflowjobs/status`: get, patch |
+| `meluxina-snapshot` (project's snapshot job, kubecore-operator) | the snapshot CronJob's service account in the HPC namespace | `hpcsites/status`: patch, of its own site only (`resourceNames`) |
+
+`HPCSite.status.storage` (project scratch quota: space and files used/limit, `byCategory` datasets, images, checkpoints, work, other, `observedAt`/`measuredAt`) is **not written by this controller**: the project's snapshot job patches it every 10 minutes from the site stager's `usage` report. The controller's status patches are merge patches of its own fields and leave it alone.
 
 Metrics (`:8443`, authn/authz-protected; the chart renders a `VMServiceScrape`, else a
 `ServiceMonitor`, when the API exists): `kaos_hpc_job_phase`, `kaos_hpc_job_queue_seconds`,

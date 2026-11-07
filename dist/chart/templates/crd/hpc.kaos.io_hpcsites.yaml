@@ -623,6 +623,70 @@ spec:
                   running host's node.
                 format: int32
                 type: integer
+              storage:
+                description: |-
+                  Storage is the project's scratch quota on the site and what uses it. It is NOT written by
+                  this controller: the project's snapshot job (it holds the staging key) patches this one
+                  field every 10 minutes from the site stager's `usage` report. The controller's status patches
+                  are merge patches of its own fields, so they leave it alone.
+                properties:
+                  byCategory:
+                    description: |-
+                      ByCategory splits the used space and files: datasets, images, checkpoints, work, and
+                      other (the rest of the quota: other users and projects of the subscription).
+                    items:
+                      description: StorageCategory is one use of the project's scratch
+                        storage.
+                      properties:
+                        files:
+                          format: int64
+                          type: integer
+                        name:
+                          description: Name is datasets, images, checkpoints, work
+                            or other.
+                          type: string
+                        partial:
+                          description: |-
+                            Partial is true when the measurement hit its time bound: the figure is a lower bound (for
+                            other, an upper bound).
+                          type: boolean
+                        space:
+                          description: Space is bytes and Files the file (and folder)
+                            count, as the site's quota counts them.
+                          format: int64
+                          type: integer
+                      required:
+                      - name
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  filesLimit:
+                    format: int64
+                    type: integer
+                  filesUsed:
+                    description: 'FilesUsed and FilesLimit are the quota''s used and
+                      limit file counts (0 limit: none set).'
+                    format: int64
+                    type: integer
+                  measuredAt:
+                    format: date-time
+                    type: string
+                  observedAt:
+                    description: |-
+                      ObservedAt is when the quota was read; MeasuredAt is when the category sizes were last
+                      measured (re-measured at most hourly, the quota on every report).
+                    format: date-time
+                    type: string
+                  spaceLimit:
+                    format: int64
+                    type: integer
+                  spaceUsed:
+                    description: SpaceUsed and SpaceLimit are the quota's used and
+                      limit bytes; a limit of 0 means none set.
+                    format: int64
+                    type: integer
+                type: object
             type: object
         required:
         - spec

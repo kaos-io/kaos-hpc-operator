@@ -154,6 +154,27 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(st.PeriodStart).NotTo(BeNil())
 	})
 
+	It("keeps the storage report the project's snapshot job patched into status when it publishes the ledger", func() {
+		newSite(10, nil)
+		site := &hpcv1alpha1.HPCSite{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "meluxina", Namespace: hpcNS}, site)).To(Succeed())
+		// What the snapshot job sends: a merge patch of status.storage only.
+		patch := `{"status":{"storage":{"spaceUsed":92580000000,"spaceLimit":2147483648000,"filesUsed":12510,` +
+			`"filesLimit":1000000,"observedAt":"2026-11-07T18:00:00Z","measuredAt":"2026-11-07T17:30:00Z",` +
+			`"byCategory":[{"name":"datasets","space":50,"files":9},{"name":"other","space":42,"files":3,"partial":true}]}}}`
+		Expect(k8sClient.Status().Patch(ctx, site, client.RawPatch(types.MergePatchType, []byte(patch)))).To(Succeed())
+		_, got := reconcileJob(newJob(envNS, 240)) // publishes the ledger with its own merge patch
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
+		st := siteStatus()
+		Expect(st.ActiveJobs).To(Equal(int32(1)))
+		Expect(st.Storage).NotTo(BeNil())
+		Expect(st.Storage.SpaceUsed).To(Equal(int64(92580000000)))
+		Expect(st.Storage.FilesLimit).To(Equal(int64(1000000)))
+		Expect(st.Storage.ByCategory).To(HaveLen(2))
+		Expect(st.Storage.ByCategory[1].Partial).To(BeTrue())
+		Expect(st.Storage.ObservedAt).NotTo(BeNil())
+	})
+
 	It("admits a job that fits and books nodes x wall time", func() {
 		newSite(10, nil)
 		_, got := reconcileJob(newJob(envNS, 240))
