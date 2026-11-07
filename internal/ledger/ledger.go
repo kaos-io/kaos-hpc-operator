@@ -15,11 +15,32 @@ type Tier struct {
 	Used   int64
 	Booked int64
 	Share  int64
+	// SiteBound is true when the site's own remainder bounds the share (source share with a usable
+	// siteLeft). SiteLeft is what the site reported at observation; SiteUsed is what ended since.
+	SiteBound bool
+	SiteLeft  int64
+	SiteUsed  int64
 }
 
-// Left is the share minus used and booked, never below zero.
+// Ceiling is the most the project can still spend this period before counting bookings: the share
+// less what was used, bounded by the site's remainder less what ended since it was observed
+// (min(share left, site left), PRD-HPC-1461 D-10, D-56). May be negative.
+func (t Tier) Ceiling() int64 {
+	c := t.Share - t.Used
+	if s := t.SiteLeft - t.SiteUsed; t.SiteBound && s < c {
+		return s
+	}
+	return c
+}
+
+// SiteBinds reports whether the site's remainder, not the share, is the lower bound.
+func (t Tier) SiteBinds() bool {
+	return t.SiteBound && t.SiteLeft-t.SiteUsed < t.Share-t.Used
+}
+
+// Left is the ceiling minus what is booked, never below zero.
 func (t Tier) Left() int64 {
-	if l := t.Share - t.Used - t.Booked; l > 0 {
+	if l := t.Ceiling() - t.Booked; l > 0 {
 		return l
 	}
 	return 0
@@ -108,6 +129,18 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 		hpcv1alpha1.TierGPU: {Share: site.Spec.Budget.GPUNodeHours * 60},
 		hpcv1alpha1.TierCPU: {Share: site.Spec.Budget.CPUNodeHours * 60},
 	}}
+	// Source share with siteLeft: the site's remainder is an upper bound beside the share. It counts
+	// only when observed within this period, since what ended before the observation is already in
+	// the site's figure and a figure from last month says nothing about this one. Attempts that ended
+	// at or after the observation are taken off it (an attempt running at the time counts whole:
+	// conservative, never an overspend).
+	var siteObserved time.Time
+	if b := site.Spec.Budget; b.Source != hpcv1alpha1.BudgetSourceSite && b.SiteLeft != nil &&
+		b.SiteLeft.ObservedAt != nil && !b.SiteLeft.ObservedAt.UTC().Before(start) {
+		siteObserved = b.SiteLeft.ObservedAt.UTC()
+		l.Tiers[hpcv1alpha1.TierGPU] = withSiteBound(l.Tiers[hpcv1alpha1.TierGPU], b.SiteLeft.GPUNodeHours*60)
+		l.Tiers[hpcv1alpha1.TierCPU] = withSiteBound(l.Tiers[hpcv1alpha1.TierCPU], b.SiteLeft.CPUNodeHours*60)
+	}
 	seen := map[string]bool{}
 	for i := range jobs {
 		j := &jobs[i]
@@ -122,6 +155,9 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 			t := l.Tiers[a.Tier]
 			// Records stored before settlement was validated can carry garbage (negative) minutes.
 			t.Used += max(a.SettledNodeMinutes, 0)
+			if t.SiteBound && !a.EndTime.Time.Before(siteObserved) {
+				t.SiteUsed += max(a.SettledNodeMinutes, 0)
+			}
 			l.Tiers[a.Tier] = t
 		}
 		if b := j.Status.Booking; b != nil && b.SiteName == site.Name && b.SiteNamespace == site.Namespace {
@@ -147,6 +183,11 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 		l.count(false) // booked in this process, not yet submitted
 	}
 	return l
+}
+
+func withSiteBound(t Tier, siteLeftMinutes int64) Tier {
+	t.SiteBound, t.SiteLeft = true, siteLeftMinutes
+	return t
 }
 
 // onSite reports whether the job's spend belongs to this HPCSite: its booking names it, or (between

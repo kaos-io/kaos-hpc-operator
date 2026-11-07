@@ -70,10 +70,15 @@ func DecideFor(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, l
 	cost := int64(nodes) * int64(effectiveWall)
 	t := l.Tiers[class.Tier]
 	block := site.Spec.Budget.AtLimit != hpcv1alpha1.AtLimitWarn
-	if block && cost > t.Share-t.Used {
+	if block && cost > t.Ceiling() {
+		// Can never fit this period, whatever settles: the lower of the share and the site's remainder.
+		what := "the project's share has"
+		if t.SiteBinds() {
+			what = "the site reports the account has"
+		}
 		return refuse(hpcv1alpha1.ReasonBudgetBlocked,
-			"needs %d %s node-minutes; the project's share has %d left this period after what was used",
-			cost, class.Tier, max(t.Share-t.Used, 0))
+			"needs %d %s node-minutes; %s %d left this period after what was used",
+			cost, class.Tier, what, max(t.Ceiling(), 0))
 	}
 	if m := site.Spec.Limits.MaxConcurrentJobs; m > 0 && l.Active >= m {
 		return Decision{Phase: hpcv1alpha1.PhaseWaiting, Reason: hpcv1alpha1.ReasonConcurrencyLimit,
