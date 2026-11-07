@@ -109,7 +109,7 @@ func main() {
 	var sitePollInterval time.Duration
 	var siteRestRate float64
 	var siteRestBurst int
-	var siteMissingGrace, sweepGiveUp time.Duration
+	var siteMissingGrace, sweepGiveUp, ledgerInterval time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -144,6 +144,9 @@ func main() {
 		"How long a booked job survives its HPCSite (or project label) being gone before it is cancelled.")
 	flag.DurationVar(&sweepGiveUp, "sweep-give-up", controller.DefaultSweepGiveUp,
 		"How long the controller waits for the site to confirm that a job's site job ended before it settles without proof.")
+	flag.DurationVar(&ledgerInterval, "ledger-publish-interval", controller.DefaultLedgerPublishInterval,
+		"The shortest time between two writes of one HPCSite's status (budget ledger, recent jobs). "+
+			"A change inside the interval is written when it has passed. 0 writes on every change.")
 	flag.IntVar(&siteRestBurst, "site-rest-burst", 5, "Token bucket per site profile: burst size.")
 	var idleCfg idlewatch.Config
 	flag.StringVar(&idleCfg.MetricsURL, "idle-metrics-url", os.Getenv("IDLE_METRICS_URL"),
@@ -334,6 +337,8 @@ func main() {
 		LaneCandidates:   candidates,
 		SiteMissingGrace: siteMissingGrace,
 		SweepGiveUp:      sweepGiveUp,
+		// One write of an HPCSite's status per interval, however many jobs reconcile.
+		LedgerPublishInterval: ledgerInterval,
 	}
 	if err := jobs.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HPCArgoWorkflowJob")

@@ -452,6 +452,7 @@ func (r *HPCArgoWorkflowJobReconciler) failAttempt(ctx context.Context, job *hpc
 		return err
 	}
 	r.forget(string(job.UID))
+	r.noteEnded(string(job.UID))
 	return nil
 }
 

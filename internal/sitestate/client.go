@@ -62,8 +62,9 @@ func (c *Client) States(ctx context.Context, s Site, bucket Waiter, ids []string
 		var se *statusError
 		if errors.As(err, &se) && se.code == http.StatusUnprocessableEntity && len(part) > 1 {
 			// The site rejects the whole list when one ID is unknown to it (a guest's job already
-			// cancelled and purged): ask one by one so one gone job never hides the others' state.
-			jobs, err = c.oneByOne(ctx, s, bucket, part)
+			// cancelled and purged): split the list until the unknown IDs stand alone, so they never
+			// hide the others' state and cost about 2*log2(n) calls each, not n.
+			jobs, err = c.split(ctx, s, bucket, part)
 		}
 		if err != nil {
 			return nil, err
@@ -81,18 +82,24 @@ func (c *Client) States(ctx context.Context, s Site, bucket Waiter, ids []string
 	return out, nil
 }
 
-// oneByOne asks for each ID alone; an ID the site does not know is skipped (the caller reads it as
-// "not listed"), any other error stops.
-func (c *Client) oneByOne(ctx context.Context, s Site, bucket Waiter, ids []string) ([]Job, error) {
+// split asks for a list the site rejected with 422 in two halves, and each half that is rejected in
+// two again, down to single IDs. An ID the site does not know is skipped (the caller reads it as "not
+// listed"); any other error stops. One unknown ID in a list of 100 costs about 14 calls, not 100: at
+// the production rate of 2 calls per second the old one-by-one walk took longer than the poll interval,
+// so the whole list's observations were never written while the unknown ID stayed in it.
+func (c *Client) split(ctx context.Context, s Site, bucket Waiter, ids []string) ([]Job, error) {
+	if len(ids) <= 1 {
+		return nil, nil // a single ID that was rejected is the unknown one
+	}
 	var out []Job
-	for _, id := range ids {
+	for _, half := range [][]string{ids[:len(ids)/2], ids[len(ids)/2:]} {
 		if err := bucket.Wait(ctx); err != nil {
 			return nil, fmt.Errorf("rate limit: %w", err)
 		}
-		jobs, err := c.call(ctx, s, []string{id})
+		jobs, err := c.call(ctx, s, half)
 		var se *statusError
 		if errors.As(err, &se) && se.code == http.StatusUnprocessableEntity {
-			continue
+			jobs, err = c.split(ctx, s, bucket, half)
 		}
 		if err != nil {
 			return nil, err
