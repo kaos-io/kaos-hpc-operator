@@ -714,3 +714,57 @@ def test_other_failures_report_no_last_log(rig):
     rig.logs.tail_text = lambda: "x"
     rig.runner.run()
     assert rig.kube.run.get("lastLog") is None
+
+
+# ---------------------------------------------------------------- a host settles from its job's end
+
+HOST_DONE = "kaos-state=done rc=0"
+
+
+def terminal_reports(rig):
+    return [c[2]["status"]["run"] for c in rig.kube.patches() if (c[2]["status"].get("run") or {}).get("terminal")]
+
+
+def test_a_host_reports_its_step_at_once_and_its_job_end_when_the_job_ends(rig):
+    """Live 2026-11-07 (job 5430776): the step ended, the job ran ~2 minutes more waiting for guests."""
+    step_over = acc("RUNNING", comment=HOST_DONE, start=1762300800, end=0)
+    job_over = acc("COMPLETED", comment=HOST_DONE, start=1762300800, end=1762300980)
+    slurm = FakeSlurm({"5001": [step_over, step_over, job_over]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    rig.runner.run()
+    first, last = terminal_reports(rig)[0], terminal_reports(rig)[-1]
+    assert len(terminal_reports(rig)) == 2
+    assert first["state"] == "COMPLETED" and first.get("hostSiteJobID") is None
+    assert last["endTime"] == "2025-11-05T00:03:00Z", "the host job's own end, not the step's"
+    assert {k: v for k, v in last.items() if k != "endTime"} == {k: v for k, v in first.items() if k != "endTime"}
+    outputs_patches = [c for c in rig.kube.patches() if "outputs" in c[2]["status"]]
+    assert len(outputs_patches) <= 1, "outputs ride with the step's report only"
+    assert "outputs" not in rig.kube.patches()[-1][2]["status"]
+
+
+def test_a_job_that_ended_by_itself_reports_its_end_once(rig):
+    slurm = FakeSlurm({"5001": [acc("RUNNING"), acc("COMPLETED")]})
+    rig.make(slurm)
+    rig.runner.run()
+    assert len(terminal_reports(rig)) == 1
+
+
+def test_a_guest_never_follows_a_host_job(rig, monkeypatch):
+    taken = acc("PENDING", comment="kaos-state=taken host=5427313 slot=2 attempt=1")
+    done = acc("RUNNING", comment="kaos-state=done rc=0 host=5427313")
+    slurm = FakeSlurm({"5001": [taken, done], "5427313": [acc("RUNNING")]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    rig.runner.run()
+    assert len(terminal_reports(rig)) == 1
+    assert rig.runner.host_job_open is False
+
+
+def test_a_host_job_that_never_ends_is_given_up_after_its_limit_plus_margin(rig, monkeypatch):
+    step_over = acc("RUNNING", comment=HOST_DONE, end=0)
+    slurm = FakeSlurm({"5001": [step_over]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    clock = [1762300800.0]
+    monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
+    rig.runner.sleep = lambda s: clock.__setitem__(0, clock[0] + 600)
+    assert rig.runner.run() == 0
+    assert len(terminal_reports(rig)) == 1, "settled from the step; no end report without a job end"

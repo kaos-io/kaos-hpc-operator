@@ -59,6 +59,7 @@ class Reporter:
         # e.g. it adopted a job; the report then leaves the earlier values alone).
         self.qos = None
         self.reservation = None
+        self.last_run = None        # the status.run of the last report that landed (a later end-time report resends it)
 
     def path(self, sub=''):
         return '/apis/hpc.kaos.io/v1alpha1/namespaces/%s/hpcargoworkflowjobs/%s%s' % (
@@ -116,6 +117,7 @@ class Reporter:
         for n in range(60 if must else 1):
             try:
                 self.patch(status)
+                self.last_run = dict(status['run'])
                 return True
             except Exception as e:
                 print('HPC job: report failed (%s)%s' % (e, ', retrying' if must else ''), flush=True)

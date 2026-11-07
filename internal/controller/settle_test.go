@@ -65,3 +65,52 @@ func TestSettle(t *testing.T) {
 		})
 	}
 }
+
+// A host whose Slurm job ends after its step: the late end raises the settlement, once.
+func TestLateEnd(t *testing.T) {
+	now := ts("2026-11-07T10:00:00Z").Time
+	start := ts("2026-11-07T09:50:00Z")
+	mk := func(run hpcv1alpha1.RunStatus, settled int64, end string) *hpcv1alpha1.HPCArgoWorkflowJob {
+		j := &hpcv1alpha1.HPCArgoWorkflowJob{}
+		j.Spec.Nodes = 1
+		j.Status.Phase = hpcv1alpha1.PhaseSucceeded
+		j.Status.Run = &run
+		j.Status.Attempts = []hpcv1alpha1.AttemptRecord{{Attempt: 1, SiteJobID: "5430776", SettledNodeMinutes: settled, EndTime: *ts(end)}}
+		return j
+	}
+	host := func(end *metav1.Time) hpcv1alpha1.RunStatus {
+		return hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5430776", State: "COMPLETED", Terminal: true, StartTime: start, EndTime: end}
+	}
+	guest := host(ts("2026-11-07T09:53:00Z"))
+	guest.HostSiteJobID = "1"
+	cases := []struct {
+		name    string
+		job     *hpcv1alpha1.HPCArgoWorkflowJob
+		wantMin int64
+		wantOK  bool
+	}{
+		{"should_settle_the_job_length_when_the_host_job_ends_after_its_step", mk(host(ts("2026-11-07T09:53:00Z")), 1, "2026-11-07T09:51:00Z"), 3, true},
+		{"should_change_nothing_when_the_same_end_is_reported_again", mk(host(ts("2026-11-07T09:53:00Z")), 3, "2026-11-07T09:53:00Z"), 0, false},
+		{"should_never_lower_a_settlement", mk(host(ts("2026-11-07T09:50:30Z")), 1, "2026-11-07T09:51:00Z"), 0, false},
+		{"should_ignore_a_no_val_late_end", mk(host(ts("2106-02-07T06:28:14Z")), 1, "2026-11-07T09:51:00Z"), 0, false},
+		{"should_keep_a_guest_at_zero", mk(guest, 0, "2026-11-07T09:51:00Z"), 0, false},
+		{"should_ignore_a_report_of_another_site_job", func() *hpcv1alpha1.HPCArgoWorkflowJob {
+			j := mk(host(ts("2026-11-07T09:53:00Z")), 1, "2026-11-07T09:51:00Z")
+			j.Status.Run.SiteJobID = "other"
+			return j
+		}(), 0, false},
+		{"should_ignore_a_job_that_is_not_terminal", func() *hpcv1alpha1.HPCArgoWorkflowJob {
+			j := mk(host(ts("2026-11-07T09:53:00Z")), 1, "2026-11-07T09:51:00Z")
+			j.Status.Phase = hpcv1alpha1.PhaseRunning
+			return j
+		}(), 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, st, ok := lateEnd(c.job, now)
+			if ok != c.wantOK || (ok && st.Minutes != c.wantMin) {
+				t.Fatalf("got ok=%v minutes=%d; want ok=%v minutes=%d", ok, st.Minutes, c.wantOK, c.wantMin)
+			}
+		})
+	}
+}
