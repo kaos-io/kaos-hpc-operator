@@ -249,6 +249,85 @@ type TierLedger struct {
 	LeftNodeMinutes int64 `json:"leftNodeMinutes"`
 }
 
+// RecentJobsMax bounds HPCSiteStatus.RecentJobs. Each entry is a few hundred bytes, so the list
+// stays far below the object size limit (about 25 KiB at the bound).
+const RecentJobsMax = 50
+
+// RecentJob is the console's view of one HPCArgoWorkflowJob of the project (PRD-HPC-1461 F-43,
+// AC-76, AC-26, AC-46). Copied from the job's status when the ledger is published: no site call.
+type RecentJob struct {
+	// Name and Namespace of the HPCArgoWorkflowJob (the namespace is the environment's).
+	Name string `json:"name"`
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+	// Step is the DAG step's name and Workflow the Argo Workflow it belongs to.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	Step string `json:"step,omitempty"`
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	Workflow string `json:"workflow,omitempty"`
+	// Phase and Reason of the job, for example Waiting / WaitingForBudget or Failed / Idle.
+	// +optional
+	Phase Phase `json:"phase,omitempty"`
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// SiteState is the scheduler's state of the current site job (PENDING, RUNNING, ...).
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	SiteState string `json:"siteState,omitempty"`
+	// PendingReason is the scheduler's reason while the site job is queued (for example Priority).
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	PendingReason string `json:"pendingReason,omitempty"`
+	// QOS and Reservation are the lane the current attempt was placed in; RefusedQOS is the lane
+	// the site refused (the job then ran on the class default).
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	QOS string `json:"qos,omitempty"`
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	Reservation string `json:"reservation,omitempty"`
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	RefusedQOS string `json:"refusedQOS,omitempty"`
+	// TimeLimitMinutes is the current attempt's limit; LimitSource says where it came from and
+	// LimitSamples how many earlier runs of the step it learned from.
+	// +optional
+	TimeLimitMinutes int32 `json:"timeLimitMinutes,omitempty"`
+	// +optional
+	LimitSource PlacementSource `json:"limitSource,omitempty"`
+	// +optional
+	LimitSamples int32 `json:"limitSamples,omitempty"`
+	// IdleTimeoutMinutes is the idle watchdog's window (0 means off).
+	// +optional
+	IdleTimeoutMinutes int32 `json:"idleTimeoutMinutes,omitempty"`
+	// Attempt is the current attempt (1 for the first site job).
+	// +optional
+	Attempt int32 `json:"attempt,omitempty"`
+	// SiteJobID is the scheduler's job id; HostSiteJobID is set when the job runs as a guest on a
+	// host job's node (node sharing).
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	SiteJobID string `json:"siteJobID,omitempty"`
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	HostSiteJobID string `json:"hostSiteJobID,omitempty"`
+	// CreatedAt, StartTime and EndTime; start and end are as the site reports them.
+	CreatedAt metav1.Time `json:"createdAt"`
+	// +optional
+	StartTime *metav1.Time `json:"startTime,omitempty"`
+	// +optional
+	EndTime *metav1.Time `json:"endTime,omitempty"`
+	// BookedNodeMinutes is what the current attempt holds, or for an ended job the limit times
+	// nodes of its last attempt. SettledNodeMinutes is the spend of the finished attempts.
+	// +optional
+	BookedNodeMinutes int64 `json:"bookedNodeMinutes,omitempty"`
+	// +optional
+	SettledNodeMinutes int64 `json:"settledNodeMinutes,omitempty"`
+}
+
 // HPCSiteStatus is the controller's view of the project's site use.
 type HPCSiteStatus struct {
 	// PeriodStart is the start of the current budget period (calendar month, UTC).
@@ -270,6 +349,12 @@ type HPCSiteStatus struct {
 	// running host's node.
 	// +optional
 	RunningJobs int32 `json:"runningJobs,omitempty"`
+	// RecentJobs are at most RecentJobsMax of the project's jobs on this site: active jobs first,
+	// then ended ones, newest first within each group. Written with the ledger, for the console.
+	// +kubebuilder:validation:MaxItems=50
+	// +listType=atomic
+	// +optional
+	RecentJobs []RecentJob `json:"recentJobs,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional

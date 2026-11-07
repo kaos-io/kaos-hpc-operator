@@ -464,6 +464,130 @@ spec:
                   or pending in the site's queue.
                 format: int32
                 type: integer
+              recentJobs:
+                description: |-
+                  RecentJobs are at most RecentJobsMax of the project's jobs on this site: active jobs first,
+                  then ended ones, newest first within each group. Written with the ledger, for the console.
+                items:
+                  description: |-
+                    RecentJob is the console's view of one HPCArgoWorkflowJob of the project (PRD-HPC-1461 F-43,
+                    AC-76, AC-26, AC-46). Copied from the job's status when the ledger is published: no site call.
+                  properties:
+                    attempt:
+                      description: Attempt is the current attempt (1 for the first
+                        site job).
+                      format: int32
+                      type: integer
+                    bookedNodeMinutes:
+                      description: |-
+                        BookedNodeMinutes is what the current attempt holds, or for an ended job the limit times
+                        nodes of its last attempt. SettledNodeMinutes is the spend of the finished attempts.
+                      format: int64
+                      type: integer
+                    createdAt:
+                      description: CreatedAt, StartTime and EndTime; start and end
+                        are as the site reports them.
+                      format: date-time
+                      type: string
+                    endTime:
+                      format: date-time
+                      type: string
+                    hostSiteJobID:
+                      maxLength: 63
+                      type: string
+                    idleTimeoutMinutes:
+                      description: IdleTimeoutMinutes is the idle watchdog's window
+                        (0 means off).
+                      format: int32
+                      type: integer
+                    limitSamples:
+                      format: int32
+                      type: integer
+                    limitSource:
+                      description: PlacementSource says where a Placement's time limit
+                        came from.
+                      enum:
+                      - declared
+                      - learned
+                      - timeout-retry
+                      type: string
+                    name:
+                      description: Name and Namespace of the HPCArgoWorkflowJob (the
+                        namespace is the environment's).
+                      type: string
+                    namespace:
+                      type: string
+                    pendingReason:
+                      description: PendingReason is the scheduler's reason while the
+                        site job is queued (for example Priority).
+                      maxLength: 63
+                      type: string
+                    phase:
+                      description: Phase and Reason of the job, for example Waiting
+                        / WaitingForBudget or Failed / Idle.
+                      enum:
+                      - Pending
+                      - Waiting
+                      - Refused
+                      - Admitted
+                      - Running
+                      - Succeeded
+                      - Failed
+                      - Cancelled
+                      type: string
+                    qos:
+                      description: |-
+                        QOS and Reservation are the lane the current attempt was placed in; RefusedQOS is the lane
+                        the site refused (the job then ran on the class default).
+                      maxLength: 63
+                      type: string
+                    reason:
+                      maxLength: 63
+                      type: string
+                    refusedQOS:
+                      maxLength: 63
+                      type: string
+                    reservation:
+                      maxLength: 63
+                      type: string
+                    settledNodeMinutes:
+                      format: int64
+                      type: integer
+                    siteJobID:
+                      description: |-
+                        SiteJobID is the scheduler's job id; HostSiteJobID is set when the job runs as a guest on a
+                        host job's node (node sharing).
+                      maxLength: 63
+                      type: string
+                    siteState:
+                      description: SiteState is the scheduler's state of the current
+                        site job (PENDING, RUNNING, ...).
+                      maxLength: 63
+                      type: string
+                    startTime:
+                      format: date-time
+                      type: string
+                    step:
+                      description: Step is the DAG step's name and Workflow the Argo
+                        Workflow it belongs to.
+                      maxLength: 253
+                      type: string
+                    timeLimitMinutes:
+                      description: |-
+                        TimeLimitMinutes is the current attempt's limit; LimitSource says where it came from and
+                        LimitSamples how many earlier runs of the step it learned from.
+                      format: int32
+                      type: integer
+                    workflow:
+                      maxLength: 253
+                      type: string
+                  required:
+                  - createdAt
+                  - name
+                  type: object
+                maxItems: 50
+                type: array
+                x-kubernetes-list-type: atomic
               runningJobs:
                 description: |-
                   RunningJobs is the number of active jobs the site reports RUNNING, plus guests running on a
