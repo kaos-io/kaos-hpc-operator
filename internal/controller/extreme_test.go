@@ -291,7 +291,7 @@ var _ = Describe("HPCArgoWorkflowJob extreme cases", func() {
 			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
 			rj := runnerJob(got)
 			start := metav1.NewTime(time.Now().Add(-10 * time.Minute))
-			report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "800", State: "RUNNING", StartTime: &start})
+			report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "800", State: siteStateRunning, StartTime: &start})
 			_, got = reconcileOnce(j)
 			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRunning))
 			return j, rj
@@ -438,7 +438,7 @@ var _ = Describe("HPCArgoWorkflowJob extreme cases", func() {
 			_, got := reconcileOnce(j)
 			rj := runnerJob(got)
 			start := metav1.NewTime(time.Now().Truncate(time.Second).Add(-15 * time.Minute))
-			report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "801", State: "RUNNING", StartTime: &start})
+			report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "801", State: siteStateRunning, StartTime: &start})
 			reconcileOnce(j)
 			return j, rj
 		}
@@ -581,7 +581,7 @@ var _ = Describe("HPCArgoWorkflowJob extreme cases", func() {
 
 			// The host died with the guest on it; the guest's runner started the job over alone.
 			start := metav1.NewTime(time.Now().Add(-2 * time.Minute))
-			report(g, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "G2", State: "RUNNING", StartTime: &start})
+			report(g, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "G2", State: siteStateRunning, StartTime: &start})
 			reconcileOnce(g)
 			st = siteStatus()
 			Expect(st.GPU.BookedNodeMinutes).To(Equal(int64(60)), "alone again: its own booking counts again")

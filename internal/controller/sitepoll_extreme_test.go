@@ -34,7 +34,7 @@ func (p *perEndpointReader) States(_ context.Context, s sitestate.Site, _ sitest
 	}
 	out := map[string]sitestate.Job{}
 	for _, id := range ids {
-		out[id] = sitestate.Job{ID: id, State: []string{"RUNNING"}}
+		out[id] = sitestate.Job{ID: id, State: []string{siteStateRunning}}
 	}
 	return out, nil
 }
@@ -57,7 +57,7 @@ func TestShouldKeepPollingTheOtherSitesWhenOneSiteIsDownOrItsHPCSiteIsGone(t *te
 	if a.Status.SiteObservation != nil {
 		t.Fatalf("site A was down: its job must keep its status, got %+v", a.Status.SiteObservation)
 	}
-	if b.Status.SiteObservation == nil || b.Status.SiteObservation.State != "RUNNING" {
+	if b.Status.SiteObservation == nil || b.Status.SiteObservation.State != siteStateRunning {
 		t.Fatalf("site B must still be polled: %+v", b.Status.SiteObservation)
 	}
 }
@@ -138,7 +138,7 @@ func TestShouldPollThreeHundredJobsWithThreeCallsOfAHundredThroughTheTokenBucket
 			t.Fatalf("a call waited %v for its token, want ~1s at 1 call/s", d)
 		}
 	}
-	if o := r.job(t, "j300").Status.SiteObservation; o == nil || o.State != "RUNNING" {
+	if o := r.job(t, "j300").Status.SiteObservation; o == nil || o.State != siteStateRunning {
 		t.Fatalf("job 300 observation: %+v", o)
 	}
 }
@@ -172,7 +172,7 @@ func TestShouldTreatAnHTMLPageWithHTTP200AsAFailedPoll(t *testing.T) {
 		_, _ = w.Write([]byte("<html><body>Request blocked by the site allow-list</body></html>"))
 	}))
 	defer srv.Close()
-	old := &hpcv1alpha1.SiteObservation{JobID: "1", State: "RUNNING", ObservedAt: metav1.NewTime(time.Unix(5, 0))}
+	old := &hpcv1alpha1.SiteObservation{JobID: "1", State: siteStateRunning, ObservedAt: metav1.NewTime(time.Unix(5, 0))}
 	objs := append(pollSite("hpc", srv.URL),
 		pollJob("env", "j", "hpc", "1", func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Status.SiteObservation = old }))
 	r := newPollRig(t, objs...)

@@ -163,15 +163,7 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{RequeueAfter: ContinueResync}, nil
 		}
 	default:
-		res, err := r.judge(ctx, &job, site)
-		if err != nil || res.RequeueAfter > 0 {
-			if err == nil {
-				// A waiting job is listed (with its reason) in the site's recentJobs now, not at the
-				// next 10-minute resync (F-43).
-				if perr := r.publishLedger(ctx, site); perr != nil {
-					log.Error(perr, "publishing the ledger", "site", client.ObjectKeyFromObject(site))
-				}
-			}
+		if res, done, err := r.judgeAndPublish(ctx, &job, site); done {
 			return res, err
 		}
 	}
@@ -192,6 +184,24 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: ServeResync}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// judgeAndPublish judges a new or waiting job. A job that is not admitted yet (or failed) ends this
+// reconcile; a waiting one is listed (with its reason) in the site's recentJobs now, not at the next
+// 10-minute resync (F-43).
+func (r *HPCArgoWorkflowJobReconciler) judgeAndPublish(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
+	site *hpcv1alpha1.HPCSite) (ctrl.Result, bool, error) {
+	res, err := r.judge(ctx, job, site)
+	if err != nil {
+		return res, true, err
+	}
+	if res.RequeueAfter == 0 {
+		return res, false, nil
+	}
+	if perr := r.publishLedger(ctx, site); perr != nil {
+		logf.FromContext(ctx).Error(perr, "publishing the ledger", "site", client.ObjectKeyFromObject(site))
+	}
+	return res, true, nil
 }
 
 // siteOf resolves the job's project from its namespace label and the project's HPCSite that offers
