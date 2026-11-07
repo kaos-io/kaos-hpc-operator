@@ -16,6 +16,7 @@ from kaos_hpc_runner import logs as logsmod
 from kaos_hpc_runner import reporter as rep
 from kaos_hpc_runner import runner as runmod
 from kaos_hpc_runner import slurm as slurmmod
+from kaos_hpc_runner import staging as staging_mod
 
 WF = "0b7f6c1e-1111-2222-3333-444455556666"
 NAME = "kaos-%s-model-training" % WF
@@ -236,6 +237,35 @@ def test_a_refused_submit_stops_the_runner_with_the_reason_and_reports_nothing(r
     assert rig.kube.run == {}
 
 
+def test_staging_that_does_not_fit_the_quota_ends_the_attempt_insufficient_quota_without_submitting(rig, capsys):
+    """AC-33: no site job, one terminal report (FAILED, exit 237, a plain message); the run is not a fallback."""
+    slurm = FakeSlurm()
+    rig.make(slurm)
+
+    def no_room(cfg, stager, mint):
+        raise staging_mod.InsufficientQuota("not enough room on the project's scratch for dataset d@c")
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", no_room)
+    assert rig.runner.run() == 0
+    assert slurm.submitted == []
+    run = rig.kube.run
+    assert run["state"] == "FAILED" and run["exitCode"] == 237 and run["terminal"] is True
+    assert run["message"].startswith("not enough room") and not run.get("siteJobID")
+    assert "InsufficientQuota" in capsys.readouterr().out
+
+
+def test_an_image_that_does_not_fit_the_quota_also_ends_insufficient_quota(rig):
+    slurm = FakeSlurm()
+    rig.make(slurm)
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", lambda cfg, st, mint: ("", ""))
+
+    def no_room(img, tok, st, strict=False):
+        assert strict, "the first submit is strict"
+        raise staging_mod.InsufficientQuota("not enough room for the step image")
+    rig.monkeypatch.setattr(runmod.imagemod, "stage_image", no_room)
+    assert rig.runner.run() == 0
+    assert slurm.submitted == [] and rig.kube.run["exitCode"] == 237
+
+
 # ---------------------------------------------------------------- sharing, leases
 
 def test_a_sharing_gpu_job_is_a_host_with_an_offer_window_and_inputs_in_its_script(rig):
@@ -260,7 +290,7 @@ def test_the_leases_ride_in_the_job_comment(rig, monkeypatch):
     summary = json.dumps({"dataset_commit": "c0ffee12"})
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
     rig.make(slurm, STEP_COMMAND=json.dumps(["x", "--info", summary]))
-    monkeypatch.setattr(runmod.imagemod, "stage_image", lambda img, tok, st: "/scr/kaos/images/k.tar")
+    monkeypatch.setattr(runmod.imagemod, "stage_image", lambda img, tok, st, **kw: "/scr/kaos/images/k.tar")
     rig.runner.run()
     key = runmod.imagemod.image_key(rig.cfg.image)
     assert slurm.submitted[0]["job"]["comment"] == \
@@ -269,7 +299,7 @@ def test_the_leases_ride_in_the_job_comment(rig, monkeypatch):
     assert env["IMAGE_STAGED"] == "/scr/kaos/images/k.tar" and env["KAOS_COMMIT"] == "c0ffee12"
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
     rig.make(slurm)           # no pin, nothing staged: only the checkpoint lease
-    monkeypatch.setattr(runmod.imagemod, "stage_image", lambda img, tok, st: "")
+    monkeypatch.setattr(runmod.imagemod, "stage_image", lambda img, tok, st, **kw: "")
     rig.runner.run()
     assert slurm.submitted[0]["job"]["comment"] == "kaos-ckpt-lease=%s/model-training" % WF
 

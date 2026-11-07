@@ -25,6 +25,7 @@ MACHINE_KEY_FILE = '/etc/mlflow-svc/ZITADEL_MACHINE_KEY'
 CHECKPOINT_EXIT = 85
 # PRD-HPC-1461 D-72: the job script's exit code for a step the idle watchdog ended (reason Idle).
 IDLE_EXIT = 236
+INSUFFICIENT_QUOTA_EXIT = 237   # the runner reports it (FAILED, no site job) when staging does not fit the quota (AC-33)
 DEFAULT_IDLE_TIMEOUT_MIN = 20
 OFFER_S = 60   # PRD-1609: a sharing job waits this long for a host of its scope to take it
 

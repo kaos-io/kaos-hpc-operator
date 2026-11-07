@@ -92,3 +92,25 @@ func TestShareBudget_source_site_is_unchanged_by_a_stray_siteLeft(t *testing.T) 
 		t.Fatalf("source site ignores siteLeft: %+v", g)
 	}
 }
+
+// AC-22: the warning percentage is used plus booked over what the project may spend this period.
+func TestTier_Percent(t *testing.T) {
+	cases := []struct {
+		name string
+		t    Tier
+		want int64
+	}{
+		{"should_be_used_plus_booked_over_the_share", Tier{Share: 600, Used: 300, Booked: 60}, 60},
+		{"should_use_the_site_remainder_when_it_is_lower", Tier{Share: 600, Used: 100, Booked: 100, SiteBound: true, SiteLeft: 300}, 50},
+		{"should_reach_100_when_everything_is_spent", Tier{Share: 600, Used: 540, Booked: 60}, 100},
+		{"should_exceed_100_when_booked_beyond_a_warn_limit", Tier{Share: 600, Used: 600, Booked: 120}, 120},
+		{"should_be_minus_one_when_nothing_may_be_spent", Tier{Share: 0}, -1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.t.Percent(); got != c.want {
+				t.Fatalf("Percent()=%d, want %d", got, c.want)
+			}
+		})
+	}
+}

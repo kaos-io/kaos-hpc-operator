@@ -22,6 +22,15 @@ const (
 	TransportSlurmREST Transport = "slurmrestd"
 )
 
+// ConditionBudgetWarning is the HPCSite condition that is True while a tier's used plus booked
+// node-minutes are at or above budget.warnAtPercent of what the project may spend this period
+// (PRD-HPC-1461 AC-22). Reasons: ReasonThresholdCrossed, ReasonBelowThreshold.
+const (
+	ConditionBudgetWarning = "BudgetWarning"
+	ReasonThresholdCrossed = "ThresholdCrossed"
+	ReasonBelowThreshold   = "BelowThreshold"
+)
+
 // AtLimitPolicy is what happens when a project's share is spent (D-13).
 // +kubebuilder:validation:Enum=block;warn
 type AtLimitPolicy string

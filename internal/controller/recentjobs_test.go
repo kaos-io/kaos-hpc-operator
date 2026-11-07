@@ -166,3 +166,27 @@ func TestRecentJobShouldDropTheSitesNeverStartedSentinel(t *testing.T) {
 		t.Fatalf("a real start was dropped: %v", rj.StartTime)
 	}
 }
+
+// AC-23: a job queued behind the site's monthly account limit shows SiteLimit as its reason and pending reason.
+func TestRecentJobOfSiteLimitPendingReason(t *testing.T) {
+	cases := []struct {
+		name, slurm, wantPending, wantReason string
+	}{
+		{"should_map_assocgrpgresminutes_to_site_limit", "AssocGrpGRESMinutes", hpcv1alpha1.ReasonSiteLimit, hpcv1alpha1.ReasonSiteLimit},
+		{"should_map_assocgrpbillingminutes_to_site_limit", "AssocGrpBillingMinutes", hpcv1alpha1.ReasonSiteLimit, hpcv1alpha1.ReasonSiteLimit},
+		{"should_keep_the_queue_reasons_that_are_not_the_monthly_limit", "Priority", "Priority", "Submitted"},
+		{"should_not_map_the_running_minutes_limit", "AssocGrpGRESRunMinutes", "AssocGrpGRESRunMinutes", "Submitted"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			j := recentJob("q", time.Minute, hpcv1alpha1.PhaseRunning)
+			j.Status.Reason = "Submitted"
+			j.Status.SiteObservation = &hpcv1alpha1.SiteObservation{JobID: "1", State: "PENDING", PendingReason: c.slurm}
+			j.Status.Run = &hpcv1alpha1.RunStatus{SiteJobID: "1", State: "PENDING"}
+			rj := recentJobOf(&j, time.Now())
+			if rj.PendingReason != c.wantPending || rj.Reason != c.wantReason {
+				t.Fatalf("got pending %q reason %q, want %q / %q", rj.PendingReason, rj.Reason, c.wantPending, c.wantReason)
+			}
+		})
+	}
+}

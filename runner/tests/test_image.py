@@ -13,7 +13,9 @@ import tarfile
 import threading
 
 import helpers
+import pytest
 from kaos_hpc_runner import image, staging
+from kaos_hpc_runner.staging import InsufficientQuota
 
 
 
@@ -225,6 +227,11 @@ def test_without_the_key_an_old_stager_or_no_space_the_job_pulls(monkeypatch):
         full = FakeStager(status={"ready": False}, image_rc=76)         # NoSpace
         assert image.stage_image(img, "gcp-tok", full) == ""
         assert [w[0] for w in full.calls] == ["image-status", "image"], "no pointless retry on no space"
+        strict = FakeStager(status={"ready": False}, image_rc=76)
+        with pytest.raises(InsufficientQuota) as e:
+            image.stage_image(img, "gcp-tok", strict, strict=True)
+        assert "step image" in str(e.value) and "Nothing was copied" in str(e.value), "AC-33"
+        assert [w[0] for w in strict.calls] == ["image-status", "image"]
     finally:
         reg.close()
 

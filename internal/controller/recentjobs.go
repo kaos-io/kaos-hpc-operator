@@ -117,7 +117,13 @@ func recentJobOf(j *hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) hpcv1alpha1.R
 		}
 	}
 	if !st.Phase.Terminal() && rj.SiteState != siteStateRunning && rj.HostSiteJobID == "" {
-		rj.PendingReason = pendingReasonOf(st)
+		raw := pendingReasonOf(st)
+		rj.PendingReason = hpcv1alpha1.DisplayPendingReason(raw)
+		if hpcv1alpha1.IsSiteLimitPendingReason(raw) {
+			// The site's monthly account limit holds this job in the site's queue (AC-23): its own reason,
+			// not the generic "Submitted".
+			rj.Reason = hpcv1alpha1.ReasonSiteLimit
+		}
 	}
 	rj.BookedNodeMinutes = bookedOf(j)
 	for _, a := range st.Attempts {

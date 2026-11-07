@@ -21,7 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .staging import EX_NOSPACE, EX_RETRY, ssh_present
+from .staging import EX_NOSPACE, EX_RETRY, InsufficientQuota, human_bytes, ssh_present
 
 IMAGE_STAGE_BUDGET_S = 45 * 60
 IMAGE_MANIFEST_ACCEPT = ', '.join([
@@ -204,8 +204,10 @@ def image_key(img):
     return hashlib.sha256(img.encode()).hexdigest()[:16]
 
 
-def stage_image(img, reg_token, stager):
-    # The staged tar's path on MeluXina, or '' (the job pulls). Never raises.
+def stage_image(img, reg_token, stager, strict=False):
+    # The staged tar's path on MeluXina, or '' (the job pulls). Never raises, except InsufficientQuota
+    # when strict: the layers do not fit the project's scratch quota (AC-33), and the job's own pull
+    # and SIF build would hit the same full quota. A resubmit is not strict: its job is already cancelled.
     if not stager.have_key():
         print('image: staging skipped (no staging key) - the job pulls', flush=True)
         return ''
@@ -238,11 +240,18 @@ def stage_image(img, reg_token, stager):
             if rc == 0 and done:
                 return done['path']
             if rc == EX_NOSPACE:
-                print('image: NOT ENOUGH SPACE on MeluXina scratch for the image layers - the job pulls',
-                      flush=True)
+                print('image: NOT ENOUGH SPACE on MeluXina scratch for the image layers', flush=True)
+                if strict:
+                    raise InsufficientQuota(
+                        'not enough room on the project\'s scratch for the step image (%s): the quota has no '
+                        'space left for it even after removing every unused copy. Nothing was copied and nothing '
+                        'in use was deleted. Free space on the project\'s scratch or ask for a larger quota.'
+                        % human_bytes(total))
                 return ''
             if rc not in (EX_RETRY, 255):
                 break
+    except InsufficientQuota:
+        raise
     except Exception as e:
         print('image: staging failed (%s) - the job pulls' % e, flush=True)
         return ''

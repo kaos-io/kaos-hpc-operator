@@ -228,7 +228,7 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		newSite(0, shareOf(10, 3)) // 180 node-minutes at the site
 		_, got := reconcileJob(newJob(envNS, 240))
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused))
-		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonBudgetBlocked))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonSiteLimit), "the site's remainder binds (AC-23)")
 		_, got = reconcileJob(newJob(envNS, 120))
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
 		_, got = reconcileJob(newJob(envNS, 120)) // fits the site's 180 only once the first settles

@@ -104,6 +104,20 @@ var (
 		Help: "Failed steps of the in-cluster idle watchdog, by stage.",
 	}, []string{"stage"})
 
+	// BudgetWarning is 1 while a project's used plus booked node-minutes on a site are at or above the
+	// warning threshold of what it may spend this period (PRD-HPC-1461 AC-22), else 0.
+	BudgetWarning = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kaos_hpc_budget_warning",
+		Help: "1 while used plus booked node-minutes are at or above budget.warnAtPercent of what the project may spend.",
+	}, []string{LabelSite, LabelProject, LabelTier})
+
+	// BudgetPercent is used plus booked as a percentage of what the project may spend this period
+	// (the lower of its share and the site's remainder); 0 when nothing may be spent.
+	BudgetPercent = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kaos_hpc_budget_percent",
+		Help: "Used plus booked node-minutes as a percentage of what the project may spend this period.",
+	}, []string{LabelSite, LabelProject, LabelTier})
+
 	// RunnerRestarts counts runner pods that failed and were replaced by their Job.
 	RunnerRestarts = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "kaos_hpc_runner_restarts_total",
@@ -114,7 +128,7 @@ var (
 func init() {
 	ctrlmetrics.Registry.MustRegister(JobPhase, JobQueueSeconds, JobRunSeconds, NodeMinutesBooked,
 		NodeMinutesSettled, SiteNodeMinutes, ActiveJobs, RunnerRestarts, LanePlacements, IdleKills,
-		K8sIdleKills, K8sIdleErrors)
+		K8sIdleKills, K8sIdleErrors, BudgetWarning, BudgetPercent)
 }
 
 // SetJobPhase makes phase the only phase series of the job.
@@ -133,4 +147,14 @@ func SetSiteLedger(site, project, tier string, used, booked, left int64) {
 	SiteNodeMinutes.WithLabelValues(site, project, tier, KindUsed).Set(float64(used))
 	SiteNodeMinutes.WithLabelValues(site, project, tier, KindBooked).Set(float64(booked))
 	SiteNodeMinutes.WithLabelValues(site, project, tier, KindLeft).Set(float64(left))
+}
+
+// SetBudgetWarning publishes one tier's budget percentage and whether it is at or above the threshold.
+func SetBudgetWarning(site, project, tier string, percent int64, warning bool) {
+	v := 0.0
+	if warning {
+		v = 1
+	}
+	BudgetWarning.WithLabelValues(site, project, tier).Set(v)
+	BudgetPercent.WithLabelValues(site, project, tier).Set(float64(max(percent, 0)))
 }

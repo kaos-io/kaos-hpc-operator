@@ -22,7 +22,7 @@ from .logs import LogStreamer
 from .reporter import OutputsTooLarge, Reporter, checkpoint_uri
 from .sharing import inputs_in_script
 from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, lane_refusal, share_state, site_time)
-from .settings import CHECKPOINT_EXIT, IDLE_EXIT, OFFER_S, Settings
+from .settings import CHECKPOINT_EXIT, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT, OFFER_S, Settings
 
 POLL_S = 30
 # --cancel-only (the controller's orphan sweep, PRD AC-08): how long one such runner works before it gives up
@@ -128,7 +128,8 @@ class Runner:
     def submit(self):
         cfg = self.cfg
         hpc = cfg.hpc_class()
-        if not self.stage_tried:
+        first = not self.stage_tried
+        if first:
             # Once per runner: a resubmit reuses the staged copy (or the in-job fallback) instead of
             # spending the staging budget again.
             self.stage_tried = True
@@ -142,7 +143,7 @@ class Runner:
         except Exception as e:
             print('no registry token from metadata server (anonymous pull):', e, flush=True)
         # After the token is minted, as late as possible: the layers move now, the job pulls nothing.
-        image_staged = imagemod.stage_image(cfg.image, reg, self.stager)
+        image_staged = imagemod.stage_image(cfg.image, reg, self.stager, strict=first)
         ident = cfg.identity()
         batch = '\n'.join(jobscript.batch_lines(cfg.scope if cfg.sharing else '-', ident['scratch']))
         env = ['PATH=/usr/bin:/bin:/usr/local/bin', 'HOME=' + ident['home'],
@@ -434,7 +435,10 @@ class Runner:
             print('adopting existing job', jid, flush=True)
             self.jid = jid
         else:
-            self.jid = self.submit()
+            try:
+                self.jid = self.submit()
+            except staging.InsufficientQuota as e:
+                return self.end_no_quota(e)
             offset = 0
         self.logs.attach(self.jid, offset)
         self.logs.start()
@@ -444,6 +448,17 @@ class Runner:
             return rc
         finally:
             self.logs.close()
+
+    def end_no_quota(self, err):
+        """Staging does not fit the project's scratch quota (AC-33): no site job was submitted. The one terminal
+        report says so (exit code 237, FAILED, a plain message); the controller ends the job InsufficientQuota
+        and settles nothing, since no node time was spent."""
+        msg = str(err)
+        print('ERROR: InsufficientQuota:', msg, flush=True)
+        self.write_termination('InsufficientQuota: ' + msg)
+        self.reporter.report(must=True, state='FAILED', exitCode=INSUFFICIENT_QUOTA_EXIT, terminal=True,
+                             endTime=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), message=msg[:500])
+        return 0
 
     def cancel_only(self):
         """The orphan sweep's runner (--cancel-only): stop this attempt's site job and report its final state.

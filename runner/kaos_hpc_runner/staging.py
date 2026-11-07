@@ -30,6 +30,27 @@ STAGE_BUDGET_S = 4 * 3600
 EX_RETRY, EX_NOSPACE, EX_USAGE = 75, 76, 2
 
 
+class InsufficientQuota(Exception):
+    """Staging stopped for want of scratch quota (space or files), after the stager evicted everything
+    unused (PRD-HPC-1461 AC-33). The message is a plain sentence for the job's status and the pipeline
+    log; the run ends InsufficientQuota instead of the job failing mid-copy on a full quota."""
+
+
+def human_bytes(n):
+    n = float(n)
+    for unit in ('B', 'kB', 'MB', 'GB', 'TB'):
+        if n < 1000 or unit == 'TB':
+            return ('%d %s' % (n, unit)) if unit == 'B' else ('%.1f %s' % (n, unit))
+        n /= 1000
+
+
+def quota_message(what, need_bytes, need_files):
+    return ('not enough room on the project\'s scratch for %s (%s, %d files): the quota has no space or file '
+            'allowance left for it even after removing every unused copy. Nothing was copied and nothing in '
+            'use was deleted. Free space on the project\'s scratch or ask for a larger quota.'
+            % (what, human_bytes(need_bytes), need_files))
+
+
 def resolve_commit(repo, ref, lakefs, wallet):
     """ref -> commit for a first step that has no upstream pin. The commit log
     (amount=1) is the proven endpoint: GET /refs/{ref} does not exist on our
@@ -261,6 +282,8 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet):
     if rc == EX_NOSPACE:
         print('stage: NOT ENOUGH SPACE on MeluXina scratch for this version even after'
               ' evicting unused versions - free space or raise the quota', flush=True)
+        # Not a fallback: the job's own copy would hit the same full quota mid-way (AC-33).
+        raise InsufficientQuota(quota_message('dataset %s@%s' % (repo, commit[:12]), need_bytes, need_files))
     return '', rc in (EX_RETRY, 255)
 
 
@@ -273,7 +296,8 @@ def ssh_present():
 
 def stage_dataset(cfg, stager, mint_wallet):
     """(resident path of the pinned commit or '' (the job stages in-job), the commit pinned for this
-    run: the upstream pin, else resolved here, else '')."""
+    run: the upstream pin, else resolved here, else ''). Raises InsufficientQuota when the dataset does
+    not fit the project's scratch quota (AC-33): the one failure that is not a fallback."""
     repo, ref = cfg.dataset_coords()
     commit = cfg.pinned_commit()
     lakefs = cfg.lakefs_url
@@ -300,6 +324,8 @@ def stage_dataset(cfg, stager, mint_wallet):
         attempt += 1
         try:
             path, retry = stage_once(stager, repo, ref, commit, lakefs, wallet)
+        except InsufficientQuota:
+            raise
         except Exception as e:
             print('stage: attempt', attempt, 'failed:', e, flush=True)
             path, retry = '', True
