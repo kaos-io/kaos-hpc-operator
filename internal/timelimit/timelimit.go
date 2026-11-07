@@ -21,6 +21,11 @@ const (
 	Margin = 1.5
 	// RoundMinutes is the granularity of a learned limit; it is also the smallest limit.
 	RoundMinutes = 15
+	// MaxLearnedMinutes: a limit is learned only for short steps. A shorter limit helps a job into
+	// the site's backfill gaps (minutes to about an hour); a long training gains nothing from it and
+	// would risk being killed hours in when one run is slower than its history (Petros 2026-11-07:
+	// nobody loses a training). Above this, the step keeps its declared limit.
+	MaxLearnedMinutes = 120
 )
 
 // Key identifies "the same step of the same app on the same class": jobs with an equal Key share
@@ -75,6 +80,9 @@ func Learn(samples []time.Duration, caps Caps) (int32, hpcv1alpha1.PlacementSour
 	p95 := percentile(samples, Percentile).Minutes()
 	limit := int32(math.Ceil(p95*Margin/RoundMinutes)) * RoundMinutes
 	limit = max(limit, RoundMinutes)
+	if limit > MaxLearnedMinutes {
+		return caps.Spec, hpcv1alpha1.PlacementDeclared // a long step keeps its declared limit
+	}
 	limit = min(limit, caps.lowest())
 	if limit >= caps.Spec {
 		return caps.Spec, hpcv1alpha1.PlacementDeclared
