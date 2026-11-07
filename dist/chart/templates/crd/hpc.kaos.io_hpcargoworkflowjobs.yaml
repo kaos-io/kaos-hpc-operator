@@ -562,6 +562,46 @@ spec:
                 - name
                 - namespace
                 type: object
+              siteObservation:
+                description: |-
+                  SiteObservation is the controller's batched reading of the site job's state (D-36). Optional:
+                  absent when the poller is off or has not read the job yet.
+                properties:
+                  comment:
+                    description: |-
+                      Comment is the site job's comment, when the site reports it (node sharing, PRD-1609: a host
+                      writes kaos-state=taken|done into its guest's comment). Nil: not reported, so a sharing
+                      reader reads it from the job itself.
+                    type: string
+                  intervalSeconds:
+                    description: |-
+                      IntervalSeconds is the controller's poll interval; a reader treats an observation older than
+                      three intervals as the controller being down.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  jobID:
+                    description: |-
+                      JobID is the site job this observation is about (a resubmit changes it; a reader ignores an
+                      observation of another id).
+                    type: string
+                  observedAt:
+                    description: ObservedAt is when the controller read the site.
+                    format: date-time
+                    type: string
+                  pendingReason:
+                    description: PendingReason is Slurm's reason while the job is
+                      pending, when the site reports one.
+                    type: string
+                  state:
+                    description: |-
+                      State is the scheduler's job state(s), comma separated, for example PENDING or RUNNING. Empty:
+                      the site no longer lists the job (it left slurmctld's memory), so the reader asks accounting.
+                    type: string
+                required:
+                - jobID
+                - observedAt
+                type: object
             type: object
         required:
         - spec

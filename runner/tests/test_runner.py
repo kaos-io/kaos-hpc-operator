@@ -107,6 +107,11 @@ def rig(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", net)
     monkeypatch.setattr(runmod.time, "sleep", lambda s: None)
     monkeypatch.setattr(runmod, "POLL_S", 0)
+    # No controller observation in these tests: the runner polls the site itself, at once (the waits
+    # for the controller's first poll and between fallback polls are tested in test_observation.py).
+    monkeypatch.setattr(runmod, "STALE_GRACE_S", 0)
+    monkeypatch.setattr(runmod, "STALE_POLL_S", 0)
+    monkeypatch.setattr(runmod, "REASON_POLL_S", 0)
 
     class Rig:
         pass
@@ -768,3 +773,170 @@ def test_a_host_job_that_never_ends_is_given_up_after_its_limit_plus_margin(rig,
     rig.runner.sleep = lambda s: clock.__setitem__(0, clock[0] + 600)
     assert rig.runner.run() == 0
     assert len(terminal_reports(rig)) == 1, "settled from the step; no end report without a job end"
+
+# ---------------------------------------------------------------- the controller's batched reading (D-36)
+
+T0 = 1762500000.0     # the tests' clock: 2025-11-07T08:00:00Z
+
+
+def stamp(t):
+    import time as _t
+    return _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(t))
+
+
+def obs(state, t=T0, jid="5001", reason=None, comment=None, interval=30):
+    o = {"jobID": jid, "state": state, "observedAt": stamp(t), "intervalSeconds": interval}
+    if reason is not None:
+        o["pendingReason"] = reason
+    if comment is not None:
+        o["comment"] = comment
+    return o
+
+
+class CountingSlurm(FakeSlurm):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.live_calls = 0
+
+    def live(self, jid):
+        self.live_calls += 1
+        return super().live(jid)
+
+
+def drive(r, script, step=30):
+    """Each poll tick sleeps once: install the next observation (None: leave the last) and move the clock."""
+    clock = {"t": T0}
+    script = list(script)
+
+    def sleep(s):
+        if script:
+            o = script.pop(0)
+            if o is not None:
+                r.kube.status["siteObservation"] = o(clock["t"]) if callable(o) else o
+        clock["t"] += step
+    r.runner.clock = lambda: clock["t"]
+    r.runner.sleep = sleep
+    r.clock = clock
+
+
+def test_a_queued_job_makes_no_site_call_while_the_controller_reports_its_state(rig):
+    slurm = CountingSlurm({"5001": [acc("PENDING"), acc("COMPLETED")]})
+    rig.make(slurm)
+    queued = lambda t: obs("PENDING", t, reason="Priority")      # noqa: E731
+    drive(rig, [queued] * 10 + [lambda t: obs("COMPLETED", t)])
+    rig.runner.run()
+    # one accounting read for the first state report and one for the final record; none in between
+    assert slurm.accounting_calls == [5001, 5001] and slurm.live_calls == 0
+    assert rig.kube.run["state"] == "COMPLETED" and rig.kube.run["terminal"]
+    states = [c[2]["status"]["run"]["state"] for c in rig.kube.patches() if "run" in c[2]["status"]]
+    assert states == ["PENDING", "PENDING", "COMPLETED"]
+
+
+def test_the_pending_reason_comes_from_the_observation_and_clears_when_it_runs(rig):
+    slurm = CountingSlurm({"5001": [acc("PENDING"), acc("RUNNING"), acc("COMPLETED")]})
+    rig.make(slurm)
+    seen = []
+    orig = rig.reporter.pending_reason
+    rig.reporter.pending_reason = lambda reason: (seen.append(reason), orig(reason))
+    drive(rig, [lambda t: obs("PENDING", t, reason="Priority"), lambda t: obs("PENDING", t, reason="Resources"),
+                lambda t: obs("RUNNING", t), lambda t: obs("COMPLETED", t)])
+    rig.runner.run()
+    assert seen == ["Priority", "Resources", None] and slurm.live_calls == 0
+
+
+def test_a_missing_reason_is_asked_of_the_job_only_every_so_often(rig):
+    rig.monkeypatch.setattr(runmod, "REASON_POLL_S", 120)
+    slurm = CountingSlurm({"5001": [acc("PENDING"), acc("COMPLETED")]}, live={"5001": {"state_reason": "Priority"}})
+    rig.make(slurm)
+    drive(rig, [lambda t: obs("PENDING", t)] * 9 + [lambda t: obs("COMPLETED", t)])
+    rig.runner.run()
+    assert 1 <= slurm.live_calls <= 3, "9 ticks of 30 s: about one per 120 s, not one per tick"
+
+
+def test_a_sharing_guest_reads_its_comment_from_the_observation_without_asking_the_site(rig):
+    slurm = CountingSlurm({"5001": [acc("PENDING"), acc("PENDING", comment="kaos-state=done host=9 slot=1 rc=0"),
+                                    acc("COMPLETED")]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    drive(rig, [lambda t: obs("PENDING", t, reason="Priority", comment=""),
+                lambda t: obs("PENDING", t, reason="Priority", comment="kaos-state=taken host=9 slot=1"),
+                lambda t: obs("RUNNING", t, comment="kaos-state=done host=9 slot=1 rc=0")])
+    rig.runner.run()
+    assert slurm.live_calls == 0
+    assert rig.kube.run["state"] == "COMPLETED" and rig.kube.run["hostSiteJobID"] == "9"
+
+
+def test_a_sharing_job_whose_observation_has_no_comment_still_reads_it_from_the_job(rig):
+    slurm = CountingSlurm({"5001": [acc("PENDING"), acc("COMPLETED")]}, live={"5001": {"state_reason": "Priority"}})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    drive(rig, [lambda t: obs("PENDING", t, reason="Priority")] * 3 + [lambda t: obs("COMPLETED", t)])
+    rig.runner.run()
+    assert slurm.live_calls == 3, "a host writes into the comment; without it in the observation the job is asked"
+
+
+def test_without_any_observation_the_runner_waits_for_the_controller_then_polls_slowly(rig):
+    rig.monkeypatch.setattr(runmod, "STALE_GRACE_S", 90)
+    rig.monkeypatch.setattr(runmod, "STALE_POLL_S", 120)
+    slurm = CountingSlurm({"5001": [acc("PENDING")] * 12 + [acc("COMPLETED")]})
+    rig.make(slurm)
+    drive(rig, [])           # the controller never reports
+    seen = []
+    orig = slurm.accounting
+
+    def acc_at(jid):
+        seen.append(rig.clock["t"] - T0)
+        return orig(jid)
+    slurm.accounting = acc_at
+    rig.runner.run()
+    # nothing in the first 90 s, then one read per 120 s (ticks are 30 s apart)
+    assert seen[0] >= 90 and all(b - a >= 120 for a, b in zip(seen, seen[1:])), seen
+
+
+def test_a_stale_observation_means_the_controller_is_down_and_the_runner_polls_slowly(rig):
+    rig.monkeypatch.setattr(runmod, "STALE_POLL_S", 120)
+    slurm = CountingSlurm({"5001": [acc("RUNNING")] * 6 + [acc("COMPLETED")]})
+    rig.make(slurm)
+    drive(rig, [lambda t: obs("RUNNING", t)] + [None] * 30)    # one fresh reading, then silence
+    seen = []
+    orig = slurm.accounting
+
+    def acc_at(jid):
+        seen.append(rig.clock["t"] - T0)
+        return orig(jid)
+    slurm.accounting = acc_at
+    rig.runner.run()
+    assert rig.kube.run["state"] == "COMPLETED" and rig.kube.run["terminal"]
+    after_stale = [t for t in seen if t > 90]
+    assert after_stale and all(b - a >= 120 for a, b in zip(after_stale, after_stale[1:])), seen
+
+
+def test_an_observation_of_another_site_job_is_ignored(rig):
+    rig.monkeypatch.setattr(runmod, "STALE_GRACE_S", 90)
+    slurm = CountingSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm)
+    drive(rig, [lambda t: obs("RUNNING", t, jid="4999")] * 2)
+    rig.runner.run()
+    assert rig.clock["t"] - T0 >= 90, "waited for an observation of its own job before polling itself"
+
+
+def test_a_job_the_site_no_longer_lists_is_read_from_accounting(rig):
+    slurm = CountingSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm)
+    drive(rig, [lambda t: obs("", t)])
+    rig.runner.run()
+    assert rig.kube.run["state"] == "COMPLETED" and rig.kube.run["terminal"]
+
+
+def test_the_end_of_an_observed_job_is_taken_from_its_accounting_record(rig):
+    slurm = CountingSlurm({"5001": [acc("PENDING"), acc("FAILED", rc=2, comment="err2:boom|")]})
+    rig.make(slurm)
+    drive(rig, [lambda t: obs("PENDING", t), lambda t: obs("FAILED", t)])
+    rig.runner.run()
+    assert rig.kube.run["exitCode"] == 2 and rig.kube.run["endTime"] == "2025-11-05T01:00:00Z"
+
+
+def test_a_cancel_and_a_submit_still_go_to_the_site(rig):
+    slurm = CountingSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm)
+    drive(rig, [lambda t: obs("COMPLETED", t)])
+    rig.runner.run()
+    assert len(slurm.submitted) == 1, "submit is the runner's own call; cancel on SIGTERM is covered by the sigterm tests"

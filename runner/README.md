@@ -3,7 +3,8 @@
 The controller-owned runner of one attempt of an `HPCArgoWorkflowJob` (PRD-HPC-1461 phase 1, D-58/D-64/D-65).
 It is the proven in-pod MeluXina waiter (hera-pipeline-template `kubecore/meluxina.py`, dev be9e52b) without its
 admission client: it submits the Slurm job (or re-attaches to the one a previous runner of this attempt submitted),
-stages dataset and image through the login-node stager, polls to the end, streams the job log, reports to the job's
+stages dataset and image through the login-node stager, follows the site job to its end (its state comes from the
+controller's `status.siteObservation`, D-36; the runner asks the site itself only when that is missing or stale), streams the job log, reports to the job's
 status and exits 0. A continuation is the controller's decision, so a new attempt is a new runner Job.
 
 Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /runner/main.py`

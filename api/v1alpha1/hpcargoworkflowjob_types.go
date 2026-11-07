@@ -265,6 +265,34 @@ type RunStatus struct {
 	Reservation string `json:"reservation,omitempty"`
 }
 
+// SiteObservation is what the controller's one batched poll per HPCSite per interval saw of the
+// attempt's site job (PRD-HPC-1461 D-36, D-45). The controller writes it; the runner reads its job's
+// state here instead of calling the site's REST API itself while the job is pending or running.
+type SiteObservation struct {
+	// JobID is the site job this observation is about (a resubmit changes it; a reader ignores an
+	// observation of another id).
+	JobID string `json:"jobID"`
+	// State is the scheduler's job state(s), comma separated, for example PENDING or RUNNING. Empty:
+	// the site no longer lists the job (it left slurmctld's memory), so the reader asks accounting.
+	// +optional
+	State string `json:"state,omitempty"`
+	// PendingReason is Slurm's reason while the job is pending, when the site reports one.
+	// +optional
+	PendingReason string `json:"pendingReason,omitempty"`
+	// Comment is the site job's comment, when the site reports it (node sharing, PRD-1609: a host
+	// writes kaos-state=taken|done into its guest's comment). Nil: not reported, so a sharing
+	// reader reads it from the job itself.
+	// +optional
+	Comment *string `json:"comment,omitempty"`
+	// ObservedAt is when the controller read the site.
+	ObservedAt metav1.Time `json:"observedAt"`
+	// IntervalSeconds is the controller's poll interval; a reader treats an observation older than
+	// three intervals as the controller being down.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	IntervalSeconds int32 `json:"intervalSeconds,omitempty"`
+}
+
 // RunnerRef names the runner Job of the current attempt (written by the controller).
 type RunnerRef struct {
 	// JobName of the Kubernetes Job, in the HPCSite's namespace.
@@ -387,6 +415,10 @@ type HPCArgoWorkflowJobStatus struct {
 	// PendingReason is the scheduler's pending reason while the site job is queued (runner's poll).
 	// +optional
 	PendingReason string `json:"pendingReason,omitempty"`
+	// SiteObservation is the controller's batched reading of the site job's state (D-36). Optional:
+	// absent when the poller is off or has not read the job yet.
+	// +optional
+	SiteObservation *SiteObservation `json:"siteObservation,omitempty"`
 	// Runner is the runner Job of the current attempt (serve mode).
 	// +optional
 	Runner *RunnerRef `json:"runner,omitempty"`

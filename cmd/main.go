@@ -20,8 +20,10 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"flag"
+	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -47,6 +49,7 @@ import (
 	"github.com/kaos-io/kaos-hpc-operator/internal/controller"
 	"github.com/kaos-io/kaos-hpc-operator/internal/lanes"
 	"github.com/kaos-io/kaos-hpc-operator/internal/runnerjob"
+	"github.com/kaos-io/kaos-hpc-operator/internal/sitestate"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -62,6 +65,14 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// defaultSitePollInterval is $SITE_POLL_INTERVAL when it parses, else the built-in default.
+func defaultSitePollInterval() time.Duration {
+	if d, err := time.ParseDuration(os.Getenv("SITE_POLL_INTERVAL")); err == nil && d >= 0 {
+		return d
+	}
+	return controller.DefaultSitePollInterval
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
@@ -73,6 +84,9 @@ func main() {
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	var runnerImage, runnerScheduling, laneCandidates string
+	var sitePollInterval time.Duration
+	var siteRestRate float64
+	var siteRestBurst int
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -98,6 +112,12 @@ func main() {
 		"JSON list of lanes tried in order for serve-mode attempts, for example "+
 			`[{"qos":"test"},{"qos":"dev","reservationByPartition":{"gpu":"gpudev"}}]`+
 			". Empty (default): every attempt uses its class's own QoS. Default: $LANE_CANDIDATES.")
+	flag.DurationVar(&sitePollInterval, "site-poll-interval", defaultSitePollInterval(),
+		"How often the controller reads the state of all site jobs of one HPCSite (one batched call). "+
+			"0 turns the poller off and runners poll the site themselves. Default: $SITE_POLL_INTERVAL or 30s.")
+	flag.Float64Var(&siteRestRate, "site-rest-rate", 2,
+		"Token bucket per site profile: REST calls per second the controller may make.")
+	flag.IntVar(&siteRestBurst, "site-rest-burst", 5, "Token bucket per site profile: burst size.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -272,6 +292,17 @@ func main() {
 	if err := (&controller.HPCSiteReconciler{Client: mgr.GetClient(), Jobs: jobs}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HPCSite")
 		os.Exit(1)
+	}
+	if sitePollInterval > 0 {
+		poller := &controller.SitePoller{
+			Client: mgr.GetClient(), Secrets: mgr.GetAPIReader(), Interval: sitePollInterval,
+			Reader:     &sitestate.Client{HTTP: &http.Client{Timeout: 30 * time.Second}},
+			BucketRate: siteRestRate, BucketBurst: siteRestBurst,
+		}
+		if err := mgr.Add(poller); err != nil {
+			setupLog.Error(err, "unable to add the site poller")
+			os.Exit(1)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 
