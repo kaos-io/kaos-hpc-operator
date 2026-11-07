@@ -1,3 +1,5 @@
+# A site operation the controller creates itself, named by a hash of its content (API type only;
+# no controller acts on it yet). Spec is immutable.
 apiVersion: hpc.kaos.io/v1alpha1
 kind: HPCOperation
 metadata:
@@ -6,4 +8,6 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: hpcoperation-sample
 spec:
-  # TODO(user): Add fields here
+  kind: Stage
+  siteName: demo-meluxina
+  params: {repo: datasets-demo, commit: abc123}

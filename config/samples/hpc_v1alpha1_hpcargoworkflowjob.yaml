@@ -1,3 +1,5 @@
+# Created by the follower step, never by hand. Serve mode (stepName set): the controller admits,
+# books and runs it through a runner Job. Names are deterministic: hpc-<hash of workflow UID/node>.
 apiVersion: hpc.kaos.io/v1alpha1
 kind: HPCArgoWorkflowJob
 metadata:
@@ -6,4 +8,13 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: hpcargoworkflowjob-sample
 spec:
-  # TODO(user): Add fields here
+  class: meluxina-gpu
+  image: registry.example.org/demo/train:v0.0.0
+  command: [python, -m, steps.train]
+  wallTimeMinutes: 240          # the cap; a learned limit (<= 2 h steps) is always lower
+  stepName: train
+  workflow: {name: demo-run-x7k2p, uid: 6c1e2f9a-0000-0000-0000-000000000000}
+  outputs: [model]
+  idleTimeoutMinutes: 20        # 0 turns the idle watchdog off
+  sharing: {scope: 5b1f0c2d9e3a}
+  resumable: {leadMinutes: 10, maxContinuations: 5}
