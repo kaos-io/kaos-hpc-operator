@@ -413,6 +413,74 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(got.Status.Attempts[0].NodeMinutesSaved).To(HaveValue(Equal(int64(0))))
 	})
 
+	// hostEnded reports a shared-node host whose step ended 1 minute after its start.
+	hostEnded := func(j *hpcv1alpha1.HPCArgoWorkflowJob, start time.Time) {
+		st, en := metav1.NewTime(start), metav1.NewTime(start.Add(time.Minute))
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5430776", State: "COMPLETED", Terminal: true,
+			StartTime: &st, EndTime: &en})
+	}
+
+	It("settles a host from its Slurm job's end when that is reported after its step (idempotently)", func() {
+		newSite(10, nil)
+		j := newJob(envNS, 240)
+		reconcileJob(j)
+		start := time.Now().Add(-10 * time.Minute)
+		hostEnded(j, start)
+		_, got := reconcileJob(j)
+		Expect(got.Status.Attempts).To(HaveLen(1))
+		Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(1)), "the step's own end")
+		before := testutil.ToFloat64(metrics.NodeMinutesSettled.WithLabelValues(string(hpcv1alpha1.TierGPU), project))
+
+		// The runner follows the host job to its end, 2 minutes after the step's: 3 minutes in all.
+		st, en := metav1.NewTime(start), metav1.NewTime(start.Add(3*time.Minute))
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5430776", State: "COMPLETED", Terminal: true,
+			StartTime: &st, EndTime: &en})
+		for range 3 { // the same report seen again changes nothing
+			_, got = reconcileJob(j)
+		}
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseSucceeded))
+		Expect(got.Status.Attempts).To(HaveLen(1))
+		Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(3)))
+		Expect(got.Status.Attempts[0].EndTime.Unix()).To(Equal(en.Unix()))
+		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(3))))
+		Expect(testutil.ToFloat64(metrics.NodeMinutesSettled.WithLabelValues(string(hpcv1alpha1.TierGPU), project))).
+			To(Equal(before + 2))
+	})
+
+	It("never lowers a host's settlement and ignores an implausible late end (NO_VAL)", func() {
+		newSite(10, nil)
+		j := newJob(envNS, 240)
+		reconcileJob(j)
+		start := time.Now().Add(-10 * time.Minute)
+		hostEnded(j, start)
+		reconcileJob(j)
+		st := metav1.NewTime(start)
+		for _, end := range []time.Time{start.Add(30 * time.Second), time.Unix(4294967294, 0)} {
+			en := metav1.NewTime(end)
+			report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5430776", State: "COMPLETED", Terminal: true,
+				StartTime: &st, EndTime: &en})
+			_, got := reconcileJob(j)
+			Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(1)))
+		}
+	})
+
+	It("keeps a guest at zero when a later end is reported", func() {
+		newSite(10, nil)
+		j := newJob(envNS, 240)
+		reconcileJob(j)
+		start := time.Now().Add(-10 * time.Minute)
+		st, en := metav1.NewTime(start), metav1.NewTime(start.Add(time.Minute))
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5430777", HostSiteJobID: "5430776", State: "COMPLETED",
+			Terminal: true, StartTime: &st, EndTime: &en})
+		reconcileJob(j)
+		en = metav1.NewTime(start.Add(3 * time.Minute))
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5430777", HostSiteJobID: "5430776", State: "COMPLETED",
+			Terminal: true, StartTime: &st, EndTime: &en})
+		_, got := reconcileJob(j)
+		Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(0)))
+		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(0))))
+	})
+
 	It("defaults idleTimeoutMinutes to 20 and keeps an explicit 0 (watchdog off)", func() {
 		newSite(10, nil)
 		j := newJob(envNS, 60)
