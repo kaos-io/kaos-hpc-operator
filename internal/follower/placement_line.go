@@ -30,6 +30,9 @@ func placementLines(job *hpcv1alpha1.HPCArgoWorkflowJob) []string {
 		return nil
 	}
 	parts := []string{"HPC: waiting", "lane " + laneOf(job.Status.Placement), timeLimitText(job)}
+	if t := resumableText(job); t != "" {
+		parts = append(parts, t)
+	}
 	if r := job.Status.PendingReason; r != "" {
 		parts = append(parts, "queue reason: "+r)
 	}
@@ -54,7 +57,37 @@ func runningLines(job *hpcv1alpha1.HPCArgoWorkflowJob) []string {
 	if run.StartTime != nil {
 		head += " since " + run.StartTime.UTC().Format("15:04") + " UTC"
 	}
-	return append(lines, strings.Join([]string{head, "lane " + lane, timeLimitText(job)}, " · "))
+	parts := []string{head, "lane " + lane, timeLimitText(job)}
+	if t := resumableText(job); t != "" {
+		parts = append(parts, t)
+	}
+	if run.Checkpoint != nil && run.Checkpoint.SkippedReason != "" {
+		lines = append(lines, "HPC: checkpoint copy skipped: "+run.Checkpoint.SkippedReason)
+	}
+	return append(lines, strings.Join(parts, " · "))
+}
+
+// resumableText says whether the step continues after an interruption and whether that is verified (D-74).
+func resumableText(job *hpcv1alpha1.HPCArgoWorkflowJob) string {
+	rs := (*hpcv1alpha1.ResumableStatus)(nil)
+	if p := job.Status.Placement; p != nil {
+		rs = p.Resumable
+	}
+	switch {
+	case job.Spec.ResumableOptOut:
+		return "not resumable (resumable=False)"
+	case rs != nil && rs.Verified:
+		when := ""
+		if rs.Since != nil {
+			when = " " + rs.Since.UTC().Format("2006-01-02")
+		}
+		return "resumable (verified" + when + ")"
+	case rs != nil && rs.Reason != "":
+		return "resumable not verified: " + rs.Reason
+	case job.Spec.Resumable != nil:
+		return "resumable (declared, not yet verified)"
+	}
+	return ""
 }
 
 // endLines explains why an attempt ended or will be retried; nil when the reason is none of them.
@@ -67,6 +100,14 @@ func endLines(job *hpcv1alpha1.HPCArgoWorkflowJob) []string {
 			lines = append(lines, strings.TrimRight(job.Status.Run.LastLog, "\n"))
 		}
 		return lines
+	case hpcv1alpha1.ReasonContinuing:
+		return []string{fmt.Sprintf("HPC: continuing from the last checkpoint as attempt %d (%s)", job.Status.Attempt, job.Status.Message)}
+	case hpcv1alpha1.ReasonRerunNodeFail, hpcv1alpha1.ReasonRerunPreempted:
+		return []string{fmt.Sprintf("HPC: re-running from the start (%d/%d): %s", job.Status.Reruns, hpcv1alpha1.MaxReruns, rerunWhy(job))}
+	case hpcv1alpha1.ReasonRerunLimit:
+		return []string{fmt.Sprintf("HPC: stopped: the step was interrupted again after %d re-runs", hpcv1alpha1.MaxReruns)}
+	case hpcv1alpha1.ReasonNoProgress:
+		return []string{"HPC: stopped: the continuation did not get past its checkpoint (NoProgress): " + job.Status.Message}
 	case hpcv1alpha1.ReasonTimeLimitRetry:
 		return []string{"HPC: hit its learned time limit; retrying once with the full limit"}
 	case hpcv1alpha1.ReasonWallTimeReached:
@@ -125,4 +166,12 @@ func (f *follower) showPlacement(job *hpcv1alpha1.HPCArgoWorkflowJob) {
 	for _, l := range lines {
 		_, _ = fmt.Fprintln(f.o.Out, l)
 	}
+}
+
+// rerunWhy names the interruption behind a re-run.
+func rerunWhy(job *hpcv1alpha1.HPCArgoWorkflowJob) string {
+	if job.Status.Reason == hpcv1alpha1.ReasonRerunPreempted {
+		return "the site pre-empted the job"
+	}
+	return "the node failed or was taken for maintenance"
 }

@@ -6,6 +6,7 @@ re-attach by key, never submit a continuation.
 """
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import helpers
@@ -19,6 +20,7 @@ from kaos_hpc_runner import slurm as slurmmod
 WF = "0b7f6c1e-1111-2222-3333-444455556666"
 NAME = "kaos-%s-model-training" % WF
 CID = "ab" * 32
+REF = "scratch://kaos-ckpt/%s/model-training/000002.tar#%s" % (WF, CID)
 
 
 def acc(state, rc=0, comment="", start=1762300800, end=1762304400):
@@ -196,7 +198,7 @@ def test_timeout_and_node_fail_are_terminal_states_too(rig):
 def test_the_submitted_job_is_the_proven_one(rig):
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
     rig.make(slurm, KAOS_ATTEMPT="3", HPC_RESUMABLE_LEAD="20", CHECKPOINT_BUCKET="b", KUBECORE_RUN_ID="run-1",
-             KAOS_RESUME_REF=CID, KAOS_RESUME_PREFIX="hpc-checkpoints/%s/model-training/attempt-2/" % WF)
+             KAOS_RESUME_REF=REF)
     rig.runner.run()
     job = slurm.submitted[0]["job"]
     env = dict(e.split("=", 1) for e in job["environment"])
@@ -204,10 +206,11 @@ def test_the_submitted_job_is_the_proven_one(rig):
         (NAME, "gpu", "p1", "default", 720)
     assert job["current_working_directory"] == "/home/u1" and job["requeue"] is True
     assert (env["KAOS_ATTEMPT"], env["KAOS_RESUMABLE"], env["KAOS_RESUME_REF"]) == ("3", "1", CID)
-    assert env["KAOS_RESUME_PREFIX"].endswith("attempt-2/") and env["HPC_GPUS"] == "4"
+    assert env["KAOS_RESUME_PREFIX"] == "kaos-ckpt/%s/model-training/000002.tar" % WF and env["HPC_GPUS"] == "4"
+    assert env["KAOS_PROJID"] == "1" and env["KAOS_CKPT_BUDGET_PCT"] == "10" and "CKPT_B64" in env
     assert env["MLFLOW_TRACKING_TOKEN"] == "wallet.jwt" and env["LAKEFS_BEARER_TOKEN"] == "wallet.jwt"
     assert env["LAKEFS_ENDPOINT"] == "https://lakefs.example" and env["OUTPUTS_REPO"] == "outputs-yolo"
-    assert env["CHECKPOINT_BUCKET"] == "b" and env["KUBECORE_RUN_ID"] == "run-1" and "CKPTOUT_B64" in env
+    assert env["CHECKPOINT_BUCKET"] == "b" and env["KUBECORE_RUN_ID"] == "run-1" and "CKPT_B64" in env
     assert "ZITADEL_MACHINE_KEY" not in " ".join(job["environment"]), "the machine key never reaches the site (T-03)"
     assert job["kill_warning_signal"] == "USR1" and job["kill_warning_delay"]["number"] == 20 * 60
     assert slurm.submitted[0]["script"].startswith("#!/bin/bash -l\n# kaos-job v2 scope=-\n")
@@ -260,14 +263,15 @@ def test_the_leases_ride_in_the_job_comment(rig, monkeypatch):
     monkeypatch.setattr(runmod.imagemod, "stage_image", lambda img, tok, st: "/scr/kaos/images/k.tar")
     rig.runner.run()
     key = runmod.imagemod.image_key(rig.cfg.image)
-    assert slurm.submitted[0]["job"]["comment"] == "kaos-commit=c0ffee12 kaos-image=" + key
+    assert slurm.submitted[0]["job"]["comment"] == \
+        "kaos-commit=c0ffee12 kaos-image=" + key + " kaos-ckpt-lease=%s/model-training" % WF
     env = dict(e.split("=", 1) for e in slurm.submitted[0]["job"]["environment"])
     assert env["IMAGE_STAGED"] == "/scr/kaos/images/k.tar" and env["KAOS_COMMIT"] == "c0ffee12"
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    rig.make(slurm)           # no pin, nothing staged: no comment at all
+    rig.make(slurm)           # no pin, nothing staged: only the checkpoint lease
     monkeypatch.setattr(runmod.imagemod, "stage_image", lambda img, tok, st: "")
     rig.runner.run()
-    assert "comment" not in slurm.submitted[0]["job"]
+    assert slurm.submitted[0]["job"]["comment"] == "kaos-ckpt-lease=%s/model-training" % WF
 
 
 # ---------------------------------------------------------------- re-attach: never a second submission
@@ -331,60 +335,84 @@ def test_a_deleted_job_means_nothing_to_run(rig, capsys):
 
 # ---------------------------------------------------------------- no continuation submission (D-44: the controller decides)
 
-def _ckpt_comment(attempt=1):
-    return "kaos-commit=c0ffee12 kaos-ckpt=%s kaos-ckpt-path=hpc-checkpoints/%s/model-training/attempt-%d/" % (
-        CID, WF, attempt)
+def _ckpt_comment(seq=3, info=None):
+    note = "kaos-commit=c0ffee12 kaos-ckpt-lease=%s/model-training kaos-ckpt=%s kaos-ckpt-path=kaos-ckpt/%s/model-training/%06d.tar" % (
+        WF, CID, WF, seq)
+    info = {"p": [3, 40], "pt": "epoch=3 step=40", "d": "dd", "b": 1000, "sb": 2000, "pb": 9000} if info is None else info
+    return note + " kaos-ckpt-info=" + urllib.parse.quote(json.dumps(info, separators=(",", ":")), safe="")
 
 
-def test_a_checkpoint_is_reported_and_the_runner_exits_without_submitting_the_continuation(rig):
+def test_a_checkpoint_copy_is_reported_and_the_runner_exits_without_submitting_the_continuation(rig):
     slurm = FakeSlurm({"5001": [acc("FAILED", rc=85, comment=_ckpt_comment())]})
     rig.make(slurm, HPC_RESUMABLE_LEAD="20")
-    rig.net.commits.add(CID)
     assert rig.runner.run() == 0
     assert len(slurm.submitted) == 1, "one attempt per runner: the next job is the controller's decision (D-44)"
     assert rig.kube.run["exitCode"] == 85 and rig.kube.run["terminal"] is True
-    assert rig.kube.run["checkpointRef"] == "lakefs://outputs-yolo/%s/hpc-checkpoints/%s/model-training/attempt-1/" % (CID, WF)
+    assert rig.kube.run["checkpointRef"] == "scratch://kaos-ckpt/%s/model-training/000003.tar#%s" % (WF, CID)
+    assert rig.kube.run["checkpoint"] == {"progressValues": [3, 40], "progressText": "epoch=3 step=40", "digest": "dd",
+                                          "bytes": 1000, "stepBytes": 2000, "projectBytes": 9000}
     assert "outputs" not in rig.kube.status
 
 
-@pytest.mark.parametrize("lead, comment, commit_exists, why", [
-    (0, _ckpt_comment(), True, "not declared resumable"),
-    (20, "kaos-commit=c0ffee12", True, "did not reach the outputs repository"),
-    (20, _ckpt_comment(attempt=2), True, "did not reach the outputs repository"),    # the previous attempt's
-    (20, _ckpt_comment(), False, "is not in the outputs repository"),
+@pytest.mark.parametrize("state,rc", [("TIMEOUT", None), ("NODE_FAIL", None), ("PREEMPTED", None), ("BOOT_FAIL", None),
+                                      ("REVOKED", None), ("FAILED", 236), ("FAILED", 85)])
+def test_every_recoverable_end_reports_the_copy_the_job_left(rig, state, rc):
+    slurm = FakeSlurm({"5001": [acc(state, rc=rc, comment=_ckpt_comment())]})
+    rig.make(slurm)
+    assert rig.runner.run() == 0
+    assert rig.kube.run["checkpointRef"].endswith("#" + CID) and rig.kube.run["checkpoint"]["progressValues"] == [3, 40]
+
+
+@pytest.mark.parametrize("state,rc", [("FAILED", 1), ("OUT_OF_MEMORY", None), ("CANCELLED", 85), ("COMPLETED", 0)])
+def test_the_steps_own_error_a_cancel_or_a_success_is_never_reported_with_a_copy(rig, state, rc):
+    slurm = FakeSlurm({"5001": [acc(state, rc=rc, comment=_ckpt_comment())]})
+    rig.make(slurm)
+    rig.runner.run()
+    assert "checkpointRef" not in rig.kube.run
+
+
+@pytest.mark.parametrize("comment, why", [
+    ("kaos-commit=c0ffee12", "no checkpoint copy reached the scratch store"),
+    ("kaos-ckpt=%s kaos-ckpt-path=kaos-ckpt/other-wf/model-training/000001.tar" % CID, "no checkpoint copy reached"),   # another step's
+    ("kaos-ckpt=nothex kaos-ckpt-path=kaos-ckpt/%s/model-training/000001.tar" % WF, "no checkpoint copy reached"),
+    ("kaos-ckpt=%s kaos-ckpt-path=../../etc/passwd" % CID, "no checkpoint copy reached"),
 ])
-def test_without_a_committed_checkpoint_of_this_attempt_no_ref_is_reported(rig, capsys, lead, comment, commit_exists, why):
+def test_exit_85_without_a_valid_copy_of_this_step_reports_no_ref(rig, capsys, comment, why):
     slurm = FakeSlurm({"5001": [acc("FAILED", rc=85, comment=comment)]})
-    rig.make(slurm, HPC_RESUMABLE_LEAD=str(lead))
-    if commit_exists:
-        rig.net.commits.add(CID)
+    rig.make(slurm, HPC_RESUMABLE_LEAD="20")
     assert rig.runner.run() == 0 and len(slurm.submitted) == 1
     assert rig.kube.run["terminal"] is True and "checkpointRef" not in rig.kube.run
     assert why in capsys.readouterr().out
+
+
+def test_a_node_failure_with_no_copy_reports_no_ref_and_does_not_wait_for_one(rig):
+    slurm = FakeSlurm({"5001": [acc("NODE_FAIL", rc=None, comment="kaos-commit=c0ffee12")]})
+    rig.make(slurm)
+    assert rig.runner.run() == 0 and "checkpointRef" not in rig.kube.run and rig.kube.run["state"] == "NODE_FAIL"
 
 
 def test_lagging_accounting_is_covered_by_slurmctld(rig):
     slurm = FakeSlurm({"5001": [acc("FAILED", rc=85, comment="kaos-commit=c0ffee12")]},
                       live={"5001": {"comment": _ckpt_comment()}})
     rig.make(slurm, HPC_RESUMABLE_LEAD="20")
-    rig.net.commits.add(CID)
     rig.runner.run()
     assert "checkpointRef" in rig.kube.run
 
 
-def test_a_stopped_run_is_never_reported_with_a_checkpoint(rig):
-    slurm = FakeSlurm({"5001": [acc("CANCELLED", rc=85, comment=_ckpt_comment())]})
-    rig.make(slurm, HPC_RESUMABLE_LEAD="20")
-    rig.net.commits.add(CID)
+def test_the_submitted_comment_leases_the_steps_checkpoint_copies(rig):
+    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm)
     rig.runner.run()
-    assert "checkpointRef" not in rig.kube.run and rig.kube.run["state"] == "CANCELLED"
+    assert "kaos-ckpt-lease=%s/model-training" % WF in slurm.submitted[0]["job"]["comment"]
 
 
-def test_an_unreachable_lakefs_never_lets_the_step_continue(rig):
-    slurm = FakeSlurm({"5001": [acc("FAILED", rc=85, comment=_ckpt_comment())]})
-    rig.make(slurm, HPC_RESUMABLE_LEAD="20", wallet="")
+def test_a_skipped_periodic_copy_is_reported_while_the_job_runs(rig):
+    info = {"sb": 10, "pb": 20, "sk": "skipped the periodic copy: it would take the project over 80% of its scratch space"}
+    slurm = FakeSlurm({"5001": [acc("RUNNING", comment=_ckpt_comment(info=info)), acc("COMPLETED")]})
+    rig.make(slurm)
     rig.runner.run()
-    assert "checkpointRef" not in rig.kube.run
+    running = [c[2]["status"]["run"] for c in rig.kube.patches() if c[2]["status"]["run"].get("state") == "RUNNING"]
+    assert running and running[0]["checkpoint"]["skippedReason"].startswith("skipped the periodic copy")
 
 
 # ---------------------------------------------------------------- resubmits inside one attempt

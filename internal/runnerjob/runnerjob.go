@@ -289,9 +289,12 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 	}
 	// D-72: the idle watchdog's window; the runner hands it to the job script (0 = off).
 	kv = append(kv, [2]string{"HPC_IDLE_TIMEOUT_MINUTES", strconv.Itoa(int(job.EffectiveIdleTimeoutMinutes()))})
-	if spec.Resumable != nil {
-		kv = append(kv, [2]string{"HPC_RESUMABLE_LEAD", strconv.Itoa(int(spec.Resumable.LeadMinutes))})
+	// A step declared resumable, or verified resumable from its history (D-74), gets the wall-time signal
+	// and never shares a node; every other step still gets its checkpoint folder (D-75).
+	if res := job.EffectiveResumable(); res != nil {
+		kv = append(kv, [2]string{"HPC_RESUMABLE_LEAD", strconv.Itoa(int(res.LeadMinutes))})
 	}
+	kv = append(kv, [2]string{"HPC_CKPT_BUDGET_PERCENT", strconv.Itoa(int(checkpointBudgetPercent(site)))})
 	if r := job.Status.Resume; r != nil && attempt > 1 {
 		kv = append(kv, [2]string{"KAOS_RESUME_REF", r.CheckpointRef},
 			[2]string{"KAOS_RESUME_FROM_ATTEMPT", strconv.Itoa(int(r.FromAttempt))})
@@ -307,6 +310,17 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 		LocalObjectReference: corev1.LocalObjectReference{Name: SecretJWT}, Key: "token", Optional: ptr.To(false)}}})
 	return env, nil
 }
+
+// checkpointBudgetPercent is the share of the project's scratch space the step checkpoints may hold.
+func checkpointBudgetPercent(site *hpcv1alpha1.HPCSite) int32 {
+	if p := site.Spec.Limits.CheckpointBudgetPercent; p > 0 {
+		return p
+	}
+	return DefaultCheckpointBudgetPercent
+}
+
+// DefaultCheckpointBudgetPercent is the checkpoint budget when the HPCSite sets none (D-75).
+const DefaultCheckpointBudgetPercent = 10
 
 func homeOf(site *hpcv1alpha1.HPCSite) string {
 	root := site.Spec.Profile.HomeRoot

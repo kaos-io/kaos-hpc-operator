@@ -21,7 +21,7 @@ from . import jobscript, payloads, settings, staging, wallet
 from .logs import LogStreamer
 from .reporter import OutputsTooLarge, Reporter, checkpoint_uri
 from .sharing import inputs_in_script
-from .slurm import (TERMINAL, Refused, Slurm, comment_of, host_gone, lane_refusal, share_state, site_time)
+from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, lane_refusal, share_state, site_time)
 from .settings import CHECKPOINT_EXIT, IDLE_EXIT, OFFER_S, Settings
 
 POLL_S = 30
@@ -62,6 +62,34 @@ def parse_time(text):
         return None
 
 
+def checkpoint_info(comment):
+    """The checkpoint report in a job comment (kaos-ckpt-info=), as status.run.checkpoint wants it, or None."""
+    import re
+    m = re.search(r'(?:^|\s)kaos-ckpt-info=(\S+)', comment or '')
+    if not m:
+        return None
+    try:
+        raw = json.loads(urllib.parse.unquote(m.group(1)))
+    except ValueError:
+        return None
+    names = {'p': 'progressValues', 'pt': 'progressText', 'd': 'digest', 'b': 'bytes', 'sb': 'stepBytes',
+             'pb': 'projectBytes', 'sk': 'skippedReason'}
+    info = {names[k]: v for k, v in raw.items() if k in names and v not in (None, '', [], 0)}
+    return info or None
+
+
+def parse_checkpoint_note(comment, wf_uid, step):
+    """The checkpoint copy a job comment names: {'sha', 'rel', 'info'}, or None. Only this step's own store
+    counts (kaos-ckpt/<workflow uid>/<step>/<seq>.tar), and the sha must look like one."""
+    import re
+    m = dict(re.findall(r'(?:^|\s)(kaos-ckpt|kaos-ckpt-path)=(\S+)', comment or ''))
+    sha, rel = m.get('kaos-ckpt', ''), m.get('kaos-ckpt-path', '')
+    if not (re.fullmatch('[0-9a-f]{64}', sha)
+            and re.fullmatch(r'kaos-ckpt/%s/%s/\d{6}\.tar' % (re.escape(wf_uid), re.escape(step)), rel)):
+        return None
+    return {'sha': sha, 'rel': rel, 'info': checkpoint_info(comment) or {}}
+
+
 class View:
     """What one poll tick knows of the site job: an accounting-shaped job, its states, and whether the
     controller's observation supplied it (then the comment and reason may be absent, see Runner.live_of)."""
@@ -89,6 +117,7 @@ class Runner:
         self.resubmits = 0
         self.lost_hosts = 0
         self.reported = None
+        self.reported_info = 'null'   # the last checkpoint report sent (json), so a change is sent once
         self.pending_reason = None
         self.hosted = None
         self.job_limit_min = None    # the time limit this runner submitted the site job with
@@ -132,6 +161,10 @@ class Runner:
             env.append('IDLEWATCH_B64=' + payloads.b64(payloads.IDLEWATCH))
         if cfg.resume:
             env += ['KAOS_RESUME_REF=' + cfg.resume[0], 'KAOS_RESUME_PREFIX=' + cfg.resume[1]]
+        # D-74, D-75: the checkpoint copier every job carries (the step's KAOS_CHECKPOINT_DIR). Quota ids: the
+        # project's Lustre project id is the digits of its account.
+        env += ['CKPT_B64=' + payloads.b64(payloads.CKPT), 'KAOS_CKPT_BUDGET_PCT=%d' % cfg.ckpt_budget_pct,
+                'KAOS_PROJID=' + ''.join(c for c in ident['account'] if c.isdigit())]
         # Same outputs location + run id as the in-cluster copy (outputs-<app>). Only when set: step
         # code reads os.environ.get(..., default), so an empty value would override its own default.
         env += [k + '=' + cfg.env[k] for k in
@@ -155,9 +188,6 @@ class Runner:
                         'OUTPUTS_REPO=' + cfg.outputs_repo, 'OUTPUTS_REF=' + cfg.outputs_ref,
                         'STAGEIN_B64=' + payloads.b64(payloads.STAGEIN),
                         'STAGEOUT_B64=' + payloads.b64(payloads.STAGEOUT)]
-                if cfg.resumable_lead:
-                    env += ['CKPTOUT_B64=' + payloads.b64(payloads.CKPTOUT),
-                            'CKPTIN_B64=' + payloads.b64(payloads.CKPTIN)]
         commit = cfg.pinned_commit()
         if commit:
             env.append('KAOS_COMMIT=' + commit)   # fail() keeps the dataset lease
@@ -197,8 +227,8 @@ class Runner:
             lease.append('kaos-commit=' + commit)
         if image_staged:
             lease.append('kaos-image=' + imagemod.image_key(cfg.image))
-        if lease:
-            body['job']['comment'] = ' '.join(lease)
+        lease.append('kaos-ckpt-lease=%s/%s' % (cfg.wf_uid, cfg.step))   # a queued continuation keeps its copies (D-75)
+        body['job']['comment'] = ' '.join(lease)
         if cfg.sharing and int(hpc.get('gpus') or 0) > 0:
             # PRD-1609 offer window (PRD-HPC-1461 N-12): a sharing job starts OFFER_S late, so a
             # running host of the same scope can take it even when free nodes would start it at once.
@@ -305,53 +335,27 @@ class Runner:
             print('hand-off branch', branch, 'not deleted:', e, flush=True)
         return got
 
-    def checkpoint_path(self):
-        return 'hpc-checkpoints/%s/%s/attempt-%d/' % (self.cfg.wf_uid, self.cfg.step, self.cfg.attempt)
-
-    def checkpoint_of(self, job):
-        """(commit, path) of the checkpoint this job staged out before it exited 85, or None. The batch
-        script writes them into the job comment after the upload committed; accounting may lag that,
-        so slurmctld is asked too, a few times. Only this attempt's path counts."""
-        import re
-        for n in range(4):
+    def checkpoint_of(self, job, tries=4):
+        """The newest checkpoint copy this job reported ({'sha', 'rel', 'info'}), or None. The copier writes
+        kaos-ckpt, kaos-ckpt-path and kaos-ckpt-info into the job comment after each complete copy; accounting
+        may lag, so slurmctld is asked too, a few times when the step said it saved (exit 85)."""
+        for n in range(tries):
             texts = [comment_of(job)]
             try:
                 texts.append(comment_of(self.slurm.live(self.jid)))
             except Exception:
                 pass
             for c in texts:
-                m = dict(re.findall(r'(?:^|\s)(kaos-ckpt|kaos-ckpt-path)=(\S+)', c))
-                if (re.fullmatch('[0-9a-f]{40,64}', m.get('kaos-ckpt', ''))
-                        and m.get('kaos-ckpt-path') == self.checkpoint_path()):
-                    return m['kaos-ckpt'], m['kaos-ckpt-path']
-            if n < 3:
+                found = parse_checkpoint_note(c, self.cfg.wf_uid, self.cfg.step)
+                if found:
+                    return found
+            if n < tries - 1:
                 self.sleep(20)
                 try:
                     job = self.slurm.accounting(self.jid)
                 except Exception:
                     pass
         return None
-
-    def checkpoint_committed(self, commit):
-        """A4: the checkpoint commit exists in the outputs repository. Asked a few times: an
-        unreachable lakeFS is not a missing checkpoint, but it never lets the step continue either."""
-        base, repo = self.cfg.lakefs_url, self.cfg.outputs_repo
-        if not (base and repo and self.wallet):
-            return False
-        for n in range(4):
-            try:
-                c = json.load(urllib.request.urlopen(urllib.request.Request(
-                    base + '/api/v1/repositories/%s/commits/%s' % (repo, commit),
-                    headers={'Authorization': 'Bearer ' + self.wallet}), timeout=60))
-                return c.get('id') == commit
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    return False
-                print('checkpoint commit check:', e, flush=True)
-            except Exception as e:
-                print('checkpoint commit check:', e, flush=True)
-            self.sleep(15 * (n + 1))
-        return False
 
     # ------------------------------------------------------------------ signals
 
@@ -519,12 +523,14 @@ class Runner:
                 job, st = v.job, v.st
                 print('state:', st, flush=True)
                 share = share_state(comment_of(job))
+                info = checkpoint_info(comment_of(job))
                 now = (','.join(st), share.get('host'), share.get('slot'))
-                if now != self.reported and not any(x in TERMINAL for x in st):
+                info_key = json.dumps(info, sort_keys=True)
+                if (now != self.reported or info_key != self.reported_info) and not any(x in TERMINAL for x in st):
                     reporter.report(siteJobID=str(jid), state=now[0], startTime=site_time(job, 'start'),
-                                    hostSiteJobID=share.get('host'),
+                                    hostSiteJobID=share.get('host'), checkpoint=info,
                                     slot=int(share['slot']) if (share.get('slot') or '').isdigit() else None)
-                    self.reported = now
+                    self.reported, self.reported_info = now, info_key
                 reason = ''
                 if 'PENDING' in st:
                     try:
@@ -717,30 +723,19 @@ class Runner:
             # D-72: the job ended a hung step; the controller records Failed/Idle and, in its event, the
             # last lines the step wrote (printed above from the same log).
             fields['lastLog'] = self.logs.tail_text() or None
-        if rc == CHECKPOINT_EXIT and not any(x in st for x in ('COMPLETED', 'CANCELLED')):
-            # D-44 (amended 2026-11-05), A2/A4: a checkpoint is reported only for a resumable step, only
-            # from a checkpoint that reached the outputs repository. The controller continues the step
-            # from checkpointRef (and enforces the continuation cap); without one nothing continues.
-            self.fresh_wallet()
-            ckpt = self.checkpoint_of(job) if self.cfg.resumable_lead else None
-            if not self.cfg.resumable_lead:
-                why = 'the step exited 85, but it is not declared resumable'
-            elif not ckpt:
-                why = ('its checkpoint did not reach the outputs repository before the job ended'
-                       ' (a longer resumable= lead leaves the upload more time)')
-            elif not self.checkpoint_committed(ckpt[0]):
-                why = 'its checkpoint commit %s is not in the outputs repository' % ckpt[0][:12]
-                ckpt = None
-            else:
-                why = ''
-            if why:
-                print('not continuing the step:', why, flush=True)
-            else:
-                print('the step saved its checkpoint (%s) before its wall time - the controller decides '
-                      'whether it continues' % ckpt[0][:12], flush=True)
-            self.reporter.report(must=True, checkpointRef=(checkpoint_uri(self.cfg.outputs_repo, ckpt)
-                                                           if ckpt and not why else None), **fields)
-            return 0
+        recoverable = (rc in (CHECKPOINT_EXIT, IDLE_EXIT) or any(x in RECOVERABLE for x in st)) \
+            and not any(x in st for x in ('COMPLETED', 'CANCELLED'))
+        if recoverable:
+            # D-75: every end the step did not cause (and the step's own exit 85) is reported with the newest
+            # checkpoint copy, if the job left one. The controller decides: continue from it, re-run, or end.
+            ckpt = self.checkpoint_of(job, 4 if rc == CHECKPOINT_EXIT else 1)
+            if ckpt:
+                print('the job left a checkpoint copy (%s) - the controller decides whether the step continues'
+                      % (ckpt['info'].get('progressText') or ckpt['sha'][:12]), flush=True)
+                fields.update(checkpointRef=checkpoint_uri(ckpt), checkpoint=ckpt['info'])
+            elif rc == CHECKPOINT_EXIT:
+                print('not continuing the step: it exited 85, but no checkpoint copy reached the scratch store '
+                      '(a longer resumable= lead leaves the copy more time)', flush=True)
         if 'COMPLETED' in st:
             self.fresh_wallet()
             outputs = self.fetch_outputs()

@@ -25,7 +25,7 @@ def batch_lines(scope, scratch):
         # see WHY): on any failure, tail this job's own output file into its
         # job COMMENT — readable over REST from the waiter and by operators.
         # The dataset lease (kaos-commit=, PRD-1541 D-06) stays first.
-        'fail(){ scontrol update JobId=$KAOS_JOB_ID Comment="${KAOS_COMMIT:+kaos-commit=$KAOS_COMMIT }err$1:$(tail -c 700 slurm-$KAOS_JOB_ID.out 2>/dev/null | tr "\\n" "|")" 2>/dev/null; exit $1; }',
+        'fail(){ KAOS_NOTE=$(cat "$KAOS_WORK/.kaos-note" 2>/dev/null); scontrol update JobId=$KAOS_JOB_ID Comment="${KAOS_COMMIT:+kaos-commit=$KAOS_COMMIT }${KAOS_NOTE:+$KAOS_NOTE }err$1:$(tail -c 700 slurm-$KAOS_JOB_ID.out 2>/dev/null | tr "\\n" "|")" 2>/dev/null; exit $1; }',
         # PRD-1609 F-03: with sharing on, the job's batch step is the host. It runs
         # this same script as one Slurm job step per slot (its own step and taken
         # guests' scripts), each with KAOS_IN_STEP=1 and that step's KAOS_JOB_ID.
@@ -74,12 +74,22 @@ def batch_lines(scope, scratch):
         # (declared outputs), /work/runs, /work/dataset caches. Per-job scratch
         # on Lustre, removed after a successful stage-out.
         'export KAOS_WORK=$SCR/kaos-work/$KAOS_JOB_ID; mkdir -p $KAOS_WORK/output',
-        # D-44: a continued job starts from the checkpoint its previous job staged out, never
-        # silently from scratch: no checkpoint, no run (exit 234).
+        # D-74/D-75: every step gets a checkpoint folder (KAOS_CHECKPOINT_DIR in the container). The payload
+        # keeps at most two copies of it on scratch, each ONE tar archive + manifest (file quota), and
+        # restores the newest verified one here when the step is a continuation.
+        'export KAOS_CKPT_ROOT=$SCR/kaos-ckpt KAOS_SCR=$SCR; mkdir -p $KAOS_WORK/ckpt',
+        'export APPTAINERENV_KAOS_CHECKPOINT_DIR=/work/ckpt',
+        'CKPTPY=$KAOS_WORK/.kaos-ckpt.py; HAVE_CKPT=0',
+        'if [ -n "$CKPT_B64" ] && command -v python3 >/dev/null; then'
+        ' printf %s "$CKPT_B64" | base64 -d > $CKPTPY && HAVE_CKPT=1; fi',
+        # Copies of steps abandoned for 7 days go, except those a queued or running job still names.
+        '[ $HAVE_CKPT = 1 ] && python3 $CKPTPY expire',
+        # A continued job starts from the checkpoint its previous job left, never silently from scratch:
+        # no verified copy, no run (exit 234).
         'if [ -n "$KAOS_RESUME_REF" ]; then',
-        '  { [ -n "$LAKEFS_BEARER_TOKEN" ] && [ -n "$CKPTIN_B64" ]; } || fail 234',
-        '  rm -rf $KAOS_WORK/resume; printf %s "$CKPTIN_B64" | base64 -d | python3 - || fail 234',
-        '  export APPTAINERENV_KAOS_RESUME_PATH=/work/resume',
+        '  [ $HAVE_CKPT = 1 ] || fail 234',
+        '  python3 $CKPTPY restore || fail 234',
+        '  export APPTAINERENV_KAOS_RESUME_PATH=/work/ckpt',
         'fi',
         'BIND="$BIND -B $KAOS_WORK:/work"',
         # Last use of a cached SIF, before the cleanup below can see it.
@@ -159,6 +169,10 @@ def batch_lines(scope, scratch):
         # it never fails the job and dies with it.
         'kaos_sample &',
         'SAMPLER_PID=$!',
+        # D-75: copy the checkpoint folder every few minutes while the step runs (guarded by the project's
+        # space quota); SIGUSR2 = copy now.
+        'CKPT_PID=""',
+        'if [ $HAVE_CKPT = 1 ]; then python3 $CKPTPY watch & CKPT_PID=$!; fi',
         # D-72: the idle watchdog of THIS step (on a shared node every slot's script has its own). It
         # sees the step's process group and the job output file, writes IDLE_MARK and ends the step
         # with TERM, a short grace, KILL when the step sat idle for the whole window. 0 = off.
@@ -169,6 +183,7 @@ def batch_lines(scope, scratch):
         '  WATCHDOG_PID=$!',
         'fi',
         'kaos_stop(){ echo "stop signal: asking the step to save its progress";'
+        ' [ -n "$CKPT_PID" ] && kill -USR2 $CKPT_PID 2>/dev/null;'
         ' for p in $(pgrep -g $STEP_PID); do'
         ' m=$(awk \'/^SigCgt:/{print $2}\' /proc/$p/status 2>/dev/null);'
         ' [ -n "$m" ] && [ $(( 0x$m >> 9 & 1 )) -eq 1 ] && kill -USR1 $p 2>/dev/null; done; }',
@@ -177,30 +192,28 @@ def batch_lines(scope, scratch):
         'while kill -0 $STEP_PID 2>/dev/null; do wait $STEP_PID; rc=$?; done',
         'kill $SAMPLER_PID 2>/dev/null',
         'trap - USR1',
+        '[ -n "$CKPT_PID" ] && { kill $CKPT_PID 2>/dev/null; wait $CKPT_PID 2>/dev/null; }',
         '[ -n "$WATCHDOG_PID" ] && kill $WATCHDOG_PID 2>/dev/null',
         # D-72: the watchdog ended the step. Reason Idle wins over whatever the killed step exited
         # with (even 85: a step that was hung saved no checkpoint). Stage-out and the failure comment
         # below run as for any failed step; the controller records Failed/Idle from exit 236.
         'if [ -f "$IDLE_MARK" ]; then rm -f "$IDLE_MARK"; rc=236; echo "idle watchdog: the step ended as Idle (exit 236)"; fi',
-        # D-44 (amended 2026-11-05, T-19): 85 = a resumable step saved its checkpoint. Before
-        # the job ends, the checkpoint goes to the outputs repository and its commit into the
-        # job comment; only then may the waiter continue the step. The step's outputs are not
-        # final, so nothing else is staged out. 85 from a step that is not resumable fails, and
-        # so does a checkpoint that did not upload (exit 235).
+        # What a hung step left in its folder is copied too, so the continuation does not lose it.
+        'if [ $rc -eq 236 ] && [ $HAVE_CKPT = 1 ]; then python3 $CKPTPY final; fi',
+        # D-44, D-75: 85 = the step saved before the wall time (or was asked to stop). Copy the folder one last
+        # time (replaces the oldest copy, never a third); the payload writes the copy into the job comment.
+        # Only then may the controller continue the step. The outputs are not final, so nothing else is staged
+        # out. A final copy that fails ends the job with 235.
         'if [ $rc -eq 85 ]; then',
         '  echo "step saved its checkpoint before the wall time (exit 85)"',
-        '  [ "$KAOS_RESUMABLE" = 1 ] || { echo "exit 85, but the step is not declared resumable"; fail 85; }',
-        '  { [ -n "$LAKEFS_BEARER_TOKEN" ] && [ -n "$CKPTOUT_B64" ]; } || fail 235',
-        '  export KAOS_CKPT_FILE=$KAOS_WORK/.kaos-ckpt',
-        '  printf %s "$CKPTOUT_B64" | base64 -d | python3 - || fail 235',
-        '  read -r CKPT CKPT_PATH < $KAOS_CKPT_FILE',
-        '  scontrol update JobId=$KAOS_JOB_ID Comment="${KAOS_COMMIT:+kaos-commit=$KAOS_COMMIT }'
-        'kaos-ckpt=$CKPT kaos-ckpt-path=$CKPT_PATH" || fail 235',
+        '  [ $HAVE_CKPT = 1 ] || fail 235',
+        '  python3 $CKPTPY final || fail 235',
         '  rm -rf "$KAOS_WORK"; exit 85',
         'fi',
         'if [ -n "$STEP_OUTPUTS" ] && [ -n "$STAGEOUT_B64" ] && [ -n "$LAKEFS_BEARER_TOKEN" ]; then'
         ' printf %s "$STAGEOUT_B64" | base64 -d | python3 - || echo "stage-out failed (rc=$rc)"; fi',
-        '[ $rc -eq 0 ] && rm -rf "$KAOS_WORK"',
+        # A step that succeeded needs no checkpoint copies: delete them (frees the project's scratch quota).
+        '[ $rc -eq 0 ] && rm -rf "$KAOS_WORK" "$KAOS_CKPT_ROOT/$WF_UID/$STEP_NAME"',
         '[ $rc -ne 0 ] && fail $rc',
         'exit 0',
     ]

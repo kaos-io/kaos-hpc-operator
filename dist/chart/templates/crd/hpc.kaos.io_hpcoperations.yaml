@@ -170,6 +170,52 @@ spec:
                     format: int32
                     minimum: 1
                     type: integer
+                  checkpoint:
+                    description: |-
+                      Checkpoint is what the job reported about the checkpoint copies it keeps (D-74, D-75): the newest
+                      copy's progress and size, and the step's and project's total. Reported with every attempt end.
+                    properties:
+                      bytes:
+                        description: Bytes is the size of the newest copy.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      digest:
+                        description: |-
+                          Digest identifies the folder's content (sha256 over its files' checksums). A copy with another digest
+                          than the one before it counts as progress when the step reports no progress values.
+                        maxLength: 64
+                        type: string
+                      progressText:
+                        description: ProgressText is the progress in words, for example
+                          "epoch=3 step=1200".
+                        maxLength: 200
+                        type: string
+                      progressValues:
+                        description: |-
+                          ProgressValues are the numbers the copy's progress is compared by (epoch, step, ...; most
+                          significant first), when the step saved through the KAOS library. Empty: compare Digest.
+                        items:
+                          format: int64
+                          type: integer
+                        type: array
+                      projectBytes:
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      skippedReason:
+                        description: SkippedReason is why the latest periodic copy
+                          was skipped (space guard), when it was.
+                        maxLength: 300
+                        type: string
+                      stepBytes:
+                        description: |-
+                          StepBytes is all the copies the step holds (at most two) and ProjectBytes all checkpoint copies of the
+                          project, as read when the report was written.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    type: object
                   checkpointRef:
                     description: |-
                       CheckpointRef is set with exit code 85: the lakeFS commit (or URI) of the checkpoint the job

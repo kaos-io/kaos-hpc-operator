@@ -38,7 +38,7 @@ def _job_script_lines():
 
 _job_lines = _job_script_lines
 
-CKPTOUT, CKPTIN = payloads.CKPTOUT, payloads.CKPTIN
+CKPT = payloads.CKPT
 
 
 class FakeLakeFS:
@@ -145,21 +145,6 @@ def _py(payload, env):
     """Run an on-node payload; retries sleep for nothing."""
     code = "import time; time.sleep = lambda s: None\n" + payload
     return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
-
-
-BIG = os.urandom(3 * (1 << 20) + 17)     # more than one 1 MiB chunk, not a multiple of it
-
-
-FILES = {"model.pt": BIG, "optim/state.bin": b"adam", "meta/epoch": b"7"}
-
-
-PREFIX = "hpc-checkpoints/wf1/train/attempt-2/"
-
-
-def _staged_out(tmp_path, lakefs):
-    _checkpoint(tmp_path, FILES)
-    assert _py(CKPTOUT, _env(tmp_path, lakefs)).returncode == 0
-    return (tmp_path / "ckpt.ref").read_text().split()
 
 
 def _make(path, old):
@@ -378,13 +363,6 @@ def _block(first, last):
     return lines[start:lines.index(last, start) + 1]
 
 
-def _checkpoint(tmp_path, files):
-    root = tmp_path / "work" / "output" / "checkpoint"
-    for name, data in files.items():
-        (root / name).parent.mkdir(parents=True, exist_ok=True)
-        (root / name).write_bytes(data)
-
-
 def _bin(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
@@ -393,32 +371,6 @@ def _bin(tmp_path):
     if not (bindir / "python3").exists():
         (bindir / "python3").symlink_to(sys.executable)
     return bindir
-
-
-def _end_of_job(tmp_path, lakefs, rc, **extra):
-    """The script from the step's exit code to the job's end."""
-    block = _block('if [ $rc -eq 85 ]; then', 'exit 0')
-    _checkpoint(tmp_path, FILES)
-    env = _env(tmp_path, lakefs, PATH=str(_bin(tmp_path)) + os.pathsep + os.environ["PATH"],
-               SCONTROL_LOG=str(tmp_path / "scontrol.log"), KAOS_JOB_ID="4242", KAOS_COMMIT="c0ffee12",
-               CKPTOUT_B64=base64.b64encode(("import time; time.sleep = lambda s: None\n" + CKPTOUT).encode()).decode(),
-               STEP_OUTPUTS="")
-    env.pop("KAOS_CKPT_FILE")
-    env.update(extra)
-    script = "\n".join([FAIL, "rc=%d" % rc] + block)
-    p = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
-    log = (tmp_path / "scontrol.log").read_text() if (tmp_path / "scontrol.log").exists() else ""
-    return p.returncode, log, p.stdout
-
-
-def _resume(tmp_path, lakefs, **extra):
-    block = _block('if [ -n "$KAOS_RESUME_REF" ]; then', "fi")
-    env = _env(tmp_path, lakefs, PATH=str(_bin(tmp_path)) + os.pathsep + os.environ["PATH"],
-               SCONTROL_LOG=str(tmp_path / "scontrol.log"), KAOS_JOB_ID="4243", KAOS_WORK=str(tmp_path / "next"),
-               CKPTIN_B64=base64.b64encode(CKPTIN.encode()).decode())
-    env.update(extra)
-    script = "\n".join([FAIL] + block + ['echo "resume=$APPTAINERENV_KAOS_RESUME_PATH"'])
-    return subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
 
 
 def _run(tmp_path, step_cmd):
@@ -467,55 +419,6 @@ HANDLER_STEP = ("python3 -c \"import signal,sys,time,pathlib; "
 PLAIN_STEP = "python3 -c \"import pathlib,time; pathlib.Path('ready').write_text('1'); time.sleep(2)\"; exit 0"
 
 
-def test_85_from_a_resumable_step_stages_the_checkpoint_out_before_the_job_ends(tmp_path, lakefs):
-    rc, log, out = _end_of_job(tmp_path, lakefs, 85, KAOS_RESUMABLE="1")
-    assert rc == 85, out
-    (cid,) = lakefs.commits
-    assert log.split("\n")[:3] == ["update", "JobId=4242",
-                                   "Comment=kaos-commit=c0ffee12 kaos-ckpt=%s kaos-ckpt-path=%s" % (cid, PREFIX)]
-    assert not (tmp_path / "work").exists(), "the job's scratch is removed once the checkpoint is committed"
-
-
-def test_85_from_a_step_that_is_not_resumable_fails(tmp_path, lakefs):
-    rc, log, out = _end_of_job(tmp_path, lakefs, 85)
-    assert rc == 85 and "not declared resumable" in out
-    assert "err85:" in log and "kaos-ckpt=" not in log and not lakefs.commits
-
-
-def test_85_whose_checkpoint_does_not_upload_fails_235(tmp_path, lakefs):
-    lakefs.fail_uploads = 100
-    rc, log, _ = _end_of_job(tmp_path, lakefs, 85, KAOS_RESUMABLE="1")
-    assert rc == 235 and "kaos-ckpt=" not in log and "err235:" in log
-
-
-def test_85_without_a_wallet_fails_235(tmp_path, lakefs):
-    rc, log, _ = _end_of_job(tmp_path, lakefs, 85, KAOS_RESUMABLE="1", LAKEFS_BEARER_TOKEN="")
-    assert rc == 235 and not lakefs.commits
-
-
-def test_a_step_that_finishes_ends_as_before(tmp_path, lakefs):
-    rc, log, _ = _end_of_job(tmp_path, lakefs, 0, KAOS_RESUMABLE="1")
-    assert rc == 0 and log == "" and not lakefs.commits
-
-
-def test_a_continued_job_starts_from_the_checkpoint(tmp_path, lakefs):
-    cid, prefix = _staged_out(tmp_path, lakefs)
-    p = _resume(tmp_path, lakefs, KAOS_RESUME_REF=cid, KAOS_RESUME_PREFIX=prefix)
-    assert p.returncode == 0 and "resume=/work/resume" in p.stdout
-    assert (tmp_path / "next" / "resume" / "model.pt").read_bytes() == BIG
-
-
-def test_a_continued_job_without_its_checkpoint_never_starts_from_scratch(tmp_path, lakefs):
-    assert _resume(tmp_path, lakefs, KAOS_RESUME_REF="0" * 64, KAOS_RESUME_PREFIX=PREFIX).returncode == 234
-    assert _resume(tmp_path, lakefs, KAOS_RESUME_REF="ab" * 32, KAOS_RESUME_PREFIX=PREFIX,
-                   LAKEFS_BEARER_TOKEN="").returncode == 234
-
-
-def test_a_first_job_has_no_resume_path(tmp_path, lakefs):
-    p = _resume(tmp_path, lakefs)
-    assert p.returncode == 0 and "resume=\n" in p.stdout
-
-
 def test_the_stop_signal_reaches_a_step_inside_the_container_and_85_comes_back(tmp_path):
     assert _run(tmp_path, HANDLER_STEP) == 85
 
@@ -524,64 +427,115 @@ def test_a_step_without_a_handler_ignores_the_signal_and_finishes(tmp_path):
     assert _run(tmp_path, PLAIN_STEP) == 0
 
 
-def test_stage_out_uploads_every_file_and_commits_it(tmp_path, lakefs):
-    _checkpoint(tmp_path, FILES)
-    r = _py(CKPTOUT, _env(tmp_path, lakefs))
-    assert r.returncode == 0, r.stdout + r.stderr
-    cid, prefix = (tmp_path / "ckpt.ref").read_text().split()
-    assert prefix == PREFIX
-    assert lakefs.commits[cid] == {PREFIX + k: v for k, v in FILES.items()}
-    assert "hpc-ckpt-wf1-train" in lakefs.branches, "kept on its own branch, never the hand-off branch"
-    assert lakefs.commit_meta[cid] == {"kaos.kind": "checkpoint", "workflow_uid": "wf1", "step": "train",
-                                       "attempt": "2"}
 
 
-def test_a_later_attempt_reuses_the_branch(tmp_path, lakefs):
-    lakefs.branches.add("hpc-ckpt-wf1-train")          # attempt 1 created it
-    _checkpoint(tmp_path, FILES)
-    assert _py(CKPTOUT, _env(tmp_path, lakefs)).returncode == 0
+# ---------------------------------------------------------------- D-74, D-75: the checkpoint folder in the script
+
+def _ckpt_env(tmp_path, **extra):
+    """An environment in which the script's checkpoint parts run against the real payload and fake scontrol."""
+    work, scr = tmp_path / "work", tmp_path / "scr"
+    (work / "ckpt").mkdir(parents=True, exist_ok=True)
+    py = work / ".kaos-ckpt.py"
+    py.write_text(CKPT)
+    env = dict(os.environ, PATH=str(_bin(tmp_path)) + os.pathsep + os.environ["PATH"],
+               SCONTROL_LOG=str(tmp_path / "scontrol.log"), KAOS_JOB_ID="4242", KAOS_COMMIT="c0ffee12",
+               KAOS_WORK=str(work), KAOS_CKPT_ROOT=str(scr / "kaos-ckpt"), KAOS_SCR=str(scr), WF_UID="wf1",
+               STEP_NAME="train", KAOS_ATTEMPT="1", CKPTPY=str(py), HAVE_CKPT="1", STEP_OUTPUTS="", USER="u1")
+    env.update(extra)
+    return env
 
 
-def test_a_failed_upload_is_retried(tmp_path, lakefs):
-    lakefs.fail_uploads = 2
-    _checkpoint(tmp_path, FILES)
-    assert _py(CKPTOUT, _env(tmp_path, lakefs)).returncode == 0
-    assert len(lakefs.commits) == 1
+def _bash(tmp_path, lines, env, rc=None):
+    script = "\n".join([FAIL] + (["rc=%d" % rc] if rc is not None else []) + lines)
+    return subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
 
 
-def test_an_upload_that_keeps_failing_commits_nothing(tmp_path, lakefs):
-    lakefs.fail_uploads = 100
-    _checkpoint(tmp_path, FILES)
-    r = _py(CKPTOUT, _env(tmp_path, lakefs))
-    assert r.returncode != 0 and not lakefs.commits and not (tmp_path / "ckpt.ref").exists()
+def _comments(tmp_path):
+    path = tmp_path / "scontrol.log"
+    return path.read_text().splitlines() if path.exists() else []
 
 
-def test_without_a_checkpoint_nothing_is_committed(tmp_path, lakefs):
-    (tmp_path / "work" / "output" / "checkpoint").mkdir(parents=True)
-    r = _py(CKPTOUT, _env(tmp_path, lakefs))
-    assert r.returncode != 0 and "nothing in" in r.stdout and not lakefs.commits
+def test_85_copies_the_folder_once_more_writes_the_comment_and_ends_with_85(tmp_path):
+    env = _ckpt_env(tmp_path)
+    (tmp_path / "work" / "ckpt" / "last.pt").write_bytes(b"weights")
+    r = _bash(tmp_path, _block('if [ $rc -eq 85 ]; then', 'exit 0'), env, rc=85)
+    assert r.returncode == 85, r.stdout + r.stderr
+    assert not (tmp_path / "work").exists(), "the job's scratch is removed once the copy is written"
+    assert (tmp_path / "scr" / "kaos-ckpt" / "wf1" / "train" / "000001.tar").exists(), "the copy outlives the job"
+    comment = _comments(tmp_path)[-1]
+    assert "kaos-commit=c0ffee12" in comment and "kaos-ckpt=" in comment and "kaos-ckpt-path=kaos-ckpt/wf1/train/000001.tar" in comment
 
 
-def test_stage_in_restores_the_checkpoint_at_its_commit(tmp_path, lakefs):
-    cid, prefix = _staged_out(tmp_path, lakefs)
-    lakefs.objects[("hpc-ckpt-wf1-train", PREFIX + "model.pt")] = b"changed after the commit"
-    work = tmp_path / "next"
-    r = _py(CKPTIN, _env(tmp_path, lakefs, KAOS_WORK=str(work), KAOS_RESUME_REF=cid, KAOS_RESUME_PREFIX=prefix))
-    assert r.returncode == 0, r.stdout + r.stderr
-    got = {p.relative_to(work / "resume").as_posix(): p.read_bytes()
-           for p in (work / "resume").rglob("*") if p.is_file()}
-    assert got == FILES, "exactly the committed files, nothing partial"
+def test_85_whose_final_copy_fails_ends_235_and_the_failure_comment_keeps_the_last_good_copy(tmp_path):
+    env = _ckpt_env(tmp_path)
+    (tmp_path / "work" / "ckpt" / "last.pt").write_bytes(b"weights")
+    assert subprocess.run([sys.executable, env["CKPTPY"], "final"], env=env).returncode == 0     # a periodic copy exists
+    Path(env["CKPTPY"]).write_text("import sys; sys.exit(1)")                                        # the final copy cannot be made
+    r = _bash(tmp_path, _block('if [ $rc -eq 85 ]; then', 'exit 0'), env, rc=85)
+    assert r.returncode == 235
+    comment = _comments(tmp_path)[-1]
+    assert "err235:" in comment and "kaos-ckpt=" in comment, "the failure comment still names the last good copy"
 
 
-def test_stage_in_of_a_missing_checkpoint_fails(tmp_path, lakefs):
-    r = _py(CKPTIN, _env(tmp_path, lakefs, KAOS_RESUME_REF="0" * 64, KAOS_RESUME_PREFIX=PREFIX))
-    assert r.returncode != 0
+def test_85_without_the_copier_fails_235(tmp_path):
+    env = _ckpt_env(tmp_path, HAVE_CKPT="0")
+    assert _bash(tmp_path, _block('if [ $rc -eq 85 ]; then', 'exit 0'), env, rc=85).returncode == 235
 
 
-def test_a_short_download_fails_and_leaves_no_file(tmp_path, lakefs):
-    cid, prefix = _staged_out(tmp_path, lakefs)
-    lakefs.truncate = True
-    work = tmp_path / "next"
-    r = _py(CKPTIN, _env(tmp_path, lakefs, KAOS_WORK=str(work), KAOS_RESUME_REF=cid, KAOS_RESUME_PREFIX=prefix))
-    assert r.returncode != 0 and "short download" in r.stdout
-    assert not [p for p in (work / "resume").rglob("*") if p.is_file() and not p.name.endswith(".part")]
+def test_a_step_that_succeeds_deletes_its_checkpoint_copies_and_its_scratch(tmp_path):
+    env = _ckpt_env(tmp_path)
+    (tmp_path / "work" / "ckpt" / "last.pt").write_bytes(b"weights")
+    assert subprocess.run([sys.executable, env["CKPTPY"], "final"], env=env).returncode == 0
+    store = tmp_path / "scr" / "kaos-ckpt" / "wf1" / "train"
+    assert store.is_dir()
+    r = _bash(tmp_path, _block('if [ -n "$STEP_OUTPUTS" ] && [ -n "$STAGEOUT_B64" ] && [ -n "$LAKEFS_BEARER_TOKEN" ]; then'
+                               " printf %s \"$STAGEOUT_B64\" | base64 -d | python3 - || echo \"stage-out failed (rc=$rc)\"; fi", "exit 0"),
+              env, rc=0)
+    assert r.returncode == 0 and not store.exists() and not (tmp_path / "work").exists()
+
+
+def test_a_step_that_fails_keeps_its_copies_for_the_seven_days(tmp_path):
+    env = _ckpt_env(tmp_path)
+    (tmp_path / "work" / "ckpt" / "last.pt").write_bytes(b"weights")
+    assert subprocess.run([sys.executable, env["CKPTPY"], "final"], env=env).returncode == 0
+    r = _bash(tmp_path, _block('[ $rc -eq 0 ] && rm -rf "$KAOS_WORK" "$KAOS_CKPT_ROOT/$WF_UID/$STEP_NAME"', "exit 0"), env, rc=3)
+    assert r.returncode == 3
+    assert (tmp_path / "scr" / "kaos-ckpt" / "wf1" / "train" / "000001.tar").exists()
+    assert "kaos-ckpt=" in _comments(tmp_path)[-1], "the failure comment carries the copy"
+
+
+def test_a_continued_job_restores_the_copy_before_the_step_and_never_starts_from_scratch(tmp_path):
+    env = _ckpt_env(tmp_path)
+    (tmp_path / "work" / "ckpt" / "last.pt").write_bytes(b"weights")
+    assert subprocess.run([sys.executable, env["CKPTPY"], "final"], env=env).returncode == 0
+    sha = json.loads(next((tmp_path / "scr" / "kaos-ckpt" / "wf1" / "train").glob("*.json")).read_text())["tar_sha256"]
+    (tmp_path / "work" / "ckpt" / "last.pt").unlink()
+    block = _block('if [ -n "$KAOS_RESUME_REF" ]; then', "fi")
+    r = _bash(tmp_path, block + ['echo "resume=$APPTAINERENV_KAOS_RESUME_PATH"'], dict(env, KAOS_RESUME_REF=sha))
+    assert r.returncode == 0 and "resume=/work/ckpt" in r.stdout
+    assert (tmp_path / "work" / "ckpt" / "last.pt").read_bytes() == b"weights"
+    r = _bash(tmp_path, block, dict(env, KAOS_RESUME_REF="0" * 64))
+    bad = (tmp_path / "scr" / "kaos-ckpt" / "wf1" / "train" / "000001.tar")
+    bad.write_bytes(b"torn")
+    r = _bash(tmp_path, block, dict(env, KAOS_RESUME_REF=sha))
+    assert r.returncode == 234 and "err234:" in _comments(tmp_path)[-1]
+
+
+def test_a_first_job_has_no_resume_path(tmp_path):
+    r = _bash(tmp_path, _block('if [ -n "$KAOS_RESUME_REF" ]; then', "fi") + ['echo "resume=[$APPTAINERENV_KAOS_RESUME_PATH]"'],
+              _ckpt_env(tmp_path))
+    assert r.returncode == 0 and "resume=[]" in r.stdout
+
+
+def test_the_script_wires_the_folder_the_watcher_and_the_wall_time_copy():
+    lines = _job_script_lines()
+    text = "\n".join(lines)
+    assert "export APPTAINERENV_KAOS_CHECKPOINT_DIR=/work/ckpt" in text
+    assert lines.index("STEP_PID=$!") < lines.index("CKPT_PID=\"\"") < next(
+        i for i, l in enumerate(lines) if l.startswith("if [ $HAVE_CKPT = 1 ]; then python3 $CKPTPY watch"))
+    assert "kill -USR2 $CKPT_PID" in next(l for l in lines if l.startswith("kaos_stop(){"))
+    expire = next(i for i, l in enumerate(lines) if l == "[ $HAVE_CKPT = 1 ] && python3 $CKPTPY expire")
+    restore = next(i for i, l in enumerate(lines) if "python3 $CKPTPY restore" in l)
+    assert expire < restore < lines.index("STEP_PID=$!")
+    assert lines.index('trap - USR1') < next(i for i, l in enumerate(lines) if l.startswith('[ -n "$CKPT_PID" ] && { kill'))
+    assert "CKPTOUT" not in text and "CKPTIN" not in text

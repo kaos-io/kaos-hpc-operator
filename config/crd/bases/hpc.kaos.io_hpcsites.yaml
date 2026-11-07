@@ -161,6 +161,15 @@ spec:
               limits:
                 description: Limits are the project's central job limits.
                 properties:
+                  checkpointBudgetPercent:
+                    description: |-
+                      CheckpointBudgetPercent is the share of the project's scratch space quota that step checkpoints may
+                      hold (D-75). A periodic copy that would exceed it, or push the project over 80 % of its space or file
+                      quota, is skipped. Absent or zero: 10.
+                    format: int32
+                    maximum: 50
+                    minimum: 0
+                    type: integer
                   maxConcurrentJobs:
                     description: 'MaxConcurrentJobs: extra jobs WAIT in KAOS, they
                       are never refused (D-49). Zero means no limit.'
@@ -371,6 +380,23 @@ spec:
                   ended (= queuedJobs + runningJobs).
                 format: int32
                 type: integer
+              checkpoints:
+                description: 'Checkpoints is the scratch the project''s step checkpoints
+                  hold (D-75): at most two copies per step.'
+                properties:
+                  bytes:
+                    description: Bytes held by the checkpoint copies of steps that
+                      have not succeeded (a succeeded step's are deleted).
+                    format: int64
+                    type: integer
+                  steps:
+                    description: Steps is how many steps hold copies.
+                    format: int32
+                    type: integer
+                required:
+                - bytes
+                - steps
+                type: object
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
