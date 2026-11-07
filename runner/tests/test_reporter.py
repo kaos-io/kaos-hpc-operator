@@ -28,7 +28,7 @@ def test_it_reports_to_its_own_job_in_its_own_namespace_with_a_merge_patch():
 def test_every_report_writes_the_whole_run_so_nothing_of_an_earlier_report_survives():
     r, kube = _reporter()
     r.report(siteJobID="5425070", state="FAILED", exitCode=85, terminal=True,
-             checkpointRef="lakefs://outputs-yolo/" + "ab" * 32 + "/hpc-checkpoints/w/s/attempt-1/")
+             checkpointRef="scratch://kaos-ckpt/w/s/000001.tar#" + "ab" * 64)
     r.attempt = 2
     r.report(siteJobID="5425099", state="PENDING")
     assert kube.run == {"attempt": 2, "siteJobID": "5425099", "state": "PENDING"}
@@ -119,9 +119,9 @@ def test_without_permission_the_runner_says_which_binding_is_missing(capsys):
 
 def test_the_checkpoint_ref_round_trips():
     from kaos_hpc_runner.settings import resume_of
-    ckpt = ("ab" * 32, "hpc-checkpoints/wf/model-training/attempt-2/")
-    assert resume_of(rep.checkpoint_uri("outputs-yolo", ckpt)) == ckpt
-    for bad in (None, "", "lakefs://r/not-a-commit/p/", "s3://x/" + "ab" * 32 + "/p/"):
+    ckpt = {"sha": "ab" * 32, "rel": "kaos-ckpt/wf/model-training/000002.tar"}
+    assert resume_of(rep.checkpoint_uri(ckpt)) == (ckpt["sha"], ckpt["rel"])
+    for bad in (None, "", "lakefs://r/" + "ab" * 32 + "/p/", "s3://x/" + "ab" * 32 + "/p/"):
         assert resume_of(bad) is None
 
 

@@ -38,6 +38,7 @@ type Config struct {
 	Class            string
 	ResumableLead    int32 // HPC_RESUMABLE_LEAD, 0 = not resumable
 	MaxContinuations int32
+	ResumableOptOut  bool     // HPC_RESUMABLE=0|false (resumable=False in pipeline.py): never continued from a checkpoint
 	Outputs          []string // STEP_OUTPUTS, comma separated
 	Dataset          string
 	Scope            string // HPC_SCOPE: set means node sharing
@@ -100,6 +101,10 @@ func (c *Config) readResumable(get func(string) string) error {
 		c.ResumableLead = int32(lead)
 		c.MaxContinuations = defaultMaxContinuations
 	}
+	switch strings.ToLower(get("HPC_RESUMABLE")) {
+	case "0", "false", "no":
+		c.ResumableOptOut = true
+	}
 	if raw := get("HPC_MAX_CONTINUATIONS"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 0 {
@@ -127,6 +132,7 @@ func (c Config) Job() *hpcv1alpha1.HPCArgoWorkflowJob {
 	if c.ResumableLead > 0 {
 		spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: c.ResumableLead, MaxContinuations: c.MaxContinuations}
 	}
+	spec.ResumableOptOut = c.ResumableOptOut
 	if c.Scope != "" {
 		spec.Sharing = &hpcv1alpha1.Sharing{Scope: c.Scope}
 	}

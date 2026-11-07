@@ -609,6 +609,242 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
 		_, got := reconcileOnce(j)
 		Expect(got.Status.Placement.Warning).To(BeEmpty())
+
+	// ---- D-74, D-75: recovery from interrupted attempts, discovered resumability ----
+
+	// ended reports the end of an attempt: the site state, the step's exit code, and (when the job
+	// persisted a checkpoint copy) its reference and progress.
+	ended := func(j *hpcv1alpha1.HPCArgoWorkflowJob, attempt int32, state string, exit *int32, ref string, ck *hpcv1alpha1.CheckpointInfo) {
+		start, end := metav1.NewTime(time.Now().Add(-30*time.Minute)), metav1.NewTime(time.Now())
+		report(j, hpcv1alpha1.RunStatus{Attempt: attempt, SiteJobID: fmt.Sprintf("30%d", attempt), State: state, ExitCode: exit,
+			StartTime: &start, EndTime: &end, Terminal: true, CheckpointRef: ref, Checkpoint: ck})
+	}
+	progress := func(values ...int64) *hpcv1alpha1.CheckpointInfo {
+		return &hpcv1alpha1.CheckpointInfo{ProgressValues: values, Bytes: 10, StepBytes: 20}
+	}
+	i32 := func(v int32) *int32 { return &v }
+
+	It("tier 1: re-runs a step without a checkpoint from the start after a node failure or pre-emption, twice at most, with a reason each time", func() {
+		j := newServeJob(nil, nil)
+		reconcileOnce(j)
+		ended(j, 1, "NODE_FAIL", nil, "", nil)
+		res, got := reconcileOnce(j)
+		Expect(res.RequeueAfter).To(Equal(ContinueResync))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRerunNodeFail))
+		Expect(got.Status.Message).To(ContainSubstring("re-running the step from the start (1/2) as attempt 2"))
+		Expect(got.Status.Reruns).To(Equal(int32(1)))
+		Expect(got.Status.Continuations).To(BeZero(), "a re-run is not a continuation")
+		Expect(got.Status.Resume).To(BeNil())
+		got = settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		Expect(envMap(runnerJob(got, 2))).NotTo(HaveKey("KAOS_RESUME_REF"), "the re-run starts from scratch")
+
+		ended(j, 2, "PREEMPTED", nil, "", nil)
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRerunPreempted))
+		Expect(got.Status.Reruns).To(Equal(int32(2)))
+		settleTo(j, hpcv1alpha1.PhaseAdmitted)
+
+		ended(j, 3, "NODE_FAIL", nil, "", nil)
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRerunLimit))
+		Expect(got.Status.Attempts).To(HaveLen(3), "every interrupted attempt is settled")
+	})
+
+	It("tier 1: never re-runs the step's own error, an out-of-memory kill, a wall-time kill or a cancel", func() {
+		for _, c := range []struct {
+			state string
+			exit  *int32
+		}{{"FAILED", i32(1)}, {"OUT_OF_MEMORY", i32(0)}, {"TIMEOUT", nil}, {"CANCELLED by 1000", nil}} {
+			j := newServeJob(nil, nil)
+			reconcileOnce(j)
+			ended(j, 1, c.state, c.exit, "", nil)
+			_, got := reconcileOnce(j)
+			Expect(got.Status.Phase.Terminal()).To(BeTrue(), c.state)
+			Expect(got.Status.Reruns).To(BeZero(), c.state)
+		}
+	})
+
+	It("tier 1: a step that opted out of resuming is still re-run after a node failure", func() {
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.ResumableOptOut = true })
+		reconcileOnce(j)
+		ended(j, 1, "NODE_FAIL", nil, "", nil)
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRerunNodeFail))
+	})
+
+	It("continues a step that was never marked from the checkpoint copy it persisted, on every recoverable end", func() {
+		for i, c := range []struct {
+			state string
+			exit  *int32
+		}{{"TIMEOUT", nil}, {"NODE_FAIL", nil}, {"PREEMPTED", nil}, {"FAILED", i32(236)}, {"FAILED", i32(85)}} {
+			j := newServeJob(nil, nil)
+			reconcileOnce(j)
+			ended(j, 1, c.state, c.exit, fmt.Sprintf("scratch://ckpt/%d", i), progress(2, 40))
+			_, got := reconcileOnce(j)
+			Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing), c.state)
+			Expect(got.Status.Continuations).To(Equal(int32(1)), c.state)
+			Expect(got.Status.Reruns).To(BeZero(), c.state)
+			Expect(got.Status.Resume.ProgressValues).To(Equal([]int64{2, 40}), c.state)
+			got = settleTo(j, hpcv1alpha1.PhaseAdmitted)
+			Expect(envMap(runnerJob(got, 2))).To(HaveKeyWithValue("KAOS_RESUME_REF", fmt.Sprintf("scratch://ckpt/%d", i)))
+		}
+	})
+
+	It("does not continue the step's own error even when a checkpoint exists, nor a step that opted out", func() {
+		j := newServeJob(nil, nil)
+		reconcileOnce(j)
+		ended(j, 1, "FAILED", i32(1), "scratch://ckpt/x", progress(1))
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Continuations).To(BeZero())
+
+		out := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.ResumableOptOut = true })
+		reconcileOnce(out)
+		ended(out, 1, "TIMEOUT", nil, "scratch://ckpt/y", progress(1))
+		_, got = reconcileOnce(out)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Continuations).To(BeZero())
+	})
+
+	It("a wall-time end with no checkpoint and an idle kill with no checkpoint end as before", func() {
+		j := newServeJob(nil, nil)
+		reconcileOnce(j)
+		ended(j, 1, "FAILED", i32(236), "", nil)
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonIdle))
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+	})
+
+	It("ends a continuation that did not get past its checkpoint with NoProgress and records the failed evidence", func() {
+		j := newServeJob(nil, nil)
+		reconcileOnce(j)
+		ended(j, 1, "TIMEOUT", nil, "scratch://ckpt/a", progress(3, 100))
+		reconcileOnce(j)
+		settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		ended(j, 2, "TIMEOUT", nil, "scratch://ckpt/b", progress(3, 100))
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonNoProgress))
+		Expect(got.Status.Message).To(ContainSubstring("not past the one it started from"))
+		Expect(got.Status.ResumeEvidence).NotTo(BeNil())
+		Expect(got.Status.ResumeEvidence.Verified).To(BeFalse())
+	})
+
+	It("ends a continuation that saved no checkpoint at all at its wall time with NoProgress", func() {
+		j := newServeJob(nil, nil)
+		reconcileOnce(j)
+		ended(j, 1, "TIMEOUT", nil, "scratch://ckpt/a", progress(3))
+		reconcileOnce(j)
+		settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		ended(j, 2, "TIMEOUT", nil, "", nil)
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonNoProgress))
+	})
+
+	It("a node failure before a continuation's first new checkpoint continues again from the same checkpoint (counted)", func() {
+		j := newServeJob(nil, nil)
+		reconcileOnce(j)
+		ended(j, 1, "TIMEOUT", nil, "scratch://ckpt/a", progress(3))
+		reconcileOnce(j)
+		settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		ended(j, 2, "NODE_FAIL", nil, "", nil)
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+		Expect(got.Status.Continuations).To(Equal(int32(2)))
+		Expect(got.Status.Resume.CheckpointRef).To(Equal("scratch://ckpt/a"))
+		Expect(got.Status.Resume.FromAttempt).To(Equal(int32(1)))
+	})
+
+	It("stops at the continuation cap (5 for a step that was never marked)", func() {
+		j := newServeJob(nil, nil)
+		reconcileOnce(j)
+		for a := int32(1); a <= 5; a++ {
+			ended(j, a, "TIMEOUT", nil, fmt.Sprintf("scratch://ckpt/%d", a), progress(int64(a)))
+			_, got := reconcileOnce(j)
+			Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+			settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		}
+		ended(j, 6, "TIMEOUT", nil, "scratch://ckpt/6", progress(6))
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuationLimit))
+	})
+
+	It("verifies a step passively: after a continuation gets past its checkpoint, the next job of that step is resumable without a mark", func() {
+		first := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
+		reconcileOnce(first)
+		_, got := reconcileOnce(first)
+		Expect(got.Status.Placement.Resumable).To(BeNil(), "nothing is verified before a continuation has shown progress")
+		Expect(envMap(runnerJob(got, 1))).NotTo(HaveKey("HPC_RESUMABLE_LEAD"))
+
+		ended(first, 1, "TIMEOUT", nil, "scratch://ckpt/a", progress(3))
+		reconcileOnce(first)
+		settleTo(first, hpcv1alpha1.PhaseAdmitted)
+		ended(first, 2, "TIMEOUT", nil, "scratch://ckpt/b", progress(4))
+		_, got = reconcileOnce(first)
+		Expect(got.Status.ResumeEvidence).NotTo(BeNil())
+		Expect(got.Status.ResumeEvidence.Verified).To(BeTrue())
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+
+		next := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg/lab/app:v2" }) // a new build of the same app
+		_, got = reconcileOnce(next)
+		Expect(got.Status.Placement.Resumable).NotTo(BeNil())
+		Expect(got.Status.Placement.Resumable.Verified).To(BeTrue())
+		Expect(got.Status.Placement.Source).To(Equal(hpcv1alpha1.PlacementDeclared), "a verified step keeps its declared limit (D-67)")
+		Expect(got.EffectiveResumable()).NotTo(BeNil())
+		env := envMap(runnerJob(got, 1))
+		Expect(env).To(HaveKeyWithValue("HPC_RESUMABLE_LEAD", "10"))
+		Expect(env).To(HaveKeyWithValue("HPC_CKPT_BUDGET_PERCENT", "10"))
+
+		optOut := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+			j.Spec.Image = "reg/lab/app:v3"
+			j.Spec.ResumableOptOut = true
+		})
+		_, got = reconcileOnce(optOut)
+		Expect(got.EffectiveResumable()).To(BeNil(), "resumable=False wins over a verified history")
+		Expect(envMap(runnerJob(got, 1))).NotTo(HaveKey("HPC_RESUMABLE_LEAD"))
+	})
+
+	It("a later continuation with no progress clears the verification", func() {
+		old := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
+		reconcileOnce(old)
+		for _, v := range []int64{3, 4} {
+			ended(old, int32(v-2), "TIMEOUT", nil, fmt.Sprintf("scratch://ckpt/%d", v), progress(v))
+			reconcileOnce(old)
+			settleTo(old, hpcv1alpha1.PhaseAdmitted)
+		}
+		time.Sleep(1100 * time.Millisecond) // evidence times have one-second resolution
+		bad := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg/lab/app:v2" })
+		reconcileOnce(bad)
+		ended(bad, 1, "TIMEOUT", nil, "scratch://ckpt/p", progress(9))
+		reconcileOnce(bad)
+		settleTo(bad, hpcv1alpha1.PhaseAdmitted)
+		ended(bad, 2, "TIMEOUT", nil, "scratch://ckpt/q", progress(9))
+		reconcileOnce(bad)
+
+		fresh := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg/lab/app:v3" })
+		_, got := reconcileOnce(fresh)
+		Expect(got.Status.Placement.Resumable).NotTo(BeNil())
+		Expect(got.Status.Placement.Resumable.Verified).To(BeFalse())
+		Expect(got.Status.Placement.Resumable.Reason).To(ContainSubstring("NoProgress"))
+		Expect(got.EffectiveResumable()).To(BeNil())
+	})
+
+	It("publishes the scratch the project's checkpoint copies hold on the HPCSite and drops a succeeded step's", func() {
+		held := newServeJob(nil, nil)
+		reconcileOnce(held)
+		ended(held, 1, "TIMEOUT", nil, "scratch://ckpt/a", &hpcv1alpha1.CheckpointInfo{Bytes: 5, StepBytes: 12})
+		reconcileOnce(held)
+		done := newServeJob(nil, nil)
+		reconcileOnce(done)
+		ended(done, 1, "COMPLETED", i32(0), "", &hpcv1alpha1.CheckpointInfo{StepBytes: 999})
+		reconcileOnce(done)
+		reconcileOnce(held)
+		site := &hpcv1alpha1.HPCSite{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: hpcNS, Name: "meluxina"}, site)).To(Succeed())
+		Expect(site.Status.Checkpoints).NotTo(BeNil())
+		Expect(site.Status.Checkpoints.Bytes).To(Equal(int64(12)))
+		Expect(site.Status.Checkpoints.Steps).To(Equal(int32(1)))
 	})
 })
 

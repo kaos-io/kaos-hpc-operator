@@ -126,5 +126,56 @@ func TestShowPlacementPrintsTheWarningOnce(t *testing.T) {
 		Placement: &hpcv1alpha1.Placement{TimeLimitMinutes: 240, Source: hpcv1alpha1.PlacementDeclared}}))
 	if strings.Contains(quiet.String(), "Warning") {
 		t.Fatalf("unexpected warning: %s", quiet.String())
+
+func TestResumableAndRecoveryLines(t *testing.T) {
+	since := metav1.NewTime(time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC))
+	place := func(rs *hpcv1alpha1.ResumableStatus) *hpcv1alpha1.Placement {
+		return &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Source: hpcv1alpha1.PlacementDeclared, QOS: "default", Resumable: rs}
+	}
+	cases := []struct {
+		name string
+		job  *hpcv1alpha1.HPCArgoWorkflowJob
+		want string
+	}{
+		{"should_show_verified_date_while_waiting", func() *hpcv1alpha1.HPCArgoWorkflowJob {
+			j := jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseAdmitted,
+				Placement: place(&hpcv1alpha1.ResumableStatus{Verified: true, Since: &since})})
+			return j
+		}(), "HPC: waiting · lane standard · time limit 60 min (declared) · resumable (verified 2026-11-07)"},
+		{"should_show_why_not_verified", jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseAdmitted,
+			Placement: place(&hpcv1alpha1.ResumableStatus{Reason: "NoProgress: nothing new"})}),
+			"HPC: waiting · lane standard · time limit 60 min (declared) · resumable not verified: NoProgress: nothing new"},
+		{"should_show_opt_out", func() *hpcv1alpha1.HPCArgoWorkflowJob {
+			j := jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseAdmitted, Placement: place(nil)})
+			j.Spec.ResumableOptOut = true
+			return j
+		}(), "HPC: waiting · lane standard · time limit 60 min (declared) · not resumable (resumable=False)"},
+		{"should_explain_a_rerun", jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhasePending,
+			Reason: hpcv1alpha1.ReasonRerunNodeFail, Reruns: 1}),
+			"HPC: re-running from the start (1/2): the node failed or was taken for maintenance"},
+		{"should_explain_a_preemption_rerun", jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhasePending,
+			Reason: hpcv1alpha1.ReasonRerunPreempted, Reruns: 2}), "HPC: re-running from the start (2/2): the site pre-empted the job"},
+		{"should_explain_no_progress", jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseFailed,
+			Reason: hpcv1alpha1.ReasonNoProgress, Message: "x"}),
+			"HPC: stopped: the continuation did not get past its checkpoint (NoProgress): x"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := placementLines(c.job)
+			if len(got) == 0 || got[len(got)-1] != c.want {
+				t.Fatalf("lines = %q, want last %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestSkippedCheckpointIsSaidWhileRunning(t *testing.T) {
+	start := metav1.NewTime(time.Date(2026, 11, 7, 21, 40, 0, 0, time.UTC))
+	j := jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseRunning,
+		Run: &hpcv1alpha1.RunStatus{State: "RUNNING", StartTime: &start,
+			Checkpoint: &hpcv1alpha1.CheckpointInfo{SkippedReason: "over the checkpoint budget"}}})
+	got := strings.Join(placementLines(j), "\n")
+	if !strings.Contains(got, "HPC: checkpoint copy skipped: over the checkpoint budget") {
+		t.Fatalf("lines = %q", got)
 	}
 }

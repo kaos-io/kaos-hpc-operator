@@ -74,16 +74,19 @@ def test_the_site_endpoint_and_login_node_come_from_the_site_with_meluxina_defau
     assert (cfg.login_host, cfg.login_port) == ("login.example.org", "2200")
 
 
-def test_the_resume_point_is_a_commit_with_its_prefix_or_the_checkpoint_uri():
-    cid, path = "ab" * 32, "hpc-checkpoints/wf/model-training/attempt-1/"
+def test_the_resume_point_is_the_scratch_checkpoint_reference():
+    sha, rel = "ab" * 32, "kaos-ckpt/wf/model-training/000003.tar"
     assert helpers.settings().resume is None
-    assert helpers.settings(KAOS_RESUME_REF=cid, KAOS_RESUME_PREFIX=path).resume == (cid, path)
-    assert helpers.settings(KAOS_RESUME_REF="lakefs://outputs-yolo/%s/%s" % (cid, path)).resume == (cid, path)
-    # the controller's form: a commit and the attempt that saved it
-    assert helpers.settings(KAOS_ATTEMPT="3", KAOS_RESUME_REF=cid, KAOS_RESUME_FROM_ATTEMPT="2").resume == \
-        (cid, "hpc-checkpoints/0b7f6c1e-1111-2222-3333-444455556666/model-training/attempt-2/")
-    with pytest.raises(SystemExit):
-        helpers.settings(KAOS_RESUME_REF="not-a-commit")
+    assert helpers.settings(KAOS_RESUME_REF="scratch://%s#%s" % (rel, sha)).resume == (sha, rel)
+    for bad in ("not-a-reference", sha, "lakefs://outputs-yolo/%s/hpc-checkpoints/wf/s/attempt-1/" % sha,
+                "scratch://elsewhere/x.tar#" + sha, "scratch://%s#short" % rel):
+        with pytest.raises(SystemExit):
+            helpers.settings(KAOS_RESUME_REF=bad)
+
+
+def test_the_checkpoint_budget_comes_from_the_controller_and_defaults_to_ten_percent():
+    assert helpers.settings().ckpt_budget_pct == 10
+    assert helpers.settings(HPC_CKPT_BUDGET_PERCENT="15").ckpt_budget_pct == 15
 
 
 def test_the_lead_and_attempt_come_from_the_controller():

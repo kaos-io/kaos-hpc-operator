@@ -66,6 +66,19 @@ const (
 	// ReasonTimeLimitRetry: the attempt hit a learned time limit (Slurm TIMEOUT) below the spec's
 	// cap; the job runs once more at the declared limit (PRD-HPC-1461 D-67).
 	ReasonTimeLimitRetry = "TimeLimitRetry"
+	// ReasonNoProgress: a continuation did not get past the checkpoint it started from (D-75 3).
+	ReasonNoProgress = "NoProgress"
+	// Tier 1 (D-75): a step without a checkpoint is re-run from the start after an end that is not its
+	// own fault, at most MaxReruns times. One reason per kind of end, so the user reads why.
+	ReasonRerunNodeFail  = "RerunNodeFailure"
+	ReasonRerunPreempted = "RerunPreempted"
+	ReasonRerunLimit     = "RerunLimit"
+	// MaxReruns caps the re-runs of a step that has no checkpoint.
+	MaxReruns = int32(2)
+	// DefaultMaxContinuations caps the continuations of a step discovered resumable (no spec.resumable).
+	DefaultMaxContinuations = int32(5)
+	// DefaultLeadMinutes is the wall-time signal lead of a step discovered resumable (D-75 4: fixed).
+	DefaultLeadMinutes = int32(10)
 )
 
 // CancelFinalizer holds a serve-mode job until its runner Job is gone and its attempt is settled
@@ -146,6 +159,10 @@ type HPCArgoWorkflowJobSpec struct {
 	// 2026-11-05, F-29). Absent: the step ends when its wall time is reached.
 	// +optional
 	Resumable *Resumable `json:"resumable,omitempty"`
+	// ResumableOptOut is resumable=False: the step is never continued from a checkpoint, even when it
+	// uses the checkpoint folder and the controller has verified it (D-74). A node failure still re-runs it.
+	// +optional
+	ResumableOptOut bool `json:"resumableOptOut,omitempty"`
 	// StepName is the DAG step's name (the Argo step-name input). Setting it turns on
 	// serve mode: the controller runs the job through a runner Job (PRD-HPC-1461 D-58, D-64).
 	// Without it the job behaves as in phase 0 (observe and admit; the in-pod runner submits).
@@ -259,12 +276,49 @@ type RunStatus struct {
 	// +kubebuilder:validation:MaxLength=2048
 	// +optional
 	LastLog string `json:"lastLog,omitempty"`
+	// Checkpoint is what the job reported about the checkpoint copies it keeps (D-74, D-75): the newest
+	// copy's progress and size, and the step's and project's total. Reported with every attempt end.
+	// +optional
+	Checkpoint *CheckpointInfo `json:"checkpoint,omitempty"`
 	// QOS and Reservation are what the site job was actually submitted with. The submitter reports
 	// them because it may fall back from a lane the site refused (PRD-HPC-1461 D-68).
 	// +optional
 	QOS string `json:"qos,omitempty"`
 	// +optional
 	Reservation string `json:"reservation,omitempty"`
+}
+
+// CheckpointInfo describes the newest persisted copy of a step's checkpoint folder.
+type CheckpointInfo struct {
+	// ProgressValues are the numbers the copy's progress is compared by (epoch, step, ...; most
+	// significant first), when the step saved through the KAOS library. Empty: compare Digest.
+	// +optional
+	ProgressValues []int64 `json:"progressValues,omitempty"`
+	// ProgressText is the progress in words, for example "epoch=3 step=1200".
+	// +kubebuilder:validation:MaxLength=200
+	// +optional
+	ProgressText string `json:"progressText,omitempty"`
+	// Digest identifies the folder's content (sha256 over its files' checksums). A copy with another digest
+	// than the one before it counts as progress when the step reports no progress values.
+	// +kubebuilder:validation:MaxLength=64
+	// +optional
+	Digest string `json:"digest,omitempty"`
+	// Bytes is the size of the newest copy.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Bytes int64 `json:"bytes,omitempty"`
+	// StepBytes is all the copies the step holds (at most two) and ProjectBytes all checkpoint copies of the
+	// project, as read when the report was written.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	StepBytes int64 `json:"stepBytes,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ProjectBytes int64 `json:"projectBytes,omitempty"`
+	// SkippedReason is why the latest periodic copy was skipped (space guard), when it was.
+	// +kubebuilder:validation:MaxLength=300
+	// +optional
+	SkippedReason string `json:"skippedReason,omitempty"`
 }
 
 // SiteObservation is what the controller's one batched poll per HPCSite per interval saw of the
@@ -366,6 +420,10 @@ type Placement struct {
 	// limit is not raised. Empty: no warning.
 	// +optional
 	Warning string `json:"warning,omitempty"`
+	// Resumable is whether the step is treated as resumable, and whether that is verified (D-74). Absent for
+	// a step with no earlier continuation evidence and no declaration.
+	// +optional
+	Resumable *ResumableStatus `json:"resumable,omitempty"`
 }
 
 // ResumeInfo is what the next attempt resumes from.
@@ -373,6 +431,37 @@ type ResumeInfo struct {
 	// CheckpointRef of the attempt that saved it.
 	CheckpointRef string `json:"checkpointRef"`
 	FromAttempt   int32  `json:"fromAttempt"`
+	// ProgressValues and Digest of the checkpoint resumed from: the next attempt must get past them (D-75 3).
+	// +optional
+	ProgressValues []int64 `json:"progressValues,omitempty"`
+	// +optional
+	Digest string `json:"digest,omitempty"`
+}
+
+// ResumableStatus says whether the controller treats a step as resumable (D-74): discovered when its
+// checkpoint folder persisted and verified when a continuation from it made progress.
+type ResumableStatus struct {
+	// Verified: an earlier continuation of the same step loaded its checkpoint and made progress.
+	Verified bool `json:"verified"`
+	// Since is when the latest evidence was recorded.
+	// +optional
+	Since *metav1.Time `json:"since,omitempty"`
+	// Reason is the evidence in words: what verified the step, or why it is not (for example NoProgress).
+	// +kubebuilder:validation:MaxLength=300
+	// +optional
+	Reason string `json:"reason,omitempty"`
+}
+
+// ResumeEvidence is the result of one continuation: the history the controller derives Verified from.
+type ResumeEvidence struct {
+	// Verified is true when the continuation got past its checkpoint, false when it did not (NoProgress).
+	Verified bool `json:"verified"`
+	// At is when the continuation ended.
+	At metav1.Time `json:"at"`
+	// Reason in words.
+	// +kubebuilder:validation:MaxLength=300
+	// +optional
+	Reason string `json:"reason,omitempty"`
 }
 
 // HPCArgoWorkflowJobStatus: the controller owns phase, reason, message, booking and settlement; the submitter
@@ -404,6 +493,13 @@ type HPCArgoWorkflowJobStatus struct {
 	// on jobs admitted before the field existed: the spec's wallTimeMinutes applies.
 	// +optional
 	Placement *Placement `json:"placement,omitempty"`
+	// Reruns so far: how often a step without a checkpoint was re-run from the start after a node failure
+	// or pre-emption (tier 1, D-75), at most MaxReruns.
+	// +optional
+	Reruns int32 `json:"reruns,omitempty"`
+	// ResumeEvidence is what the latest continuation showed about the step's checkpoints (D-74).
+	// +optional
+	ResumeEvidence *ResumeEvidence `json:"resumeEvidence,omitempty"`
 	// Resume is set for a continuation: the submitter passes it to the new site job.
 	// +optional
 	Resume *ResumeInfo `json:"resume,omitempty"`
@@ -515,4 +611,19 @@ func (j *HPCArgoWorkflowJob) EffectiveWallMinutes() int32 {
 		return p.TimeLimitMinutes
 	}
 	return j.Spec.WallTimeMinutes
+}
+
+// EffectiveResumable is how the step is treated: its declaration, else (when it did not opt out) the default
+// lead and cap of a step the controller found resumable from its checkpoint history. nil: not resumable.
+func (j *HPCArgoWorkflowJob) EffectiveResumable() *Resumable {
+	if j.Spec.ResumableOptOut {
+		return nil
+	}
+	if j.Spec.Resumable != nil {
+		return j.Spec.Resumable
+	}
+	if p := j.Status.Placement; p != nil && p.Resumable != nil && p.Resumable.Verified {
+		return &Resumable{LeadMinutes: DefaultLeadMinutes, MaxContinuations: DefaultMaxContinuations}
+	}
+	return nil
 }

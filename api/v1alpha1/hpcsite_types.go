@@ -235,6 +235,13 @@ type Limits struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxWallTimeMinutes int32 `json:"maxWallTimeMinutes,omitempty"`
+	// CheckpointBudgetPercent is the share of the project's scratch space quota that step checkpoints may
+	// hold (D-75). A periodic copy that would exceed it, or push the project over 80 % of its space or file
+	// quota, is skipped. Absent or zero: 10.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=50
+	// +optional
+	CheckpointBudgetPercent int32 `json:"checkpointBudgetPercent,omitempty"`
 }
 
 // HPCSiteSpec is one KAOS project's whole specification for one site (D-47).
@@ -425,10 +432,21 @@ type HPCSiteStatus struct {
 	// are merge patches of its own fields, so they leave it alone.
 	// +optional
 	Storage *SiteStorage `json:"storage,omitempty"`
+	// Checkpoints is the scratch the project's step checkpoints hold (D-75): at most two copies per step.
+	// +optional
+	Checkpoints *CheckpointUsage `json:"checkpoints,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// CheckpointUsage is the space step checkpoints hold on the site's scratch.
+type CheckpointUsage struct {
+	// Bytes held by the checkpoint copies of steps that have not succeeded (a succeeded step's are deleted).
+	Bytes int64 `json:"bytes"`
+	// Steps is how many steps hold copies.
+	Steps int32 `json:"steps"`
 }
 
 // +kubebuilder:object:root=true

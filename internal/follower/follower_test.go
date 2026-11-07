@@ -299,6 +299,11 @@ func TestConfigFromEnv(t *testing.T) {
 				t.Errorf("%+v", c)
 			}
 		}},
+		{"should_opt_out_of_resuming_when_resumable_is_false", with("HPC_RESUMABLE", "False"), "", func(t *testing.T, c Config) {
+			if !c.ResumableOptOut || !c.Job().Spec.ResumableOptOut {
+				t.Errorf("resumable=False must set spec.resumableOptOut: %+v", c)
+			}
+		}},
 		{"should_read_resumable_sharing_outputs_command_and_allowlisted_env",
 			with("HPC_RESUMABLE_LEAD", "20", "HPC_MAX_CONTINUATIONS", "3", "HPC_SCOPE", "abcdef123456", "STEP_OUTPUTS", "a, b,",
 				"STEP_COMMAND", `["x","y"]`, "OUTPUTS_REPO", "outputs-app", "HOME", "/root", "KAOS_LIB_SUPPORT", "{}"), "",

@@ -340,28 +340,8 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		r.noteIdleKill(job, site, tier, msg)
 	}
 
-	next := false
-	if run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeContinue {
-		res := job.Spec.Resumable
-		switch {
-		case res == nil:
-			phase, reason, msg = hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonNotResumable,
-				msg+"; the step exited 85 but is not declared resumable"
-		case run.CheckpointRef == "":
-			phase, reason, msg = hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonCheckpointMissing,
-				msg+"; checkpoint upload incomplete: no staged-out checkpoint to continue from"
-		case job.Status.Continuations >= res.MaxContinuations:
-			phase, reason, msg = hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonContinuationLimit,
-				msg+"; the step reached its "+strconv.Itoa(int(res.MaxContinuations))+" continuations"
-		default:
-			next = true
-			job.Status.Continuations++
-			job.Status.Attempt = attempt + 1
-			job.Status.Resume = &hpcv1alpha1.ResumeInfo{CheckpointRef: run.CheckpointRef, FromAttempt: attempt}
-			phase, reason = hpcv1alpha1.PhasePending, hpcv1alpha1.ReasonContinuing
-			msg += "; continuing from checkpoint " + run.CheckpointRef + " as attempt " + strconv.Itoa(int(attempt+1))
-		}
-	}
+	v := r.recoverAttempt(job, run, attempt, attemptEnd{phase: phase, reason: reason, msg: msg})
+	phase, reason, msg, next := v.phase, v.reason, v.msg, v.next
 	if retry := timeoutRetry(job, site, run); !next && reason == hpcv1alpha1.ReasonWallTimeReached && retry != nil {
 		// D-67: a learned limit that was too tight is not a failure; one more attempt with twice
 		// the limit, up to the spec's cap. The job is re-admitted and re-booked like a continuation.
@@ -463,6 +443,9 @@ func (r *HPCArgoWorkflowJobReconciler) publishLedger(ctx context.Context, site *
 		metrics.SetSiteLedger(site.Spec.Site, projectOf(site), string(tier), t.Used, t.Booked, t.Left())
 	}
 	metrics.ActiveJobs.WithLabelValues(projectOf(site), site.Spec.Site).Set(float64(l.Active))
+	if u, uerr := r.checkpointUsage(ctx, site); uerr == nil {
+		site.Status.Checkpoints = &u
+	}
 	err = r.Status().Patch(ctx, site, client.MergeFrom(orig))
 	if apierrors.IsNotFound(err) {
 		return nil

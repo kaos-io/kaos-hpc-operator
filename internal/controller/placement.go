@@ -39,6 +39,10 @@ func (r *HPCArgoWorkflowJobReconciler) placementFor(ctx context.Context, job *hp
 		return p, nil
 	}
 	caps := capsOf(job, site)
+	rs, err := r.resumableFor(ctx, job)
+	if err != nil {
+		return nil, err
+	}
 	if job.Spec.StepName == "" {
 		return &hpcv1alpha1.Placement{TimeLimitMinutes: caps.Spec, Source: hpcv1alpha1.PlacementDeclared}, nil
 	}
@@ -46,15 +50,22 @@ func (r *HPCArgoWorkflowJobReconciler) placementFor(ctx context.Context, job *hp
 	if err != nil {
 		return nil, err
 	}
-	if job.Spec.Resumable != nil {
-		return declaredWithWarning(job, caps, history, 0), nil
+	// A declared or verified resumable step keeps its declared limit (D-67): its signal is timed from it.
+	if job.Spec.Resumable != nil || (!job.Spec.ResumableOptOut && rs != nil && rs.Verified) {
+		return withResumable(declaredWithWarning(job, caps, history, 0), rs), nil
 	}
 	samples := samplesOf(history, r.now())
 	limit, source := timelimit.Learn(samples, caps)
 	if source == hpcv1alpha1.PlacementDeclared {
-		return declaredWithWarning(job, caps, history, int32(len(samples))), nil
+		return withResumable(declaredWithWarning(job, caps, history, int32(len(samples))), rs), nil
 	}
-	return &hpcv1alpha1.Placement{TimeLimitMinutes: limit, Source: source, Samples: int32(len(samples))}, nil
+	return &hpcv1alpha1.Placement{TimeLimitMinutes: limit, Source: source, Samples: int32(len(samples)), Resumable: rs}, nil
+}
+
+// withResumable records the step's resumable status on a placement.
+func withResumable(p *hpcv1alpha1.Placement, rs *hpcv1alpha1.ResumableStatus) *hpcv1alpha1.Placement {
+	p.Resumable = rs
+	return p
 }
 
 // declaredWithWarning is the placement at the declared limit, with a warning when a recent run of

@@ -53,9 +53,9 @@ def normalize_image(img):
 
 
 def resume_of(uri):
-    """(commit, path) from a checkpoint URI the runner reported, or None."""
-    m = re.fullmatch(r'lakefs://[^/]+/([0-9a-f]{40,64})/(\S+/)', uri or '')
-    return (m.group(1), m.group(2)) if m else None
+    """(sha256, path) from a checkpoint reference the runner reported (scratch://<tar path>#<sha256>), or None."""
+    m = re.fullmatch(r'scratch://(kaos-ckpt/\S+\.tar)#([0-9a-f]{64})', uri or '')
+    return (m.group(2), m.group(1)) if m else None
 
 
 class Settings:
@@ -109,18 +109,13 @@ class Settings:
         self.job_site_name = 'kaos-' + (self.scope + '-' if self.sharing else '') + self.wf_uid + '-' + self.step
         # The checkpoint this attempt continues from (set by the controller from status.resume).
         self.resume = None
-        ref, prefix = g('KAOS_RESUME_REF'), g('KAOS_RESUME_PREFIX')
+        ref = g('KAOS_RESUME_REF')
         if ref:
-            if prefix:
-                self.resume = (ref, prefix)
-            elif resume_of(ref):                # a lakefs:// checkpoint URI, as status.resume carries it
-                self.resume = resume_of(ref)
-            elif g('KAOS_RESUME_FROM_ATTEMPT', '').isdigit():   # a commit of the earlier attempt's checkpoint
-                self.resume = (ref, 'hpc-checkpoints/%s/%s/attempt-%d/'
-                               % (self.wf_uid, self.step, int(g('KAOS_RESUME_FROM_ATTEMPT'))))
-            else:
-                fail_start('KAOS_RESUME_REF %r is neither a checkpoint URI nor a commit with '
-                           'KAOS_RESUME_PREFIX / KAOS_RESUME_FROM_ATTEMPT' % ref)
+            self.resume = resume_of(ref)
+            if not self.resume:
+                fail_start('KAOS_RESUME_REF %r is not a checkpoint reference (scratch://<path>#<sha256>)' % ref)
+        # D-75: the share of the project's scratch space the checkpoint copies may hold.
+        self.ckpt_budget_pct = int(g('HPC_CKPT_BUDGET_PERCENT') or 10)
         # Site: scheduler API, login node.
         endpoint = (g('HPC_ENDPOINT') or DEFAULT_ENDPOINT).rstrip('/')
         version = g('HPC_REST_VERSION') or DEFAULT_REST_VERSION

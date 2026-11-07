@@ -17,7 +17,7 @@ import urllib.request
 K8S_SA = '/var/run/secrets/kubernetes.io/serviceaccount'
 K8S_API = 'https://kubernetes.default.svc'
 RUN_FIELDS = ('attempt', 'siteJobID', 'state', 'exitCode', 'startTime', 'endTime', 'terminal',
-              'hostSiteJobID', 'slot', 'checkpointRef', 'logOffset', 'lastLog')
+              'hostSiteJobID', 'slot', 'checkpointRef', 'checkpoint', 'logOffset', 'lastLog')
 CANCEL_ANNOTATION = 'hpc.kaos.io/cancel-requested'
 OUTPUTS_MAX_BYTES = 64 * 1024   # total of the declared outputs' JSON text (contract section 1)
 
@@ -155,5 +155,6 @@ class Reporter:
             return False
 
 
-def checkpoint_uri(repo, ckpt):
-    return 'lakefs://%s/%s/%s' % (repo, ckpt[0], ckpt[1])
+def checkpoint_uri(ckpt):
+    """The reference the controller keeps and hands back: the tar's path under the scratch root and its sha256."""
+    return 'scratch://%s#%s' % (ckpt['rel'], ckpt['sha'])
