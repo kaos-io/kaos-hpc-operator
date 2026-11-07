@@ -176,8 +176,9 @@ func TestBucketShouldStopWaitingWhenTheContextEnds(t *testing.T) {
 }
 
 // Live on MeluXina 2026-11-07: one unknown ID (a guest's job already purged) makes the site reject
-// the whole list with 422. The poll then asks one by one, skips the unknown ID and keeps the rest.
-func TestShouldAskOneByOneWhenOneUnknownIDFailsTheList(t *testing.T) {
+// the whole list with 422. The poll then splits the list until the unknown ID stands alone, skips it
+// and keeps the rest.
+func TestShouldSplitTheListWhenOneUnknownIDFailsIt(t *testing.T) {
 	rec := &recorder{}
 	srv := httptest.NewServer(rec.handler(func(ids []string) (int, string) {
 		for _, id := range ids {
@@ -196,8 +197,41 @@ func TestShouldAskOneByOneWhenOneUnknownIDFailsTheList(t *testing.T) {
 	if len(got) != 2 || len(got["5"].State) == 0 || len(got["9"].State) == 0 {
 		t.Fatalf("got %v, want 5 and 9", got)
 	}
-	if len(rec.calls) != 4 || w.n != 4 {
-		t.Fatalf("calls %v, waits %d: want the list once, then each ID through the bucket", rec.calls, w.n)
+	if len(rec.calls) != 5 || w.n != 5 {
+		t.Fatalf("calls %v, waits %d: want the list, then its halves, every call through the bucket", rec.calls, w.n)
+	}
+}
+
+// Regression (found by the scale test): one unknown ID in a list of 100 made the poll walk the list one ID
+// at a time, 101 calls. At the production rate (2 calls per second) that outlasts the 30 s poll interval,
+// the poll is abandoned, and no job of the list gets an observation while the unknown ID stays in it.
+func TestShouldFindOneUnknownIDInAFullListInAboutTwoLog2NCalls(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(rec.handler(func(ids []string) (int, string) {
+		parts := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if id == "57" {
+				return 422, `{"errors":[{"description":"Invalid job id specified"}]}`
+			}
+			parts = append(parts, fmt.Sprintf(`{"job_id":"%s","state":["RUNNING"]}`, id))
+		}
+		return 200, `{"jobs":[` + strings.Join(parts, ",") + `]}`
+	}))
+	defer srv.Close()
+	ids := make([]string, 100)
+	for i := range ids {
+		ids[i] = fmt.Sprint(i + 1)
+	}
+	w := &noWait{}
+	got, err := (&Client{HTTP: srv.Client()}).States(context.Background(), site(srv.URL), w, ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 99 || got["56"].State == nil || got["58"].State == nil || got["57"].State != nil {
+		t.Fatalf("got %d jobs, want the 99 known ones and not 57", len(got))
+	}
+	if len(rec.calls) > 16 {
+		t.Fatalf("%d calls for one unknown ID in 100, want at most 16 (1 + 2*7), the one-by-one walk made 101", len(rec.calls))
 	}
 }
 
