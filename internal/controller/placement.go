@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -38,37 +39,89 @@ func (r *HPCArgoWorkflowJobReconciler) placementFor(ctx context.Context, job *hp
 		return p, nil
 	}
 	caps := capsOf(job, site)
-	if job.Spec.StepName == "" || job.Spec.Resumable != nil {
+	if job.Spec.StepName == "" {
 		return &hpcv1alpha1.Placement{TimeLimitMinutes: caps.Spec, Source: hpcv1alpha1.PlacementDeclared}, nil
 	}
-	samples, err := r.samplesOf(ctx, job)
+	history, err := r.historyOf(ctx, job)
 	if err != nil {
 		return nil, err
 	}
+	if job.Spec.Resumable != nil {
+		return declaredWithWarning(job, caps, history, 0), nil
+	}
+	samples := samplesOf(history, r.now())
 	limit, source := timelimit.Learn(samples, caps)
+	if source == hpcv1alpha1.PlacementDeclared {
+		return declaredWithWarning(job, caps, history, int32(len(samples))), nil
+	}
 	return &hpcv1alpha1.Placement{TimeLimitMinutes: limit, Source: source, Samples: int32(len(samples))}, nil
 }
 
-// samplesOf returns the run times of the job's step in earlier jobs: same Key, Succeeded, never
-// continued (a continued job's last segment is not the step's run time), with valid site times.
-func (r *HPCArgoWorkflowJobReconciler) samplesOf(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob) ([]time.Duration, error) {
+// declaredWithWarning is the placement at the declared limit, with a warning when a recent run of
+// the step was stopped at that same limit. It never changes the limit.
+func declaredWithWarning(job *hpcv1alpha1.HPCArgoWorkflowJob, caps timelimit.Caps,
+	history []*hpcv1alpha1.HPCArgoWorkflowJob, samples int32) *hpcv1alpha1.Placement {
+	p := &hpcv1alpha1.Placement{TimeLimitMinutes: caps.Spec, Source: hpcv1alpha1.PlacementDeclared, Samples: samples}
+	if stoppedAtLimit(history, caps.Spec) {
+		p.Warning = timelimit.WarnMessage(caps.Spec, job.Spec.Resumable != nil)
+	}
+	return p
+}
+
+// RecentRuns is how many of a step's latest finished jobs are looked at for a time-limit warning.
+const RecentRuns = 3
+
+// stoppedAtLimit reports whether, among the last RecentRuns finished jobs of the step (history is
+// newest first), one ended WallTimeReached at the given declared limit.
+func stoppedAtLimit(history []*hpcv1alpha1.HPCArgoWorkflowJob, limit int32) bool {
+	for _, o := range history[:min(len(history), RecentRuns)] {
+		if o.Status.Reason == hpcv1alpha1.ReasonWallTimeReached && o.Spec.WallTimeMinutes == limit &&
+			o.EffectiveWallMinutes() == limit {
+			return true
+		}
+	}
+	return false
+}
+
+// finishedAt orders jobs: the end of the last attempt, else the job's creation.
+func finishedAt(o *hpcv1alpha1.HPCArgoWorkflowJob) time.Time {
+	if n := len(o.Status.Attempts); n > 0 && !o.Status.Attempts[n-1].EndTime.IsZero() {
+		return o.Status.Attempts[n-1].EndTime.Time
+	}
+	return o.CreationTimestamp.Time
+}
+
+// historyOf returns the finished jobs of the same step (same Key), newest first, the job itself excluded.
+func (r *HPCArgoWorkflowJobReconciler) historyOf(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob) ([]*hpcv1alpha1.HPCArgoWorkflowJob, error) {
 	var jobs hpcv1alpha1.HPCArgoWorkflowJobList
 	if err := r.List(ctx, &jobs, client.InNamespace(job.Namespace)); err != nil {
 		return nil, err
 	}
-	key, now := timelimit.KeyOf(job), r.now()
-	var out []time.Duration
+	key := timelimit.KeyOf(job)
+	var out []*hpcv1alpha1.HPCArgoWorkflowJob
 	for i := range jobs.Items {
 		o := &jobs.Items[i]
-		if o.UID == job.UID || o.Spec.StepName == "" || timelimit.KeyOf(o) != key ||
-			o.Status.Phase != hpcv1alpha1.PhaseSucceeded || o.Status.Continuations > 0 {
+		if o.UID != job.UID && o.Spec.StepName != "" && timelimit.KeyOf(o) == key && o.Status.Phase.Terminal() {
+			out = append(out, o)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return finishedAt(out[i]).After(finishedAt(out[j])) })
+	return out, nil
+}
+
+// samplesOf returns the run times of the step's earlier jobs: Succeeded, never continued (a
+// continued job's last segment is not the step's run time), with valid site times.
+func samplesOf(history []*hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) []time.Duration {
+	var out []time.Duration
+	for _, o := range history {
+		if o.Status.Phase != hpcv1alpha1.PhaseSucceeded || o.Status.Continuations > 0 {
 			continue
 		}
 		if d, ok := runTime(o.Status.Run, o.Status.Attempt, now); ok {
 			out = append(out, d)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // runTime is start to end of the job's final attempt, when the report is current and both times

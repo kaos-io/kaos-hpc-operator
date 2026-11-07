@@ -70,6 +70,9 @@ func endLines(job *hpcv1alpha1.HPCArgoWorkflowJob) []string {
 	case hpcv1alpha1.ReasonTimeLimitRetry:
 		return []string{"HPC: hit its learned time limit; retrying once with the full limit"}
 	case hpcv1alpha1.ReasonWallTimeReached:
+		if m := job.Status.Message; m != "" {
+			return []string{"HPC: " + m}
+		}
 		return []string{"HPC: stopped at its time limit"}
 	}
 	return nil
@@ -109,6 +112,10 @@ func timeLimitText(job *hpcv1alpha1.HPCArgoWorkflowJob) string {
 
 // showPlacement prints the placement lines when they differ from the last print.
 func (f *follower) showPlacement(job *hpcv1alpha1.HPCArgoWorkflowJob) {
+	if p := job.Status.Placement; p != nil && p.Warning != "" && p.Warning != f.lastWarning {
+		f.lastWarning = p.Warning // once per text, at submit
+		_, _ = fmt.Fprintln(f.o.Out, p.Warning)
+	}
 	lines := placementLines(job)
 	key := strings.Join(lines, "\n")
 	if lines == nil || key == f.lastPlacement {

@@ -68,6 +68,8 @@ type follower struct {
 	last view
 	// lastPlacement is the last placement text printed (see showPlacement).
 	lastPlacement string
+	// lastWarning is the time-limit warning already printed.
+	lastWarning string
 }
 
 // view is what a change of is printed for.

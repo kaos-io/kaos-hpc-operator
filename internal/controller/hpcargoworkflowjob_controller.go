@@ -44,6 +44,7 @@ import (
 	"github.com/kaos-io/kaos-hpc-operator/internal/ledger"
 	"github.com/kaos-io/kaos-hpc-operator/internal/metrics"
 	"github.com/kaos-io/kaos-hpc-operator/internal/runnerjob"
+	"github.com/kaos-io/kaos-hpc-operator/internal/timelimit"
 )
 
 // WaitingResync is how often a Waiting job is judged again (bookings settle, limits free up).
@@ -335,6 +336,11 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		job.Status.Placement = retry
 		phase, reason = hpcv1alpha1.PhasePending, hpcv1alpha1.ReasonTimeLimitRetry
 	}
+	stopped := !next && reason == hpcv1alpha1.ReasonWallTimeReached
+	if stopped {
+		// The step ran its whole declared limit: say so in plain words (settled minutes are in attempts).
+		msg = timelimit.StopMessage(job.EffectiveWallMinutes(), capsOf(job, site).Max(), job.Spec.Resumable != nil)
+	}
 	job.Status.Phase, job.Status.Reason, job.Status.Message = phase, reason, msg
 	if phase.Terminal() {
 		var total int64
@@ -348,6 +354,9 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 	}
 	r.forget(string(job.UID))
 	observeSettled(site, tier, used, run, admittedAt)
+	if stopped && r.Recorder != nil {
+		r.Recorder.Event(job, corev1.EventTypeWarning, hpcv1alpha1.ReasonWallTimeReached, msg)
+	}
 	return next, nil
 }
 

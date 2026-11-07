@@ -359,6 +359,11 @@ type Placement struct {
 	// was rewritten. Empty: no refusal.
 	// +optional
 	RefusedQOS string `json:"refusedQOS,omitempty"`
+	// Warning is a plain-words notice for the pipeline author, set at admission when a recent run
+	// of the same step ended WallTimeReached at this same declared limit. It changes nothing: the
+	// limit is not raised. Empty: no warning.
+	// +optional
+	Warning string `json:"warning,omitempty"`
 }
 
 // ResumeInfo is what the next attempt resumes from.

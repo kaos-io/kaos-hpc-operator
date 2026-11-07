@@ -74,6 +74,10 @@ func TestPlacementLines(t *testing.T) {
 		{"wall_time_reached",
 			hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseFailed, Reason: hpcv1alpha1.ReasonWallTimeReached},
 			[]string{"HPC: stopped at its time limit"}},
+		{"wall_time_reached_prints_the_plain_guidance_from_the_message",
+			hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseFailed, Reason: hpcv1alpha1.ReasonWallTimeReached,
+				Message: "This step ran its full 4 h time limit and was stopped. Set a longer limit."},
+			[]string{"HPC: This step ran its full 4 h time limit and was stopped. Set a longer limit."}},
 		{"succeeded_prints_nothing_extra", hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Placement: learned}, nil},
 	}
 	for _, tc := range cases {
@@ -100,5 +104,27 @@ func TestShowPlacementPrintsOnlyOnChange(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	if len(lines) != 2 || !strings.HasSuffix(lines[0], "queue reason: Priority") || !strings.HasSuffix(lines[1], "queue reason: Resources") {
 		t.Fatalf("unexpected output: %q", lines)
+	}
+}
+
+func TestShowPlacementPrintsTheWarningOnce(t *testing.T) {
+	var out bytes.Buffer
+	f := &follower{o: Options{Out: &out}}
+	w := "Warning: this step was stopped at its 4 h limit in an earlier run and will be again unless you raise its limit (`walltime`) or make it resumable."
+	job := jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseAdmitted,
+		Placement: &hpcv1alpha1.Placement{TimeLimitMinutes: 240, Source: hpcv1alpha1.PlacementDeclared, Warning: w}})
+	f.showPlacement(job)
+	job.Status.Phase = hpcv1alpha1.PhaseRunning
+	job.Status.PendingReason = "Priority" // placement line changes; the warning must not repeat
+	f.showPlacement(job)
+	if n := strings.Count(out.String(), w); n != 1 {
+		t.Fatalf("warning printed %d times:\n%s", n, out.String())
+	}
+	quiet := &bytes.Buffer{}
+	g := &follower{o: Options{Out: quiet}}
+	g.showPlacement(jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseAdmitted,
+		Placement: &hpcv1alpha1.Placement{TimeLimitMinutes: 240, Source: hpcv1alpha1.PlacementDeclared}}))
+	if strings.Contains(quiet.String(), "Warning") {
+		t.Fatalf("unexpected warning: %s", quiet.String())
 	}
 }

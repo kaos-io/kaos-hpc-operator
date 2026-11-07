@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -539,6 +540,75 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		_, got = reconcileOnce(declared)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed), "a declared limit that times out fails as before")
 		Expect(got.Status.Attempts).To(HaveLen(1))
+	})
+
+	// Time-limit guidance (a stop at the declared limit is explained; a repeat is warned about).
+	stoppedRun := func(wall int32) func(*hpcv1alpha1.HPCArgoWorkflowJob) {
+		return func(g *hpcv1alpha1.HPCArgoWorkflowJob) {
+			g.Status.Reason = hpcv1alpha1.ReasonWallTimeReached
+			g.Status.Run.State = "TIMEOUT"
+			g.Status.Placement = &hpcv1alpha1.Placement{TimeLimitMinutes: wall, Source: hpcv1alpha1.PlacementDeclared}
+		}
+	}
+
+	It("explains a stop at the declared limit with the real limit and the site maximum, and raises a Warning event", func() {
+		rec := record.NewFakeRecorder(10)
+		r.Recorder = rec
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.WallTimeMinutes = 240 })
+		reconcileOnce(j)
+		timeout(j, 1, 240)
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonWallTimeReached), "the machine-read code is unchanged")
+		want := "This step ran its full 4 h time limit and was stopped. Set a longer limit for it (`walltime`, up to 48 h on this site) " +
+			"or make it resumable so it continues automatically from a checkpoint."
+		Expect(got.Status.Message).To(Equal(want))
+		Expect(<-rec.Events).To(Equal("Warning WallTimeReached " + want))
+	})
+
+	It("says a resumable step was stopped before it saved a checkpoint", func() {
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+			j.Spec.WallTimeMinutes = 90
+			j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: 5}
+		})
+		reconcileOnce(j)
+		timeout(j, 1, 90)
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonWallTimeReached))
+		Expect(got.Status.Message).To(Equal("This step ran its full 90 min time limit and was stopped before it saved a checkpoint; " +
+			"save more often or ask to be signalled earlier."))
+	})
+
+	It("warns at admission when a recent run of the step was stopped at the same declared limit, and changes nothing else", func() {
+		seedRun(appImage, hpcv1alpha1.PhaseFailed, 60, stoppedRun(60))
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
+		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(60)), "the limit is not raised")
+		Expect(got.Status.Placement.Warning).To(Equal("Warning: this step was stopped at its 1 h limit in an earlier run " +
+			"and will be again unless you raise its limit (`walltime`) or make it resumable."))
+	})
+
+	It("gives no warning without such a history: other limit, other app, success, or older than the last three", func() {
+		n := 0
+		ended := func(mod func(*hpcv1alpha1.HPCArgoWorkflowJob)) func(*hpcv1alpha1.HPCArgoWorkflowJob) {
+			n++
+			at := metav1.NewTime(time.Now().Add(-time.Duration(100-n) * time.Minute)) // later seeds ended later
+			return func(g *hpcv1alpha1.HPCArgoWorkflowJob) {
+				if mod != nil {
+					mod(g)
+				}
+				g.Status.Attempts = []hpcv1alpha1.AttemptRecord{{Attempt: 1, Tier: hpcv1alpha1.TierGPU, EndTime: at}}
+			}
+		}
+		seedRun(appImage, hpcv1alpha1.PhaseFailed, 60, ended(stoppedRun(60))) // stopped at 60, but older than the last three
+		for range 3 {
+			seedRun(appImage, hpcv1alpha1.PhaseSucceeded, 10, ended(nil))
+		}
+		seedRun(appImage, hpcv1alpha1.PhaseFailed, 120, ended(stoppedRun(120))) // another declared limit
+		seedRun("reg/lab/other:v1", hpcv1alpha1.PhaseFailed, 60, ended(stoppedRun(60)))
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Placement.Warning).To(BeEmpty())
 	})
 })
 
