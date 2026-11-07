@@ -6,6 +6,7 @@ previous runner of this attempt submitted), polls it to its end, reports to the 
 exits. A continuation is the controller's decision (D-44): a new attempt gets a new runner Job.
 """
 
+import calendar
 import json
 import os
 import signal
@@ -24,6 +25,17 @@ from .slurm import (TERMINAL, Refused, Slurm, comment_of, host_gone, lane_refusa
 from .settings import CHECKPOINT_EXIT, IDLE_EXIT, OFFER_S, Settings
 
 POLL_S = 30
+# PRD-HPC-1461 D-36: while the job is pending or running the CONTROLLER reads its state, once per site per
+# interval, into status.siteObservation; the runner reads it there instead of calling the site. An
+# observation older than STALE_INTERVALS of its own intervals (the controller is down), or none at all for
+# STALE_GRACE_S, makes the runner poll the site itself, but only every STALE_POLL_S, so jobs never stall.
+STALE_INTERVALS = 3
+DEFAULT_INTERVAL_S = 30
+STALE_GRACE_S = 90
+STALE_POLL_S = 120
+# The pending reason is not in every site's batched reading: when it is missing, the runner asks the
+# job itself this often (not at every poll).
+REASON_POLL_S = 120
 # The registry pull token (GCE metadata, 1 h) is minted at submit time and cannot be refreshed inside
 # a queued job, so every queue wait longer than an hour costs one failed pull (exit 231) and a
 # resubmission. Bounded, not once: a second long wait after the first resubmit must not strand the run.
@@ -32,11 +44,30 @@ PULL_RESUBMITS = 3
 LOST_HOST_RESUBMITS = 3
 
 
+def parse_time(text):
+    """Epoch seconds of an RFC 3339 UTC time ('2026-11-07T12:00:00Z'), or None."""
+    try:
+        return calendar.timegm(time.strptime(str(text)[:19], '%Y-%m-%dT%H:%M:%S'))
+    except (ValueError, TypeError):
+        return None
+
+
+class View:
+    """What one poll tick knows of the site job: an accounting-shaped job, its states, and whether the
+    controller's observation supplied it (then the comment and reason may be absent, see Runner.live_of)."""
+
+    def __init__(self, job, st, observed=False, comment=None, reason=''):
+        self.job, self.st, self.observed, self.comment, self.reason = job, st, observed, comment, reason
+
+
 class Runner:
     def __init__(self, cfg, slurm=None, stager=None, reporter=None, logs=None,
-                 sleep=time.sleep, mint=None):
+                 sleep=time.sleep, mint=None, clock=time.time):
         self.cfg = cfg
         self.sleep = sleep
+        self.clock = clock
+        self.watch_jid, self.watch_since = None, 0.0     # when this runner began waiting for jid's observation
+        self.last_rest, self.last_reason = 0.0, 0.0
         self.slurm = slurm or Slurm(cfg)
         self.stager = stager or staging.Stager(cfg)
         self.reporter = reporter or Reporter(cfg)
@@ -396,8 +427,10 @@ class Runner:
             self.sleep(POLL_S)
             try:
                 jid = self.jid
-                job = slurm.accounting(jid)
-                st = (job.get('state') or {}).get('current') or []
+                v = self.view()
+                if v is None:
+                    continue
+                job, st = v.job, v.st
                 print('state:', st, flush=True)
                 share = share_state(comment_of(job))
                 now = (','.join(st), share.get('host'), share.get('slot'))
@@ -409,7 +442,7 @@ class Runner:
                 reason = ''
                 if 'PENDING' in st:
                     try:
-                        live = slurm.live(jid)
+                        live = self.live_of(v)
                         reason = live.get('state_reason') or ''
                         # The live comment: accounting may lag a host's update.
                         share = share_state(comment_of(live)) or share
@@ -427,7 +460,8 @@ class Runner:
                     # PRD-1609 F-03: a host keeps its node while its guests run; its own step's result
                     # is in its comment as soon as that step ends.
                     try:
-                        share = share_state(comment_of(slurm.live(jid))) or share
+                        if not (v.observed and v.comment is not None):
+                            share = share_state(comment_of(slurm.live(jid))) or share
                     except Exception:
                         pass
                 if 'PENDING' not in st and self.pending_reason:
@@ -480,6 +514,70 @@ class Runner:
                 raise
             except Exception as e:
                 print('poll error (transient):', e, flush=True)
+
+    def view(self):
+        """This tick's reading of the site job, or None to skip the tick (D-36).
+
+        Fresh controller observation of this job: its state, no REST call (accounting is read only when
+        the job is over, the host reported it is done, or the state changed and the start time is wanted).
+        Otherwise the old path: accounting every tick; but with no observation yet the runner waits
+        STALE_GRACE_S for the controller's first poll, and a stale one is replaced by REST every STALE_POLL_S."""
+        now = self.clock()
+        if self.watch_jid != self.jid:
+            self.watch_jid, self.watch_since = self.jid, now
+        obs = self.reporter.site_observation()
+        mine = obs is not None and str(obs.get('jobID')) == str(self.jid)
+        seen = parse_time(obs.get('observedAt')) if mine else None
+        if mine and seen is not None and now - seen <= STALE_INTERVALS * (obs.get('intervalSeconds') or DEFAULT_INTERVAL_S):
+            if obs.get('state'):
+                return self.observed_view(obs)
+            # The site no longer lists the job: its record is in accounting.
+            return self.rest_view()
+        if not mine and now - self.watch_since < STALE_GRACE_S:
+            return None
+        if now - self.last_rest < STALE_POLL_S:
+            return None
+        print('no fresh site observation: polling the site myself', flush=True)
+        self.last_rest = now
+        return self.rest_view()
+
+    def rest_view(self):
+        job = self.slurm.accounting(self.jid)
+        return View(job, (job.get('state') or {}).get('current') or [])
+
+    def observed_view(self, obs):
+        """A View from the controller's observation; the accounting record only where it is needed."""
+        st = [x for x in obs['state'].split(',') if x]
+        comment = obs.get('comment')
+        share = share_state(comment or '')
+        job = {'state': {'current': st}, 'comment': {'job': comment or ''}}
+        over = any(x in TERMINAL for x in st) or ('RUNNING' in st and share.get('kaos-state') == 'done')
+        changed = (','.join(st), share.get('host'), share.get('slot')) != self.reported
+        if over or changed:
+            try:
+                job = self.slurm.accounting(self.jid)
+                st = (job.get('state') or {}).get('current') or st
+                if comment and not comment_of(job):
+                    # Accounting lags the host's newest comment: keep the controller's fresher one.
+                    job = dict(job, comment={'job': comment})
+            except Exception:
+                if over:
+                    raise       # the end needs its record: ask again next tick
+        return View(job, st, True, comment, obs.get('pendingReason') or '')
+
+    def live_of(self, v):
+        """slurmctld's view of a pending job ({state_reason, comment}). From the observation when it
+        carries what is needed; otherwise the job is asked: always on the old path, for the comment of a
+        sharing job (a host writes into it), and for a missing reason every REASON_POLL_S."""
+        if not v.observed:
+            return self.slurm.live(self.jid)
+        now = self.clock()
+        reason_due = not v.reason and now - self.last_reason >= REASON_POLL_S
+        if (self.cfg.sharing and v.comment is None) or reason_due:
+            if reason_due:
+                self.last_reason = now
+            return self.slurm.live(self.jid)
+        return {'state_reason': v.reason or self.pending_reason or '', 'comment': v.comment or ''}
 
     def end(self, job, st, rc, share=None):
         """The attempt's site job is over: its last log lines, then the one terminal report. The runner
