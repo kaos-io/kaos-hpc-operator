@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 )
 
@@ -60,6 +59,12 @@ func (c *Client) States(ctx context.Context, s Site, bucket Waiter, ids []string
 			return nil, fmt.Errorf("rate limit: %w", err)
 		}
 		jobs, err := c.call(ctx, s, part)
+		var se *statusError
+		if errors.As(err, &se) && se.code == http.StatusUnprocessableEntity && len(part) > 1 {
+			// The site rejects the whole list when one ID is unknown to it (a guest's job already
+			// cancelled and purged): ask one by one so one gone job never hides the others' state.
+			jobs, err = c.oneByOne(ctx, s, bucket, part)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -76,10 +81,69 @@ func (c *Client) States(ctx context.Context, s Site, bucket Waiter, ids []string
 	return out, nil
 }
 
+// oneByOne asks for each ID alone; an ID the site does not know is skipped (the caller reads it as
+// "not listed"), any other error stops.
+func (c *Client) oneByOne(ctx context.Context, s Site, bucket Waiter, ids []string) ([]Job, error) {
+	var out []Job
+	for _, id := range ids {
+		if err := bucket.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("rate limit: %w", err)
+		}
+		jobs, err := c.call(ctx, s, []string{id})
+		var se *statusError
+		if errors.As(err, &se) && se.code == http.StatusUnprocessableEntity {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, jobs...)
+	}
+	return out, nil
+}
+
+// statusError is a non-2xx reply; text is the site's own error description (never a token).
+type statusError struct {
+	code int
+	text string
+}
+
+func (e *statusError) Error() string {
+	if e.text == "" {
+		return fmt.Sprintf("jobs/state: HTTP %d", e.code)
+	}
+	return fmt.Sprintf("jobs/state: HTTP %d: %s", e.code, e.text)
+}
+
+// siteErrorText is the first error description of a Slurm REST error reply, bounded.
+func siteErrorText(body []byte) string {
+	var r struct {
+		Errors []struct {
+			Description string `json:"description"`
+			Error       string `json:"error"`
+		} `json:"errors"`
+	}
+	if json.Unmarshal(body, &r) != nil || len(r.Errors) == 0 {
+		return ""
+	}
+	t := strings.TrimSpace(r.Errors[0].Description + " " + r.Errors[0].Error)
+	if len(t) > 200 {
+		t = t[:200]
+	}
+	return t
+}
+
 func (c *Client) call(ctx context.Context, s Site, ids []string) ([]Job, error) {
-	// job_id is always explicit (D-45): unfiltered, the site lists jobs we must not read.
+	// job_id is always explicit (D-45): unfiltered, the site lists jobs we must not read. A plain
+	// comma list: slurmrestd reads the query itself and does not decode an escaped comma (%2C), so
+	// "1%2C2" was one invalid ID and the whole call failed with 422 (live on MeluXina 2026-11-07).
+	for _, id := range ids {
+		if !isJobID(id) {
+			return nil, fmt.Errorf("jobs/state: %q is not a job ID", id)
+		}
+	}
 	u := fmt.Sprintf("%s/slurm/%s/jobs/state?job_id=%s", strings.TrimSuffix(s.Endpoint, "/"), s.RESTVersion,
-		url.QueryEscape(strings.Join(ids, ",")))
+		strings.Join(ids, ","))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("jobs/state request: %w", err)
@@ -97,7 +161,7 @@ func (c *Client) call(ctx context.Context, s Site, ids []string) ([]Job, error) 
 		return nil, fmt.Errorf("jobs/state body: %w", err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("jobs/state: HTTP %d", resp.StatusCode)
+		return nil, &statusError{code: resp.StatusCode, text: redactText(siteErrorText(body), s.Token)}
 	}
 	return parse(body)
 }
@@ -168,4 +232,24 @@ func comment(raw json.RawMessage) *string {
 		return &o.Job
 	}
 	return nil
+}
+
+// isJobID: digits only, so a plain comma list cannot carry anything else into the URL.
+func isJobID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func redactText(t, token string) string {
+	if token == "" {
+		return t
+	}
+	return strings.ReplaceAll(t, token, "***")
 }
