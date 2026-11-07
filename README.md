@@ -69,6 +69,15 @@ Cancel (D-04): the finalizer `hpc.kaos.io/cancel` holds the job until its runner
 deleted, or its Argo Workflow is deleted, shut down (`spec.shutdown`) or ended while the job had not.
 The Workflow is read as unstructured (no Argo dependency) and polled every `ServeResync` (15 s).
 
+Site polling (D-36, T-25): the controller reads the state of every non-terminal job's site job with one
+`jobs/state` call per HPCSite per `--site-poll-interval` (default 30 s, `$SITE_POLL_INTERVAL`, `0` = off), the
+`job_id` list always explicit and chunked (100), each call through a token bucket per site profile
+(`--site-rest-rate` 2/s, `--site-rest-burst` 5). The JWT is the `meluxina-jwt` Secret of the HPCSite's
+namespace (read live, never cached). It writes `status.siteObservation` (job id, state, pending reason and
+comment when the site reports them, time, interval). A failed poll writes nothing. Runners read their state from
+it and call the site themselves only for submit, cancel and the final record, or every 120 s when the
+observation is older than three intervals (controller down).
+
 RBAC roles shipped by the chart (bound per namespace by kubecore-operator):
 
 | ClusterRole | For | Verbs |

@@ -90,6 +90,7 @@ type HPCArgoWorkflowJobReconciler struct {
 // +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcsites/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get,resourceNames=meluxina-jwt
 
 // Reconcile judges a new or waiting job, follows an admitted one, and settles it when it ends.
 // A job with spec.stepName set is in serve mode (phase 1): the controller also runs it through a

@@ -85,6 +85,15 @@ class Reporter:
         print('HPC job: the API server did not answer for 5 minutes', flush=True)
         sys.exit(1)
 
+    def site_observation(self):
+        """status.siteObservation: the controller's batched reading of the site job (D-36). None when
+        the job is unreadable or carries none; the caller then falls back on its own REST poll."""
+        try:
+            return ((self.kube('GET', self.path(), timeout=10).get('status') or {}).get('siteObservation')) or None
+        except Exception as e:
+            print('site observation: job not readable (%s)' % e, flush=True)
+            return None
+
     def cancel_requested(self):
         """Did the controller ask for a real cancel (annotation hpc.kaos.io/cancel-requested, set before it
         deletes the runner Job)? A fresh read with a short timeout and 2 retries. None when it cannot be

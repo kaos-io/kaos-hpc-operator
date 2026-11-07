@@ -27,6 +27,14 @@ rules:
   verbs:
   - get
 - apiGroups:
+  - ""
+  resourceNames:
+  - meluxina-jwt
+  resources:
+  - secrets
+  verbs:
+  - get
+- apiGroups:
   - argoproj.io
   resources:
   - workflows
