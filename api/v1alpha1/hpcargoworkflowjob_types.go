@@ -49,6 +49,10 @@ const (
 	ReasonClassNotAllowed      = "ClassNotAllowed"
 	ReasonNoProject            = "NoProject"
 	ReasonNoSite               = "NoSite"
+	// ReasonAmbiguousSite: two of the project's HPCSites offer the job's class. The job is refused
+	// rather than charged to a site picked by list order (AC-15): the project's class names must be
+	// unique across its sites.
+	ReasonAmbiguousSite = "AmbiguousSite"
 	// Continuation (D-44 as amended 2026-11-05, F-29, T-19).
 	ReasonContinuing        = "Continuing"
 	ReasonContinuationLimit = "ContinuationLimit"

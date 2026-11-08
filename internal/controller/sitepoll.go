@@ -22,9 +22,6 @@ import (
 // DefaultSitePollInterval is how often the site is read, once per HPCSite (PRD-HPC-1461 D-36).
 const DefaultSitePollInterval = 30 * time.Second
 
-// siteTokenKey is the key of the JWT in the runnerjob.SecretJWT Secret.
-const siteTokenKey = "token"
-
 // StateReader reads the state of explicit site job IDs (sitestate.Client implements it).
 type StateReader interface {
 	States(ctx context.Context, s sitestate.Site, bucket sitestate.Waiter, ids []string) (map[string]sitestate.Job, error)
@@ -164,9 +161,10 @@ func (p *SitePoller) credentials(ctx context.Context, site *hpcv1alpha1.HPCSite)
 	if err := p.Secrets.Get(ctx, client.ObjectKey{Namespace: site.Namespace, Name: runnerjob.SecretJWT}, &secret); err != nil {
 		return sitestate.Site{}, fmt.Errorf("get Slurm token Secret: %w", err)
 	}
-	token := strings.TrimSpace(string(secret.Data[siteTokenKey]))
+	key := runnerjob.TokenKey(site)
+	token := strings.TrimSpace(string(secret.Data[key]))
 	if token == "" {
-		return sitestate.Site{}, fmt.Errorf("the Slurm token Secret %s has no %q", runnerjob.SecretJWT, siteTokenKey)
+		return sitestate.Site{}, fmt.Errorf("the Slurm token Secret %s has no %q", runnerjob.SecretJWT, key)
 	}
 	return sitestate.Site{Endpoint: site.Spec.Profile.Endpoint, RESTVersion: site.Spec.Profile.RESTVersion,
 		User: site.Spec.Identity.User, Token: token}, nil

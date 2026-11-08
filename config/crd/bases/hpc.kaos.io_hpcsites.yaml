@@ -138,6 +138,16 @@ spec:
                     description: Account is the site account (subscription) the jobs
                       are charged to.
                     type: string
+                  credentialKeyPrefix:
+                    description: |-
+                      CredentialKeyPrefix names this site's keys inside the namespace's shared credential Secrets
+                      (meluxina-jwt, meluxina-staging): the Slurm token is <prefix>token, the stager key <prefix>id_ed25519
+                      and the host pin <prefix>known_hosts. Empty (the default, and the only value a single-site project
+                      has) means the unprefixed keys. A project with several sites gives each site after the first its own
+                      prefix, so the Secrets stay the only two the controller's RBAC names (AC-15).
+                    maxLength: 64
+                    pattern: ^([a-z0-9][-a-z0-9]*\.)?$
+                    type: string
                   sshKeySecretRef:
                     description: SSHKeySecretRef holds the private key used to mint
                       scheduler tokens (D-19).

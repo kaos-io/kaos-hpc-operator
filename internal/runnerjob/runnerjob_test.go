@@ -331,3 +331,66 @@ func TestShouldBuildACancelOnlyRunnerThatNeverCollidesWithTheAttemptsRunner(t *t
 		t.Fatal("the attempt's own runner must be untouched")
 	}
 }
+
+// AC-15: a project's second site reads its own keys of the shared credential Secrets; a single-site project's
+// Job stays exactly as it was (the Secrets mounted whole, the unprefixed token key).
+func TestShouldReadTheSiteOwnKeysOfTheSharedSecretsWhenItHasAPrefix(t *testing.T) {
+	cases := []struct {
+		name       string
+		prefix     string
+		wantToken  string
+		wantJWTMap []corev1.KeyToPath
+		wantStage  []corev1.KeyToPath
+	}{
+		{name: "should_mount_the_secrets_whole_and_read_key_token_when_the_site_has_no_prefix", prefix: "", wantToken: "token"},
+		{name: "should_map_the_prefixed_keys_to_the_files_the_runner_reads_when_the_site_has_a_prefix", prefix: "vega.",
+			wantToken:  "vega.token",
+			wantJWTMap: []corev1.KeyToPath{{Key: "vega.token", Path: "token"}},
+			wantStage: []corev1.KeyToPath{{Key: "vega.id_ed25519", Path: "id_ed25519"},
+				{Key: "vega.known_hosts", Path: "known_hosts"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			job, site := fixtures()
+			site.Spec.Identity.CredentialKeyPrefix = tc.prefix
+			rj, err := Build(Config{Image: "kaos/op:1"}, job, site, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pod := rj.Spec.Template.Spec
+			for _, v := range pod.Volumes {
+				switch v.Name {
+				case SecretJWT:
+					if v.Secret.SecretName != SecretJWT || !equalItems(v.Secret.Items, tc.wantJWTMap) {
+						t.Errorf("jwt volume %+v, want items %v", v.Secret, tc.wantJWTMap)
+					}
+				case SecretStaging:
+					if v.Secret.SecretName != SecretStaging || !equalItems(v.Secret.Items, tc.wantStage) {
+						t.Errorf("staging volume %+v, want items %v", v.Secret, tc.wantStage)
+					}
+				}
+			}
+			var key string
+			for _, e := range pod.Containers[0].Env {
+				if e.Name == "SLURM_TOKEN" {
+					key = e.ValueFrom.SecretKeyRef.Key
+				}
+			}
+			if key != tc.wantToken {
+				t.Errorf("SLURM_TOKEN reads key %q, want %q", key, tc.wantToken)
+			}
+		})
+	}
+}
+
+func equalItems(got, want []corev1.KeyToPath) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i].Key != want[i].Key || got[i].Path != want[i].Path {
+			return false
+		}
+	}
+	return true
+}

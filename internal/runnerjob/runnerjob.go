@@ -193,13 +193,13 @@ func Build(cfg Config, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HP
 			}}},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
-				Spec:       podSpec(cfg, env),
+				Spec:       podSpec(cfg, site, env),
 			},
 		},
 	}, nil
 }
 
-func podSpec(cfg Config, env []corev1.EnvVar) corev1.PodSpec {
+func podSpec(cfg Config, site *hpcv1alpha1.HPCSite, env []corev1.EnvVar) corev1.PodSpec {
 	return corev1.PodSpec{
 		RestartPolicy:                 corev1.RestartPolicyNever,
 		ServiceAccountName:            ServiceAccount,
@@ -235,16 +235,40 @@ func podSpec(cfg Config, env []corev1.EnvVar) corev1.PodSpec {
 			},
 		}},
 		Volumes: []corev1.Volume{
-			secretVolume(SecretJWT, false), // fail fast: the runner cannot start without a Slurm token
-			secretVolume(SecretStaging, true),
+			secretVolume(SecretJWT, false, jwtItems(site)...), // fail fast: the runner cannot start without a Slurm token
+			secretVolume(SecretStaging, true, stagingItems(site)...),
 			secretVolume(SecretMLflow, false),
 		},
 	}
 }
 
-func secretVolume(name string, optional bool) corev1.Volume {
+func secretVolume(name string, optional bool, items ...corev1.KeyToPath) corev1.Volume {
 	return corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-		SecretName: name, DefaultMode: ptr.To(int32(0o400)), Optional: ptr.To(optional)}}}
+		SecretName: name, DefaultMode: ptr.To(int32(0o400)), Optional: ptr.To(optional), Items: items}}}
+}
+
+// TokenKey is the key of the site's Slurm token in the SecretJWT Secret: "token" for a single-site
+// project, <identity.credentialKeyPrefix>token for a site of a multi-site project (AC-15).
+func TokenKey(site *hpcv1alpha1.HPCSite) string {
+	return site.Spec.Identity.CredentialKeyPrefix + "token"
+}
+
+// stagingItems maps the site's prefixed keys of the SecretStaging Secret to the file names the runner
+// reads. Nil for an unprefixed site: the Secret is then mounted whole, exactly as before.
+func stagingItems(site *hpcv1alpha1.HPCSite) []corev1.KeyToPath {
+	prefix := site.Spec.Identity.CredentialKeyPrefix
+	if prefix == "" {
+		return nil
+	}
+	return []corev1.KeyToPath{{Key: prefix + "id_ed25519", Path: "id_ed25519"}, {Key: prefix + "known_hosts", Path: "known_hosts"}}
+}
+
+// jwtItems is the same mapping for the token. Nil for an unprefixed site.
+func jwtItems(site *hpcv1alpha1.HPCSite) []corev1.KeyToPath {
+	if site.Spec.Identity.CredentialKeyPrefix == "" {
+		return nil
+	}
+	return []corev1.KeyToPath{{Key: TokenKey(site), Path: "token"}}
 }
 
 // Env is the runner's environment. Names set here win over the ConfigMap (envFrom), and the
@@ -315,7 +339,7 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 		env = append(env, corev1.EnvVar{Name: p[0], Value: p[1]})
 	}
 	env = append(env, corev1.EnvVar{Name: "SLURM_TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-		LocalObjectReference: corev1.LocalObjectReference{Name: SecretJWT}, Key: "token", Optional: ptr.To(false)}}})
+		LocalObjectReference: corev1.LocalObjectReference{Name: SecretJWT}, Key: TokenKey(site), Optional: ptr.To(false)}}})
 	return env, nil
 }
 

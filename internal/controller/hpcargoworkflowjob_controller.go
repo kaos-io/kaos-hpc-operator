@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -233,12 +235,50 @@ func (r *HPCArgoWorkflowJobReconciler) siteOf(ctx context.Context, job *hpcv1alp
 	if err := r.List(ctx, &sites, client.MatchingLabels{hpcv1alpha1.ProjectLabel: project}); err != nil {
 		return nil, "", "", err
 	}
+	var offering []*hpcv1alpha1.HPCSite
 	for i := range sites.Items {
 		if _, ok := admission.ClassOf(&sites.Items[i], job.Spec.Class); ok {
-			return &sites.Items[i], "", "", nil
+			offering = append(offering, &sites.Items[i])
 		}
 	}
-	return nil, hpcv1alpha1.ReasonNoSite, "project " + project + " has no HPC site offering class " + job.Spec.Class, nil
+	switch len(offering) {
+	case 0:
+		return nil, hpcv1alpha1.ReasonNoSite, "project " + project + " has no HPC site offering class " + job.Spec.Class, nil
+	case 1:
+		return offering[0], "", "", nil
+	}
+	// Several sites offer the class (AC-15). A job that already holds its booking stays on the site that
+	// holds it, so adding a second site never moves a running job; any other job is refused, because
+	// choosing by list order would charge an arbitrary site's budget.
+	if held := bookedSite(job, offering); held != nil {
+		return held, "", "", nil
+	}
+	return nil, hpcv1alpha1.ReasonAmbiguousSite, ambiguousMessage(project, job.Spec.Class, offering), nil
+}
+
+// bookedSite returns the offering site that holds the job's booking, nil when the job holds none there.
+func bookedSite(job *hpcv1alpha1.HPCArgoWorkflowJob, offering []*hpcv1alpha1.HPCSite) *hpcv1alpha1.HPCSite {
+	b := job.Status.Booking
+	if b == nil {
+		return nil
+	}
+	for _, s := range offering {
+		if s.Name == b.SiteName && s.Namespace == b.SiteNamespace {
+			return s
+		}
+	}
+	return nil
+}
+
+// ambiguousMessage names the sites that offer the class, sorted, so the message is stable between reconciles.
+func ambiguousMessage(project, class string, offering []*hpcv1alpha1.HPCSite) string {
+	names := make([]string, len(offering))
+	for i, s := range offering {
+		names[i] = s.Name
+	}
+	sort.Strings(names)
+	return fmt.Sprintf("project %s has several HPC sites offering class %s (%s): class names must be unique across a project's sites",
+		project, class, strings.Join(names, ", "))
 }
 
 // judge decides a new or waiting job and books it when admitted.

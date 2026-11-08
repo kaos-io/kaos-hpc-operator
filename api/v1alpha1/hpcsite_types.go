@@ -170,6 +170,15 @@ type ProjectIdentity struct {
 	Account string `json:"account"`
 	// SSHKeySecretRef holds the private key used to mint scheduler tokens (D-19).
 	SSHKeySecretRef SecretKeyRef `json:"sshKeySecretRef"`
+	// CredentialKeyPrefix names this site's keys inside the namespace's shared credential Secrets
+	// (meluxina-jwt, meluxina-staging): the Slurm token is <prefix>token, the stager key <prefix>id_ed25519
+	// and the host pin <prefix>known_hosts. Empty (the default, and the only value a single-site project
+	// has) means the unprefixed keys. A project with several sites gives each site after the first its own
+	// prefix, so the Secrets stay the only two the controller's RBAC names (AC-15).
+	// +kubebuilder:validation:Pattern=`^([a-z0-9][-a-z0-9]*\.)?$`
+	// +kubebuilder:validation:MaxLength=64
+	// +optional
+	CredentialKeyPrefix string `json:"credentialKeyPrefix,omitempty"`
 }
 
 // BudgetSource is where a project's node-hours come from.

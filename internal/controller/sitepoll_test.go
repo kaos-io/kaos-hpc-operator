@@ -207,3 +207,24 @@ func TestShouldShareOneBucketPerSiteProfileAcrossHPCSites(t *testing.T) {
 		t.Fatal("buckets are per site profile, shared by every HPCSite of it")
 	}
 }
+
+// AC-15: a second site of a project reads its own key of the shared token Secret.
+func TestShouldReadTheSecondSitesTokenFromItsPrefixedKey(t *testing.T) {
+	objs := pollSite("hpc", "https://s.example")
+	objs[0].(*hpcv1alpha1.HPCSite).Spec.Identity.CredentialKeyPrefix = "beta."
+	secret := objs[1].(*corev1.Secret)
+	secret.Data = map[string][]byte{"token": []byte("first-site-token"), "beta.token": []byte("beta-token")}
+	r := newPollRig(t, objs...)
+	var site hpcv1alpha1.HPCSite
+	if err := r.c.Get(context.Background(), client.ObjectKey{Namespace: "hpc", Name: "meluxina"}, &site); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.poller.credentials(context.Background(), &site)
+	if err != nil || got.Token != "beta-token" {
+		t.Fatalf("token %q err %v, want the beta.token value", got.Token, err)
+	}
+	site.Spec.Identity.CredentialKeyPrefix = "gone."
+	if _, err := r.poller.credentials(context.Background(), &site); err == nil {
+		t.Fatal("a site whose prefixed key is missing must not fall back to another site's token")
+	}
+}

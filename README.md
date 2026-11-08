@@ -139,6 +139,26 @@ Metrics (`:8443`, authn/authz-protected; the chart renders a `VMServiceScrape`, 
 `kaos_hpc_job_run_seconds`, `kaos_hpc_node_minutes_booked`, `kaos_hpc_node_minutes_settled`,
 `kaos_hpc_site_node_minutes`, `kaos_hpc_active_jobs`, `kaos_hpc_runner_restarts_total`, `kaos_hpc_site_up`.
 
+## A project with several sites (PRD-HPC-1461 AC-15)
+
+A KAOS project may hold one `HPCSite` per site, all in its HPC namespace. Everything the controller keeps is
+**per HPCSite**: the budget and its ledger (a booking names its `siteName`/`siteNamespace`), the limits, the
+`sharing` switch, the lanes of the site identity, the checkpoint usage, the storage report and the credentials.
+
+- **Finding the site.** A job names only its class. The controller takes the project's `HPCSite` that offers
+  that class (`internal/controller/siteOf`). When two sites of the project offer it, a new job is **refused**
+  with reason `AmbiguousSite` (the message lists the sites) and nothing is booked: choosing by list order
+  would charge an arbitrary budget. A job that already holds a booking stays on the site that holds it, so
+  adding a site never moves a running job. kubecore-operator keeps class names unique across a project's sites
+  (they are provider-prefixed, and its admission refuses a duplicate provider), so the refusal is the last guard.
+- **Credentials.** The Secrets `meluxina-jwt` and `meluxina-staging` stay the only two Secrets the controller names
+  (its RBAC lists them). A site after the first sets `spec.identity.credentialKeyPrefix` (for example `vega.`);
+  its Slurm token is the key `vega.token`, and its stager key and host pin are `vega.id_ed25519` and
+  `vega.known_hosts`, which the runner Job maps to the file names it reads. Empty prefix (the default, and what a
+  single-site project has) keeps the Secrets mounted whole, exactly as before.
+- **Rate limit.** The token bucket is per site profile and endpoint, so two projects (or two HPCSites) of one site
+  share one budget of REST calls.
+
 ## Interruptions and checkpoints (PRD-HPC-1461 D-74, D-75, D-76)
 
 - **Tier 1, every step, no code:** a step with no checkpoint is re-run from the start after a node failure,
