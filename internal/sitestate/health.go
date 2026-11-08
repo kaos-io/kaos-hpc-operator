@@ -17,6 +17,12 @@ import (
 // blip (a single 503) must not put every waiting job on SiteUnavailable.
 const FailuresToDown = 2
 
+// MinDownAfter is how long the failing probes must span, from the first of the run to the latest, before the
+// site counts as down. Two failures 30 s apart are a bad minute of slurmrestd under a burst (live 2026-11-08: a
+// 12-job burst got HTTP 500 from jobs/state while submits worked), not an outage; jobs only wait for a site that
+// has kept failing for this long.
+const MinDownAfter = 90 * time.Second
+
 // Verdict is what one probe of the site concluded.
 type Verdict int
 
@@ -131,6 +137,7 @@ type Outage struct {
 
 type siteHealth struct {
 	failures int
+	first    time.Time // when the current run of failures began
 	down     bool
 	since    time.Time
 	reason   string
@@ -147,7 +154,8 @@ type Health struct {
 func NewHealth() *Health { return &Health{m: map[string]*siteHealth{}} }
 
 // Observe records one probe of the site `key` and reports whether its up/down state changed. A Down verdict
-// counts toward FailuresToDown; an Up verdict resets at once; Unknown changes nothing.
+// counts toward FailuresToDown, and the run of failures must also span MinDownAfter; an Up verdict resets at
+// once; Unknown changes nothing.
 func (h *Health) Observe(key string, v Verdict, why string, now time.Time) (changed bool) {
 	if h == nil || v == Unknown {
 		return false
@@ -164,9 +172,12 @@ func (h *Health) Observe(key string, v Verdict, why string, now time.Time) (chan
 		*e = siteHealth{}
 		return changed
 	}
+	if e.failures == 0 {
+		e.first = now
+	}
 	e.failures++
 	e.reason = why
-	if !e.down && e.failures >= FailuresToDown {
+	if !e.down && e.failures >= FailuresToDown && now.Sub(e.first) >= MinDownAfter {
 		e.down, e.since = true, now
 		return true
 	}
