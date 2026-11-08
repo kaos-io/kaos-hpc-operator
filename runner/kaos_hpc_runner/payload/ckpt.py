@@ -221,6 +221,28 @@ def write_note(skipped=''):
 
 
 # ------------------------------------------------------------------------------------------- copy
+def digest_of(files):
+    """The folder digest of a manifest's files ({rel: {'size', 'sha256'}})."""
+    return hashlib.sha256(json.dumps(sorted(files.items()), separators=(',', ':')).encode()).hexdigest()
+
+
+def folder_digest(rels):
+    """The digest pack() would record for the folder now, without writing an archive. None when a file
+    vanishes meanwhile (the step is saving; the copy is tried later)."""
+    files = {}
+    try:
+        for r in rels:
+            h, n = hashlib.sha256(), 0
+            with open(os.path.join(FOLDER, r), 'rb') as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b''):
+                    h.update(chunk)
+                    n += len(chunk)
+            files[r] = {'size': n, 'sha256': h.hexdigest()}
+    except OSError:
+        return None
+    return digest_of(files)
+
+
 class Unstable(Exception):
     pass
 
@@ -247,7 +269,7 @@ def pack(rels, seq):
         os.fsync(raw.fileno())
     if signature(FOLDER, rels) != before:
         raise Unstable('the step changed the folder while it was copied')
-    digest = hashlib.sha256(json.dumps(sorted(files.items()), separators=(',', ':')).encode()).hexdigest()
+    digest = digest_of(files)
     values, text = progress_of(FOLDER)
     man = {'version': 1, 'seq': seq, 'time': time.time(), 'attempt': os.environ.get('KAOS_ATTEMPT', ''),
            'tar_sha256': hw.sha.hexdigest(), 'tar_bytes': hw.n, 'files': files, 'digest': digest,
@@ -281,6 +303,15 @@ def persist(force):
             say(state['skipped'] + '; the last copy is kept')
             write_note(state['skipped'])
             return bool(cs)
+    newest = cs[-1] if cs else None
+    if newest and folder_digest(rels) == newest[1].get('digest'):
+        # Live 2026-11-08: the wall-time copy and the exit-85 final copy of one folder were both made.
+        # Same content as the newest copy: nothing new to keep, and the older copy must not be dropped for it.
+        state['sig'], state['skipped'] = sig, ''
+        say('no new copy: the folder is the same as copy %06d (%s); %d kept' % (
+            newest[0], newest[1].get('progress_text') or 'no progress value', len(cs)))
+        write_note()
+        return True
     sweep_parts()
     while len(copies()) >= KEEP:            # never a third copy: the oldest goes first, the newest stays
         drop(copies()[0][0])
@@ -293,8 +324,11 @@ def persist(force):
         return bool(copies())
     now = copies()
     if len(now) >= 2 and now[-2][1].get('digest') == man['digest']:
-        drop(seq)                            # same content as the copy before: nothing new, keep the older one
-        man = now[-2][1]
+        # Only reached when the folder changed while it was read (the check above saw other content).
+        drop(seq)
+        say('no new copy: the folder is the same as copy %06d; %d kept' % (now[-2][0], len(copies())))
+        write_note()
+        return True
     state['sig'], state['skipped'] = sig, ''
     say('copy %06d: %d files, %d bytes, %s; %d kept' % (seq, len(rels), man['tar_bytes'], man.get('progress_text') or 'no progress value',
                                                           len(copies())))

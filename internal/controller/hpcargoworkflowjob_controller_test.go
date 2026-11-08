@@ -152,6 +152,7 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(st.GPU.BookedNodeMinutes).To(BeZero())
 		Expect(st.ActiveJobs).To(BeZero())
 		Expect(st.PeriodStart).NotTo(BeNil())
+		Expect(st.CountedFrom).NotTo(BeNil())
 	})
 
 	It("keeps the storage report the project's snapshot job patched into status when it publishes the ledger", func() {

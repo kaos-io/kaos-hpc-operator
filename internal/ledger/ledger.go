@@ -68,7 +68,11 @@ func (t Tier) Left() int64 {
 
 // Ledger is one project's spend on one site.
 type Ledger struct {
+	// PeriodStart is always the start of the calendar month (UTC) containing now.
 	PeriodStart time.Time
+	// CountedFrom is where the spend in Tiers starts: PeriodStart, or, for a source-site budget,
+	// the observation the share is the remainder at (what ended before it is already in the figure).
+	CountedFrom time.Time
 	Tiers       map[hpcv1alpha1.Tier]Tier
 	// Active is the number of jobs holding a booking or running as a guest: Queued + Running.
 	Active int32
@@ -138,7 +142,8 @@ func Holds(j *hpcv1alpha1.HPCArgoWorkflowJob) bool {
 // present in jobs with a booking takes precedence over its pending entry.
 func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 	pending map[string]hpcv1alpha1.Booking, now time.Time) Ledger {
-	start := PeriodStart(now)
+	periodStart := PeriodStart(now)
+	start := periodStart
 	siteSource := site.Spec.Budget.Source == hpcv1alpha1.BudgetSourceSite
 	// Source site (D-56): the share is what the site reported left at ObservedAt, which already
 	// counts every job that ended before it, so only later ends are used against it. An attempt
@@ -146,7 +151,7 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 	if b := site.Spec.Budget; b.Source == hpcv1alpha1.BudgetSourceSite && b.ObservedAt != nil {
 		start = b.ObservedAt.UTC()
 	}
-	l := Ledger{PeriodStart: start, Tiers: map[hpcv1alpha1.Tier]Tier{
+	l := Ledger{PeriodStart: periodStart, CountedFrom: start, Tiers: map[hpcv1alpha1.Tier]Tier{
 		hpcv1alpha1.TierGPU: {Share: site.Spec.Budget.GPUNodeHours * 60, SiteSource: siteSource},
 		hpcv1alpha1.TierCPU: {Share: site.Spec.Budget.CPUNodeHours * 60, SiteSource: siteSource},
 	}}

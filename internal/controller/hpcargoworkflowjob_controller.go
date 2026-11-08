@@ -459,6 +459,8 @@ func (r *HPCArgoWorkflowJobReconciler) publishLedgerNow(ctx context.Context, sit
 	orig := site.DeepCopy()
 	start := metav1.NewTime(l.PeriodStart)
 	site.Status.PeriodStart = &start
+	counted := metav1.NewTime(l.CountedFrom)
+	site.Status.CountedFrom = &counted
 	site.Status.ActiveJobs = l.Active
 	site.Status.QueuedJobs = l.Queued
 	site.Status.RunningJobs = l.Running

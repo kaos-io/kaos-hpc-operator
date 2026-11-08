@@ -418,9 +418,15 @@ type StorageCategory struct {
 
 // HPCSiteStatus is the controller's view of the project's site use.
 type HPCSiteStatus struct {
-	// PeriodStart is the start of the current budget period (calendar month, UTC).
+	// PeriodStart is the start of the current budget period: always the first of the calendar
+	// month, UTC.
 	// +optional
 	PeriodStart *metav1.Time `json:"periodStart,omitempty"`
+	// CountedFrom is where the used figures start. It equals periodStart, except for a budget of
+	// source site: the share is then what the site reported left at spec.budget.observedAt, which
+	// already counts everything that ended before it, so only later attempts are added.
+	// +optional
+	CountedFrom *metav1.Time `json:"countedFrom,omitempty"`
 	// GPU and CPU ledgers.
 	// +optional
 	GPU *TierLedger `json:"gpu,omitempty"`

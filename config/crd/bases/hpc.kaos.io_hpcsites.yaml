@@ -456,6 +456,13 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              countedFrom:
+                description: |-
+                  CountedFrom is where the used figures start. It equals periodStart, except for a budget of
+                  source site: the share is then what the site reported left at spec.budget.observedAt, which
+                  already counts everything that ended before it, so only later attempts are added.
+                format: date-time
+                type: string
               cpu:
                 description: |-
                   TierLedger is the project's spend in one tier for the current period, in node-minutes (the
@@ -503,8 +510,9 @@ spec:
                 - usedNodeMinutes
                 type: object
               periodStart:
-                description: PeriodStart is the start of the current budget period
-                  (calendar month, UTC).
+                description: |-
+                  PeriodStart is the start of the current budget period: always the first of the calendar
+                  month, UTC.
                 format: date-time
                 type: string
               queuedJobs:

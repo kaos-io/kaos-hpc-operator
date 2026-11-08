@@ -139,8 +139,11 @@ func TestASiteBudgetCountsOnlyWhatTheSiteHasNotSeenYet(t *testing.T) {
 	if g.Share != 600 || g.Used != 50 || g.Booked != 60 || g.Left() != 490 {
 		t.Fatalf("got share %d used %d booked %d left %d", g.Share, g.Used, g.Booked, g.Left())
 	}
-	if !l.PeriodStart.Equal(observed.Time) {
-		t.Fatalf("counted from %v, want the observation %v", l.PeriodStart, observed.Time)
+	if !l.CountedFrom.Equal(observed.Time) {
+		t.Fatalf("counted from %v, want the observation %v", l.CountedFrom, observed.Time)
+	}
+	if want := PeriodStart(now); !l.PeriodStart.Equal(want) {
+		t.Fatalf("period starts %v, want the calendar month %v even for a site budget", l.PeriodStart, want)
 	}
 }
 
@@ -205,5 +208,27 @@ func TestNoJobsMeansNoCounts(t *testing.T) {
 	l := Compute(theSite(), nil, nil, now)
 	if l.Queued != 0 || l.Running != 0 || l.Active != 0 {
 		t.Fatalf("got %+v", l)
+	}
+}
+
+// A controller restart keeps no ledger state: the period and the spend are recomputed from the
+// jobs, so a job that ended before the restart, earlier in the month, still counts.
+func TestPoolBudgetCountsEveryAttemptSettledInTheMonthWhateverTheRestart(t *testing.T) {
+	site := theSite()
+	monthStart := PeriodStart(now)
+	jobs := []hpcv1alpha1.HPCArgoWorkflowJob{
+		booked("first-of-month", hpcv1alpha1.PhaseSucceeded, 0, settled(30, monthStart.Add(time.Minute))),
+		booked("before-restart", hpcv1alpha1.PhaseFailed, 0, settled(12, now.Add(-2*time.Hour))),
+		booked("last-month", hpcv1alpha1.PhaseSucceeded, 0, settled(99, monthStart.Add(-time.Minute))),
+	}
+	// Computed at two different instants (a restart in between): same period, same spend.
+	for _, at := range []time.Time{now.Add(-time.Hour), now} {
+		l := Compute(site, jobs, nil, at)
+		if !l.PeriodStart.Equal(monthStart) || !l.CountedFrom.Equal(monthStart) {
+			t.Fatalf("at %v: period %v counted from %v, want %v", at, l.PeriodStart, l.CountedFrom, monthStart)
+		}
+		if g := l.Tiers[hpcv1alpha1.TierGPU]; g.Used != 42 {
+			t.Fatalf("at %v: used %d, want 42 (last month's 99 excluded)", at, g.Used)
+		}
 	}
 }

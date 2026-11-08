@@ -771,6 +771,25 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuationLimit))
 	})
 
+	It("verifies a step passively when its continuation completes (live hpc-289baf48: success leaves no copy to compare)", func() {
+		first := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
+		reconcileOnce(first)
+		ended(first, 1, "FAILED", i32(85), "scratch://ckpt/a", progress(1111))
+		reconcileOnce(first)
+		settleTo(first, hpcv1alpha1.PhaseAdmitted)
+		zero := int32(0)
+		ended(first, 2, "COMPLETED", &zero, "", nil)
+		_, got := reconcileOnce(first)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseSucceeded))
+		Expect(got.Status.ResumeEvidence).NotTo(BeNil())
+		Expect(got.Status.ResumeEvidence.Verified).To(BeTrue())
+
+		next := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
+		_, got = reconcileOnce(next)
+		Expect(got.Status.Placement.Resumable).NotTo(BeNil())
+		Expect(got.Status.Placement.Resumable.Verified).To(BeTrue())
+	})
+
 	It("verifies a step passively: after a continuation gets past its checkpoint, the next job of that step is resumable without a mark", func() {
 		first := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
 		reconcileOnce(first)
