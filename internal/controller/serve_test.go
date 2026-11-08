@@ -155,7 +155,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(rj.Labels).To(HaveKeyWithValue(runnerjob.LabelJobUID, string(got.UID)))
 		Expect(rj.Labels).To(HaveKeyWithValue(runnerjob.LabelAttempt, "1"))
 		Expect(*rj.Spec.BackoffLimit).To(Equal(int32(4)))
-		Expect(*rj.Spec.ActiveDeadlineSeconds).To(Equal(int64((60 + 480 + 30) * 60)))
+		Expect(*rj.Spec.ActiveDeadlineSeconds).To(Equal(int64((60+480+30)*60 + 30*60))) // + the 30-minute site wait
 		pod := rj.Spec.Template.Spec
 		Expect(pod.ServiceAccountName).To(Equal("hpc-runner"))
 		Expect(pod.NodeSelector).To(HaveKeyWithValue("pool", "system"))
@@ -461,7 +461,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(30)), "admission books the learned limit")
 		rj := runnerJob(got, 1)
 		Expect(envMap(rj)).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "30"))
-		Expect(*rj.Spec.ActiveDeadlineSeconds).To(Equal(int64((30 + 480 + 30) * 60)))
+		Expect(*rj.Spec.ActiveDeadlineSeconds).To(Equal(int64((30+480+30)*60 + 30*60)))
 	})
 
 	It("keeps the declared limit with fewer than three samples of its own app", func() {

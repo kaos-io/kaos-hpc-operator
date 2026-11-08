@@ -62,6 +62,9 @@ type world struct {
 	ctx    context.Context
 	wg     sync.WaitGroup
 
+	// outageStart and outageEnd are when L-chaos took the shared site down and up.
+	outageStart, outageEnd time.Time
+
 	projects []*project
 	sampler  *sampler
 	mon      *monitor

@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
@@ -190,11 +192,15 @@ func lWorld(t *testing.T, nodeFail float64, flaky bool) (*world, []*project) {
 		o.Latency, o.Jitter = 5*time.Millisecond, 20*time.Millisecond
 	}
 	if flaky {
-		// lumi is slow and sometimes wrong all the time. meluxina only gets the outage: a runner pod
-		// that meets the outage has five tries over 150 s (backoffLimit 4), so a second fault on its
-		// last try would fail the job for a reason that has nothing to do with the outage.
+		// Both sites are slow and sometimes wrong all the time, on top of the outage that hits meluxina: an
+		// unreachable site is a wait for the runner (AC-28), so a second fault in the middle of it fails nothing.
+		// A share of the lost-reply jobs finishes before the runner asks again (LostReplyQuick): only slurmdbd
+		// still lists them, and they must be found by name, never submitted twice.
 		o2.Latency, o2.Jitter = 20*time.Millisecond, 60*time.Millisecond
-		o2.Err5xx, o2.TimeoutRate, o2.HangFor, o2.LostReplyRate, o2.LostReplyHold = 0.01, 0.004, 4*time.Second, 0.02, 60*time.Second
+		o2.Err5xx, o2.TimeoutRate, o2.HangFor, o2.LostReplyRate, o2.LostReplyHold = 0.01, 0.004, 4*time.Second, 0.05, 60*time.Second
+		o2.LostReplyQuick = 0.6
+		o1.Err5xx, o1.TimeoutRate, o1.HangFor, o1.LostReplyRate, o1.LostReplyHold = 0.005, 0.002, 4*time.Second, 0.05, 60*time.Second
+		o1.LostReplyQuick = 0.6
 	}
 	s1, s2 := fakeslurm.New(o1), fakeslurm.New(o2)
 	big := budget{gpuShare: 4000, cpuShare: 4000, gpuSiteLeft: 3500, cpuSiteLeft: 3500}
@@ -310,7 +316,7 @@ func (w *world) laneRows(r *result, jobs []hpcv1alpha1.HPCArgoWorkflowJob) {
 // TestScaleLChaos: the L run with a controller restart, a 2-minute site outage, 422 storms, 10 % node
 // failures, forced re-run limits and checkpointing steps.
 func TestScaleLChaos(t *testing.T) {
-	r := newResult(t, "L-chaos", "L plus: controller restart mid-run, 2-minute site outage (all 5xx) on the shared site, "+
+	r := newResult(t, "L-chaos", "L plus: controller restart mid-run, a site outage (all 5xx, 10 minutes) on the shared site, "+
 		"422 storm (slurmctld forgets finished jobs + spurious 422) on the other, 10% NODE_FAIL, jobs that always fail "+
 		"(RerunLimit), checkpointing steps (continuations <= 5, one cohort that needs more).")
 	w, ps := lWorld(t, 0.10, true)
@@ -349,8 +355,16 @@ func TestScaleLChaos(t *testing.T) {
 	w.wg.Add(1)
 	go func() { defer w.wg.Done(); w.chaos(r, ps) }()
 
-	ok := w.waitTerminal(n, 40*time.Minute, func(jobs []hpcv1alpha1.HPCArgoWorkflowJob) {
+	peakWaiting := 0
+	ok := w.waitTerminal(n, 60*time.Minute, func(jobs []hpcv1alpha1.HPCArgoWorkflowJob) {
 		t.Logf("%s %v", time.Since(start).Round(time.Second), histogram(jobs))
+		waiting := 0
+		for i := range jobs {
+			if jobs[i].Status.Phase == hpcv1alpha1.PhaseWaiting && jobs[i].Status.Reason == hpcv1alpha1.ReasonSiteUnavailable {
+				waiting++
+			}
+		}
+		peakWaiting = max(peakWaiting, waiting)
 	})
 	dur := time.Since(start)
 	jobs := w.allJobs()
@@ -359,6 +373,8 @@ func TestScaleLChaos(t *testing.T) {
 	if !ok {
 		r.fail("not every job reached a terminal phase: %v", histogram(jobs))
 	}
+	w.verifyOutage(r, ps[:2], peakWaiting, jobs)
+	w.verifyQuickLost(r)
 	w.verifyChaosOutcomes(r, jobs, alwaysFail, overLimit, resumable)
 	w.commonL(r, jobs, start, dur, true)
 }
@@ -397,15 +413,93 @@ func (w *world) chaos(r *result, ps []*project) {
 	siteC.SetSpurious422(0.3)
 	r.row("chaos: 422 storm on site lumi (jobs forgotten at once, 30% spurious 422)", "t+25s, 60s")
 	sleep(10 * time.Second)
-	// 3. the shared site goes down for two minutes while the storm is still on.
+	// 3. the shared site goes down while the storm is still on, for siteOutage (10 minutes): every call is a 503. Jobs
+	// must wait (SiteUnavailable), no runner may be spawned for it, nothing may fail, and all of them finish afterwards.
 	siteA := ps[0].site
 	siteA.SetDown(true)
-	r.row("chaos: site meluxina down (all 5xx)", "t+35s, 2m")
+	w.outageStart = time.Now()
+	r.row("chaos: site meluxina down (all 5xx)", fmt.Sprintf("t+35s, %s", siteOutage))
 	sleep(50 * time.Second)
 	siteC.SetSpurious422(0)
 	siteC.SetMinJobAge(5 * time.Minute)
-	sleep(70 * time.Second)
+	sleep(30 * time.Second)
+	w.checkReachableCondition(r, ps[0], false)
+	sleep(siteOutage - 80*time.Second)
 	siteA.SetDown(false)
+	w.outageEnd = time.Now()
+	sleep(20 * time.Second)
+	w.checkReachableCondition(r, ps[0], true)
+}
+
+// siteOutage is how long the shared site is down in L-chaos (SCALE_OUTAGE, a Go duration).
+var siteOutage = envDuration("SCALE_OUTAGE", 10*time.Minute)
+
+func envDuration(name string, def time.Duration) time.Duration {
+	if d, err := time.ParseDuration(os.Getenv(name)); err == nil && d > 0 {
+		return d
+	}
+	return def
+}
+
+// verifyQuickLost makes sure the scenario really produced the case behind the duplicate-submit fix: submissions
+// the site accepted whose reply was lost and whose job ended before the runner asked again. Duplicates
+// themselves are asserted by verifySubmits (no attempt submitted twice).
+func (w *world) verifyQuickLost(r *result) {
+	quick, seen := 0, map[*fakeslurm.Site]bool{}
+	for _, p := range w.projects {
+		if !seen[p.site] {
+			seen[p.site] = true
+			quick += p.site.Snapshot().QuickLost
+		}
+	}
+	r.row("lost-reply submissions that finished before the retry (found in accounting by name, never repeated)", quick)
+	if quick == 0 {
+		r.fail("no lost-reply job finished before its retry: the scenario no longer exercises the adopt-by-name path")
+	}
+}
+
+// checkReachableCondition asserts the HPCSite's SiteReachable condition (AC-30: health shown in the console).
+func (w *world) checkReachableCondition(r *result, p *project, want bool) {
+	var hs hpcv1alpha1.HPCSite
+	if err := w.c.Get(w.ctx, objKey(p.hpcNS, "site"), &hs); err != nil {
+		return
+	}
+	c := meta.FindStatusCondition(hs.Status.Conditions, hpcv1alpha1.ConditionSiteReachable)
+	got := c != nil && c.Status == metav1.ConditionTrue
+	r.row(fmt.Sprintf("HPCSite %s SiteReachable (want %v)", p.hpcNS, want), got)
+	if c == nil || got != want {
+		r.fail("HPCSite %s: SiteReachable is %v, want %v", p.hpcNS, c, want)
+	}
+}
+
+// verifyOutage asserts what a long outage must look like (AC-28, AC-30): jobs waited with SiteUnavailable, the
+// controller spawned no runner Job for the down site while it lasted (after the two probes that notice it), and the
+// per-job counters show no runner failure.
+func (w *world) verifyOutage(r *result, down []*project, peakWaiting int, jobs []hpcv1alpha1.HPCArgoWorkflowJob) {
+	r.row("outage: peak jobs Waiting/SiteUnavailable", peakWaiting)
+	if peakWaiting == 0 {
+		r.fail("no job ever showed Waiting/SiteUnavailable during a %s outage", siteOutage)
+	}
+	ns := map[string]bool{}
+	for _, p := range down {
+		ns[p.hpcNS] = true
+	}
+	// 20 s after the start the poller has probed the site twice (3 s interval); the end is left alone for the same reason.
+	spawned := w.kube.spawnedBetween(ns, w.outageStart.Add(20*time.Second), w.outageEnd)
+	r.row("outage: runner Jobs created for the down site while it was down", spawned)
+	if spawned > 0 {
+		r.fail("%d runner Jobs were created for the down site during the outage: the controller must stop spawning attempts", spawned)
+	}
+	unavailable := 0
+	for i := range jobs {
+		if jobs[i].Status.Reason == hpcv1alpha1.ReasonSiteUnavailable {
+			unavailable++
+		}
+	}
+	r.row("jobs that ended SiteUnavailable (the bound is 30 min, the outage 10)", unavailable)
+	if unavailable > 0 {
+		r.fail("%d jobs ended SiteUnavailable: a %s outage is inside the %s bound", unavailable, siteOutage, "30m")
+	}
 }
 
 // bookings maps job#attempt -> booking for every job that holds one.

@@ -31,6 +31,14 @@ const (
 	ReasonBelowThreshold   = "BelowThreshold"
 )
 
+// ConditionSiteReachable is the HPCSite condition that is False while the site's REST API does not answer
+// (PRD-HPC-1461 AC-30: health shown in the console). Reasons: ReasonSiteAnswering, ReasonSiteNotAnswering.
+const (
+	ConditionSiteReachable = "SiteReachable"
+	ReasonSiteAnswering    = "Answering"
+	ReasonSiteNotAnswering = "NotAnswering"
+)
+
 // AtLimitPolicy is what happens when a project's share is spent (D-13).
 // +kubebuilder:validation:Enum=block;warn
 type AtLimitPolicy string

@@ -21,7 +21,8 @@ from . import jobscript, payloads, settings, staging, wallet
 from .logs import LogStreamer
 from .reporter import OutputsTooLarge, Reporter, checkpoint_uri
 from .sharing import inputs_in_script
-from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, lane_refusal, share_state, site_time)
+from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_site_down, lane_refusal,
+                    share_state, site_time)
 from .settings import CHECKPOINT_EXIT, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT, OFFER_S, Settings
 
 POLL_S = 30
@@ -52,6 +53,10 @@ REASON_POLL_S = 120
 PULL_RESUBMITS = 3
 # PRD-1609: how often this run started over because its host died with it.
 LOST_HOST_RESUBMITS = 3
+# AC-28/AC-30: an unreachable site is waited for, asking again after SITE_RETRY_FIRST_S, doubling up to SITE_RETRY_MAX_S.
+SITE_RETRY_FIRST_S = 5
+SITE_RETRY_MAX_S = 60
+SITE_UNAVAILABLE = 'SiteUnavailable'   # the pending reason the controller shows, and the prefix of the failure message
 
 
 def parse_time(text):
@@ -396,14 +401,21 @@ class Runner:
 
     def adopt(self, job):
         """The site job a previous runner of this attempt submitted, or None. By key: the active job of
-        this step's name; failing that the job the previous runner reported (it may have ended while no
-        runner was watching). Never a second submission for the same attempt."""
+        this attempt's name; failing that its finished job in accounting, found by the same NAME (a submit
+        whose answer was lost, ended before this runner came back); failing that the job the previous runner
+        reported. Never a second submission for the same attempt."""
         run = (job.get('status') or {}).get('run') or {}
         mine = int(run.get('attempt') or 0) == self.cfg.attempt
+        prev = run.get('siteJobID') if mine else None
         jid = self.slurm.find_active()
         if jid is not None:
             return str(jid), (int(run.get('logOffset') or 0) if mine and str(jid) == run.get('siteJobID') else 0)
-        prev = run.get('siteJobID') if mine else None
+        # Only a job newer than the one already reported counts: that one may have been replaced (cancelled).
+        fin = self.slurm.find_finished(after=prev if prev and str(prev).isdigit() else 0)
+        if fin is not None:
+            fid = str(fin['job_id'])
+            print('adopting the finished job %s of this attempt (found by name %s)' % (fid, self.cfg.job_site_name), flush=True)
+            return fid, (int(run.get('logOffset') or 0) if fid == prev else 0)
         if prev:
             try:
                 rec = self.slurm.accounting(prev)
@@ -411,10 +423,39 @@ class Runner:
                 rec = {}
                 print('previous site job %s unreadable: %s' % (prev, e), flush=True)
             st = (rec.get('state') or {}).get('current') or []
-            # A job this runner cancelled for a resubmit is not the attempt's result.
-            if rec.get('name') == self.cfg.job_site_name and st and 'CANCELLED' not in st:
+            # A job this runner cancelled for a resubmit is not the attempt's result. The legacy name is the one
+            # a runner of the previous release gave the job.
+            if rec.get('name') in (self.cfg.job_site_name, self.cfg.legacy_site_name) and st and 'CANCELLED' not in st:
                 return str(prev), int(run.get('logOffset') or 0)
         return None, 0
+
+    def adopt_or_submit(self, job):
+        """(site job id, log offset, adopted). An unreachable site is waited for, not failed on (AC-28, AC-30):
+        every round starts with the adopt step, so a submit the site accepted but did not answer is found again
+        instead of being repeated. Real errors (auth, a refused job) end the runner at once."""
+        waited, delay = 0, SITE_RETRY_FIRST_S
+        while True:
+            try:
+                jid, offset = self.adopt(job)
+                adopted = jid is not None
+                if not adopted:
+                    jid, offset = self.submit(), 0
+            except Exception as e:
+                if not is_site_down(e):
+                    raise
+                if waited >= self.cfg.site_wait_max:
+                    settings.fail_start('%s: the site did not answer for %d min (last error: %s)' % (
+                        SITE_UNAVAILABLE, waited // 60, str(e)[:300]), 1)
+                if waited == 0:
+                    self.reporter.pending_reason(SITE_UNAVAILABLE)
+                print('the site is unavailable (%s): asking again in %d s (%d s of at most %d)' % (
+                    str(e)[:300], delay, waited, self.cfg.site_wait_max), flush=True)
+                self.sleep(delay)
+                waited, delay = waited + delay, min(delay * 2, SITE_RETRY_MAX_S)
+                continue
+            if waited:
+                self.reporter.pending_reason(None)   # the site answered: the wait is over
+            return jid, offset, adopted
 
     def run(self):
         cfg = self.cfg
@@ -430,16 +471,13 @@ class Runner:
             return 0
         print('HPC job %s/%s: attempt %d' % (cfg.namespace, cfg.job_name, cfg.attempt), flush=True)
         signal.signal(signal.SIGTERM, self.on_term)
-        jid, offset = self.adopt(job)
-        if jid is not None:
+        try:
+            jid, offset, adopted = self.adopt_or_submit(job)
+        except staging.InsufficientQuota as e:
+            return self.end_no_quota(e)
+        if adopted:
             print('adopting existing job', jid, flush=True)
-            self.jid = jid
-        else:
-            try:
-                self.jid = self.submit()
-            except staging.InsufficientQuota as e:
-                return self.end_no_quota(e)
-            offset = 0
+        self.jid = jid
         self.logs.attach(self.jid, offset)
         self.logs.start()
         try:
@@ -485,6 +523,10 @@ class Runner:
             try:
                 active = self.slurm.find_active()
                 jid = str(active) if active is not None else prev
+                if jid is None:
+                    # A submit whose answer was lost may have run and ended unreported: settle it from accounting.
+                    fin = self.slurm.find_finished()
+                    jid = str(fin['job_id']) if fin is not None else None
                 if jid is None:
                     return self.report_swept('-', 'NOT_SUBMITTED', None, None, run)
                 if active is not None:

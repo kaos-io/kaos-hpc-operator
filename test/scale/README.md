@@ -12,7 +12,7 @@ go test -tags scale ./test/scale/ -run TestScaleM -v    # one scenario
 
 Needs `KUBEBUILDER_ASSETS` (`make scale-test` sets it through setup-envtest). Normal CI is untouched: every
 file of the harness has the build tag `scale`; only the small `fakeslurm` package (and its unit tests) is in
-`make test`. `SCALE_TMPDIR` moves the scratch files (default `$TMPDIR`), `SCALE_REPORT` the report path.
+`make test`. `SCALE_TMPDIR` moves the scratch files (default `$TMPDIR`), `SCALE_REPORT` the report path. `SCALE_OUTAGE` sets the L-chaos site outage (default 10m).
 
 ## What runs
 
@@ -38,13 +38,16 @@ It implements what the controller and the runner call, and nothing else:
 | `GET /slurm/v/jobs/state?job_id=1,2,3` | controller poller | plain comma list, `job_id` as a string; **422 when any ID is unknown** to slurmctld |
 | `POST /slurm/v/job/submit` | runner | per-user lane limits (`MaxJobsPerUser`, `MaxWallMinutes` per QoS) refuse with the QoS error text; returns the job id |
 | `GET /slurm/v/jobs?name=` | runner (find-by-key) | the real runner lists all jobs and filters by name; the fake filters server side |
+| `GET /slurmdb/v/jobs?job_name=&start_time=` | runner (adopt a finished job by name) | every job of that name, finished or not, kept forever |
+| `GET /slurm/v/ping` | controller poller (site health) | one healthy controller; 503 like every call while the site is down |
 | `GET /slurm/v/job/{id}`, `DELETE` | runner | 404 when slurmctld forgot the job |
 | `GET /slurmdb/v/job/{id}` | runner | accounting: kept forever; exit code, dilated start/end, the comment (checkpoint marker) |
 | `GET /slurmdb/v/sshare`, `/qos`, `GET /slurm/v/reservations` | hub | **not called by this controller**. Discovery of the site's share, QoS and reservations is hub-side in this design: the harness plays the hub and renders `spec.budget.siteLeft`, `spec.profile.qos` and `reservations` from the same figures. The fake also keeps the account's true consumption (`Charged`), which is what the budget assertion compares to. |
 
 Behaviour knobs: latency and jitter, 5xx rate, hanging requests, a full outage (`SetDown`), spurious 422s
 (`SetSpurious422`), how long slurmctld remembers a finished job (`SetMinJobAge`), queue delay, node capacity
-(FIFO start), a seeded random end per run (`NODE_FAIL`, `PREEMPTED`, `FAILED`), a run that outlasts its limit
+(FIFO start), a lost reply of a share of submissions (`LostReplyRate`; `LostReplyQuick` of those start at once and end within a second, before the
+runner asks again), a seeded random end per run (`NODE_FAIL`, `PREEMPTED`, `FAILED`), a run that outlasts its limit
 (`TIMEOUT`), and per-job hints that the harness puts in the submit environment (`FAKE_RUN_MINUTES`,
 `FAKE_FORCE_END`, `FAKE_SEGMENTS`: a checkpointing step that exits 85 with a checkpoint marker in the job
 comment until its last segment). A run is planned from the job name, the attempt and the seed, so a repeated
@@ -66,8 +69,8 @@ submit it, retry a refused lane once on the class QoS, report `status.run` (site
 one terminal report with exit code, times and checkpoint reference), read the state from
 `status.siteObservation` while it is fresh and call the site only for the accounting record of a state change
 or an end, or for itself when the observation is stale (the real runner's `STALE_*` rules, scaled to the
-test's poll interval). A failed submit restarts the "pod" after 10, 20, 40, 80 s and fails the batch Job after
-the fifth try, like `backoffLimit: 4`. Not modelled: staging of dataset and image, the job script, logs,
+test's poll interval). A refused submit (4xx) restarts the "pod" after 10, 20, 40, 80 s and fails the batch Job after
+the fifth try, like `backoffLimit: 4`; a site that does not answer is waited for, up to 30 minutes. Not modelled: staging of dataset and image, the job script, logs,
 outputs, node sharing, the cancel-on-SIGTERM path (a cancel-only runner for the orphan sweep is).
 
 ## Scenarios
@@ -77,14 +80,14 @@ outputs, node sharing, the cancel-on-SIGTERM path (a cancel-only runner for the 
 | **S** | one job end to end: admitted, booked, runner Job, submit, observed, settled; one submission |
 | **M** | 50 jobs, two classes, a share and siteLeft that admit only part: the rest wait `WaitingForBudget` and are admitted as bookings settle; on every snapshot `used + booked <= min(share, siteLeft)`; the fake site's own charge never exceeds it; every job terminal; no duplicate submission; the published ledger ends with nothing booked |
 | **L** | 1,000 jobs, 3 projects on 2 sites (two projects share one site profile and so one token bucket), lanes `test` and `dev` on with one-job-per-user limits at the site: reconcile throughput, `jobs/state` calls per poll cycle (batched, O(sites)), the shared rate-limit bucket, controller RSS and heap over time, `recentJobs` <= 50 and bounded object size, HPCSite write rate, no lane refusal (the controller never submits a second job into a one-job lane) |
-| **L-chaos** | L plus: controller killed and restarted mid-run (bookings unchanged, no re-submission), 2-minute outage of the shared site (all 5xx: jobs wait, none fails), a 422 storm on the other site, 10 % `NODE_FAIL`, jobs that always lose their node (`RerunLimit` after exactly 2 re-runs), checkpointing steps (continue at most 5 times; a cohort needing 8 segments ends `ContinuationLimit`) |
+| **L-chaos** | L plus: controller killed and restarted mid-run (bookings unchanged, no re-submission), a 10-minute outage of the shared site (all 5xx: jobs wait `Waiting/SiteUnavailable`, no runner Job is created for it while it lasts, none fails, all finish afterwards; `SiteReachable` false, then true), lost submit replies that finish before the retry (found in accounting by name: 0 duplicates), a 422 storm on the other site, 10 % `NODE_FAIL`, jobs that always lose their node (`RerunLimit` after exactly 2 re-runs), checkpointing steps (continue at most 5 times; a cohort needing 8 segments ends `ContinuationLimit`) |
 
 ## Assertions that fail the test
 
 Budget invariant on every snapshot; site charge <= min(share, siteLeft); no attempt submitted twice and
 submissions == attempts that reached the site; `jobs/state` batched (>= 5 IDs per call, calls per poll per
 HPCSite <= ceil(active/100)+1; not asserted in the 422 storm run) and inside the token bucket in every
-1 s, 5 s and 30 s window; no `RunnerFailed`; re-runs <= 2, continuations <= 5; `recentJobs` <= 50 and the
+1 s, 5 s and 30 s window; no `RunnerFailed`; in L-chaos also jobs seen `Waiting/SiteUnavailable`, no runner Job created for the down site after the poller's two probes, `SiteReachable` false during and true after the outage, lost-reply jobs that finished before the retry (> 0) and 0 duplicates; re-runs <= 2, continuations <= 5; `recentJobs` <= 50 and the
 HPCSite object < 128 KiB; HPCSite written at most N times in any second; controller RSS not growing after
 warmup (+30 % and +30 MB) and below a ceiling; the published ledger shows nothing booked after the last job.
 
@@ -105,20 +108,15 @@ Fixed in the same PR, one commit and one regression unit test each:
 | `HPCSite.status` was written in step with the reconciles | L: 31 writes in one second, about 5 per second, 23 KiB each | `4a9689f` at most one write per `--ledger-publish-interval` (default 1 s) and site; a request inside the interval is written when it has passed. Now at most 2 in a second |
 | one unknown ID made the poll walk its list one ID at a time | 101 calls for 100 IDs; at the production bucket (2 calls/s) that is 50 s against a 30 s interval, so the poll is abandoned and nobody in the list gets an observation while the ID stays in it. L-chaos 422 storm: the bucket of the stormed site is used to 95-98 % in the busiest window | `551314e` the list is split in halves: 15 calls for one unknown ID in 100 |
 
-Found and **not** fixed (design decisions or changes that cannot be proven without the real site):
+Found by the first run, fixed in the follow-up PR (`fix(runner,controller): ...`, one regression test each):
 
-- **A submission whose answer is lost can be repeated if the job finishes before the pod's retry.** The restarted
-  runner adopts only a job that is still pending or running (`find_active`), or the one a previous runner reported.
-  If the site accepted the job, the answer timed out, and the job had already ended by the time the pod restarted
-  (10 s, then 20, 40, 80), the attempt is submitted a second time. Real jobs outlive 10 s (queue, staging), so
-  the fake holds a lost-reply job for 60 s (`LostReplyHold`); with 20 s the harness hit it twice in 2,700 submissions.
-  A fix needs an attempt marker (`kaos-attempt=N`) that survives every rewrite of the job comment, which the job script
-  does in three places (`fail()`, the slot manager, the checkpoint copier), and the stager reads that comment: not done blind.
-- **A site outage longer than about 2.5 minutes fails every job that has not been submitted yet.** The runner stops on a
-  5xx at submit and Kubernetes restarts the pod after 10, 20, 40 and 80 s (`backoffLimit: 4`); the fifth try is 150 s
-  after the first. The 2-minute outage of L-chaos passes only because of that margin, and the scenario keeps the
-  second site's extra faults off the shared site for the same reason (`RunnerFailed` is asserted to be zero). PRD
-  AC-28 (30 minutes of retry) and AC-30 (`SiteUnavailable` wait) are the open items that cover it.
+| finding | evidence in the test | fix |
+|---|---|---|
+| **A submission whose answer is lost could be repeated if the job finished before the pod's retry.** The adopt step found only live jobs by key | with the fake holding a lost-reply job for 20 s the harness hit it twice in 2,700 submissions | the job NAME (immutable; the job script rewrites the comment, not the name) is now `kaos-<uid>-<step>-<hpc job>-a<attempt>`, and adopt also searches slurmdbd by that name (newest non-cancelled job above the reported one). Fake: `LostReplyQuick` jobs that finish within a second; L-chaos asserts they happened and that there are 0 duplicates |
+| **A site outage longer than about 2.5 minutes failed every job not yet submitted** (`RunnerFailed` after the pod's five tries) | the 2-minute outage passed only by that margin; the second site's extra faults were kept off the shared site | an unreachable site is a wait (PRD AC-28, AC-30): runner waits 5..60 s per ask up to `--site-outage-max` (30 min); the controller books nothing and creates no runner Job for a down site (`Waiting/SiteUnavailable`), resumes when it answers. L-chaos: 10-minute outage, `RunnerFailed` 0, no runner Job created while down, faults on both sites |
+
+Still **not** fixed (design decisions or changes that cannot be proven without the real site):
+
 - **Capacity.** One worker reconciles jobs and each reconcile lists the jobs: the average reconcile costs 0.9 ms with 50 jobs
   and 2.6 ms with 1,000 (`HPCSite` ledger, namespaces and step history are read per reconcile). At 1,000 jobs
   and about 70 reconciles per second the worker is 23-29 % busy (reported as "reconcile worker busy"); the test fails

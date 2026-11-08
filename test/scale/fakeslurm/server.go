@@ -97,6 +97,10 @@ type Options struct {
 	// runner's adopt step finds ACTIVE jobs only: a job that finished in between would be submitted again).
 	LostReplyRate float64
 	LostReplyHold time.Duration
+	// LostReplyQuick is the share of those lost-reply jobs that start at once (a free node) and end within
+	// about a second, before the submitter asks again: the job is finished when the runner looks for it, so
+	// only slurmdbd still lists it (found by name; the case that used to submit the attempt twice).
+	LostReplyQuick float64
 	// QueueMin..QueueMax is the real time a job waits before it may start (queue delay).
 	QueueMin, QueueMax time.Duration
 	// RunMin..RunMax is the dilated run time (minutes) of a job without a FAKE_RUN_MINUTES hint.
@@ -131,6 +135,7 @@ type Job struct {
 	endExit                              int
 	runReal                              time.Duration
 	endedReal                            time.Time // when the job really ended (EndAt is dilated)
+	quick                                bool      // a lost-reply job that starts at once and ends within a second
 	forgotten                            bool      // slurmctld no longer knows it
 	ckptSeq                              int
 }
@@ -152,6 +157,8 @@ type Stats struct {
 	// Injected counts the requests answered with an injected 5xx or hang; LostReplies the accepted
 	// submissions whose reply was dropped.
 	Injected, LostReplies int
+	// QuickLost counts the lost-reply submissions that finished before any retry (LostReplyQuick).
+	QuickLost int
 	// PeakRunning and PeakActive are the highest number of running and of pending+running jobs.
 	PeakRunning, PeakActive int
 	// ChargedMinutes is the dilated node-minutes charged to each account so far (ended jobs).
@@ -327,6 +334,11 @@ func (s *Site) handle(w http.ResponseWriter, r *http.Request) {
 		s.cancel(w, r)
 	case "acct":
 		s.accounting(w, r)
+	case "acctlist":
+		s.accountingList(w, r)
+	case "ping":
+		writeJSON(w, http.StatusOK, map[string]any{"pings": []map[string]any{
+			{"hostname": "slurmctld", "pinged": "UP", "responding": true}}})
 	case "hub":
 		s.hub(w, r)
 	default:
@@ -341,6 +353,10 @@ func kindOf(r *http.Request) string {
 		return keyState
 	case strings.HasSuffix(p, "/job/submit"):
 		return "submit"
+	case strings.HasSuffix(p, "/ping") || strings.HasSuffix(p, "/ping/"):
+		return "ping"
+	case strings.Contains(p, "/slurmdb/") && strings.HasSuffix(p, "/jobs"):
+		return "acctlist"
 	case strings.Contains(p, "/slurmdb/") && strings.Contains(p, "/job/"):
 		return "acct"
 	case strings.HasSuffix(p, "/sshare"), strings.HasSuffix(p, "/qos"), strings.HasSuffix(p, "/reservations"):
@@ -459,6 +475,15 @@ func (s *Site) cancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"errors": []any{}})
 }
 
+// accountingRecord is slurmdbd's record of a job.
+func accountingRecord(j *Job) map[string]any {
+	return map[string]any{"job_id": j.ID, "name": j.Name, "account": j.Account, "user": j.User,
+		keyState:    map[string]any{"current": []string{j.State}},
+		"exit_code": map[string]any{"return_code": map[string]any{"set": true, "number": j.Exit}},
+		"comment":   map[string]any{"job": j.Cm},
+		"time":      map[string]any{"start": epoch(j.StartAt), "end": epoch(j.EndAt)}}
+}
+
 func (s *Site) accounting(w http.ResponseWriter, r *http.Request) {
 	n := idOf(r)
 	s.mu.Lock()
@@ -468,12 +493,22 @@ func (s *Site) accounting(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "Invalid job id specified")
 		return
 	}
-	rec := map[string]any{"job_id": j.ID, "name": j.Name, "account": j.Account, "user": j.User,
-		keyState:    map[string]any{"current": []string{j.State}},
-		"exit_code": map[string]any{"return_code": map[string]any{"set": true, "number": j.Exit}},
-		"comment":   map[string]any{"job": j.Cm},
-		"time":      map[string]any{"start": epoch(j.StartAt), "end": epoch(j.EndAt)}}
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": []map[string]any{rec}})
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": []map[string]any{accountingRecord(j)}})
+}
+
+// accountingList is GET /slurmdb/v/jobs?job_name=: slurmdbd lists every job of that name, finished or not,
+// for as long as it keeps them (the fake: forever). start_time bounds the search like the real query.
+func (s *Site) accountingList(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("job_name")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]map[string]any, 0, 1)
+	for _, id := range s.order {
+		if j := s.jobs[id]; name == "" || j.Name == name {
+			out = append(out, accountingRecord(j))
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": out})
 }
 
 // epoch is a Slurm time object; an unset time is "set": false.
@@ -542,10 +577,15 @@ func (s *Site) submit(w http.ResponseWriter, r *http.Request, user string) {
 	s.nextID++
 	j.EligibleAt = now.Add(s.between(s.Opts.QueueMin, s.Opts.QueueMax))
 	lost := s.rng.Float64() < s.Opts.LostReplyRate
-	if lost {
+	quick := lost && s.rng.Float64() < s.Opts.LostReplyQuick
+	if lost && !quick {
 		j.EligibleAt = j.EligibleAt.Add(s.Opts.LostReplyHold)
 	}
 	s.planLocked(j)
+	if quick {
+		j.quick, j.EligibleAt, j.runReal = true, now, 800*time.Millisecond
+		s.stats.QuickLost++
+	}
 	s.jobs[j.ID] = j
 	s.order = append(s.order, j.ID)
 	s.stats.Submits[j.Name+"#"+j.Attempt]++
@@ -692,7 +732,7 @@ func (s *Site) advanceLocked(now time.Time) {
 	}
 	for _, id := range s.order {
 		j := s.jobs[id]
-		if j.State == Pending && running < s.Opts.Capacity && !now.Before(j.EligibleAt) {
+		if j.State == Pending && (running < s.Opts.Capacity || j.quick) && !now.Before(j.EligibleAt) {
 			j.State, j.Reason, j.StartAt = Running, "None", now
 			running++
 		}

@@ -30,6 +30,12 @@ type StateReader interface {
 	States(ctx context.Context, s sitestate.Site, bucket sitestate.Waiter, ids []string) (map[string]sitestate.Job, error)
 }
 
+// Pinger asks a site whether its REST API answers (sitestate.Client implements it). A StateReader that is also
+// a Pinger lets the poller keep the sites' health (PRD-HPC-1461 AC-30) even while no site job is polled.
+type Pinger interface {
+	Ping(ctx context.Context, s sitestate.Site, bucket sitestate.Waiter) (sitestate.Verdict, string)
+}
+
 // SitePoller reads the state of every non-terminal job's site job with one batched call per
 // HPCSite per interval (chunked when the list is long) and writes it to each job's
 // status.siteObservation, so runners never poll the site for state themselves (D-36, T-25).
@@ -43,6 +49,12 @@ type SitePoller struct {
 	Reader  StateReader
 	// Interval between polls; DefaultSitePollInterval when zero.
 	Interval time.Duration
+	// Health receives what every poll and probe learned about each site's reachability; the reconciler reads it
+	// (AC-30). Nil: reachability is not tracked and no job ever waits for a site.
+	Health *sitestate.Health
+	// Republish is called when a site's reachability changed, so its HPCSite condition SiteReachable is
+	// written at once and not at the next job reconcile. Optional.
+	Republish func(ctx context.Context, site *hpcv1alpha1.HPCSite)
 	// BucketRate and BucketBurst shape the token bucket of one site profile (shared by all of its HPCSites).
 	BucketRate  float64
 	BucketBurst int
@@ -98,9 +110,76 @@ func (p *SitePoller) PollOnce(ctx context.Context) {
 		log.Error(err, "listing jobs")
 		return
 	}
-	for site, group := range groupBySite(jobs.Items) {
+	groups := groupBySite(jobs.Items)
+	for site, group := range groups {
 		if err := p.pollSite(ctx, site, group); err != nil {
 			log.Error(err, "site poll failed; observations left as they were", "site", site.String())
+		}
+	}
+	p.probeIdleSites(ctx, jobs.Items, groups)
+}
+
+// probeIdleSites pings every slurmrestd HPCSite that was not just read through jobs/state, while any job is
+// unfinished: a job that waits to be admitted or submitted has no site job to poll, yet it must know whether
+// the site answers (AC-30). With no unfinished job nothing is probed.
+func (p *SitePoller) probeIdleSites(ctx context.Context, items []hpcv1alpha1.HPCArgoWorkflowJob, polled map[types.NamespacedName][]polledJob) {
+	pinger, ok := p.Reader.(Pinger)
+	if p.Health == nil || !ok || !anyUnfinished(items) {
+		return
+	}
+	var sites hpcv1alpha1.HPCSiteList
+	if err := p.Client.List(ctx, &sites); err != nil {
+		logf.FromContext(ctx).Error(err, "listing sites to probe")
+		return
+	}
+	for i := range sites.Items {
+		site := &sites.Items[i]
+		if _, done := polled[client.ObjectKeyFromObject(site)]; done || site.Spec.Profile.Transport != hpcv1alpha1.TransportSlurmREST {
+			continue
+		}
+		creds, err := p.credentials(ctx, site)
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "probe: no credentials", "site", client.ObjectKeyFromObject(site).String())
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, p.interval())
+		v, why := pinger.Ping(cctx, creds, p.bucket(site))
+		cancel()
+		p.observe(ctx, site, v, why)
+	}
+}
+
+func anyUnfinished(items []hpcv1alpha1.HPCArgoWorkflowJob) bool {
+	for i := range items {
+		if !items[i].Status.Phase.Terminal() {
+			return true
+		}
+	}
+	return false
+}
+
+// credentials reads the site endpoint and JWT of an HPCSite.
+func (p *SitePoller) credentials(ctx context.Context, site *hpcv1alpha1.HPCSite) (sitestate.Site, error) {
+	var secret corev1.Secret
+	if err := p.Secrets.Get(ctx, client.ObjectKey{Namespace: site.Namespace, Name: runnerjob.SecretJWT}, &secret); err != nil {
+		return sitestate.Site{}, fmt.Errorf("get Slurm token Secret: %w", err)
+	}
+	token := strings.TrimSpace(string(secret.Data[siteTokenKey]))
+	if token == "" {
+		return sitestate.Site{}, fmt.Errorf("the Slurm token Secret %s has no %q", runnerjob.SecretJWT, siteTokenKey)
+	}
+	return sitestate.Site{Endpoint: site.Spec.Profile.Endpoint, RESTVersion: site.Spec.Profile.RESTVersion,
+		User: site.Spec.Identity.User, Token: token}, nil
+}
+
+// observe records a verdict in the health store and logs a change of state.
+func (p *SitePoller) observe(ctx context.Context, site *hpcv1alpha1.HPCSite, v sitestate.Verdict, why string) {
+	key := client.ObjectKeyFromObject(site).String()
+	if p.Health.Observe(key, v, why, p.now()) {
+		_, down := p.Health.Down(key)
+		logf.FromContext(ctx).Info("site reachability changed", "site", key, "down", down, "why", why)
+		if p.Republish != nil {
+			p.Republish(ctx, site)
 		}
 	}
 }
@@ -130,24 +209,27 @@ func (p *SitePoller) pollSite(ctx context.Context, key types.NamespacedName, gro
 	if site.Spec.Profile.Transport != hpcv1alpha1.TransportSlurmREST {
 		return nil
 	}
-	var secret corev1.Secret
-	if err := p.Secrets.Get(ctx, client.ObjectKey{Namespace: key.Namespace, Name: runnerjob.SecretJWT}, &secret); err != nil {
-		return fmt.Errorf("get Slurm token Secret: %w", err)
-	}
-	token := strings.TrimSpace(string(secret.Data[siteTokenKey]))
-	if token == "" {
-		return fmt.Errorf("the Slurm token Secret %s has no %q", runnerjob.SecretJWT, siteTokenKey)
+	creds, err := p.credentials(ctx, &site)
+	if err != nil {
+		return err
 	}
 	ids := uniqueIDs(group)
 	// A poll that outlasts its interval would overlap the next one: bound it.
 	cctx, cancel := context.WithTimeout(ctx, p.interval())
 	defer cancel()
-	seen, err := p.Reader.States(cctx, sitestate.Site{Endpoint: site.Spec.Profile.Endpoint,
-		RESTVersion: site.Spec.Profile.RESTVersion, User: site.Spec.Identity.User, Token: token},
-		p.bucket(&site), ids)
+	seen, err := p.Reader.States(cctx, creds, p.bucket(&site), ids)
 	if err != nil {
+		// The site not answering is a fact about the site, not about the poll: remember it (AC-30).
+		if sitestate.IsOutage(err) {
+			p.observe(ctx, &site, sitestate.Down, err.Error())
+		} else if sitestate.IsAnswer(err) {
+			// A 4xx (e.g. 422 for job IDs the site has forgotten) is the site answering: after an outage it
+			// must not keep the site marked down just because the read itself still fails.
+			p.observe(ctx, &site, sitestate.Up, "")
+		}
 		return err
 	}
+	p.observe(ctx, &site, sitestate.Up, "")
 	at := metav1.NewTime(p.now())
 	for _, pj := range group {
 		obs := &hpcv1alpha1.SiteObservation{JobID: pj.jobID, ObservedAt: at, IntervalSeconds: int32(p.interval() / time.Second)}

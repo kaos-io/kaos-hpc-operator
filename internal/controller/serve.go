@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -244,9 +245,19 @@ func (r *HPCArgoWorkflowJobReconciler) driveRunner(ctx context.Context, job *hpc
 	var rj batchv1.Job
 	err := r.Get(ctx, key, &rj)
 	if apierrors.IsNotFound(err) {
+		// No runner Job is spawned while the site is down: it would only burn its retries (AC-30).
+		if held, herr := r.siteWait(ctx, job, site, false); herr != nil || held {
+			if herr == nil {
+				herr = &requeueError{after: WaitingResync}
+			}
+			return herr
+		}
 		return r.createRunnerJob(ctx, job, site, attempt)
 	}
 	if err != nil {
+		return err
+	}
+	if _, err := r.siteWait(ctx, job, site, true); err != nil { // display only: the runner has its own wait
 		return err
 	}
 	if err := r.noteRunner(ctx, job, key.Name, attempt); err != nil {
@@ -268,7 +279,7 @@ func (r *HPCArgoWorkflowJobReconciler) createRunnerJob(ctx context.Context, job 
 	if r.RunnerImage == "" {
 		return fmt.Errorf("serve-mode job %s/%s needs a runner image: start the controller with --runner-image", job.Namespace, job.Name)
 	}
-	rj, err := runnerjob.Build(runnerjob.Config{Image: r.RunnerImage, Scheduling: r.RunnerScheduling}, job, site, attempt)
+	rj, err := runnerjob.Build(runnerjob.Config{Image: r.RunnerImage, Scheduling: r.RunnerScheduling, SiteWaitMax: r.siteOutageMax()}, job, site, attempt)
 	if err != nil {
 		return fmt.Errorf("building the runner Job: %w", err)
 	}
@@ -343,14 +354,18 @@ func (r *HPCArgoWorkflowJobReconciler) runnerFailed(ctx context.Context, job *hp
 	if m := r.lastPodMessage(ctx, rj); m != "" {
 		why += ": " + m
 	}
+	reason := hpcv1alpha1.ReasonRunnerFailed
+	if strings.Contains(why, hpcv1alpha1.ReasonSiteUnavailable+":") {
+		reason = hpcv1alpha1.ReasonSiteUnavailable // the runner waited for the site as long as it may and said so
+	}
 	if siteJobMayLive(job) {
 		// The runner is over but its site job may not be: stop it before the booking is released (AC-08).
-		if err := r.beginSweep(ctx, job, hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonRunnerFailed, truncate(why)); err != nil {
+		if err := r.beginSweep(ctx, job, hpcv1alpha1.PhaseFailed, reason, truncate(why)); err != nil {
 			return err
 		}
 		return &requeueError{after: SweepPoll}
 	}
-	return r.failAttempt(ctx, job, site, hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonRunnerFailed, hpcv1alpha1.ReasonRunnerFailed, truncate(why))
+	return r.failAttempt(ctx, job, site, hpcv1alpha1.PhaseFailed, reason, reason, truncate(why))
 }
 
 func truncate(s string) string {

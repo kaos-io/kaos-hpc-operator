@@ -67,6 +67,14 @@ const (
 	ExitCodeInsufficientQuota = int32(237)
 	// DefaultIdleTimeoutMinutes is the idle window of a step that does not set one (D-72).
 	DefaultIdleTimeoutMinutes = int32(20)
+	// ReasonSiteUnavailable: the site does not answer (connection errors, 5xx, timeouts, slurmctld down). The job
+	// WAITS (phase Waiting before admission, Admitted after it, no runner Job is created) and resumes when the
+	// site answers; after the controller's --site-outage-max it ends Failed with this reason (PRD-HPC-1461
+	// AC-28, AC-30). Also the pending reason a runner reports while it waits for the site.
+	ReasonSiteUnavailable = "SiteUnavailable"
+	// ConditionSiteUnavailable is the job condition that is True while the job waits for an unreachable site;
+	// its lastTransitionTime is when the wait began, which the outage bound counts from.
+	ConditionSiteUnavailable = "SiteUnavailable"
 	// ReasonRunnerFailed: the runner Job ended (backoff exhausted) without a terminal report (phase 1).
 	ReasonRunnerFailed = "RunnerFailed"
 	// ReasonSiteMissing is the reason while the job's HPCSite is gone and the grace period runs.

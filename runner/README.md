@@ -32,10 +32,22 @@ Env (controller): `HPC_JOB_NAMESPACE`, `HPC_JOB_NAME`, `KAOS_ATTEMPT`, `KAOS_RES
 `HPC_RESUMABLE_LEAD`, `STEP_OUTPUTS`, `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `KUBECORE_WORKFLOW_NAME`, `KUBECORE_RUN_ID`,
 `DATASET`, `HPC_SHARING` (`on`/`1`) + `HPC_SCOPE`, allowlisted `OUTPUTS_REPO`/`OUTPUTS_REF`/`CHECKPOINT_*`/
 `KAOS_LIB_SUPPORT`, site: `HPC_ACCOUNT`, `HPC_USER`, `HPC_SCRATCH`, `HPC_HOME`, `HPC_CLASSES_JSON`, `HPC_ENDPOINT`,
-`HPC_REST_VERSION`, optional `HPC_LOGIN_HOST` (`host:port`, default login.lxp.lu:8822), `SLURM_TOKEN` (fallback),
+`HPC_REST_VERSION`, optional `HPC_SITE_WAIT_MAX_S` (how long an unreachable site is waited for, default 1800; the controller's `--site-outage-max`), `HPC_LOGIN_HOST` (`host:port`, default login.lxp.lu:8822), `SLURM_TOKEN` (fallback),
 and the ConfigMap: `ZITADEL_DOMAIN`, `ZITADEL_MLFLOW_PROJECT_ID`, `MLFLOW_EXTERNAL_URL`, `LAKEFS_EXTERNAL_URL`.
 Files: `/etc/meluxina-jwt/token`, `/etc/meluxina-staging/{id_ed25519,known_hosts}`,
 `/etc/mlflow-svc/ZITADEL_MACHINE_KEY` (or `ZITADEL_MACHINE_KEY_FILE`), the pod ServiceAccount token.
+
+## The site job's name, adopt, and a site that does not answer
+The site job is named `kaos-[<scope>-]<workflow uid>-<step>-<first 8 of the HPC job id>-a<attempt>`. A job script rewrites
+the job *comment*, never the name, so the name is the attempt's immutable key. The adopt step looks for it, in this order:
+the live job (`GET /jobs`), the finished job in accounting (`GET /slurmdb/<v>/jobs?job_name=...`, newest one that was not
+cancelled and is newer than the job the previous runner reported), then the job the previous runner reported. A submit the
+site accepted whose answer was lost is therefore found again even when the job has already ended: never a second submission.
+The previous release's name (no HPC job, no attempt) is still recognised among live jobs.
+
+Before the site job exists, a site that does not answer (connection error, timeout, 429/502/503/504, a nameless 500, a dead
+slurmctld) is waited for: ask again after 5, 10, 20 ... 60 s (adopt first, then submit), `pendingReason: SiteUnavailable`,
+fail with `SiteUnavailable: ...` only after `HPC_SITE_WAIT_MAX_S`. A 4xx, an auth error or a refusal that names a reason fails at once.
 
 ## Recovery and checkpoints (PRD-HPC-1461 D-74, D-75)
 

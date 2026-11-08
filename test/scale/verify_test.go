@@ -5,6 +5,7 @@ package scale
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -40,6 +41,9 @@ func (r *result) fail(format string, a ...any) {
 	r.t.Error(msg)
 }
 
+// attemptSuffix is the "-a<attempt>" the runner puts at the end of a site job's name.
+var attemptSuffix = regexp.MustCompile(`-a\d+$`)
+
 // verifySubmits asserts that no attempt was submitted twice and that every job was submitted exactly
 // as many times as it has attempts that reached the site. Returns (submits, jobs).
 func (w *world) verifySubmits(r *result, jobs []hpcv1alpha1.HPCArgoWorkflowJob) {
@@ -58,7 +62,7 @@ func (w *world) verifySubmits(r *result, jobs []hpcv1alpha1.HPCArgoWorkflowJob) 
 				r.fail("duplicate site submission: %s submitted %d times", k, n)
 			}
 			name, _, _ := strings.Cut(k, "#")
-			perName[name] += n
+			perName[attemptSuffix.ReplaceAllString(name, "")] += n
 		}
 	}
 	mismatch := 0
@@ -70,7 +74,7 @@ func (w *world) verifySubmits(r *result, jobs []hpcv1alpha1.HPCArgoWorkflowJob) 
 				attempts++
 			}
 		}
-		if got := perName[siteName(j)]; got != attempts && mismatch < 5 {
+		if got := perName[strings.TrimSuffix(siteName(j, 0), "-a0")]; got != attempts && mismatch < 5 {
 			mismatch++
 			r.fail("job %s/%s: %d site submissions but %d attempts reached the site", j.Namespace, j.Name, got, attempts)
 		}

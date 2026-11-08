@@ -52,6 +52,12 @@ var (
 		Buckets: prometheus.ExponentialBuckets(60, 2, 12),
 	}, []string{LabelTier})
 
+	// SiteUp is 1 while the site's REST API answers and 0 while it does not (AC-30).
+	SiteUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kaos_hpc_site_up",
+		Help: "1 while the HPC site's REST API answers, 0 while it does not.",
+	}, []string{LabelSite, LabelProject})
+
 	// NodeMinutesBooked counts node-minutes booked at admission.
 	NodeMinutesBooked = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "kaos_hpc_node_minutes_booked",
@@ -128,7 +134,7 @@ var (
 func init() {
 	ctrlmetrics.Registry.MustRegister(JobPhase, JobQueueSeconds, JobRunSeconds, NodeMinutesBooked,
 		NodeMinutesSettled, SiteNodeMinutes, ActiveJobs, RunnerRestarts, LanePlacements, IdleKills,
-		K8sIdleKills, K8sIdleErrors, BudgetWarning, BudgetPercent)
+		K8sIdleKills, K8sIdleErrors, BudgetWarning, BudgetPercent, SiteUp)
 }
 
 // SetJobPhase makes phase the only phase series of the job.

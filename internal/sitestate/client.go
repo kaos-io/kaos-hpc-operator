@@ -56,7 +56,7 @@ func (c *Client) States(ctx context.Context, s Site, bucket Waiter, ids []string
 	for from := 0; from < len(ids); from += chunk {
 		part := ids[from:min(from+chunk, len(ids))]
 		if err := bucket.Wait(ctx); err != nil {
-			return nil, fmt.Errorf("rate limit: %w", err)
+			return nil, &rateLimitError{err}
 		}
 		jobs, err := c.call(ctx, s, part)
 		var se *statusError
@@ -94,7 +94,7 @@ func (c *Client) split(ctx context.Context, s Site, bucket Waiter, ids []string)
 	var out []Job
 	for _, half := range [][]string{ids[:len(ids)/2], ids[len(ids)/2:]} {
 		if err := bucket.Wait(ctx); err != nil {
-			return nil, fmt.Errorf("rate limit: %w", err)
+			return nil, &rateLimitError{err}
 		}
 		jobs, err := c.call(ctx, s, half)
 		var se *statusError
@@ -260,3 +260,10 @@ func redactText(t, token string) string {
 	}
 	return strings.ReplaceAll(t, token, "***")
 }
+
+// rateLimitError is the poller's own token bucket running dry before the call was made: it says nothing about
+// the site (IsOutage is false for it).
+type rateLimitError struct{ err error }
+
+func (e *rateLimitError) Error() string { return "rate limit: " + e.err.Error() }
+func (e *rateLimitError) Unwrap() error { return e.err }

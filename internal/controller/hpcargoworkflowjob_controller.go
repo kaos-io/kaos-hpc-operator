@@ -44,6 +44,7 @@ import (
 	"github.com/kaos-io/kaos-hpc-operator/internal/ledger"
 	"github.com/kaos-io/kaos-hpc-operator/internal/metrics"
 	"github.com/kaos-io/kaos-hpc-operator/internal/runnerjob"
+	"github.com/kaos-io/kaos-hpc-operator/internal/sitestate"
 	"github.com/kaos-io/kaos-hpc-operator/internal/timelimit"
 )
 
@@ -77,6 +78,10 @@ type HPCArgoWorkflowJobReconciler struct {
 	SiteMissingGrace time.Duration
 	// SweepGiveUp is how long an orphan sweep waits for the site's confirmation (DefaultSweepGiveUp).
 	SweepGiveUp time.Duration
+	// Health is what the site poller knows about each site's reachability. Nil: a job never waits for a site.
+	Health *sitestate.Health
+	// SiteOutageMax is how long a job waits for an unreachable site before it fails (DefaultSiteOutageMax).
+	SiteOutageMax time.Duration
 	// LedgerPublishInterval is the shortest time between two writes of one HPCSite's status
 	// (DefaultLedgerPublishInterval in the manager). A request inside the interval is not lost: the
 	// newest state is written once the interval has passed. Zero (tests): every request writes.
@@ -238,6 +243,10 @@ func (r *HPCArgoWorkflowJobReconciler) siteOf(ctx context.Context, job *hpcv1alp
 
 // judge decides a new or waiting job and books it when admitted.
 func (r *HPCArgoWorkflowJobReconciler) judge(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite) (ctrl.Result, error) {
+	// An unreachable site is a wait, not a booking: nothing is admitted, and no runner is spawned, until it answers (AC-30).
+	if held, err := r.siteWait(ctx, job, site, false); err != nil || held {
+		return ctrl.Result{RequeueAfter: WaitingResync}, err
+	}
 	l, err := r.ledgerOf(ctx, site)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -462,6 +471,7 @@ func (r *HPCArgoWorkflowJobReconciler) publishLedgerNow(ctx context.Context, sit
 	}
 	metrics.ActiveJobs.WithLabelValues(projectOf(site), site.Spec.Site).Set(float64(l.Active))
 	r.noteBudgetWarning(site, l)
+	r.noteSiteReachable(site)
 	if u, uerr := r.checkpointUsage(ctx, site); uerr == nil {
 		site.Status.Checkpoints = &u
 	}
