@@ -46,9 +46,15 @@ const (
 	ReasonInsufficientQuota    = "InsufficientQuota"
 	ReasonMultiNodeUnsupported = "MultiNodeUnsupported"
 	ReasonWallTimeOverLimit    = "WallTimeOverLimit"
-	ReasonClassNotAllowed      = "ClassNotAllowed"
-	ReasonNoProject            = "NoProject"
-	ReasonNoSite               = "NoSite"
+	// ReasonTooLongNotResumable: the declared limit is above the longest lane and the step is not
+	// resumable, so it would be cut at the lane maximum. Refused at admission, never cut silently.
+	ReasonTooLongNotResumable = "TooLongNotResumable"
+	// ReasonTooLongBeyondContinuations: the step is resumable but the declared limit needs more
+	// runs than the continuation cap allows.
+	ReasonTooLongBeyondContinuations = "TooLongBeyondContinuations"
+	ReasonClassNotAllowed            = "ClassNotAllowed"
+	ReasonNoProject                  = "NoProject"
+	ReasonNoSite                     = "NoSite"
 	// Continuation (D-44 as amended 2026-11-05, F-29, T-19).
 	ReasonContinuing        = "Continuing"
 	ReasonContinuationLimit = "ContinuationLimit"

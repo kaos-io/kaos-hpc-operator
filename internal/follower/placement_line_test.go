@@ -83,6 +83,10 @@ func TestPlacementLines(t *testing.T) {
 			hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseFailed, Reason: hpcv1alpha1.ReasonWallTimeReached,
 				Message: "This step ran its full 4 h time limit and was stopped. Set a longer limit."},
 			[]string{"HPC: This step ran its full 4 h time limit and was stopped. Set a longer limit."}},
+		{"waiting_long_resumable_step_shows_its_continuation_plan",
+			hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseAdmitted,
+				Placement: &hpcv1alpha1.Placement{TimeLimitMinutes: 30, Source: hpcv1alpha1.PlacementDeclared, QOS: "default"}},
+			[]string{"HPC: waiting · lane standard · time limit 30 min (declared), declared 60 min runs as continuations of up to 30 min each"}},
 		{"succeeded_prints_nothing_extra", hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Placement: learned}, nil},
 	}
 	for _, tc := range cases {

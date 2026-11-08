@@ -35,6 +35,26 @@ func capsOf(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite) time
 // there), and a resumable step keeps its declared limit: its checkpoint signal is timed from it.
 func (r *HPCArgoWorkflowJobReconciler) placementFor(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
 	site *hpcv1alpha1.HPCSite) (*hpcv1alpha1.Placement, error) {
+	p, err := r.placementUncapped(ctx, job, site)
+	if err != nil {
+		return nil, err
+	}
+	return capAtLaneMax(p, capsOf(job, site)), nil
+}
+
+// capAtLaneMax runs a resumable step whose declared limit is above the longest lane as continuations
+// of at most that lane's maximum (D-67, D-74). Admission refuses a step that is not resumable, so only
+// a resumable step reaches a booking with a limit above the maximum.
+func capAtLaneMax(p *hpcv1alpha1.Placement, caps timelimit.Caps) *hpcv1alpha1.Placement {
+	if m := caps.Max(); m > 0 && p.TimeLimitMinutes > m {
+		p.TimeLimitMinutes = m
+	}
+	return p
+}
+
+// placementUncapped is placementFor before the lane maximum is applied.
+func (r *HPCArgoWorkflowJobReconciler) placementUncapped(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
+	site *hpcv1alpha1.HPCSite) (*hpcv1alpha1.Placement, error) {
 	if p := job.Status.Placement; p != nil && p.Source == hpcv1alpha1.PlacementTimeoutRetry {
 		return p, nil
 	}

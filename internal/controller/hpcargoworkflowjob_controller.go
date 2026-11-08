@@ -255,7 +255,11 @@ func (r *HPCArgoWorkflowJobReconciler) judge(ctx context.Context, job *hpcv1alph
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	d := admission.DecideFor(job, site, l, pl.TimeLimitMinutes)
+	// Admission sees the placement just chosen, so a step verified resumable by earlier jobs of the
+	// same step (pl.Resumable) is judged resumable even though this job has no placement status yet.
+	judged := job.DeepCopy()
+	judged.Status.Placement = pl
+	d := admission.DecideFor(judged, site, l, pl.TimeLimitMinutes)
 	switch d.Phase {
 	case hpcv1alpha1.PhaseAdmitted:
 		// The lane is chosen with the booking, in the same serial step, so the one-job semaphore

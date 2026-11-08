@@ -63,8 +63,9 @@ func DecideFor(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, l
 		limit = m
 	}
 	if spec.WallTimeMinutes > limit {
-		return refuse(hpcv1alpha1.ReasonWallTimeOverLimit,
-			"wall time %d min is above the limit of %d min", spec.WallTimeMinutes, limit)
+		if d, refused := refuseTooLong(job, limit); refused {
+			return d
+		}
 	}
 
 	cost := int64(nodes) * int64(effectiveWall)
@@ -102,4 +103,45 @@ func DecideFor(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, l
 
 func refuse(reason, format string, a ...any) Decision {
 	return Decision{Phase: hpcv1alpha1.PhaseRefused, Reason: reason, Message: fmt.Sprintf(format, a...)}
+}
+
+// refuseTooLong judges a declared limit above the longest lane (PRD-HPC-1461 D-67, D-74). A step that
+// is not resumable (declared, or verified, and not opted out) is refused with the numbers and the two
+// fixes. A resumable one runs as continuations of at most the lane maximum each, so it is refused only
+// when it needs more runs than the continuation cap allows. refused is false when the step may run; the
+// controller then caps each attempt at the lane maximum (placementFor).
+func refuseTooLong(job *hpcv1alpha1.HPCArgoWorkflowJob, laneMax int32) (Decision, bool) {
+	declared := job.Spec.WallTimeMinutes
+	if laneMax <= 0 {
+		return refuse(hpcv1alpha1.ReasonWallTimeOverLimit,
+			"wall time %d min is above the limit of %d min", declared, laneMax), true
+	}
+	res := job.EffectiveResumable()
+	if res == nil {
+		return refuse(hpcv1alpha1.ReasonTooLongNotResumable,
+			"this step asks for %s but the longest run this site allows is %s, and it is not resumable, so it would be "+
+				"cut at %s. Make it resumable (write framework checkpoints into KAOS_CHECKPOINT_DIR, resumable=True) "+
+				"so it continues automatically in runs of up to %s, or shorten it (walltime of %d minutes or less)",
+			Words(declared), Words(laneMax), Words(laneMax), Words(laneMax), laneMax), true
+	}
+	runs := int64(res.MaxContinuations) + 1
+	total := int64(laneMax) * runs
+	if int64(declared) > total {
+		return refuse(hpcv1alpha1.ReasonTooLongBeyondContinuations,
+			"this step asks for %s; as a resumable step it runs in runs of up to %s and at most %d continuations "+
+				"(%d runs, %d min in all). Shorten it to %d minutes or less, or raise maxContinuations",
+			Words(declared), Words(laneMax), res.MaxContinuations, runs, total, total), true
+	}
+	return Decision{}, false
+}
+
+// Words writes minutes the way a person says it: "2 days (2880 min)", "6 h (360 min)", "90 min".
+func Words(m int32) string {
+	switch {
+	case m >= 1440 && m%1440 == 0:
+		return fmt.Sprintf("%d days (%d min)", m/1440, m)
+	case m >= 60 && m%60 == 0:
+		return fmt.Sprintf("%d h (%d min)", m/60, m)
+	}
+	return fmt.Sprintf("%d min", m)
 }
