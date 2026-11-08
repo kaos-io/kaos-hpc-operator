@@ -76,3 +76,8 @@ is exported so the copier writes to the right job. The exit-85 final copy runs t
 script exits (the job is still live); a comment that cannot be verified ends the job 235. Scratch is out of the runner's
 reach (the staging key runs only the stager's fixed commands), so a missing comment word cannot be repaired from the copy
 manifest; the runner's message says which of the two is unknown.
+
+## Live lessons
+
+Each lesson of the old in-pod waiter and the test that pins it: [docs/live-lessons.md](../docs/live-lessons.md)
+(PRD-HPC-1461 AC-11). A new live incident gets a test named after it, with the live job id, and a row there.
