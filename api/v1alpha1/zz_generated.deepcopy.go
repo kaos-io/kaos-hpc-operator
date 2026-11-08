@@ -619,6 +619,10 @@ func (in *HPCSiteStatus) DeepCopyInto(out *HPCSiteStatus) {
 		in, out := &in.PeriodStart, &out.PeriodStart
 		*out = (*in).DeepCopy()
 	}
+	if in.CountedFrom != nil {
+		in, out := &in.CountedFrom, &out.CountedFrom
+		*out = (*in).DeepCopy()
+	}
 	if in.GPU != nil {
 		in, out := &in.GPU, &out.GPU
 		*out = new(TierLedger)

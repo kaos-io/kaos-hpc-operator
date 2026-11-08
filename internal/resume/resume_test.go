@@ -99,6 +99,7 @@ func TestEvidence(t *testing.T) {
 		{"should_fail_when_an_idle_end_saved_nothing_new", from, EndIdle, false, Mark{}, false, false},
 		{"should_show_nothing_when_the_node_failed_before_any_new_checkpoint", from, EndNodeFailure, false, Mark{}, true, false},
 		{"should_show_nothing_when_the_step_errored", from, EndStepError, false, Mark{}, true, false},
+		{"should_verify_when_the_continuation_completed_though_a_success_leaves_no_new_copy", from, EndSuccess, false, Mark{}, false, true},
 		{"should_show_nothing_for_a_first_attempt", nil, EndWallTime, true, Mark{Digest: "a"}, true, false},
 	}
 	for _, c := range cases {

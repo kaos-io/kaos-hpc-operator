@@ -43,6 +43,10 @@ another job of the same project holds is covered by that job's booking.
 
 ### Budget sources (`HPCSite.spec.budget.source`)
 
+`status.periodStart` is always the first of the calendar month (UTC). `status.countedFrom` is where the used figures
+start: the month start, except for `source: site`, where it is `observedAt` (the site's remainder already counts
+everything that ended before it, so earlier attempts are not added again).
+
 | Source | Admission counts against |
 |---|---|
 | `site` | What the site reported left on the project's account at `observedAt`, less the attempts that ended since and the bookings |
@@ -142,12 +146,12 @@ Metrics (`:8443`, authn/authz-protected; the chart renders a `VMServiceScrape`, 
   `RerunLimit`). Never after the step's own error, an out-of-memory kill, a cancel or a wall-time kill.
 - **Tier 2, the checkpoint folder:** every job gets `KAOS_CHECKPOINT_DIR` (`/work/ckpt`, on scratch). The job keeps at
   most two copies of it per step (one tar + one manifest each), copies it periodically and when the wall-time signal
-  arrives, and deletes the copies when the step succeeds or after 7 days. A periodic copy is skipped when it would
+  arrives, and deletes the copies when the step succeeds or after 7 days. A copy whose folder digest equals the newest copy's is skipped (the exit-85 copy right after a wall-time copy). A periodic copy is skipped when it would
   take the project over 80 % of its scratch space or file quota or past its checkpoint budget
   (`HPCSite.spec.limits.checkpointBudgetPercent`, default 10 % of the space quota). Details: `runner/README.md`.
 - **Continuation:** on exit 85, wall time, node failure, pre-emption or an idle kill, a step that left a copy continues
   from the newest verified one (cap 5, or `spec.resumable.maxContinuations`). A continuation that does not get past its
-  checkpoint ends `NoProgress`; one that does marks the step key verified (`status.placement.resumable`), after
+  checkpoint ends `NoProgress`; one that does (or that runs to completion, which leaves no copy to compare) marks the step key verified (`status.placement.resumable`), after
   which it keeps its declared limit and gets the wall-time signal. `spec.resumableOptOut` (`resumable=False`) turns
   continuing off; the follower passes it from `HPC_RESUMABLE=0`.
 - **Reported:** `status.run.checkpoint` (progress, size of the newest copy, the step's and the project's total,

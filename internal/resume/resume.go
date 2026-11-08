@@ -132,8 +132,11 @@ func Advanced(prev, cur Mark) bool {
 }
 
 // Evidence is what one attempt that continued from a checkpoint shows, or nil for an attempt that
-// shows nothing (a first attempt, an infrastructure end without a new checkpoint, a success).
-// hasNew: the attempt reported a new checkpoint copy.
+// shows nothing (a first attempt, an infrastructure end without a new checkpoint).
+// hasNew: the attempt reported a new checkpoint copy. A continuation that completed is verified
+// without one: the job script deletes a succeeded step's copies, so none is reported, and finishing
+// the run from a restored checkpoint is the strongest proof there is (live job hpc-289baf48: restored
+// copy 000001, resumed at epoch 1112, completed, yet no evidence was recorded).
 func Evidence(resumedFrom *hpcv1alpha1.ResumeInfo, end End, hasNew bool, cur Mark, now time.Time) *hpcv1alpha1.ResumeEvidence {
 	if resumedFrom == nil {
 		return nil
@@ -145,6 +148,9 @@ func Evidence(resumedFrom *hpcv1alpha1.ResumeInfo, end End, hasNew bool, cur Mar
 	case hasNew:
 		return &hpcv1alpha1.ResumeEvidence{Verified: false, At: metaTime(now), Reason: hpcv1alpha1.ReasonNoProgress +
 			": the continuation's newest checkpoint is not past the one it started from"}
+	case end == EndSuccess:
+		return &hpcv1alpha1.ResumeEvidence{Verified: true, At: metaTime(now),
+			Reason: "a continuation loaded its checkpoint and ran to completion"}
 	case !hasNew && (end == EndWallTime || end == EndIdle || end == EndContinue):
 		return &hpcv1alpha1.ResumeEvidence{Verified: false, At: metaTime(now), Reason: hpcv1alpha1.ReasonNoProgress +
 			": the continuation saved no checkpoint before it ended"}

@@ -149,6 +149,29 @@ def test_an_unchanged_folder_is_not_copied_again_and_same_content_keeps_the_olde
     assert node.names() == ["000001.json", "000001.tar"]
 
 
+def test_a_final_copy_of_the_folder_the_wall_time_copy_took_is_skipped_and_logged_as_such(node):
+    node.write({"last.pt": "epoch 1111"})
+    first = node.run("final")
+    assert first.returncode == 0 and "copy 000001" in first.stdout
+    before = (node.store / "000001.tar").read_bytes()
+    second = node.run("final")                     # the exit-85 copy, a new process (no memory of the first)
+    assert second.returncode == 0
+    assert "copy 000002" not in second.stdout and "no new copy" in second.stdout and "1 kept" in second.stdout
+    assert node.names() == ["000001.json", "000001.tar"]
+    assert (node.store / "000001.tar").read_bytes() == before
+    assert "kaos-ckpt-path=kaos-ckpt/wf1/train/000001.tar" in node.comment()
+
+
+def test_a_duplicate_final_copy_never_costs_the_older_copy_its_place(node):
+    node.write({"last.pt": "epoch 1"})
+    assert node.run("final").returncode == 0
+    node.write({"last.pt": "epoch 2"})
+    assert node.run("final").returncode == 0
+    assert node.names() == ["000001.json", "000001.tar", "000002.json", "000002.tar"]
+    assert node.run("final").returncode == 0       # nothing changed since copy 2
+    assert node.names() == ["000001.json", "000001.tar", "000002.json", "000002.tar"]
+
+
 def test_an_empty_folder_makes_no_copy_and_is_not_an_error(node):
     r = node.run("final")
     assert r.returncode == 0 and node.names() == []
