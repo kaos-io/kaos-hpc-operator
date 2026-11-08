@@ -10,6 +10,40 @@ build (D-62).
 """
 
 
+# The ONLY code that writes this job's comment from the node (fail(), the checkpoint copier). It never
+# overwrites blindly: it reads the live comment, drops the words being set and any old err tail, appends the
+# new words (and the err text), writes, and reads back that every new word is there, up to 3 tries. Every
+# other word (kaos-commit=, kaos-image=, kaos-ckpt-lease=, kaos-ckpt*=, kaos-state=...) is kept. When the
+# comment cannot be read the dataset lease from the environment is still kept. Returns 1 when a word could
+# not be verified: the caller (the final copy) then fails loudly instead of leaving the controller blind.
+COMMENT_HELPER = [
+    'kaos_comment(){',
+    '  local err="" cur new="" t k w try got drop ok toks',
+    '  if [ "$1" = "-e" ]; then err=$2; shift 2; fi',
+    '  for try in 1 2 3; do',
+    '    cur=$(squeue -h -j "$KAOS_JOB_ID" -o %k 2>/dev/null); [ "$cur" = "(null)" ] && cur=""',
+    '    [ -z "$cur" ] && [ -n "$KAOS_COMMIT" ] && cur="kaos-commit=$KAOS_COMMIT"',
+    '    cur=$(printf %s "$cur" | sed -E "s/(^| )err[0-9]+:.*$//")',
+    '    read -r -a toks <<< "$cur"; new=""',
+    '    for t in "${toks[@]}"; do',
+    '      k=${t%%=*}; drop=0',
+    '      for w in "$@"; do [ "${w%%=*}" = "$k" ] && drop=1; done',
+    '      [ $drop = 0 ] && new="${new:+$new }$t"',
+    '    done',
+    '    for w in "$@"; do new="${new:+$new }$w"; done',
+    '    [ -n "$err" ] && new="${new:+$new }$err"',
+    '    scontrol update JobId=$KAOS_JOB_ID "Comment=$new" 2>/dev/null',
+    '    [ $# -eq 0 ] && return 0',
+    '    got=" $(squeue -h -j "$KAOS_JOB_ID" -o %k 2>/dev/null) "; ok=1',
+    '    for w in "$@"; do case "$got" in *" $w "*) ;; *) ok=0;; esac; done',
+    '    [ $ok = 1 ] && return 0',
+    '    sleep ${KAOS_COMMENT_RETRY_SLEEP:-2}',
+    '  done',
+    '  return 1',
+    '}',
+]
+
+
 def batch_lines(scope, scratch):
     """scope: the sharing scope ('-' when sharing is off); scratch: the project's scratch root."""
     return [
@@ -20,12 +54,17 @@ def batch_lines(scope, scratch):
         'set +e',
         # The job this step belongs to: its own on its own node; on a shared node
         # the host sets it to this step's job. Every per-job path keys on it.
-        'KAOS_JOB_ID=${KAOS_JOB_ID:-$SLURM_JOB_ID}',
+        # Exported: the checkpoint copier (a child python3) writes the job comment for THIS job id (live job
+        # 5433318: unexported, it saw an empty id and every comment update failed silently).
+        'export KAOS_JOB_ID=${KAOS_JOB_ID:-$SLURM_JOB_ID}',
+        # The one writer of the job comment (see COMMENT_HELPER), exported for the copier.
+        *COMMENT_HELPER,
+        'export -f kaos_comment',
         # Diagnostics without SSH (live job 5143859: exit 231 with no way to
         # see WHY): on any failure, tail this job's own output file into its
         # job COMMENT — readable over REST from the waiter and by operators.
         # The dataset lease (kaos-commit=, PRD-1541 D-06) stays first.
-        'fail(){ KAOS_NOTE=$(cat "$KAOS_WORK/.kaos-note" 2>/dev/null); scontrol update JobId=$KAOS_JOB_ID Comment="${KAOS_COMMIT:+kaos-commit=$KAOS_COMMIT }${KAOS_NOTE:+$KAOS_NOTE }err$1:$(tail -c 700 slurm-$KAOS_JOB_ID.out 2>/dev/null | tr "\\n" "|")" 2>/dev/null; exit $1; }',
+        'fail(){ KAOS_NOTE=$(cat "$KAOS_WORK/.kaos-note" 2>/dev/null); kaos_comment -e "err$1:$(tail -c 700 slurm-$KAOS_JOB_ID.out 2>/dev/null | tr "\\n" "|")" $KAOS_NOTE; exit $1; }',
         # PRD-1609 F-03: with sharing on, the job's batch step is the host. It runs
         # this same script as one Slurm job step per slot (its own step and taken
         # guests' scripts), each with KAOS_IN_STEP=1 and that step's KAOS_JOB_ID.

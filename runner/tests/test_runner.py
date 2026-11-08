@@ -402,10 +402,10 @@ def test_the_steps_own_error_a_cancel_or_a_success_is_never_reported_with_a_copy
 
 
 @pytest.mark.parametrize("comment, why", [
-    ("kaos-commit=c0ffee12", "no checkpoint copy reached the scratch store"),
-    ("kaos-ckpt=%s kaos-ckpt-path=kaos-ckpt/other-wf/model-training/000001.tar" % CID, "no checkpoint copy reached"),   # another step's
-    ("kaos-ckpt=nothex kaos-ckpt-path=kaos-ckpt/%s/model-training/000001.tar" % WF, "no checkpoint copy reached"),
-    ("kaos-ckpt=%s kaos-ckpt-path=../../etc/passwd" % CID, "no checkpoint copy reached"),
+    ("kaos-commit=c0ffee12", "the job comment names no checkpoint copy"),
+    ("kaos-ckpt=%s kaos-ckpt-path=kaos-ckpt/other-wf/model-training/000001.tar" % CID, "the job comment names no checkpoint copy"),   # another step's
+    ("kaos-ckpt=nothex kaos-ckpt-path=kaos-ckpt/%s/model-training/000001.tar" % WF, "the job comment names no checkpoint copy"),
+    ("kaos-ckpt=%s kaos-ckpt-path=../../etc/passwd" % CID, "the job comment names no checkpoint copy"),
 ])
 def test_exit_85_without_a_valid_copy_of_this_step_reports_no_ref(rig, capsys, comment, why):
     slurm = FakeSlurm({"5001": [acc("FAILED", rc=85, comment=comment)]})
@@ -413,6 +413,15 @@ def test_exit_85_without_a_valid_copy_of_this_step_reports_no_ref(rig, capsys, c
     assert rig.runner.run() == 0 and len(slurm.submitted) == 1
     assert rig.kube.run["terminal"] is True and "checkpointRef" not in rig.kube.run
     assert why in capsys.readouterr().out
+
+
+def test_the_exit_85_message_does_not_blame_the_lead_when_the_comment_is_all_that_is_missing(rig, capsys):
+    # Live job 5433318: the copy was made, only its comment words were lost. The message names both causes.
+    rig.make(FakeSlurm({"5001": [acc("FAILED", rc=85, comment="kaos-commit=c0ffee12 kaos-image=e882f17eaa4ee41b")]}),
+             HPC_RESUMABLE_LEAD="20")
+    rig.runner.run()
+    out = capsys.readouterr().out
+    assert "only its entry in the job comment is missing" in out and "no copy was made in time" in out
 
 
 def test_a_node_failure_with_no_copy_reports_no_ref_and_does_not_wait_for_one(rig):

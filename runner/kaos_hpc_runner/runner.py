@@ -749,8 +749,13 @@ class Runner:
                       % (ckpt['info'].get('progressText') or ckpt['sha'][:12]), flush=True)
                 fields.update(checkpointRef=checkpoint_uri(ckpt), checkpoint=ckpt['info'])
             elif rc == CHECKPOINT_EXIT:
-                print('not continuing the step: it exited 85, but no checkpoint copy reached the scratch store '
-                      '(a longer resumable= lead leaves the copy more time)', flush=True)
+                # The comment is all the runner has: the scratch store is out of its reach (the staging key
+                # runs only the stager's fixed commands), so say what is known and what is not.
+                print('not continuing the step: it exited 85, but the job comment names no checkpoint copy of this '
+                      'step (neither Slurm accounting nor the live job has kaos-ckpt=). If the step log shows '
+                      '"checkpoint: copy NNNNNN", the copy exists on scratch and only its entry in the job comment '
+                      'is missing; if it does not, no copy was made in time (a longer resumable= lead leaves the '
+                      'copy more time)', flush=True)
         if 'COMPLETED' in st:
             self.fresh_wallet()
             outputs = self.fetch_outputs()

@@ -56,3 +56,11 @@ Every step gets a checkpoint folder: `$KAOS_WORK/ckpt` on scratch, `KAOS_CHECKPO
 After each copy the job comment carries `kaos-ckpt=<tar sha256> kaos-ckpt-path=<tar path> kaos-ckpt-info=<json>`; the
 runner reports them as `status.run.checkpointRef` (`scratch://<path>#<sha256>`) and `status.run.checkpoint` for every
 recoverable end (exit 85, TIMEOUT, NODE_FAIL, PREEMPTED, BOOT_FAIL, REVOKED, idle exit 236). The controller decides.
+
+The job comment has ONE writer on the node, `kaos_comment` (`jobscript.COMMENT_HELPER`, exported to the copier and used by
+`fail()`): it reads the live comment (`squeue -o %k`), replaces only the words it sets and any old `errN:` tail, keeps every
+other `kaos-*` word (dataset lease, image lease, checkpoint lease), writes, and reads the words back (3 tries). `KAOS_JOB_ID`
+is exported so the copier writes to the right job. The exit-85 final copy runs to the end, comment included, before the
+script exits (the job is still live); a comment that cannot be verified ends the job 235. Scratch is out of the runner's
+reach (the staging key runs only the stager's fixed commands), so a missing comment word cannot be repaired from the copy
+manifest; the runner's message says which of the two is unknown.
