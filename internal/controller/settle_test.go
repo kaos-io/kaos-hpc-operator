@@ -114,3 +114,61 @@ func TestLateEnd(t *testing.T) {
 		})
 	}
 }
+
+// Live 2026-11-08 (site job 5435560): a failed host's terminal report carried no start and settled 0
+// node-minutes for ~11 minutes of a GPU node. A job that provably ran settles from the booking.
+func TestSettleAttempt(t *testing.T) {
+	now := ts("2026-11-08T21:56:00Z").Time
+	bookedAt := *ts("2026-11-08T21:44:00Z")
+	one := int32(1)
+	mk := func(run hpcv1alpha1.RunStatus, booked bool, nodeMinutes int64) *hpcv1alpha1.HPCArgoWorkflowJob {
+		j := &hpcv1alpha1.HPCArgoWorkflowJob{}
+		j.Spec.Nodes = 1
+		run.SiteJobID = "5435560"
+		j.Status.Run = &run
+		if booked {
+			j.Status.Booking = &hpcv1alpha1.Booking{At: bookedAt, NodeMinutes: nodeMinutes}
+		}
+		return j
+	}
+	end := ts("2026-11-08T21:55:43Z")
+	cases := []struct {
+		name    string
+		job     *hpcv1alpha1.HPCArgoWorkflowJob
+		wantMin int64
+	}{
+		{"should_settle_a_failed_host_without_start_from_the_booking",
+			mk(hpcv1alpha1.RunStatus{State: "FAILED", ExitCode: &one, Terminal: true, EndTime: end}, true, 240), 12},
+		{"should_settle_a_failed_non_host_with_a_start_from_the_site_times",
+			mk(hpcv1alpha1.RunStatus{State: "FAILED", ExitCode: &one, Terminal: true, StartTime: ts("2026-11-08T21:44:52Z"), EndTime: end}, true, 240), 11},
+		{"should_settle_a_failed_job_without_start_and_end_up_to_now",
+			mk(hpcv1alpha1.RunStatus{State: "FAILED", ExitCode: &one, Terminal: true}, true, 240), 12},
+		{"should_settle_a_running_job_without_start_up_to_now_for_a_sweep",
+			mk(hpcv1alpha1.RunStatus{State: "RUNNING"}, true, 240), 12},
+		{"should_never_settle_more_than_was_booked",
+			mk(hpcv1alpha1.RunStatus{State: "FAILED", ExitCode: &one, Terminal: true, EndTime: end}, true, 5), 5},
+		{"should_settle_zero_for_a_cancelled_job_that_never_started",
+			mk(hpcv1alpha1.RunStatus{State: "CANCELLED", ExitCode: &one, Terminal: true, EndTime: end}, true, 240), 0},
+		{"should_settle_zero_for_a_failed_record_without_exit_code",
+			mk(hpcv1alpha1.RunStatus{State: "FAILED", Terminal: true, EndTime: end}, true, 240), 0},
+		{"should_settle_zero_for_a_failure_before_any_site_job_exists",
+			func() *hpcv1alpha1.HPCArgoWorkflowJob {
+				j := mk(hpcv1alpha1.RunStatus{State: "FAILED", ExitCode: &one, Terminal: true, EndTime: end}, true, 240)
+				j.Status.Run.SiteJobID = ""
+				return j
+			}(), 0},
+		{"should_settle_zero_for_a_guest",
+			mk(hpcv1alpha1.RunStatus{State: "FAILED", ExitCode: &one, Terminal: true, HostSiteJobID: "1", EndTime: end}, true, 240), 0},
+		{"should_settle_zero_without_a_booking_to_start_from",
+			mk(hpcv1alpha1.RunStatus{State: "FAILED", ExitCode: &one, Terminal: true, EndTime: end}, false, 0), 0},
+		{"should_prefer_a_valid_site_start_over_the_booking",
+			mk(hpcv1alpha1.RunStatus{State: "COMPLETED", ExitCode: &one, Terminal: true, StartTime: ts("2026-11-08T21:50:00Z"), EndTime: end}, true, 240), 6},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := settleAttempt(c.job, now); got.Minutes != c.wantMin {
+				t.Fatalf("got %d node-minutes, want %d", got.Minutes, c.wantMin)
+			}
+		})
+	}
+}

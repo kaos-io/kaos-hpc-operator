@@ -63,3 +63,30 @@ func settle(nodes int32, run *hpcv1alpha1.RunStatus, now time.Time) settlement {
 	s.Minutes = int64(max(nodes, 1)) * max(int64(math.Ceil(end.Sub(run.StartTime.Time).Minutes())), 0)
 	return s
 }
+
+// ranStates are the site states of a job that provably used its node, whatever start the site
+// record kept. The value says whether an exit code must also be reported: a job that is RUNNING or
+// hit its time limit ran by definition; COMPLETED/FAILED/OOM without an exit code may be a record
+// of a job that never started.
+var ranStates = map[string]bool{"RUNNING": false, "TIMEOUT": false, "COMPLETED": true, "FAILED": true, "OUT_OF_MEMORY": true}
+
+// settleAttempt settles the job's current attempt. It is settle(), plus one rule for a job that
+// provably ran but whose report carries no usable start (live 2026-11-08, site job 5435560: a failed
+// host settled 0 for 11 minutes of a GPU node): the start is then the booking's time, the earliest
+// the job could have begun, and the result never exceeds what was booked. That is conservative: it
+// may include queue wait, never zero for a job that ran. A job that never ran (CANCELLED while
+// queued, no site job, no exit code) and a guest still settle 0.
+func settleAttempt(job *hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) settlement {
+	run := job.Status.Run
+	needsExit, ran := ranStates[run.State]
+	if run.HostSiteJobID != "" || run.SiteJobID == "" || validSiteTime(run.StartTime, now) || job.Status.Booking == nil ||
+		!ran || (needsExit && run.ExitCode == nil) {
+		return settle(job.Spec.Nodes, run, now)
+	}
+	at := job.Status.Booking.At
+	filled := *run
+	filled.StartTime = &at
+	st := settle(job.Spec.Nodes, &filled, now)
+	st.Minutes = min(st.Minutes, job.Status.Booking.NodeMinutes)
+	return st
+}

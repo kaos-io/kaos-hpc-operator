@@ -462,7 +462,7 @@ func (r *HPCArgoWorkflowJobReconciler) usedMinutes(job *hpcv1alpha1.HPCArgoWorkf
 	if run == nil || !current(run, job.Status.Attempt) {
 		return 0
 	}
-	return settle(job.Spec.Nodes, run, r.now()).Minutes
+	return settleAttempt(job, r.now()).Minutes
 }
 
 // failAttempt ends the job in a terminal phase without a continuation: it settles the booked
