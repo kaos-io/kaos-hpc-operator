@@ -117,3 +117,46 @@ func TestShouldPlanTheSameRunForTheSameAttempt(t *testing.T) {
 		a.mu.Unlock()
 	}
 }
+
+func TestShouldListAJobFromAccountingByNameAfterSlurmctldForgotIt(t *testing.T) {
+	s := New(Options{Token: "t", Dilation: 600, MinJobAge: time.Nanosecond, LostReplyRate: 1, LostReplyQuick: 1})
+	defer s.Close()
+	b, _ := json.Marshal(map[string]any{"job": map[string]any{"name": "kaos-x-a1", "account": "a", "time_limit": 30}})
+	if code, _ := do(t, s, http.MethodPost, "/slurm/v0.0.44/job/submit", string(b)); code != http.StatusGatewayTimeout {
+		t.Fatalf("a lost reply must be a 504, got %d", code)
+	}
+	var out string
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_, out = do(t, s, http.MethodGet, "/slurmdb/v0.0.44/jobs?job_name=kaos-x-a1&start_time=1", "")
+		if strings.Contains(out, `"current":["COMPLETED"]`) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(out, `"job_id":4000000`) || !strings.Contains(out, `"COMPLETED"`) {
+		t.Fatalf("the quick lost-reply job must end COMPLETED and be listed by name: %s", out)
+	}
+	if _, other := do(t, s, http.MethodGet, "/slurmdb/v0.0.44/jobs?job_name=other", ""); strings.Contains(other, "4000000") {
+		t.Fatalf("a different name must not match: %s", other)
+	}
+	if _, live := do(t, s, http.MethodGet, "/slurm/v0.0.44/jobs?name=kaos-x-a1", ""); strings.Contains(live, `"job_state":["PENDING"]`) ||
+		strings.Contains(live, `"job_state":["RUNNING"]`) {
+		t.Fatalf("the job is over: slurmctld lists it as live: %s", live)
+	}
+	if st := s.Snapshot(); st.QuickLost != 1 || st.LostReplies != 1 {
+		t.Fatalf("stats %+v", st)
+	}
+}
+
+func TestShouldAnswerPingAndFailItWhileTheSiteIsDown(t *testing.T) {
+	s := New(Options{Token: "t"})
+	defer s.Close()
+	if code, body := do(t, s, http.MethodGet, "/slurm/v0.0.44/ping", ""); code != 200 || !strings.Contains(body, `"responding":true`) {
+		t.Fatalf("ping: %d %s", code, body)
+	}
+	s.SetDown(true)
+	if code, _ := do(t, s, http.MethodGet, "/slurm/v0.0.44/ping", ""); code != http.StatusServiceUnavailable {
+		t.Fatalf("ping while down: %d", code)
+	}
+}

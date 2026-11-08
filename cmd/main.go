@@ -109,7 +109,7 @@ func main() {
 	var sitePollInterval time.Duration
 	var siteRestRate float64
 	var siteRestBurst int
-	var siteMissingGrace, sweepGiveUp, ledgerInterval time.Duration
+	var siteMissingGrace, sweepGiveUp, ledgerInterval, siteOutageMax time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -142,6 +142,9 @@ func main() {
 		"Token bucket per site profile: REST calls per second the controller may make.")
 	flag.DurationVar(&siteMissingGrace, "site-missing-grace", controller.DefaultSiteMissingGrace,
 		"How long a booked job survives its HPCSite (or project label) being gone before it is cancelled.")
+	flag.DurationVar(&siteOutageMax, "site-outage-max", controller.DefaultSiteOutageMax,
+		"How long a job waits for an unreachable site (connection errors, 5xx, timeouts, slurmctld down) before it fails "+
+			"with reason SiteUnavailable. The runner waits as long. Needs the site poller (--site-poll-interval > 0).")
 	flag.DurationVar(&sweepGiveUp, "sweep-give-up", controller.DefaultSweepGiveUp,
 		"How long the controller waits for the site to confirm that a job's site job ended before it settles without proof.")
 	flag.DurationVar(&ledgerInterval, "ledger-publish-interval", controller.DefaultLedgerPublishInterval,
@@ -340,6 +343,11 @@ func main() {
 		// One write of an HPCSite's status per interval, however many jobs reconcile.
 		LedgerPublishInterval: ledgerInterval,
 	}
+	if sitePollInterval > 0 {
+		// The poller keeps the sites' health; the reconciler reads it (AC-30). Without a poller no job waits for a site.
+		jobs.Health = sitestate.NewHealth()
+	}
+	jobs.SiteOutageMax = siteOutageMax
 	if err := jobs.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HPCArgoWorkflowJob")
 		os.Exit(1)
@@ -351,7 +359,8 @@ func main() {
 	if sitePollInterval > 0 {
 		poller := &controller.SitePoller{
 			Client: mgr.GetClient(), Secrets: mgr.GetAPIReader(), Interval: sitePollInterval,
-			Reader:     &sitestate.Client{HTTP: &http.Client{Timeout: 30 * time.Second}},
+			Reader: &sitestate.Client{HTTP: &http.Client{Timeout: 30 * time.Second}},
+			Health: jobs.Health, Republish: jobs.PublishSite,
 			BucketRate: siteRestRate, BucketBurst: siteRestBurst,
 		}
 		if err := mgr.Add(poller); err != nil {

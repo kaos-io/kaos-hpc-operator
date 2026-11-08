@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -79,6 +80,10 @@ type Scheduling struct {
 type Config struct {
 	Image      string
 	Scheduling Scheduling
+	// SiteWaitMax is how long the runner waits for an unreachable site before it fails (PRD-HPC-1461 AC-28,
+	// AC-30). It is added to the Job's deadline, so a long outage never eats the time of the site job. Zero: the
+	// runner's own default (30 minutes) applies and the deadline is not extended.
+	SiteWaitMax time.Duration
 }
 
 // Name is the deterministic runner Job name of an attempt: hpcr-<hash8(job uid)>-a<attempt>.
@@ -159,6 +164,9 @@ func Build(cfg Config, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HP
 	if err != nil {
 		return nil, err
 	}
+	if cfg.SiteWaitMax > 0 {
+		env = append(env, corev1.EnvVar{Name: "HPC_SITE_WAIT_MAX_S", Value: strconv.Itoa(int(cfg.SiteWaitMax / time.Second))})
+	}
 	name := Name(job.UID, attempt)
 	labels := map[string]string{
 		"app.kubernetes.io/name":       "kaos-hpc-runner",
@@ -167,7 +175,7 @@ func Build(cfg Config, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HP
 		LabelAttempt:                   strconv.Itoa(int(attempt)),
 		LabelRunnerJob:                 name,
 	}
-	deadline := (int64(job.EffectiveWallMinutes()) + queueAllowanceMinutes + teardownMarginMinutes) * 60
+	deadline := (int64(job.EffectiveWallMinutes())+queueAllowanceMinutes+teardownMarginMinutes)*60 + int64(cfg.SiteWaitMax/time.Second)
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: site.Namespace, Labels: labels,

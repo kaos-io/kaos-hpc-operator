@@ -117,9 +117,18 @@ def test_a_resumable_step_never_shares_a_node(capsys):
 
 def test_the_job_name_carries_the_scope_only_with_sharing_on():
     wf, step = "0b7f6c1e-1111-2222-3333-444455556666", "model-training"
-    assert helpers.settings().job_site_name == "kaos-%s-%s" % (wf, step)
-    assert helpers.settings(HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5").job_site_name == \
+    assert helpers.settings().legacy_site_name == "kaos-%s-%s" % (wf, step)
+    assert helpers.settings(HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5").legacy_site_name == \
         "kaos-a1b2c3d4e5-%s-%s" % (wf, step)
+
+
+def test_the_job_name_carries_the_hpc_job_and_the_attempt():
+    """The name is the immutable key of the attempt: another attempt, or another HPC job of the same Argo step
+    (a retried node), never shares it."""
+    wf, step = "0b7f6c1e-1111-2222-3333-444455556666", "model-training"
+    assert helpers.settings().job_site_name == "kaos-%s-%s-01234567-a1" % (wf, step)
+    assert helpers.settings(KAOS_ATTEMPT="3").job_site_name.endswith("-a3")
+    assert helpers.settings(HPC_JOB_NAME="hpc-89abcdef000000000000").job_site_name.endswith("-89abcdef-a1")
 
 
 # ---------------------------------------------------------------- dataset

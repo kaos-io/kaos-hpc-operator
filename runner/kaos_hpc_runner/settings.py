@@ -27,6 +27,8 @@ CHECKPOINT_EXIT = 85
 IDLE_EXIT = 236
 INSUFFICIENT_QUOTA_EXIT = 237   # the runner reports it (FAILED, no site job) when staging does not fit the quota (AC-33)
 DEFAULT_IDLE_TIMEOUT_MIN = 20
+# AC-28: a site that does not answer is waited for this long (the controller passes its --site-outage-max).
+DEFAULT_SITE_WAIT_MAX_S = 30 * 60
 OFFER_S = 60   # PRD-1609: a sharing job waits this long for a host of its scope to take it
 
 
@@ -107,7 +109,13 @@ class Settings:
             # A step on a shared node is not passed the stop signal (#1609), so it runs alone.
             print('node sharing: off for this step - it is resumable', flush=True)
             self.sharing = False
-        self.job_site_name = 'kaos-' + (self.scope + '-' if self.sharing else '') + self.wf_uid + '-' + self.step
+        # The site job's NAME is its immutable key (a job script rewrites the comment, never the name). It carries
+        # the HPC job's identity and the attempt, so the finished job of a submit whose answer was lost is found
+        # again by name (Runner.adopt) and is never taken for another attempt's or another Argo retry's job.
+        self.legacy_site_name = 'kaos-' + (self.scope + '-' if self.sharing else '') + self.wf_uid + '-' + self.step
+        self.job_site_name = '%s-%s-a%d' % (self.legacy_site_name, re.sub(r'^hpc-', '', self.job_name)[:8], self.attempt)
+        # AC-28/AC-30: how long an unreachable site is waited for before the attempt fails (seconds).
+        self.site_wait_max = int(g('HPC_SITE_WAIT_MAX_S') or DEFAULT_SITE_WAIT_MAX_S)
         # The checkpoint this attempt continues from (set by the controller from status.resume).
         self.resume = None
         ref = g('KAOS_RESUME_REF')

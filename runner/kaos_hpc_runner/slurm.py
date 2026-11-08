@@ -1,10 +1,14 @@
 """The Slurm REST client (slurmrestd + slurmdbd) and the readings the runner takes from a job."""
 
+import http.client
 import json
 import os
 import re
+import socket
+import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from . import settings
@@ -12,6 +16,10 @@ from . import settings
 
 # Tries of one cancel (2 + 4 + 8 + 16 s of backoff between them: inside the runner pod's 60 s grace).
 CANCEL_TRIES = 5
+# How far back the accounting search for a finished job of this attempt looks (seconds). The job NAME is what
+# makes the match exact (it carries the HPC job and the attempt); this only bounds the query. A Slurm job lives
+# at most days, so a week covers a submit whose pod came back late.
+FINISHED_LOOKBACK_S = 7 * 24 * 3600
 
 
 class Slurm:
@@ -49,12 +57,40 @@ class Slurm:
         return (self.get(self.cfg.sdb + '/job/' + str(jid)).get('jobs') or [{}])[0]
 
     def find_active(self):
+        # The legacy name (no attempt in it) is also looked for among LIVE jobs: a runner of the previous
+        # release may have submitted this attempt's job just before an upgrade.
+        names = (self.cfg.job_site_name, self.cfg.legacy_site_name)
         for j in (self.get(self.cfg.api + '/jobs').get('jobs') or []):
             st = j.get('job_state') or []
-            if j.get('name') == self.cfg.job_site_name and any(
-                    x in ('PENDING', 'RUNNING', 'SUSPENDED') for x in st):
+            if j.get('name') in names and any(x in ('PENDING', 'RUNNING', 'SUSPENDED') for x in st):
                 return j.get('job_id')
         return None
+
+    def find_finished(self, after=0, now=time.time):
+        """The newest job of this attempt (by NAME) that slurmdbd lists and that was not cancelled, or None.
+        A submit whose answer was lost and whose job ended before the runner came back is found here, not
+        submitted twice. `after`: only a job id above this one counts (the job a previous runner reported
+        and then replaced). A site that rejects the query (4xx) is read as "cannot tell": None, the caller
+        then relies on the job the previous runner reported; a site that does not answer raises."""
+        url = '%s/jobs?job_name=%s&start_time=%d' % (
+            self.cfg.sdb, urllib.parse.quote(self.cfg.job_site_name), int(now()) - FINISHED_LOOKBACK_S)
+        try:
+            jobs = self.get(url).get('jobs') or []
+        except urllib.error.HTTPError as e:
+            if e.code < 500 and e.code != 429:
+                print('accounting search by name refused (HTTP %s): not used' % e.code, flush=True)
+                return None
+            raise
+        best = None
+        for j in jobs:
+            st = (j.get('state') or {}).get('current') or []
+            jid = j.get('job_id')
+            # A job this runner cancelled for a resubmit is not the attempt's result.
+            if j.get('name') != self.cfg.job_site_name or not st or 'CANCELLED' in st or not str(jid).isdigit():
+                continue
+            if int(jid) > int(after or 0) and (best is None or int(jid) > int(best['job_id'])):
+                best = j
+        return best
 
     def cancel(self, jid, sleep=time.sleep):
         """DELETE the site job; retried with backoff while the site errs (PRD D-20: a cancel is retried until
@@ -86,11 +122,46 @@ class Slurm:
         try:
             return json.load(urllib.request.urlopen(req, timeout=30))
         except urllib.error.HTTPError as e:
-            raise Refused(submit_refusal(e))
+            why = submit_refusal(e)
+            if site_down_reply(e.code, why):
+                raise SiteUnavailable(why)
+            raise Refused(why)
 
 
 class Refused(Exception):
     pass
+
+
+class SiteUnavailable(Exception):
+    """The site did not take or answer the request for a reason that is not the job's (AC-28, AC-30): the caller
+    waits and asks again, it does not give up on the first one."""
+
+
+# What slurmrestd says when slurmctld or slurmdbd is down behind it. Matched case-insensitively.
+SITE_DOWN_TEXTS = ('unable to contact slurm', 'unable to connect', 'connection refused', 'timed out',
+                   'slurmctld', 'slurmdbd', 'not responding')
+
+
+def site_down_reply(code, why):
+    """True when an HTTP error reply means the site is unavailable rather than that it refused the job: a
+    gateway or overload code, a 500 that names no reason, or a 500 that names a dead slurmctld/slurmdbd. A
+    500 with a real reason (an account, a QoS, a limit) is a refusal and fails at once."""
+    if code in (408, 429, 502, 503, 504):
+        return True
+    if code != 500:
+        return False
+    return 'no reason in the body' in why or any(t in why.lower() for t in SITE_DOWN_TEXTS)
+
+
+def is_site_down(e):
+    """True when an exception from a site call means the site is unreachable now: no connection, a timeout, a
+    broken reply, a gateway or server error. A 4xx (auth, unknown job, bad request) and everything else is not."""
+    if isinstance(e, SiteUnavailable):
+        return True
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code >= 500 or e.code in (408, 429)
+    return isinstance(e, (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError,
+                          http.client.HTTPException, ssl.SSLError))
 
 
 # Why a site refuses a job because of its lane (QoS or reservation) rather than the job itself. The

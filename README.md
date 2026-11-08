@@ -104,6 +104,17 @@ it and call the site themselves only for submit, cancel and the final record, or
 observation is older than three intervals (controller down). A list the site rejects with 422 (one unknown
 ID) is split in halves until the unknown ID stands alone, so it costs about 2*log2(n) calls, not n.
 
+Site outage (PRD-HPC-1461 AC-28, AC-30): a site that does not answer (connection errors, 5xx, timeouts, slurmctld
+down) is a wait, not a failure. The poller keeps each site's health (the `jobs/state` read, and a `ping` for a site
+with no site job to read; two failed probes in a row = down, one answer = up; a site without a ping is never read as
+down). While the site is down the controller admits and books nothing and creates no runner Job for it: the job is
+`Waiting/SiteUnavailable` (or `Admitted` with reason `SiteUnavailable` when it was booked already), with the job
+condition `SiteUnavailable`, in the follower's lines and in `recentJobs`; `HPCSite` carries condition `SiteReachable`
+and the metric `kaos_hpc_site_up`. It resumes when the site answers. A runner that is already started waits too
+(5, 10 ... 60 s between asks, `pendingReason: SiteUnavailable`). Both are bounded by `--site-outage-max` (default
+30 min): then the job ends `Failed/SiteUnavailable`. Auth errors, refusals that name a reason (account, QoS, limit)
+and other 4xx still fail at once. Needs the site poller (`--site-poll-interval` > 0).
+
 The ledger (`HPCSite.status`: used, booked, left, recent jobs) is written at most once per
 `--ledger-publish-interval` (default 1 s) and site; a change inside the interval is written when it has passed,
 and the last job to end publishes again once the cache shows its end.
@@ -122,7 +133,7 @@ RBAC roles shipped by the chart (bound per namespace by kubecore-operator):
 Metrics (`:8443`, authn/authz-protected; the chart renders a `VMServiceScrape`, else a
 `ServiceMonitor`, when the API exists): `kaos_hpc_job_phase`, `kaos_hpc_job_queue_seconds`,
 `kaos_hpc_job_run_seconds`, `kaos_hpc_node_minutes_booked`, `kaos_hpc_node_minutes_settled`,
-`kaos_hpc_site_node_minutes`, `kaos_hpc_active_jobs`, `kaos_hpc_runner_restarts_total`.
+`kaos_hpc_site_node_minutes`, `kaos_hpc_active_jobs`, `kaos_hpc_runner_restarts_total`, `kaos_hpc_site_up`.
 
 ## Interruptions and checkpoints (PRD-HPC-1461 D-74, D-75, D-76)
 

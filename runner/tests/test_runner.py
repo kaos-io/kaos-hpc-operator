@@ -42,6 +42,16 @@ class FakeSlurm:
     def find_active(self):
         return self.active
 
+    # slurmdbd's search by job NAME: the real query and the real filtering, over the jobs listed in `finished`
+    # (ids whose accounting record this fake shows to a name search; none by default, as before a submit).
+    finished = ()
+    cfg = None
+    find_finished = slurmmod.Slurm.find_finished
+
+    def get(self, url):
+        assert "/jobs?job_name=" in url, url
+        return {"jobs": [dict(self.jobs[str(i)][-1], job_id=int(i)) for i in self.finished]}
+
     def accounting(self, jid):
         self.accounting_calls.append(jid)
         recs = self.jobs.get(str(jid))
@@ -125,6 +135,7 @@ def rig(monkeypatch):
     def make(slurm, status=None, wallet="wallet.jwt", stager=None, **env):
         cfg = helpers.settings(**env)
         r.cfg, r.slurm = cfg, slurm
+        slurm.cfg = cfg
         r.kube = helpers.FakeKube(cfg, status=status)
         r.reporter = rep.Reporter(cfg, r.kube, sleep=lambda s: None)
         r.stager = stager or NoStager()
@@ -204,7 +215,7 @@ def test_the_submitted_job_is_the_proven_one(rig):
     job = slurm.submitted[0]["job"]
     env = dict(e.split("=", 1) for e in job["environment"])
     assert (job["name"], job["partition"], job["account"], job["qos"], job["time_limit"]) == \
-        (NAME, "gpu", "p1", "default", 720)
+        (NAME + "-01234567-a3", "gpu", "p1", "default", 720)
     assert job["current_working_directory"] == "/home/u1" and job["requeue"] is True
     assert (env["KAOS_ATTEMPT"], env["KAOS_RESUMABLE"], env["KAOS_RESUME_REF"]) == ("3", "1", CID)
     assert env["KAOS_RESUME_PREFIX"] == "kaos-ckpt/%s/model-training/000002.tar" % WF and env["HPC_GPUS"] == "4"
@@ -274,7 +285,7 @@ def test_a_sharing_gpu_job_is_a_host_with_an_offer_window_and_inputs_in_its_scri
     rig.runner.run()
     sub = slurm.submitted[0]
     job = sub["job"]
-    assert job["name"] == "kaos-a1b2c3d4e5-%s-model-training" % WF
+    assert job["name"] == "kaos-a1b2c3d4e5-%s-model-training-01234567-a1" % WF
     assert sub["script"].split("\n")[1] == "# kaos-job v2 scope=a1b2c3d4e5"
     assert [e.split("=")[0] for e in job["environment"]] == ["PATH", "HOME", "USER"], "secrets leave the Slurm environment"
     assert "export LAKEFS_BEARER_TOKEN=wallet.jwt" in sub["script"] and "export KAOS_SLOTS_B64=" in sub["script"]

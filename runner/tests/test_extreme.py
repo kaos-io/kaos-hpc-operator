@@ -17,7 +17,7 @@ from pathlib import Path
 
 import helpers
 import pytest
-from test_runner import FakeSlurm, acc, rig  # noqa: F401  (rig is a fixture)
+from test_runner import NAME, WF, FakeSlurm, acc, rig  # noqa: F401  (rig is a fixture)
 
 from kaos_hpc_runner import runner as runmod
 from kaos_hpc_runner import slurm as slurmmod
@@ -115,8 +115,8 @@ def test_should_never_resubmit_or_report_over_a_site_job_the_site_has_purged(rig
 
 
 def test_should_adopt_instead_of_resubmitting_when_the_submit_answer_was_lost(rig):
-    """The site created the job but the answer timed out. The exception leaves the runner (the pod restarts)
-    and the next runner of the attempt finds the job by its key: exactly one site job exists."""
+    """The site created the job but the answer timed out. The same runner asks again (the site may be down), and
+    its adopt step finds the live job by name: exactly one site job exists."""
     class LostAnswer(FakeSlurm):
         def submit(self, body):
             self.submitted.append(body)
@@ -125,26 +125,202 @@ def test_should_adopt_instead_of_resubmitting_when_the_submit_answer_was_lost(ri
             raise socket.timeout("timed out reading the answer")
     slurm = LostAnswer({})
     rig.make(slurm)
-    with pytest.raises(socket.timeout):
-        rig.runner.run()
-    assert len(slurm.submitted) == 1, "the first runner does not try again by itself"
-    rig.make(slurm)                                         # the restarted pod
     assert rig.runner.run() == 0
-    assert len(slurm.submitted) == 1, "the restarted runner adopted the job it found by key"
+    assert len(slurm.submitted) == 1, "the runner adopted the job it found by key instead of submitting again"
     assert rig.kube.run["siteJobID"] == "5001" and rig.kube.run["state"] == "COMPLETED"
 
 
-@pytest.mark.parametrize("code", [500, 502, 503, 504])
-def test_should_stop_loudly_on_a_5xx_at_submit_so_the_pod_retry_adopts_by_key(rig, monkeypatch, code):
-    """A refused or failing submit ends the runner with the site's reason in the pod's message; the Job's pod
-    retries (backoffLimit 4) and the next runner adopts anything the site did create."""
+def test_should_adopt_the_finished_job_when_the_submit_answer_was_lost_and_the_job_ended_before_the_retry(rig):
+    """The scale test's duplicate (2 in ~2,700): the site accepted the job, the answer was lost, the job ended before
+    the runner came back, so no live job exists. The job is found in accounting by its NAME (which carries the HPC
+    job and the attempt) and adopted: still one site job."""
+    class LostAnswerThenDone(FakeSlurm):
+        def submit(self, body):
+            self.submitted.append(body)
+            assert body["job"]["name"] == rig.cfg.job_site_name
+            self.jobs["5001"] = [dict(acc("COMPLETED"), name=body["job"]["name"])]
+            self.finished = ("5001",)               # slurmctld has forgotten it; slurmdbd lists it
+            raise socket.timeout("timed out reading the answer")
+    slurm = LostAnswerThenDone({})
+    rig.make(slurm)
+    assert rig.runner.run() == 0
+    assert len(slurm.submitted) == 1, "no second submission of the same attempt"
+    assert rig.kube.run["siteJobID"] == "5001" and rig.kube.run["state"] == "COMPLETED" and rig.kube.run["terminal"]
+
+
+@pytest.mark.parametrize("other", [
+    {"name": "kaos-%s-model-training-01234567-a2" % WF},        # another attempt of the same HPC job
+    {"name": "kaos-%s-model-training-89abcdef-a1" % WF},        # the same step re-run by Argo under another HPC job
+    {"state": {"current": ["CANCELLED"]}},                      # cancelled by this runner for a resubmit
+])
+def test_should_not_adopt_a_finished_job_that_is_not_this_attempts(rig, other):
+    slurm = FakeSlurm({"4001": [dict(acc("COMPLETED"), **other)], "5001": [acc("COMPLETED")]})
+    slurm.finished = ("4001",)
+    slurm.next_id = 5000
+    rig.make(slurm)
+    assert rig.runner.run() == 0
+    assert len(slurm.submitted) == 1 and rig.kube.run["siteJobID"] == "5001"
+
+
+def test_should_adopt_only_a_finished_job_newer_than_the_one_already_reported(rig):
+    """A job the runner replaced (resubmit) must not come back: only ids above the reported one count."""
+    slurm = FakeSlurm({"4001": [acc("FAILED")], "5001": [acc("COMPLETED")]})
+    rig.make(slurm, status={"run": {"attempt": 1, "siteJobID": "4002", "state": "PENDING"}})
+    slurm.jobs["4001"] = [dict(acc("FAILED"), name=rig.cfg.job_site_name)]
+    slurm.finished = ("4001",)
+    slurm.next_id = 5000
+    rig.runner.run()
+    assert len(slurm.submitted) == 1 and rig.kube.run["siteJobID"] == "5001"
+
+
+def test_should_read_the_accounting_search_by_name_as_unavailable_not_as_empty_when_the_site_is_down(monkeypatch):
+    """A site that cannot answer the search must raise, never read as 'no such job' (that would submit twice)."""
+    s = slurmmod.Slurm(helpers.settings(), token_file="/nonexistent")
+
+    def urlopen(req, timeout=0, **kw):
+        raise urllib.error.HTTPError(req.full_url, 503, "x", {}, io.BytesIO(b"{}"))
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    with pytest.raises(urllib.error.HTTPError):
+        s.find_finished()
+
+
+def test_should_ask_slurmdb_by_the_attempts_name_within_the_lookback_window(monkeypatch):
+    seen = []
+    cfg = helpers.settings()
+    s = slurmmod.Slurm(cfg, token_file="/nonexistent")
+    monkeypatch.setattr(s, "get", lambda url: seen.append(url) or {"jobs": []})
+    assert s.find_finished(now=lambda: 2_000_000_000) is None
+    assert seen == ["%s/jobs?job_name=%s&start_time=%d" % (cfg.sdb, cfg.job_site_name,
+                                                          2_000_000_000 - slurmmod.FINISHED_LOOKBACK_S)]
+
+
+@pytest.mark.parametrize("code", [500, 502, 503, 504, 429])
+def test_should_read_a_gateway_or_nameless_5xx_at_submit_as_a_site_that_is_unavailable(monkeypatch, code):
+    """A gateway error, or a 500 that names no reason, says the site is down, not that it refused the job (AC-30)."""
     def urlopen(req, timeout=0, **kw):
         raise urllib.error.HTTPError(req.full_url, code, "x", {}, io.BytesIO(b"<html>gateway</html>"))
     s = slurmmod.Slurm(helpers.settings(), token_file="/nonexistent")
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    with pytest.raises(slurmmod.SiteUnavailable) as e:
+        s.submit({"job": {}})
+    assert "HTTP %d" % code in str(e.value) and slurmmod.is_site_down(e.value)
+
+
+@pytest.mark.parametrize("code,body", [
+    (500, {"errors": [{"error": "Invalid account or account/partition combination specified"}]}),
+    (500, {"errors": [{"error": "Requested time limit is invalid (missing or exceeds some limit)"}]}),
+    (400, {"errors": [{"error": "bad request"}]}), (401, {}), (403, {})])
+def test_should_still_fail_at_once_on_a_real_refusal_or_an_auth_error(monkeypatch, code, body):
+    def urlopen(req, timeout=0, **kw):
+        raise urllib.error.HTTPError(req.full_url, code, "x", {}, io.BytesIO(json.dumps(body).encode()))
+    s = slurmmod.Slurm(helpers.settings(), token_file="/nonexistent")
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
     with pytest.raises(slurmmod.Refused) as e:
         s.submit({"job": {}})
-    assert "HTTP %d" % code in str(e.value) and "no reason in the body" in str(e.value)
+    assert not slurmmod.is_site_down(e.value)
+
+
+def test_should_read_a_500_that_names_a_dead_slurmctld_as_unavailable(monkeypatch):
+    def urlopen(req, timeout=0, **kw):
+        raise urllib.error.HTTPError(req.full_url, 500, "x", {}, io.BytesIO(
+            b'{"errors": [{"error": "Unable to contact slurm controller (connect failure)"}]}'))
+    s = slurmmod.Slurm(helpers.settings(), token_file="/nonexistent")
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    with pytest.raises(slurmmod.SiteUnavailable):
+        s.submit({"job": {}})
+
+
+@pytest.mark.parametrize("err,down", [
+    (socket.timeout("t"), True), (ConnectionRefusedError("r"), True), (urllib.error.URLError("dns"), True),
+    (urllib.error.HTTPError("u", 503, "x", {}, None), True), (urllib.error.HTTPError("u", 502, "x", {}, None), True),
+    (urllib.error.HTTPError("u", 401, "x", {}, None), False), (urllib.error.HTTPError("u", 404, "x", {}, None), False),
+    (urllib.error.HTTPError("u", 422, "x", {}, None), False), (ValueError("not json"), False),
+    (PermissionError("local"), False)])
+def test_should_tell_an_unreachable_site_from_a_real_error(err, down):
+    assert slurmmod.is_site_down(err) is down
+
+
+class SiteDownAtStart(FakeSlurm):
+    """The site answers nothing for the first `fails` calls of find_active, then behaves."""
+
+    def __init__(self, fails, err, *a, **kw):
+        super().__init__(*a, **kw)
+        self.fails, self.err, self.asked = fails, err, 0
+
+    def find_active(self):
+        self.asked += 1
+        if self.asked <= self.fails:
+            raise self.err
+        return super().find_active()
+
+
+def test_should_wait_for_an_unreachable_site_and_then_submit_without_failing(rig):
+    """AC-30 / AC-28: ten minutes of connection errors are a wait: no failure, one submission, the reason shown
+    while it lasts and cleared when the site answers."""
+    slurm = SiteDownAtStart(14, urllib.error.URLError("connection refused"), {"5001": [acc("COMPLETED")]})
+    rig.make(slurm)
+    sleeps = []
+    rig.runner.sleep = sleeps.append
+    assert rig.runner.run() == 0
+    assert len(slurm.submitted) == 1 and rig.kube.run["state"] == "COMPLETED"
+    assert sum(sleeps) >= 600, "the outage was waited out, not skipped"
+    reasons = [p[2]["status"]["pendingReason"] for p in rig.kube.patches() if "pendingReason" in p[2]["status"]]
+    assert reasons[0] == "SiteUnavailable" and reasons[1] is None
+
+
+def test_should_back_off_between_asks_up_to_a_ceiling(rig):
+    slurm = SiteDownAtStart(12, socket.timeout("t"), {"5001": [acc("COMPLETED")]})
+    rig.make(slurm)
+    sleeps = []
+    rig.runner.sleep = sleeps.append
+    rig.runner.run()
+    waits = sleeps[:12]
+    assert waits[:4] == [5, 10, 20, 40] and max(waits) == runmod.SITE_RETRY_MAX_S
+
+
+def test_should_fail_with_a_clear_reason_when_the_site_stays_down_past_the_bound(rig):
+    slurm = SiteDownAtStart(10 ** 6, urllib.error.URLError("connection refused"), {})
+    rig.make(slurm, HPC_SITE_WAIT_MAX_S="300")
+    rig.runner.sleep = lambda s: None
+    with pytest.raises(SystemExit) as e:
+        rig.runner.run()
+    assert e.value.code == 1 and slurm.submitted == []
+
+
+def test_should_not_wait_on_an_auth_error_or_an_unreadable_reply(rig):
+    for err in (urllib.error.HTTPError("u", 401, "x", {}, None), ValueError("not JSON")):
+        slurm = SiteDownAtStart(1, err, {})
+        rig.make(slurm)
+        sleeps = []
+        rig.runner.sleep = sleeps.append
+        with pytest.raises(type(err)):
+            rig.runner.run()
+        assert sleeps == [], "a real error is not waited for"
+
+
+def test_should_not_submit_a_second_job_when_the_outage_swallows_the_answer_and_then_lifts(rig):
+    """The submit POST times out after the site created the job, then the site is down for two more asks, then back
+    with the job live: one site job."""
+    class LostThenDown(FakeSlurm):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.lookups = 0
+
+        def find_active(self):
+            self.lookups += 1
+            if self.lookups in (2, 3):                 # the asks right after the lost answer meet the outage
+                raise socket.timeout("down")
+            return self.active
+
+        def submit(self, body):
+            self.submitted.append(body)
+            self.active = "5001"
+            raise socket.timeout("lost")
+    slurm = LostThenDown({"5001": [acc("COMPLETED")]})
+    rig.make(slurm)
+    rig.runner.sleep = lambda s: None
+    assert rig.runner.run() == 0
+    assert len(slurm.submitted) == 1 and rig.kube.run["siteJobID"] == "5001"
 
 
 def test_should_use_the_rotated_jwt_on_the_very_next_request_after_a_401(tmp_path, monkeypatch):
