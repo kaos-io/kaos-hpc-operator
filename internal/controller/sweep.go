@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 	"github.com/kaos-io/kaos-hpc-operator/internal/runnerjob"
@@ -61,6 +62,41 @@ func siteJobMayLive(job *hpcv1alpha1.HPCArgoWorkflowJob) bool {
 	return run != nil && current(run, job.Status.Attempt) && run.SiteJobID != "" && !run.Terminal
 }
 
+// siteJobIDOf is the site job id the current attempt reported, or "" when none was reported yet.
+func siteJobIDOf(job *hpcv1alpha1.HPCArgoWorkflowJob) string {
+	if run := job.Status.Run; run != nil && current(run, job.Status.Attempt) {
+		return run.SiteJobID
+	}
+	return ""
+}
+
+// runnerMayHaveSubmitted reports whether a runner Job exists for the attempt whose site job no report shows
+// over: the runner may have submitted it without reporting its id (a SIGTERM in that window leaves it
+// running). It is false for a job that ended, that already sweeps, that never got a runner Job, or that
+// still waits for an unreachable site (the runner submits only after it has reached the site).
+func (r *HPCArgoWorkflowJobReconciler) runnerMayHaveSubmitted(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob) (bool, error) {
+	if job.Status.Phase.Terminal() || job.Status.Sweep != nil || job.Status.Site == nil {
+		return false, nil
+	}
+	if run := job.Status.Run; run != nil && current(run, job.Status.Attempt) && run.Terminal {
+		return false, nil
+	}
+	if siteJobIDOf(job) == "" && job.Status.PendingReason == hpcv1alpha1.ReasonSiteUnavailable {
+		return false, nil
+	}
+	var jobs batchv1.JobList
+	if err := r.reader().List(ctx, &jobs, client.InNamespace(job.Status.Site.Namespace),
+		client.MatchingLabels{runnerjob.LabelJobUID: string(job.UID)}); err != nil {
+		return false, fmt.Errorf("listing the runner Jobs: %w", err)
+	}
+	for i := range jobs.Items {
+		if jobs.Items[i].Labels[runnerjob.LabelCancelOnly] == "" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // beginSweep records what the job becomes once the site confirms the end of its attempt, and keeps the
 // booking. Idempotent: a sweep already begun is left as it is.
 func (r *HPCArgoWorkflowJobReconciler) beginSweep(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
@@ -70,13 +106,19 @@ func (r *HPCArgoWorkflowJobReconciler) beginSweep(ctx context.Context, job *hpcv
 	}
 	orig := job.DeepCopy()
 	job.Status.Sweep = &hpcv1alpha1.SweepStatus{Phase: phase, Reason: reason, Message: msg, Since: metav1.NewTime(r.now())}
-	job.Status.Message = truncate(msg + "; waiting for the site to confirm that site job " + job.Status.Run.SiteJobID + " has ended")
+	id := siteJobIDOf(job)
+	what := "site job " + id
+	if id == "" {
+		what = "the site job of this attempt (its id was not reported)"
+	}
+	job.Status.Message = truncate(msg + "; waiting for the site to confirm that " + what + " has ended")
 	if err := r.Status().Patch(ctx, job, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err
 	}
+	logf.FromContext(ctx).Info("orphan sweep started", "siteJobID", id, "becomes", phase, "reason", reason)
 	if r.Recorder != nil {
 		r.Recorder.Event(job, corev1.EventTypeNormal, "SweepStarted",
-			"the runner is gone but site job "+job.Status.Run.SiteJobID+" may still run: a cancel-only runner will stop it")
+			"the runner is gone but "+what+" may still run: a cancel-only runner will stop it")
 	}
 	return nil
 }
@@ -139,6 +181,7 @@ func (r *HPCArgoWorkflowJobReconciler) launchCancelRunner(ctx context.Context, j
 	if err := r.Create(ctx, rj); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("creating the cancel-only runner Job: %w", err)
 	}
+	logf.FromContext(ctx).Info("cancel-only runner Job created", "runnerJob", rj.Name, "attempt", attempt, "launch", n)
 	return nil
 }
 
@@ -156,6 +199,7 @@ func (r *HPCArgoWorkflowJobReconciler) nextLaunch(ctx context.Context, job *hpcv
 func (r *HPCArgoWorkflowJobReconciler) finishSweep(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
 	site *hpcv1alpha1.HPCSite, msg string) error {
 	sw := job.Status.Sweep
+	logf.FromContext(ctx).Info("orphan sweep finished", "siteJobID", siteJobIDOf(job), "becomes", sw.Phase, "message", truncate(msg))
 	return r.failAttempt(ctx, job, site, sw.Phase, sw.Reason, sw.Reason, truncate(msg))
 }
 

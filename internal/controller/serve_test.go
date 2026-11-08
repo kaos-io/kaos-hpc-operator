@@ -260,6 +260,12 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 
 		before := testutil.ToFloat64(metrics.RunnerRestarts)
 		_, got = reconcileOnce(j)
+		// No site job id was reported, but sbatch may have been accepted before the crash: the sweep decides.
+		Expect(got.Status.Sweep).NotTo(BeNil())
+		reconcileOnce(j)
+		end := metav1.NewTime(time.Now().Truncate(time.Second))
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "-", State: "NOT_SUBMITTED", EndTime: &end, Terminal: true})
+		_, got = reconcileOnce(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRunnerFailed))
 		Expect(got.Status.Message).To(ContainSubstring("HPC identity missing"))
@@ -286,16 +292,19 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 			res, got := reconcileOnce(j)
 			Expect(res.RequeueAfter).To(Equal(CancelPoll), "waits for the runner Job to go")
 			Expect(got.Status.Phase).NotTo(Equal(hpcv1alpha1.PhaseCancelled), "not before the runner has been stopped")
-			gc(rj) // the Foreground deletion finishes: the runner's SIGTERM handler has run
+			// the runner's SIGTERM handler cancelled the site job and reported it before the Job went
+			report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "801", State: "CANCELLED", Terminal: true})
+			gc(rj) // the Foreground deletion finishes
 
 			_, got = reconcileOnce(j)
 			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseCancelled))
 			Expect(got.Status.Message).To(ContainSubstring(wantInMessage))
 			Expect(got.Status.Booking).To(BeNil())
-			Expect(got.Finalizers).NotTo(ContainElement(hpcv1alpha1.CancelFinalizer))
 			Expect(got.Status.Attempts).To(HaveLen(1))
 			Expect(got.Status.Attempts[0].Outcome).To(Equal("Cancelled"))
 			Expect(runnerJob(got, 1)).To(BeNil())
+			_, got = reconcileOnce(j) // the terminal job lets go of its finalizer
+			Expect(got.Finalizers).NotTo(ContainElement(hpcv1alpha1.CancelFinalizer))
 		},
 		Entry("should_cancel_when_the_workflow_is_shut_down", func(wf *unstructured.Unstructured) {
 			Expect(unstructured.SetNestedField(wf.Object, "Stop", "spec", "shutdown")).To(Succeed())
@@ -355,10 +364,81 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		res, got := reconcileOnce(j)
 		Expect(got).NotTo(BeNil(), "the cancel finalizer holds the job")
 		Expect(res.RequeueAfter).To(Equal(CancelPoll))
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "801", State: "CANCELLED", Terminal: true})
 		gc(rj)
 
 		_, got = reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseCancelled), "the cancel is settled while the finalizer still holds")
+		_, got = reconcileOnce(j)
 		Expect(got).To(BeNil(), "the finalizer is dropped and the job is gone")
+	})
+
+	// AC-08, live 2026-11-08 (hpc-05256877ed03ad42d80a): the Workflow was deleted 8 s after the runner started. The
+	// runner died on SIGTERM before it reported its site job, the controller then ended the job as Cancelled and the
+	// site job (5434810) was left running, unwatched. A runner that ran but did not report must be swept.
+	It("should_sweep_with_a_cancel_only_runner_when_the_workflow_is_deleted_before_the_runner_reported_its_site_job", func() {
+		rec := record.NewFakeRecorder(20)
+		r.Recorder = rec
+		wf := newWorkflow()
+		j := newServeJob(wf, nil)
+		_, got := reconcileOnce(j)
+		Expect(got.Finalizers).To(ContainElement(hpcv1alpha1.CancelFinalizer), "the finalizer is set before the runner Job exists")
+		Expect(got.Status.Booking).NotTo(BeNil())
+		rj := runnerJob(got, 1)
+		Expect(rj).NotTo(BeNil())
+
+		// The owner is deleted: the finalizer holds the job, as it does against the garbage collector.
+		Expect(k8sClient.Delete(ctx, wf)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, got, client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
+		res, got := reconcileOnce(j)
+		Expect(got).NotTo(BeNil())
+		Expect(res.RequeueAfter).To(Equal(CancelPoll))
+		Expect(got.Status.Sweep).NotTo(BeNil(), "decided while the runner Job still shows that a runner ran")
+		gc(rj) // the runner died on SIGTERM without a report
+
+		_, got = reconcileOnce(j)
+		Expect(got).NotTo(BeNil(), "the finalizer holds until the site reports")
+		Expect(got.Status.Phase.Terminal()).To(BeFalse(), "no Cancelled on the runner's absence alone")
+		Expect(got.Status.Booking).NotTo(BeNil(), "the booking is kept: the site job may still run")
+		Expect(got.Finalizers).To(ContainElement(hpcv1alpha1.CancelFinalizer))
+		reconcileOnce(j)
+		c := &batchv1.Job{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: hpcNS, Name: runnerjob.CancelName(got.UID, 1, 0)}, c)).To(Succeed())
+		Expect(c.Spec.Template.Spec.Containers[0].Args).To(Equal([]string{"--cancel-only"}))
+
+		// the cancel-only runner finds the site job by its name, cancels it and reports what the site says
+		end := metav1.NewTime(time.Now().Truncate(time.Second))
+		start := metav1.NewTime(end.Add(-3 * time.Minute))
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5434810", State: "CANCELLED", StartTime: &start, EndTime: &end, Terminal: true})
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseCancelled))
+		Expect(got.Status.Message).To(ContainSubstring("the site confirmed"))
+		Expect(got.Status.Booking).To(BeNil())
+		Expect(*got.Status.SettledNodeMinutes).To(Equal(int64(3)), "the spend is settled from the site's own times")
+		_, got = reconcileOnce(j)
+		Expect(got).To(BeNil(), "the finalizer is dropped once the site confirmed")
+		var events []string
+		for len(rec.Events) > 0 {
+			events = append(events, <-rec.Events)
+		}
+		Expect(events).To(ContainElement(ContainSubstring("SweepStarted")))
+	})
+
+	It("should_not_sweep_a_deleted_job_whose_runner_waits_for_an_unreachable_site", func() {
+		j := newServeJob(nil, nil)
+		_, got := reconcileOnce(j)
+		rj := runnerJob(got, 1)
+		orig := got.DeepCopy()
+		got.Status.PendingReason = hpcv1alpha1.ReasonSiteUnavailable
+		Expect(k8sClient.Status().Patch(ctx, got, client.MergeFrom(orig))).To(Succeed())
+		Expect(k8sClient.Delete(ctx, got)).To(Succeed())
+		reconcileOnce(j)
+		gc(rj)
+		_, got = reconcileOnce(j)
+		Expect(got).To(BeNil(), "no site job can exist: cancelled and let go at once, no cancel-only runner")
+		c := &batchv1.Job{}
+		Expect(client.IgnoreNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: hpcNS, Name: runnerjob.CancelName(j.UID, 1, 0)}, c))).To(Succeed())
+		Expect(c.Name).To(BeEmpty())
 	})
 
 	It("does not cancel a job whose Workflow is the same and still running", func() {

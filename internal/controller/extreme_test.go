@@ -539,12 +539,35 @@ var _ = Describe("HPCArgoWorkflowJob extreme cases", func() {
 			Expect(events).To(ContainElement(ContainSubstring("SiteJobUnconfirmed")))
 		})
 
-		It("should_not_start_a_sweep_when_no_site_job_is_known", func() {
+		It("should_sweep_a_failed_runner_that_never_reported_a_site_job_because_it_may_have_submitted", func() {
 			newSite(100)
 			clock = time.Now()
 			j := newJob(true, 60)
 			_, got := reconcileOnce(j)
 			failRunner(runnerJob(got), "BackoffLimitExceeded")
+			_, got = reconcileOnce(j)
+			Expect(got.Status.Sweep).NotTo(BeNil(), "sbatch may have been accepted before the crash")
+			Expect(got.Status.Booking).NotTo(BeNil())
+			Expect(got.Status.Phase.Terminal()).To(BeFalse())
+			reconcileOnce(j)
+			cancelRunner(j, 0)
+			end := metav1.NewTime(time.Now().Truncate(time.Second))
+			report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "-", State: "NOT_SUBMITTED", EndTime: &end, Terminal: true})
+			_, got = reconcileOnce(j)
+			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+			Expect(got.Status.Booking).To(BeNil())
+		})
+
+		It("should_not_sweep_a_failed_runner_that_gave_up_waiting_for_the_site", func() {
+			newSite(100)
+			clock = time.Now()
+			j := newJob(true, 60)
+			_, got := reconcileOnce(j)
+			rj := runnerJob(got)
+			orig := got.DeepCopy()
+			got.Status.PendingReason = hpcv1alpha1.ReasonSiteUnavailable
+			Expect(k8sClient.Status().Patch(ctx, got, client.MergeFrom(orig))).To(Succeed())
+			failRunner(rj, "BackoffLimitExceeded")
 			_, got = reconcileOnce(j)
 			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
 			Expect(got.Status.Sweep).To(BeNil())

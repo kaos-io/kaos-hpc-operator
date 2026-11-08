@@ -146,9 +146,24 @@ func (r *HPCArgoWorkflowJobReconciler) workflowCancelCause(ctx context.Context, 
 // cancels the site job), waits until it is gone, settles the attempt, marks the job Cancelled and
 // drops the finalizer (D-04).
 func (r *HPCArgoWorkflowJobReconciler) cancel(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob, cause string) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	first := job.Annotations[hpcv1alpha1.CancelRequestedAnnotation] == ""
 	// The marker comes first: the runner tells a cancel from a node drain by it.
 	if err := r.markCancelRequested(ctx, job); err != nil {
 		return ctrl.Result{}, err
+	}
+	// A runner that was killed before it reported its site job may have submitted it all the same (the
+	// SIGTERM handler cancels only a job id it already holds). The sweep is decided now, while the runner
+	// Job still shows that a runner ran, and is kept in status: the cancel-only runner finds the site job by key.
+	if may, err := r.runnerMayHaveSubmitted(ctx, job); err != nil {
+		return ctrl.Result{}, err
+	} else if may {
+		if err := r.beginSweep(ctx, job, hpcv1alpha1.PhaseCancelled, "Cancelled", "cancelled: "+cause); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if first {
+		log.Info("cancelling the job", "cause", cause, "siteJobID", siteJobIDOf(job), "sweep", job.Status.Sweep != nil)
 	}
 	gone, err := r.deleteRunnerJobs(ctx, job)
 	if err != nil {
@@ -174,6 +189,7 @@ func (r *HPCArgoWorkflowJobReconciler) cancel(ctx context.Context, job *hpcv1alp
 			return ctrl.Result{}, err
 		}
 	}
+	log.Info("the job is cancelled: the finalizer is dropped", "cause", cause, "phase", job.Status.Phase)
 	return ctrl.Result{}, r.setFinalizer(ctx, job, false)
 }
 
@@ -358,7 +374,17 @@ func (r *HPCArgoWorkflowJobReconciler) runnerFailed(ctx context.Context, job *hp
 	if strings.Contains(why, hpcv1alpha1.ReasonSiteUnavailable+":") {
 		reason = hpcv1alpha1.ReasonSiteUnavailable // the runner waited for the site as long as it may and said so
 	}
-	if siteJobMayLive(job) {
+	// A runner that crashed after the site accepted its sbatch but before it reported the id left a job no
+	// one knows: the cancel-only runner finds it by name (NOT_SUBMITTED when there is none). A runner that
+	// gave up waiting for the site never submitted.
+	unreported := false
+	if reason != hpcv1alpha1.ReasonSiteUnavailable {
+		var err error
+		if unreported, err = r.runnerMayHaveSubmitted(ctx, job); err != nil {
+			return err
+		}
+	}
+	if siteJobMayLive(job) || unreported {
 		// The runner is over but its site job may not be: stop it before the booking is released (AC-08).
 		if err := r.beginSweep(ctx, job, hpcv1alpha1.PhaseFailed, reason, truncate(why)); err != nil {
 			return err
