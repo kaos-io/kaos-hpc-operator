@@ -34,8 +34,8 @@ var _ = Describe("HPCArgoWorkflowJob waits for an unreachable site", func() {
 	)
 
 	siteDown := func() {
-		for range sitestate.FailuresToDown {
-			health.Observe(siteKey, sitestate.Down, "HTTP 503", clock)
+		for i := range sitestate.FailuresToDown {
+			health.Observe(siteKey, sitestate.Down, "HTTP 503", clock.Add(time.Duration(i)*sitestate.MinDownAfter))
 		}
 	}
 	siteUp := func() { health.Observe(siteKey, sitestate.Up, "", clock) }

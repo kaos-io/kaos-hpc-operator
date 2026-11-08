@@ -110,7 +110,7 @@ ID) is split in halves until the unknown ID stands alone, so it costs about 2*lo
 
 Site outage (PRD-HPC-1461 AC-28, AC-30): a site that does not answer (connection errors, 5xx, timeouts, slurmctld
 down) is a wait, not a failure. The poller keeps each site's health (the `jobs/state` read, and a `ping` for a site
-with no site job to read; two failed probes in a row = down, one answer = up; a site without a ping is never read as
+with no site job to read; two failed probes in a row spanning at least 90 s = down (a failed `jobs/state` read is confirmed with a ping first; a ping that answers is not an outage), one answer = up; a site without a ping is never read as
 down). While the site is down the controller admits and books nothing and creates no runner Job for it: the job is
 `Waiting/SiteUnavailable` (or `Admitted` with reason `SiteUnavailable` when it was booked already), with the job
 condition `SiteUnavailable`, in the follower's lines and in `recentJobs`; `HPCSite` carries condition `SiteReachable`

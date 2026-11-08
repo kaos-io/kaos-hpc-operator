@@ -221,7 +221,8 @@ func (p *SitePoller) pollSite(ctx context.Context, key types.NamespacedName, gro
 	if err != nil {
 		// The site not answering is a fact about the site, not about the poll: remember it (AC-30).
 		if sitestate.IsOutage(err) {
-			p.observe(ctx, &site, sitestate.Down, err.Error())
+			v, why := p.confirmOutage(ctx, &site, creds, err)
+			p.observe(ctx, &site, v, why)
 		} else if sitestate.IsAnswer(err) {
 			// A 4xx (e.g. 422 for job IDs the site has forgotten) is the site answering: after an outage it
 			// must not keep the site marked down just because the read itself still fails.
@@ -241,6 +242,26 @@ func (p *SitePoller) pollSite(ctx context.Context, key types.NamespacedName, gro
 		}
 	}
 	return nil
+}
+
+// confirmOutage decides what a failed jobs/state read says about the site. The read can fail while the site
+// is fine (a 500 for one batch, a slow reply to a long ID list), so the cheaper ping gets the last word: a
+// ping that answers means the REST API is up and the failure is not counted. A ping that does not answer, or
+// that says nothing (not offered), leaves the read's failure standing as a Down probe.
+func (p *SitePoller) confirmOutage(ctx context.Context, site *hpcv1alpha1.HPCSite, creds sitestate.Site, readErr error) (sitestate.Verdict, string) {
+	pinger, ok := p.Reader.(Pinger)
+	if !ok {
+		return sitestate.Down, readErr.Error()
+	}
+	// The poll's own deadline may be spent; the ping gets a fresh one.
+	cctx, cancel := context.WithTimeout(ctx, p.interval())
+	defer cancel()
+	if v, _ := pinger.Ping(cctx, creds, p.bucket(site)); v == sitestate.Up {
+		logf.FromContext(ctx).Info("jobs/state failed but the site answers a ping: not an outage",
+			"site", client.ObjectKeyFromObject(site).String(), "error", readErr.Error())
+		return sitestate.Up, ""
+	}
+	return sitestate.Down, readErr.Error()
 }
 
 func uniqueIDs(group []polledJob) []string {

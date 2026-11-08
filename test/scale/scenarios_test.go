@@ -422,9 +422,10 @@ func (w *world) chaos(r *result, ps []*project) {
 	sleep(50 * time.Second)
 	siteC.SetSpurious422(0)
 	siteC.SetMinJobAge(5 * time.Minute)
-	sleep(30 * time.Second)
+	// A site counts as down only after probes failed for sitestate.MinDownAfter (90 s) plus a poll: check after 130 s.
+	sleep(80 * time.Second)
 	w.checkReachableCondition(r, ps[0], false)
-	sleep(siteOutage - 80*time.Second)
+	sleep(siteOutage - 130*time.Second)
 	siteA.SetDown(false)
 	w.outageEnd = time.Now()
 	sleep(20 * time.Second)

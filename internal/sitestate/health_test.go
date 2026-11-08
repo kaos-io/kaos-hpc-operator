@@ -46,11 +46,14 @@ func TestShouldCallASiteDownOnlyAfterConsecutiveFailuresAndUpAtOnce(t *testing.T
 	if _, down := h.Down("s"); down {
 		t.Fatal("down after one failure")
 	}
-	if !h.Observe("s", Down, "503 again", now.Add(time.Minute)) {
+	if h.Observe("s", Down, "503 again", now.Add(MinDownAfter/2)) {
+		t.Fatal("two failures inside MinDownAfter are a bad minute, not an outage")
+	}
+	if !h.Observe("s", Down, "503 again", now.Add(MinDownAfter)) {
 		t.Fatal("the second failure in a row must report the change")
 	}
 	out, down := h.Down("s")
-	if !down || !out.Since.Equal(now.Add(time.Minute)) || out.Reason != "503 again" {
+	if !down || !out.Since.Equal(now.Add(MinDownAfter)) || out.Reason != "503 again" {
 		t.Fatalf("outage = %+v down=%v", out, down)
 	}
 	h.Observe("s", Unknown, "", now.Add(2*time.Minute))
@@ -65,7 +68,7 @@ func TestShouldCallASiteDownOnlyAfterConsecutiveFailuresAndUpAtOnce(t *testing.T
 	}
 	h.Observe("s", Down, "", now)
 	h.Observe("s", Up, "", now)
-	h.Observe("s", Down, "", now)
+	h.Observe("s", Down, "", now.Add(MinDownAfter))
 	if _, down := h.Down("s"); down {
 		t.Fatal("failures must be consecutive")
 	}
