@@ -2,6 +2,7 @@
 
 What the controller (`internal/`), the follower and the Python runner (`runner/`) do under pressure, and the
 automated test that proves it. Source of intent: PRD #1461 (section 10 threats T-xx, decisions D-xx).
+The lessons the old in-pod waiter learned in live runs are mapped to tests in [live-lessons.md](live-lessons.md).
 
 Status legend
 
