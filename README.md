@@ -70,6 +70,16 @@ While a tier is at or above it, the `HPCSite` condition `BudgetWarning` is `True
 and `kaos_hpc_budget_warning{site,project,tier}` is 1 (`kaos_hpc_budget_percent` carries the number).
 The policy (`budget.atLimit`) decides only what happens at the limit; the warning is raised either way.
 
+**GPU utilisation (AC-69).** The batch script samples `nvidia-smi` every 30 s into the job output
+(`KAOS_METRIC` lines). The runner keeps the latest and the highest value per GPU and writes them to
+`status.run.gpuUtilization` (`[{gpu, percent, maxPercent}]`) with the log offset. While the attempt's site job
+is `RUNNING` the controller exports them as
+`kaos_hpc_job_gpu_utilization_percent{namespace,workflow,step,hpc_job,site_job,gpu}` and
+`kaos_hpc_job_gpu_utilization_max_percent{...}` (`hpc_job` is the HPCArgoWorkflowJob name, `site_job` the
+Slurm job id; `gpu` is the position in the node's `nvidia-smi` list). The series are dropped as soon as
+the site job is no longer running, the job is terminal or deleted, so cardinality is bounded by the GPUs
+running now. After a runner restart the highest value starts over.
+
 See [docs/design.md](docs/design.md) for the full design.
 
 ## Serve mode (phase 1, PRD-HPC-1461 D-58, D-64)

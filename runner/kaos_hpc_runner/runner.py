@@ -261,6 +261,7 @@ class Runner:
             settings.fail_start('job submit returned no job id', 1)
         # A resubmit replaces the site job of the same attempt: the attempt does not end.
         self.reporter.log_offset = None
+        self.reporter.gpu_util = None
         self.reporter.report(siteJobID=str(j), state='PENDING')
         return j
 
@@ -688,7 +689,7 @@ class Runner:
             if any(x in TERMINAL for x in (job.get('state') or {}).get('current') or []):
                 end_time = site_time(job, 'end')
                 if end_time:
-                    run = {k: v for k, v in self.reporter.last_run.items() if k not in ('attempt', 'logOffset')}
+                    run = {k: v for k, v in self.reporter.last_run.items() if k not in ('attempt', 'logOffset', 'gpuUtilization')}
                     run['endTime'] = end_time
                     self.reporter.report(must=True, **run)
                     print('host job ended at', end_time, flush=True)

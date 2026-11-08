@@ -147,3 +147,13 @@ def test_the_kube_client_rereads_its_projected_token(tmp_path, monkeypatch):
     (tmp_path / "token").write_text("two")
     kube("GET", "/x")
     assert seen == ["Bearer one", "Bearer two"]
+
+
+def test_the_gpu_readings_ride_every_report_and_are_cleared_for_a_new_site_job():
+    r, kube = _reporter()
+    r.gpu_util = [{"gpu": "0", "percent": 50, "maxPercent": 80}]
+    r.report(siteJobID="1", state="RUNNING")
+    assert kube.run["gpuUtilization"] == r.gpu_util
+    r.gpu_util = None
+    r.report(siteJobID="2", state="PENDING")
+    assert "gpuUtilization" not in kube.run
