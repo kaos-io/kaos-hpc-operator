@@ -109,12 +109,16 @@ func (f *follower) attach(ctx context.Context) error {
 
 // checkExisting fails on a job of this name whose spec is not this step's: the name collided
 // or the step changed under a running workflow, and following the other job would be wrong.
+// Both specs are compared with the CRD defaults applied (see withCRDDefaults): comparing the
+// server-defaulted stored spec with a raw one refused every re-attach of a step that sets no
+// idle_timeout (2026-11-08, PRD-HPC-1461 AC-02).
 func (f *follower) checkExisting(ctx context.Context) error {
 	var got hpcv1alpha1.HPCArgoWorkflowJob
 	if err := f.c.Get(ctx, f.key, &got); err != nil {
 		return err
 	}
-	if !equality.Semantic.DeepEqual(got.Spec, f.cfg.Job().Spec) {
+	// The stored spec carries the API server's CRD defaults; this pod's freshly built one does not.
+	if !equality.Semantic.DeepEqual(withCRDDefaults(got.Spec), withCRDDefaults(f.cfg.Job().Spec)) {
 		return &mismatchError{name: f.key.String()}
 	}
 	return nil

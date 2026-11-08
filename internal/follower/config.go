@@ -158,3 +158,32 @@ func (c Config) Job() *hpcv1alpha1.HPCArgoWorkflowJob {
 		Spec: spec,
 	}
 }
+
+// CRD defaults of HPCArgoWorkflowJobSpec (kubebuilder:default markers in api/v1alpha1) the API server
+// fills into every job it stores. A nil or zero value in a request is indistinguishable from an
+// absent one, so they are applied before two specs are compared.
+const (
+	crdDefaultNodes       = int32(1)
+	crdDefaultLeadMinutes = int32(10)
+)
+
+// withCRDDefaults returns spec as the API server would store it. It never changes the argument.
+func withCRDDefaults(spec hpcv1alpha1.HPCArgoWorkflowJobSpec) hpcv1alpha1.HPCArgoWorkflowJobSpec {
+	if spec.Nodes == 0 {
+		spec.Nodes = crdDefaultNodes
+	}
+	if spec.IdleTimeoutMinutes == nil {
+		spec.IdleTimeoutMinutes = ptr.To(hpcv1alpha1.DefaultIdleTimeoutMinutes)
+	}
+	if spec.Resumable != nil {
+		r := *spec.Resumable
+		if r.LeadMinutes == 0 {
+			r.LeadMinutes = crdDefaultLeadMinutes
+		}
+		if r.MaxContinuations == 0 {
+			r.MaxContinuations = int32(defaultMaxContinuations)
+		}
+		spec.Resumable = &r
+	}
+	return spec
+}

@@ -11,10 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -348,6 +350,79 @@ func TestConfigFromEnv(t *testing.T) {
 				t.Fatal(err)
 			}
 			tc.check(t, c)
+		})
+	}
+}
+
+// podEnv is what the hpc-follower template renders into every pod of the twin; a retried pod gets the
+// same values (only Argo's node name and the pod name differ, and neither is in the environment).
+func podEnv(extra map[string]string) func(string) string {
+	m := map[string]string{
+		"HPC_JOB_NAMESPACE": "ns", "WF_NAME": "wf-1", "WF_UID": "uid-1", "STEP_NAME": "train", "NODE_KEY": "train-meluxina",
+		"IMAGE_REF": "img:1", "STEP_COMMAND": `["python","train.py"]`, "SLURM_TIME_LIMIT": "60", "HPC_CLASS": "meluxina-gpu",
+		"HPC_RESUMABLE_LEAD": "0", "HPC_RESUMABLE": "auto", "HPC_IDLE_TIMEOUT_MINUTES": "", "HPC_MAX_CONTINUATIONS": "5",
+		"STEP_OUTPUTS": "model,metrics", "DATASET": "", "OUTPUTS_REPO": "outputs-app", "OUTPUTS_REF": "main",
+		"CHECKPOINT_BUCKET": "outputs-app", "CHECKPOINT_PREFIX": "main/checkpoints",
+	}
+	for k, v := range extra {
+		m[k] = v
+	}
+	return func(k string) string { return m[k] }
+}
+
+func TestShouldBuildTheSameJobOnEveryPodAttemptOfTheStep(t *testing.T) {
+	cases := map[string]map[string]string{
+		"should_build_the_same_job_for_a_default_step":     nil,
+		"should_build_the_same_job_for_a_resumable_step":   {"HPC_RESUMABLE_LEAD": "15"},
+		"should_build_the_same_job_for_a_sharing_step":     {"HPC_SHARING": "on", "HPC_SCOPE": "abcdef12"},
+		"should_build_the_same_job_when_idle_timeout_is_0": {"HPC_IDLE_TIMEOUT_MINUTES": "0"},
+	}
+	for name, extra := range cases {
+		t.Run(name, func(t *testing.T) {
+			first, err := ConfigFromEnv(podEnv(extra))
+			if err != nil {
+				t.Fatal(err)
+			}
+			retry, err := ConfigFromEnv(podEnv(extra))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a, b := first.Job(), retry.Job(); a.Name != b.Name || !equality.Semantic.DeepEqual(a.Spec, b.Spec) {
+				t.Fatalf("two pods of one step build different jobs:\n%+v\n%+v", a, b)
+			}
+		})
+	}
+}
+
+// The API server stores the job with the CRD defaults (idleTimeoutMinutes=20, nodes=1, resumable
+// lead/cap); the retried pod's spec is raw. Only a real difference may refuse.
+func TestShouldReattachToTheJobAsTheAPIServerStoredItAndRefuseRealConflicts(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*hpcv1alpha1.HPCArgoWorkflowJob)
+		refused bool
+	}{
+		{"should_reattach_to_the_server_defaulted_copy", func(*hpcv1alpha1.HPCArgoWorkflowJob) {}, false},
+		{"should_refuse_another_step", func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.StepName = "eval" }, true},
+		{"should_refuse_another_image", func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "other:2" }, true},
+		{"should_refuse_another_class", func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Class = "meluxina-cpu" }, true},
+		{"should_refuse_another_idle_timeout", func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.IdleTimeoutMinutes = ptr.To(int32(5)) }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			existing := cfg.Job()
+			existing.Spec = withCRDDefaults(existing.Spec)
+			tc.mutate(existing)
+			existing.Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed"}
+			h := newHarness(t, interceptor.Funcs{}, existing)
+			code := h.run(context.Background(), cfg)
+			if tc.refused && (code != ExitFailed || !strings.Contains(h.out.String(), "different spec")) {
+				t.Fatalf("want a refusal, exit %d:\n%s", code, h.out)
+			}
+			if !tc.refused && (code != ExitSucceeded || !strings.Contains(h.out.String(), "re-attached")) {
+				t.Fatalf("want a re-attach, exit %d:\n%s", code, h.out)
+			}
 		})
 	}
 }
