@@ -374,7 +374,17 @@ func (r *HPCArgoWorkflowJobReconciler) runnerFailed(ctx context.Context, job *hp
 	if strings.Contains(why, hpcv1alpha1.ReasonSiteUnavailable+":") {
 		reason = hpcv1alpha1.ReasonSiteUnavailable // the runner waited for the site as long as it may and said so
 	}
-	if siteJobMayLive(job) {
+	// A runner that crashed after the site accepted its sbatch but before it reported the id left a job no
+	// one knows: the cancel-only runner finds it by name (NOT_SUBMITTED when there is none). A runner that
+	// gave up waiting for the site never submitted.
+	unreported := false
+	if reason != hpcv1alpha1.ReasonSiteUnavailable {
+		var err error
+		if unreported, err = r.runnerMayHaveSubmitted(ctx, job); err != nil {
+			return err
+		}
+	}
+	if siteJobMayLive(job) || unreported {
 		// The runner is over but its site job may not be: stop it before the booking is released (AC-08).
 		if err := r.beginSweep(ctx, job, hpcv1alpha1.PhaseFailed, reason, truncate(why)); err != nil {
 			return err

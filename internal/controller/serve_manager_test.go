@@ -112,6 +112,15 @@ var _ = Describe("HPCArgoWorkflowJob controller wiring", func() {
 			{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded"},
 			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded"}}
 		Expect(k8sClient.Status().Update(ctx, &rj)).To(Succeed())
+		// The runner reported no site job id: the sweep's cancel-only runner finds none and the site says so.
+		Eventually(func() bool {
+			_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(job), job)
+			return job.Status.Sweep != nil
+		}, 20*time.Second, 200*time.Millisecond).Should(BeTrue())
+		end := metav1.NewTime(time.Now().Truncate(time.Second))
+		orig := job.DeepCopy()
+		job.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "-", State: "NOT_SUBMITTED", EndTime: &end, Terminal: true}
+		Expect(k8sClient.Status().Patch(ctx, job, client.MergeFrom(orig))).To(Succeed())
 		Eventually(func() hpcv1alpha1.Phase {
 			_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(job), job)
 			return job.Status.Phase

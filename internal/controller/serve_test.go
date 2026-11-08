@@ -260,6 +260,12 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 
 		before := testutil.ToFloat64(metrics.RunnerRestarts)
 		_, got = reconcileOnce(j)
+		// No site job id was reported, but sbatch may have been accepted before the crash: the sweep decides.
+		Expect(got.Status.Sweep).NotTo(BeNil())
+		reconcileOnce(j)
+		end := metav1.NewTime(time.Now().Truncate(time.Second))
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "-", State: "NOT_SUBMITTED", EndTime: &end, Terminal: true})
+		_, got = reconcileOnce(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRunnerFailed))
 		Expect(got.Status.Message).To(ContainSubstring("HPC identity missing"))
