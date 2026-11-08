@@ -22,6 +22,12 @@ const (
 	LabelQOS         = "qos"
 	LabelReservation = "reservation"
 	LabelFallback    = "fallback"
+
+	LabelWorkflow = "workflow"
+	LabelStep     = "step"
+	LabelHPCJob   = "hpc_job"
+	LabelSiteJob  = "site_job"
+	LabelGPU      = "gpu"
 )
 
 // Kinds of the kaos_hpc_site_node_minutes gauge.
@@ -30,6 +36,8 @@ const (
 	KindBooked = "booked"
 	KindLeft   = "left"
 )
+
+var jobGPULabels = []string{LabelNamespace, LabelWorkflow, LabelStep, LabelHPCJob, LabelSiteJob, LabelGPU}
 
 var (
 	// JobPhase is 1 for the phase a job is in now and absent for the others.
@@ -51,6 +59,21 @@ var (
 		Help:    "Seconds the site job ran, per attempt.",
 		Buckets: prometheus.ExponentialBuckets(60, 2, 12),
 	}, []string{LabelTier})
+
+	// JobGPUUtilization is the latest GPU utilisation the on-node sampler read for a running site job
+	// (PRD-HPC-1461 AC-69). hpc_job is the HPCArgoWorkflowJob's name, site_job the scheduler's job id.
+	// Series exist only while the site job runs (see SetJobGPU), so cardinality is bounded by the
+	// running GPUs.
+	JobGPUUtilization = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kaos_hpc_job_gpu_utilization_percent",
+		Help: "Latest GPU utilisation (percent) of a running HPC site job, per GPU.",
+	}, jobGPULabels)
+
+	// JobGPUUtilizationMax is the highest utilisation the sampler read for the running site job, per GPU.
+	JobGPUUtilizationMax = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kaos_hpc_job_gpu_utilization_max_percent",
+		Help: "Highest GPU utilisation (percent) read so far for a running HPC site job, per GPU.",
+	}, jobGPULabels)
 
 	// SiteUp is 1 while the site's REST API answers and 0 while it does not (AC-30).
 	SiteUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -134,7 +157,7 @@ var (
 func init() {
 	ctrlmetrics.Registry.MustRegister(JobPhase, JobQueueSeconds, JobRunSeconds, NodeMinutesBooked,
 		NodeMinutesSettled, SiteNodeMinutes, ActiveJobs, RunnerRestarts, LanePlacements, IdleKills,
-		K8sIdleKills, K8sIdleErrors, BudgetWarning, BudgetPercent, SiteUp)
+		K8sIdleKills, K8sIdleErrors, BudgetWarning, BudgetPercent, SiteUp, JobGPUUtilization, JobGPUUtilizationMax)
 }
 
 // SetJobPhase makes phase the only phase series of the job.
@@ -143,9 +166,34 @@ func SetJobPhase(namespace, job, class, tier, phase string) {
 	JobPhase.WithLabelValues(namespace, job, class, tier, phase).Set(1)
 }
 
-// ForgetJob drops a deleted job's phase series.
+// ForgetJob drops a deleted job's phase and GPU series.
 func ForgetJob(namespace, job string) {
 	JobPhase.DeletePartialMatch(prometheus.Labels{LabelNamespace: namespace, LabelJob: job})
+	ForgetJobGPU(namespace, job)
+}
+
+// GPUReading is one GPU's latest and highest utilisation in percent.
+type GPUReading struct {
+	GPU        string
+	Percent    int32
+	MaxPercent int32
+}
+
+// SetJobGPU makes readings the only GPU series of the job (hpcJob is the HPCArgoWorkflowJob's name), so
+// a replaced site job or a GPU that disappeared leaves nothing behind.
+func SetJobGPU(namespace, workflow, step, hpcJob, siteJob string, readings []GPUReading) {
+	ForgetJobGPU(namespace, hpcJob)
+	for _, r := range readings {
+		JobGPUUtilization.WithLabelValues(namespace, workflow, step, hpcJob, siteJob, r.GPU).Set(float64(r.Percent))
+		JobGPUUtilizationMax.WithLabelValues(namespace, workflow, step, hpcJob, siteJob, r.GPU).Set(float64(r.MaxPercent))
+	}
+}
+
+// ForgetJobGPU drops the GPU series of a job; called when the site job is no longer running.
+func ForgetJobGPU(namespace, hpcJob string) {
+	l := prometheus.Labels{LabelNamespace: namespace, LabelHPCJob: hpcJob}
+	JobGPUUtilization.DeletePartialMatch(l)
+	JobGPUUtilizationMax.DeletePartialMatch(l)
 }
 
 // SetSiteLedger publishes one tier of a project's ledger on a site.

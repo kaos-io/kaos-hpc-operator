@@ -219,3 +219,43 @@ def test_the_tail_is_bounded():
     s, _, _ = _streamer(LogStager({"5425070": (b"x" * 500 + b"\n") * 10}))
     s.poll()
     assert len(s.tail_text()) == logsmod.TAIL_MAX_CHARS
+
+
+def _sample(*utils):
+    gpus = ",".join('{"util":%s,"mem_used_mib":1,"mem_total_mib":2}' % u for u in utils)
+    return ('KAOS_METRIC {"t":1,"gpus":[%s],"load":[0,0,0],"mem_available_kb":1}\n' % gpus).encode()
+
+
+def test_gpu_samples_keep_the_last_and_the_highest_value_per_gpu():
+    """AC-69: the runner reports last and max per GPU in status.run.gpuUtilization."""
+    body = _sample(10, 0) + _sample(90, 5) + _sample(40, "null")
+    s, _, _ = _streamer(LogStager({"5425070": body}))
+    s.poll()
+    assert s.reporter.gpu_util == [{"gpu": "0", "percent": 40, "maxPercent": 90},
+                                   {"gpu": "1", "percent": 5, "maxPercent": 5}]
+
+
+def test_a_sample_without_a_gpu_or_with_a_broken_line_reports_nothing():
+    body = b'KAOS_METRIC {"t":1,"gpus":[],"load":[0,0,0]}\nKAOS_METRIC {broken\n'
+    s, _, _ = _streamer(LogStager({"5425070": body}))
+    s.poll()
+    assert s.reporter.gpu_util is None
+
+
+def test_the_gpu_readings_are_written_with_the_offset_and_only_when_they_changed():
+    clock = Clock()
+    s, _, kube = _streamer(LogStager({"5425070": _sample(70)}), clock=clock)
+    clock.t = 31
+    s.poll()
+    assert kube.run["gpuUtilization"] == [{"gpu": "0", "percent": 70, "maxPercent": 70}]
+    n = len(kube.patches())
+    clock.t = 100
+    s.persist()
+    assert len(kube.patches()) == n, "nothing changed: no write"
+
+
+def test_attaching_a_new_site_job_starts_the_readings_over():
+    s, _, _ = _streamer(LogStager({"5425070": _sample(70)}))
+    s.poll()
+    s.attach("5425071", 0)
+    assert s.reporter.gpu_util is None

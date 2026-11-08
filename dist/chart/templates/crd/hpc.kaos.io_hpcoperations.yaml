@@ -229,6 +229,43 @@ spec:
                       continues (D-44).
                     format: int32
                     type: integer
+                  gpuUtilization:
+                    description: |-
+                      GPUUtilization is the step's GPU use as the on-node sampler last read it, per GPU (last value and
+                      highest value of this site job). The runner reports it with the log offset every 30 s while the
+                      job runs; the controller exports it as kaos_hpc_job_gpu_utilization_percent (PRD-1461 AC-69).
+                    items:
+                      description: GPUUtilization is one GPU's utilisation in percent,
+                        as sampled on the compute node (nvidia-smi).
+                      properties:
+                        gpu:
+                          description: GPU is the GPU's position in the node's nvidia-smi
+                            list ("0", "1", ...).
+                          maxLength: 8
+                          type: string
+                        maxPercent:
+                          description: MaxPercent is the highest reading of this site
+                            job.
+                          format: int32
+                          maximum: 100
+                          minimum: 0
+                          type: integer
+                        percent:
+                          description: Percent is the latest reading.
+                          format: int32
+                          maximum: 100
+                          minimum: 0
+                          type: integer
+                      required:
+                      - gpu
+                      - maxPercent
+                      - percent
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - gpu
+                    x-kubernetes-list-type: map
                   hostSiteJobID:
                     description: |-
                       HostSiteJobID is set when a host job of the same project took this job onto its node

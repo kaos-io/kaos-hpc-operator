@@ -23,7 +23,7 @@ Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /ru
 | `payload/` | on-node programs: stagein/stageout/ckpt/slots/idlewatch (`payloads.py` loads them) |
 | `sharing.py` | PRD-1609 inputs-in-script |
 | `reporter.py` | status merge patches: `status.run`, `status.outputs` (<= 64 KiB), `status.pendingReason` |
-| `logs.py` | stager `log` streaming, JSON lines, `status.run.logOffset` |
+| `logs.py` | stager `log` streaming, JSON lines, `status.run.logOffset`, last/max GPU use of the sampler lines in `status.run.gpuUtilization` (AC-69) |
 | `runner.py` | the attempt: submit/adopt, poll loop, resubmits, end |
 
 ## Inputs

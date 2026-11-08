@@ -7,7 +7,9 @@ each complete line as one JSON object on stdout, which the pool's Vector ships:
     {"hpc_job": "<slurm id>", "step": "...", "workflow": "...", "attempt": N, "msg": "<line>"}
 
 A line `KAOS_METRIC {json}` (written by the batch script's sampler) is printed with "metric": true and
-the parsed JSON under "m". The offset of the last complete line is kept in status.run.logOffset (at
+the parsed JSON under "m"; its per-GPU utilisation is also kept (last and highest value per GPU) and
+reported in status.run.gpuUtilization with the log offset, which the controller exports as
+kaos_hpc_job_gpu_utilization_percent (AC-69). The offset of the last complete line is kept in status.run.logOffset (at
 most every 30 s, and when the runner stops), so a restarted runner resumes without printing lines
 again (AC-70). A stager without `log` disables streaming with one warning; the job is not affected.
 """
@@ -28,6 +30,27 @@ TAIL_LINES = 20
 TAIL_MAX_CHARS = 2000   # status.run.lastLog allows 2048
 
 
+class GpuSamples:
+    """Last and highest utilisation per GPU of one site job, from the sampler's KAOS_METRIC lines. The GPU is
+    the position in the sampler's list (nvidia-smi order on the node); a value the sampler could not read
+    (null) is skipped."""
+
+    def __init__(self):
+        self.last, self.high = {}, {}
+
+    def add(self, gpus):
+        for i, g in enumerate(gpus if isinstance(gpus, list) else []):
+            util = g.get('util') if isinstance(g, dict) else None
+            if isinstance(util, int) and not isinstance(util, bool) and 0 <= util <= 100:
+                self.last[i] = util
+                self.high[i] = max(util, self.high.get(i, 0))
+
+    def status(self):
+        """status.run.gpuUtilization, or None before the first sample."""
+        return [{'gpu': str(i), 'percent': self.last[i], 'maxPercent': self.high[i]}
+                for i in sorted(self.last)] or None
+
+
 class LogStreamer:
     def __init__(self, cfg, stager, reporter, out=None, poll_s=POLL_S, persist_s=PERSIST_S,
                  clock=time.monotonic):
@@ -40,6 +63,8 @@ class LogStreamer:
         self.carry = b''         # bytes of the last, incomplete line
         self.persisted = None    # the committed offset last written to the job
         self.last_persist = clock()
+        self.gpu = GpuSamples()
+        self.persisted_gpu = None
         self.tail = collections.deque(maxlen=TAIL_LINES)   # last non-metric lines, for an Idle report
         self.disabled = False
         self.active = threading.Event()
@@ -57,6 +82,7 @@ class LogStreamer:
         with self.lock:
             self.job, self.offset, self.carry = str(job), int(offset or 0), b''
             self.persisted = self.offset
+            self.gpu, self.persisted_gpu, self.reporter.gpu_util = GpuSamples(), None, None
             self.reporter.log_offset = self.offset if offset else None
 
     # ---- one read
@@ -90,6 +116,9 @@ class LogStreamer:
             try:
                 obj['m'] = json.loads(text[len(METRIC_PREFIX):])
                 obj['metric'] = True
+                if isinstance(obj['m'], dict):
+                    self.gpu.add(obj['m'].get('gpus'))
+                    self.reporter.gpu_util = self.gpu.status()
             except ValueError:
                 pass
         if not obj.get('metric') and text.strip():
@@ -133,13 +162,14 @@ class LogStreamer:
         """status.run.logOffset, at most every PERSIST_S unless forced."""
         with self.lock:
             c = self.committed()
-            if c == self.persisted or self.job is None:
+            if (c == self.persisted and self.reporter.gpu_util == self.persisted_gpu) or self.job is None:
                 return
             if not force and self.clock() - self.last_persist < self.persist_s:
                 return
             self.last_persist = self.clock()
+            gpu = self.reporter.gpu_util
             if self.reporter.write_log_offset(c):
-                self.persisted = c
+                self.persisted, self.persisted_gpu = c, gpu
 
     def finish(self):
         """The job ended: the last of its output, then the offset."""

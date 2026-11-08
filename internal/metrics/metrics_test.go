@@ -49,3 +49,21 @@ func TestMetricsAreOnTheControllerRuntimeRegistry(t *testing.T) {
 		}
 	}
 }
+
+func TestSetJobGPUKeepsOnlyTheCurrentReadingsAndForgetDropsThem(t *testing.T) {
+	SetJobGPU("ns", "wf", "train", "job-a", "5433585", []GPUReading{{"0", 40, 90}, {"1", 5, 5}})
+	SetJobGPU("ns", "wf", "train", "job-a", "5433586", []GPUReading{{"0", 70, 90}}) // a replaced site job
+	if got := testutil.CollectAndCount(JobGPUUtilization); got != 1 {
+		t.Fatalf("want 1 series, got %d", got)
+	}
+	if v := testutil.ToFloat64(JobGPUUtilization.WithLabelValues("ns", "wf", "train", "job-a", "5433586", "0")); v != 70 {
+		t.Fatalf("last = %v", v)
+	}
+	if v := testutil.ToFloat64(JobGPUUtilizationMax.WithLabelValues("ns", "wf", "train", "job-a", "5433586", "0")); v != 90 {
+		t.Fatalf("max = %v", v)
+	}
+	ForgetJob("ns", "job-a")
+	if a, b := testutil.CollectAndCount(JobGPUUtilization), testutil.CollectAndCount(JobGPUUtilizationMax); a+b != 0 {
+		t.Fatalf("want 0 series after ForgetJob, got %d+%d", a, b)
+	}
+}

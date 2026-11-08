@@ -532,4 +532,26 @@ func (r *HPCArgoWorkflowJobReconciler) observePhase(job *hpcv1alpha1.HPCArgoWork
 		}
 	}
 	metrics.SetJobPhase(job.Namespace, job.Name, job.Spec.Class, tier, phase)
+	observeGPU(job)
+}
+
+// observeGPU publishes the GPU utilisation the runner reported (kaos_hpc_job_gpu_utilization_percent,
+// AC-69) while this attempt's site job runs, and drops the series otherwise: a job that ended, a
+// queued attempt, or a report of an earlier attempt must not leave a stale reading behind.
+func observeGPU(job *hpcv1alpha1.HPCArgoWorkflowJob) {
+	run := job.Status.Run
+	if run == nil || job.Status.Phase.Terminal() || !current(run, job.Status.Attempt) ||
+		run.State != "RUNNING" || len(run.GPUUtilization) == 0 {
+		metrics.ForgetJobGPU(job.Namespace, job.Name)
+		return
+	}
+	workflow := ""
+	if job.Spec.Workflow != nil {
+		workflow = job.Spec.Workflow.Name
+	}
+	readings := make([]metrics.GPUReading, 0, len(run.GPUUtilization))
+	for _, g := range run.GPUUtilization {
+		readings = append(readings, metrics.GPUReading{GPU: g.GPU, Percent: g.Percent, MaxPercent: g.MaxPercent})
+	}
+	metrics.SetJobGPU(job.Namespace, workflow, job.Spec.StepName, job.Name, run.SiteJobID, readings)
 }

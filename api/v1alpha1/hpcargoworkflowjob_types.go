@@ -255,6 +255,21 @@ type Booking struct {
 	At metav1.Time `json:"at"`
 }
 
+// GPUUtilization is one GPU's utilisation in percent, as sampled on the compute node (nvidia-smi).
+type GPUUtilization struct {
+	// GPU is the GPU's position in the node's nvidia-smi list ("0", "1", ...).
+	// +kubebuilder:validation:MaxLength=8
+	GPU string `json:"gpu"`
+	// Percent is the latest reading.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	Percent int32 `json:"percent"`
+	// MaxPercent is the highest reading of this site job.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	MaxPercent int32 `json:"maxPercent"`
+}
+
 // RunStatus is written by the submitter (in phase 0 the in-pod runner, D-34): what the site says
 // about the current attempt's site job. The controller only reads it.
 type RunStatus struct {
@@ -296,6 +311,14 @@ type RunStatus struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	LogOffset int64 `json:"logOffset,omitempty"`
+	// GPUUtilization is the step's GPU use as the on-node sampler last read it, per GPU (last value and
+	// highest value of this site job). The runner reports it with the log offset every 30 s while the
+	// job runs; the controller exports it as kaos_hpc_job_gpu_utilization_percent (PRD-1461 AC-69).
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=map
+	// +listMapKey=gpu
+	// +optional
+	GPUUtilization []GPUUtilization `json:"gpuUtilization,omitempty"`
 	// LastLog is the tail of the step's log (a few lines, at most 2 KiB), reported only when the
 	// idle watchdog ended the step, so the controller can name what the step last said (D-72).
 	// +kubebuilder:validation:MaxLength=2048

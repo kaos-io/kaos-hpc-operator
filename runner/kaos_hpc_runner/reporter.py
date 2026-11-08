@@ -17,7 +17,8 @@ import urllib.request
 K8S_SA = '/var/run/secrets/kubernetes.io/serviceaccount'
 K8S_API = 'https://kubernetes.default.svc'
 RUN_FIELDS = ('attempt', 'siteJobID', 'state', 'exitCode', 'startTime', 'endTime', 'terminal',
-              'hostSiteJobID', 'slot', 'checkpointRef', 'checkpoint', 'logOffset', 'lastLog', 'message')
+              'hostSiteJobID', 'slot', 'checkpointRef', 'checkpoint', 'logOffset', 'lastLog', 'message',
+              'gpuUtilization')
 CANCEL_ANNOTATION = 'hpc.kaos.io/cancel-requested'
 OUTPUTS_MAX_BYTES = 64 * 1024   # total of the declared outputs' JSON text (contract section 1)
 
@@ -55,6 +56,7 @@ class Reporter:
         self.cfg, self.kube, self.sleep = cfg, kube or Kube(), sleep
         self.attempt = cfg.attempt
         self.log_offset = None      # the log streamer's committed offset, written with every report
+        self.gpu_util = None        # the log streamer's per-GPU last/max utilisation (AC-69), written likewise
         # The QoS and reservation the site job was submitted with (None: not known to this runner,
         # e.g. it adopted a job; the report then leaves the earlier values alone).
         self.qos = None
@@ -118,6 +120,8 @@ class Reporter:
         run['attempt'] = self.attempt
         if 'logOffset' not in run:
             run['logOffset'] = self.log_offset
+        if 'gpuUtilization' not in run:
+            run['gpuUtilization'] = self.gpu_util
         status = {'run': {k: run.get(k) for k in RUN_FIELDS}}
         if self.qos is not None:
             status['run'].update(qos=self.qos, reservation=self.reservation or None)
@@ -145,10 +149,13 @@ class Reporter:
             print('HPC job: pendingReason not written (%s)' % e, flush=True)
 
     def write_log_offset(self, offset):
-        """Only the offset (a merge patch of status.run keeps its other fields). Best effort."""
+        """The offset and the latest GPU readings (a merge patch of status.run keeps its other fields). Best effort."""
         self.log_offset = offset
+        run = {'attempt': self.attempt, 'logOffset': offset}
+        if self.gpu_util is not None:
+            run['gpuUtilization'] = self.gpu_util       # the sampler's GPU readings ride with the offset (AC-69)
         try:
-            self.patch({'run': {'attempt': self.attempt, 'logOffset': offset}})
+            self.patch({'run': run})
             return True
         except Exception as e:
             print('HPC job: logOffset not written (%s)' % e, flush=True)
