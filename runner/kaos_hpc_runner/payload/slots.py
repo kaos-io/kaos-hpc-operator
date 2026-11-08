@@ -69,8 +69,9 @@ def set_comment(job, text):
 
 
 def lease(c):
-    # The dataset lease (kaos-commit=) and the image lease (kaos-image=, D-62) stay on every host write.
-    found = [m.group(0) for m in (re.search(r'kaos-commit=\S+', c), re.search(r'kaos-image=\S+', c)) if m]
+    # Every kaos- word except the host's own kaos-state= stays on every host write: the dataset lease
+    # (kaos-commit=), the image lease (kaos-image=, D-62), the checkpoint lease and copy (kaos-ckpt*=, D-75).
+    found = [t for t in c.split() if t.startswith('kaos-') and not t.startswith('kaos-state=')]
     return ''.join(f + ' ' for f in found)
 
 

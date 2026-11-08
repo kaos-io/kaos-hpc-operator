@@ -341,3 +341,15 @@ def test_a_host_write_keeps_the_image_lease_too(tmp_path):
     assert rc == 0, log
     assert node.jobs()["101"]["comment"] == \
         "kaos-commit=bbbbbbb2 kaos-image=0123456789abcdef kaos-state=done rc=0 host=100"
+
+
+def test_a_host_write_keeps_the_checkpoint_lease_and_copy_words_too(tmp_path):
+    """A job's kaos-ckpt-lease= / kaos-ckpt* words are not the host's to drop (a blind overwrite lost them)."""
+    ck = "kaos-ckpt-lease=wf1/train kaos-ckpt=" + "a" * 64 + " kaos-ckpt-path=kaos-ckpt/wf1/train/000001.tar"
+    guests = {"101": _job("kaos-%s-wf1-train" % SCOPE, "exit 0\n", comment="kaos-commit=bbbbbbb2 " + ck)}
+    node = Node(tmp_path, guests)
+    assert node.wait_for(lambda j: "kaos-state=taken" in j["101"]["comment"])
+    assert node.jobs()["101"]["comment"].startswith("kaos-commit=bbbbbbb2 " + ck + " kaos-state=taken")
+    rc, log = node.finish()
+    assert rc == 0, log
+    assert node.jobs()["101"]["comment"] == "kaos-commit=bbbbbbb2 " + ck + " kaos-state=done rc=0 host=100"

@@ -304,7 +304,7 @@ def test_a_cached_sif_needs_neither(tmp_path):
 
 def test_per_job_paths_key_on_the_steps_own_job():
     lines = _job_script_lines()
-    assert lines.index("set +e") < lines.index("KAOS_JOB_ID=${KAOS_JOB_ID:-$SLURM_JOB_ID}") \
+    assert lines.index("set +e") < lines.index("export KAOS_JOB_ID=${KAOS_JOB_ID:-$SLURM_JOB_ID}") \
         < next(i for i, l in enumerate(lines) if l.startswith("fail(){"))
     # The batch step's own id is used only by the default itself, the pull's private
     # temp name (unique per process anyway) and the host hook (F-03), which runs in the
@@ -312,7 +312,7 @@ def test_per_job_paths_key_on_the_steps_own_job():
     hook = lines[lines.index('if [ -z "$KAOS_IN_STEP" ] && [ -n "$KAOS_SLOTS_B64" ]; then'):]
     hook = hook[:hook.index("fi") + 1]
     uses = [l for l in lines if "$SLURM_JOB_ID" in l and l not in hook]
-    assert len(uses) == 2 and any(l.startswith("KAOS_JOB_ID=") for l in uses) \
+    assert len(uses) == 2 and any(l.startswith("export KAOS_JOB_ID=") for l in uses) \
         and any("SIF_TMP=" in l for l in uses), uses
     assert any("kaos-work/$KAOS_JOB_ID" in l for l in lines)
     assert any("ds-$KAOS_JOB_ID.dir" in l for l in lines)
@@ -320,7 +320,7 @@ def test_per_job_paths_key_on_the_steps_own_job():
 
 @pytest.mark.parametrize("commit, expected_prefix", [("c0ffee12", "kaos-commit=c0ffee12 err7:"), ("", "err7:")])
 def test_a_failure_comment_keeps_the_dataset_lease(tmp_path, commit, expected_prefix):
-    fail = next(l for l in _job_script_lines() if l.startswith("fail(){"))
+    fail = "\n".join(jobscript.COMMENT_HELPER + [next(l for l in _job_script_lines() if l.startswith("fail(){"))])
     bindir = tmp_path / "bin"
     bindir.mkdir()
     (bindir / "scontrol").write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$OUT"\n')
@@ -363,11 +363,27 @@ def _block(first, last):
     return lines[start:lines.index(last, start) + 1]
 
 
+def _fake_site(bindir):
+    """A stateful site: `scontrol update JobId=N Comment=X` stores X for job N (and logs the arguments, one per
+    line, to $SCONTROL_LOG) exactly as Slurm does; `squeue -j N -o %k` prints it. An update for another job id,
+    or an empty one (JobId=), changes nothing: scontrol would refuse it."""
+    (bindir / "scontrol").write_text(
+        '#!/bin/bash\nprintf "%s\\n" "$@" >> "${SCONTROL_LOG:-/dev/null}"\n'
+        '[ "$1" = update ] || exit 0\n'
+        'id=${2#JobId=}; [ -n "$id" ] && [ "$id" = "$SITE_JOB" ] || { echo "scontrol: invalid job id" >&2; exit 1; }\n'
+        '[ -n "$SITE_FILE" ] || exit 1\n'
+        '[ -e "$SITE_FILE.ro" ] && exit 0\n'                 # a post-end / ignored update
+        'for a in "$@"; do case "$a" in Comment=*) printf %s "${a#Comment=}" > "$SITE_FILE";; esac; done\n')
+    (bindir / "squeue").write_text(
+        '#!/bin/bash\ncase "$*" in *" -j "*) cat "$SITE_FILE" 2>/dev/null;; esac\n')
+    for n in ("scontrol", "squeue"):
+        (bindir / n).chmod(0o755)
+
+
 def _bin(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
-    (bindir / "scontrol").write_text('#!/bin/bash\nprintf "%s\\n" "$@" >> "$SCONTROL_LOG"\n')
-    (bindir / "scontrol").chmod(0o755)
+    _fake_site(bindir)
     if not (bindir / "python3").exists():
         (bindir / "python3").symlink_to(sys.executable)
     return bindir
@@ -408,7 +424,15 @@ def _run(tmp_path, step_cmd):
     return rc
 
 
-FAIL = next(ln for ln in _job_script_lines() if ln.startswith("fail(){"))
+def _script_head():
+    """The script from `set +e` to the fail() definition, as the node runs it: the job id (exported), the
+    comment helper, fail(). The tests start every block from here so nothing the real script does not do
+    (an exported job id, say) is assumed."""
+    lines = _job_script_lines()
+    return "\n".join(lines[lines.index("set +e"):next(i for i, ln in enumerate(lines) if ln.startswith("fail(){")) + 1])
+
+
+FAIL = _script_head()
 
 
 HANDLER_STEP = ("python3 -c \"import signal,sys,time,pathlib; "
@@ -437,8 +461,10 @@ def _ckpt_env(tmp_path, **extra):
     (work / "ckpt").mkdir(parents=True, exist_ok=True)
     py = work / ".kaos-ckpt.py"
     py.write_text(CKPT)
+    # KAOS_JOB_ID is NOT in the environment: the script derives it from SLURM_JOB_ID, as on the node.
     env = dict(os.environ, PATH=str(_bin(tmp_path)) + os.pathsep + os.environ["PATH"],
-               SCONTROL_LOG=str(tmp_path / "scontrol.log"), KAOS_JOB_ID="4242", KAOS_COMMIT="c0ffee12",
+               SCONTROL_LOG=str(tmp_path / "scontrol.log"), SLURM_JOB_ID="4242", KAOS_COMMIT="c0ffee12",
+               SITE_JOB="4242", SITE_FILE=str(tmp_path / "site.comment"),
                KAOS_WORK=str(work), KAOS_CKPT_ROOT=str(scr / "kaos-ckpt"), KAOS_SCR=str(scr), WF_UID="wf1",
                STEP_NAME="train", KAOS_ATTEMPT="1", CKPTPY=str(py), HAVE_CKPT="1", STEP_OUTPUTS="", USER="u1")
     env.update(extra)
@@ -448,6 +474,13 @@ def _ckpt_env(tmp_path, **extra):
 def _bash(tmp_path, lines, env, rc=None):
     script = "\n".join([FAIL] + (["rc=%d" % rc] if rc is not None else []) + lines)
     return subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env, capture_output=True, text=True)
+
+
+def _copier(tmp_path, env, mode):
+    """The copier as the script starts it: a child python3 of the script's shell (exported job id, exported
+    kaos_comment), in the script's own working directory."""
+    return subprocess.run(["bash", "-c", FAIL + '\npython3 "$CKPTPY" ' + mode], cwd=tmp_path, env=env,
+                          capture_output=True, text=True)
 
 
 def _comments(tmp_path):
@@ -469,7 +502,7 @@ def test_85_copies_the_folder_once_more_writes_the_comment_and_ends_with_85(tmp_
 def test_85_whose_final_copy_fails_ends_235_and_the_failure_comment_keeps_the_last_good_copy(tmp_path):
     env = _ckpt_env(tmp_path)
     (tmp_path / "work" / "ckpt" / "last.pt").write_bytes(b"weights")
-    assert subprocess.run([sys.executable, env["CKPTPY"], "final"], env=env).returncode == 0     # a periodic copy exists
+    assert _copier(tmp_path, env, "final").returncode == 0     # a periodic copy exists
     Path(env["CKPTPY"]).write_text("import sys; sys.exit(1)")                                        # the final copy cannot be made
     r = _bash(tmp_path, _block('if [ $rc -eq 85 ]; then', 'exit 0'), env, rc=85)
     assert r.returncode == 235
@@ -485,7 +518,7 @@ def test_85_without_the_copier_fails_235(tmp_path):
 def test_a_step_that_succeeds_deletes_its_checkpoint_copies_and_its_scratch(tmp_path):
     env = _ckpt_env(tmp_path)
     (tmp_path / "work" / "ckpt" / "last.pt").write_bytes(b"weights")
-    assert subprocess.run([sys.executable, env["CKPTPY"], "final"], env=env).returncode == 0
+    assert _copier(tmp_path, env, "final").returncode == 0
     store = tmp_path / "scr" / "kaos-ckpt" / "wf1" / "train"
     assert store.is_dir()
     r = _bash(tmp_path, _block('if [ -n "$STEP_OUTPUTS" ] && [ -n "$STAGEOUT_B64" ] && [ -n "$LAKEFS_BEARER_TOKEN" ]; then'
@@ -497,7 +530,7 @@ def test_a_step_that_succeeds_deletes_its_checkpoint_copies_and_its_scratch(tmp_
 def test_a_step_that_fails_keeps_its_copies_for_the_seven_days(tmp_path):
     env = _ckpt_env(tmp_path)
     (tmp_path / "work" / "ckpt" / "last.pt").write_bytes(b"weights")
-    assert subprocess.run([sys.executable, env["CKPTPY"], "final"], env=env).returncode == 0
+    assert _copier(tmp_path, env, "final").returncode == 0
     r = _bash(tmp_path, _block('[ $rc -eq 0 ] && rm -rf "$KAOS_WORK" "$KAOS_CKPT_ROOT/$WF_UID/$STEP_NAME"', "exit 0"), env, rc=3)
     assert r.returncode == 3
     assert (tmp_path / "scr" / "kaos-ckpt" / "wf1" / "train" / "000001.tar").exists()
@@ -507,7 +540,7 @@ def test_a_step_that_fails_keeps_its_copies_for_the_seven_days(tmp_path):
 def test_a_continued_job_restores_the_copy_before_the_step_and_never_starts_from_scratch(tmp_path):
     env = _ckpt_env(tmp_path)
     (tmp_path / "work" / "ckpt" / "last.pt").write_bytes(b"weights")
-    assert subprocess.run([sys.executable, env["CKPTPY"], "final"], env=env).returncode == 0
+    assert _copier(tmp_path, env, "final").returncode == 0
     sha = json.loads(next((tmp_path / "scr" / "kaos-ckpt" / "wf1" / "train").glob("*.json")).read_text())["tar_sha256"]
     (tmp_path / "work" / "ckpt" / "last.pt").unlink()
     block = _block('if [ -n "$KAOS_RESUME_REF" ]; then', "fi")
@@ -539,3 +572,85 @@ def test_the_script_wires_the_folder_the_watcher_and_the_wall_time_copy():
     assert expire < restore < lines.index("STEP_PID=$!")
     assert lines.index('trap - USR1') < next(i for i, l in enumerate(lines) if l.startswith('[ -n "$CKPT_PID" ] && { kill'))
     assert "CKPTOUT" not in text and "CKPTIN" not in text
+
+
+# ---------------------------------------------------------------- the job comment: one writer, nothing lost (live job 5433318)
+
+SUBMIT_COMMENT = "kaos-commit=c0ffee12 kaos-image=e882f17eaa4ee41b kaos-ckpt-lease=wf1/train"
+
+
+def _site_comment(tmp_path):
+    f = tmp_path / "site.comment"
+    return f.read_text() if f.exists() else None
+
+
+def _seed_site(tmp_path, text=SUBMIT_COMMENT):
+    (tmp_path / "site.comment").write_text(text)
+
+
+def test_the_copier_sees_the_job_id_the_script_derived_from_slurm(tmp_path):
+    # Live job 5433318: KAOS_JOB_ID was a plain shell variable, so the child python3 saw an empty id and
+    # every `scontrol update JobId= ...` failed silently. The environment of the test has no KAOS_JOB_ID.
+    env = _ckpt_env(tmp_path)
+    assert "KAOS_JOB_ID" not in env
+    r = subprocess.run(["bash", "-c", FAIL + '\npython3 -c "import os; print(os.environ.get(\'KAOS_JOB_ID\', \'MISSING\'))"'],
+                       env=env, capture_output=True, text=True)
+    assert r.stdout.strip() == "4242"
+
+
+def test_85_names_the_copy_in_the_job_comment_and_keeps_every_other_word(tmp_path):
+    env = _ckpt_env(tmp_path)
+    _seed_site(tmp_path)
+    (tmp_path / "work" / "ckpt" / "last.pt").write_bytes(b"weights")
+    r = _bash(tmp_path, _block('if [ $rc -eq 85 ]; then', 'exit 0'), env, rc=85)
+    assert r.returncode == 85, r.stdout + r.stderr
+    words = _site_comment(tmp_path).split()
+    assert {"kaos-commit=c0ffee12", "kaos-image=e882f17eaa4ee41b", "kaos-ckpt-lease=wf1/train"} <= set(words), \
+        "the submit-time leases survive the copier's write"
+    assert any(w.startswith("kaos-ckpt=") for w in words) and "kaos-ckpt-path=kaos-ckpt/wf1/train/000001.tar" in words
+    assert sum(w.startswith("kaos-ckpt-lease=") for w in words) == 1, "a word is replaced, never duplicated"
+
+
+def test_a_second_copy_replaces_the_copy_words_instead_of_adding_to_them(tmp_path):
+    env = _ckpt_env(tmp_path)
+    _seed_site(tmp_path)
+    work = tmp_path / "work" / "ckpt"
+    work.joinpath("last.pt").write_bytes(b"weights-1")
+    assert _copier(tmp_path, env, "final").returncode == 0
+    work.joinpath("last.pt").write_bytes(b"weights-2-longer")
+    assert _copier(tmp_path, env, "final").returncode == 0
+    words = _site_comment(tmp_path).split()
+    assert "kaos-ckpt-path=kaos-ckpt/wf1/train/000002.tar" in words
+    assert sum(w.startswith(("kaos-ckpt=", "kaos-ckpt-path=", "kaos-ckpt-info=")) for w in words) == 3
+    assert "kaos-image=e882f17eaa4ee41b" in words
+
+
+def test_85_whose_comment_update_is_ignored_by_the_site_ends_235_not_a_silent_85(tmp_path):
+    # An update the site accepts but does not keep (the job is already over, or a policy drops it): the
+    # words are read back, the copy is not reported as recorded, the job fails loudly.
+    env = _ckpt_env(tmp_path, KAOS_COMMENT_RETRY_SLEEP="0")
+    _seed_site(tmp_path)
+    (tmp_path / "site.comment.ro").write_text("")
+    (tmp_path / "work" / "ckpt" / "last.pt").write_bytes(b"weights")
+    r = _bash(tmp_path, _block('if [ $rc -eq 85 ]; then', 'exit 0'), env, rc=85)
+    assert r.returncode == 235, r.stdout + r.stderr
+    assert "the job comment could not be set" in r.stdout
+    assert "kaos-ckpt=" not in _site_comment(tmp_path)
+
+
+def test_the_failure_comment_keeps_the_leases_and_replaces_an_older_error_tail(tmp_path):
+    env = _ckpt_env(tmp_path)
+    _seed_site(tmp_path, SUBMIT_COMMENT + " kaos-ckpt=" + "a" * 64 + " err1:old tail|")
+    (tmp_path / "slurm-4242.out").write_text("boom\n")
+    r = subprocess.run(["bash", "-c", FAIL + "\nfail 9"], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert r.returncode == 9
+    comment = _site_comment(tmp_path)
+    assert comment.startswith(SUBMIT_COMMENT + " kaos-ckpt=" + "a" * 64) and comment.endswith("err9:boom|")
+    assert "old tail" not in comment, "one error tail, the newest"
+
+
+def test_a_comment_that_cannot_be_read_still_keeps_the_dataset_lease(tmp_path):
+    env = _ckpt_env(tmp_path)           # no site comment file: squeue prints nothing
+    (tmp_path / "slurm-4242.out").write_text("boom\n")
+    subprocess.run(["bash", "-c", FAIL + "\nfail 9"], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert _site_comment(tmp_path) == "kaos-commit=c0ffee12 err9:boom|"

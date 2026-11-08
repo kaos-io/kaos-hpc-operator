@@ -14,6 +14,8 @@
 #
 # After each copy the job comment carries: kaos-ckpt=<sha256 of the tar> kaos-ckpt-path=<tar path relative to the
 # root> kaos-ckpt-info=<url-quoted JSON>; the runner reads them. The same line is kept in $KAOS_WORK/.kaos-note.
+# The comment is written by the job script's exported bash function kaos_comment (read-modify-write, verified);
+# `final` exits 1 when the comment could not be set.
 import hashlib, json, os, re, shutil, signal, subprocess, sys, tarfile, time, urllib.parse
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else ''
@@ -29,7 +31,7 @@ MIN_EVERY_S, MAX_EVERY_S, DEFAULT_EVERY_S = 300, 3600, 900
 SPACE_LIMIT, FILES_LIMIT = 0.8, 0.8
 SEQ_RE = re.compile(r'^(\d{6})\.json$')
 LEASE_RE = re.compile(r'kaos-ckpt-lease=(\S+)')
-state = {'sig': None, 'digest': None, 'skipped': '', 'every': float(os.environ.get('KAOS_CKPT_EVERY_S') or DEFAULT_EVERY_S)}
+state = {'comment_ok': True, 'sig': None, 'digest': None, 'skipped': '', 'every': float(os.environ.get('KAOS_CKPT_EVERY_S') or DEFAULT_EVERY_S)}
 
 
 def say(msg):
@@ -205,13 +207,17 @@ def write_note(skipped=''):
         open(NOTE, 'w').write(note)
     except OSError:
         pass
-    commit = os.environ.get('KAOS_COMMIT', '')           # the dataset lease the job already carries (PRD-1541 D-06)
-    comment = ' '.join(x for x in ['kaos-commit=' + commit if commit else '', note] if x)
+    # The job script's kaos_comment (exported function) is the one writer of the job comment: it keeps every
+    # other word (kaos-commit=, kaos-image=, ...), retries and reads the words back. Never a blind scontrol here.
     try:
-        subprocess.call(['scontrol', 'update', 'JobId=' + os.environ.get('KAOS_JOB_ID', ''), 'Comment=' + comment],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        rc = subprocess.call(['bash', '-c', 'kaos_comment "$@"', 'kaos_comment'] + toks,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
     except Exception:
-        pass
+        rc = 1
+    state['comment_ok'] = rc == 0
+    if rc != 0:
+        say('the job comment could not be set (the copy is on scratch, but the job does not name it)')
+    return rc == 0
 
 
 # ------------------------------------------------------------------------------------------- copy
@@ -402,7 +408,8 @@ if MODE == 'periodic':      # one periodic cycle (what `watch` does every few mi
 if MODE == 'final':
     ok = persist(True)
     has = bool(os.path.isdir(FOLDER) and files_of(FOLDER))
-    sys.exit(0 if ok or not has else 1)
+    # A copy the job comment does not name is as good as none: the controller continues only from the comment.
+    sys.exit(0 if (ok and state['comment_ok']) or not has else 1)
 if MODE == 'restore':
     sys.exit(restore())
 if MODE == 'expire':

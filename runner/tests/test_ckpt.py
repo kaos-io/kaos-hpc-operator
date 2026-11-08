@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from kaos_hpc_runner import payloads
+from kaos_hpc_runner import jobscript, payloads
 
 PAYLOAD = payloads.CKPT
 WF, STEP = "wf1", "train"
@@ -36,8 +36,12 @@ class Node:
         self.script = tmp_path / "ckpt.py"
         self.script.write_text(PAYLOAD)
         self.set_quota(quota)
-        (self.bin / "scontrol").write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$SCONTROL_LOG"\n')
+        # A stateful site: scontrol update stores the comment (and logs the call), squeue -j shows it.
+        (self.bin / "scontrol").write_text(
+            '#!/bin/bash\nprintf "%s\\n" "$*" >> "$SCONTROL_LOG"\n'
+            'for a in "$@"; do case "$a" in Comment=*) printf %s "${a#Comment=}" > "$COMMENT_FILE";; esac; done\n')
         (self.bin / "scontrol").chmod(0o755)
+        self.comment_file = tmp_path / "job.comment"
         self.set_squeue(squeue)
 
     def set_quota(self, quota):
@@ -52,7 +56,9 @@ class Node:
 
     def set_squeue(self, text, fail=False):
         sq = self.bin / "squeue"
-        sq.write_text("#!/bin/bash\n%s\n" % ("exit 1" if fail else "cat <<'EOF'\n%s\nEOF" % text))
+        # `squeue -j <id>` is the job's own comment (what scontrol update stored); `squeue -u` lists everyone's.
+        sq.write_text("#!/bin/bash\n%s\n" % ("exit 1" if fail else
+                      'case "$*" in *" -j "*) cat "$COMMENT_FILE" 2>/dev/null;; *) cat <<\'EOF\'\n%s\nEOF\n;; esac' % text))
         sq.chmod(0o755)
 
     def run(self, mode, **env):
@@ -60,8 +66,11 @@ class Node:
                  KAOS_CKPT_ROOT=str(self.root), KAOS_SCR=str(self.scr), WF_UID=WF, STEP_NAME=STEP, KAOS_ATTEMPT="1",
                  KAOS_JOB_ID="77", SCONTROL_LOG=str(self.scontrol_log), KAOS_COMMIT="c0ffee12", KAOS_PROJID="201342",
                  USER="u1", KAOS_CKPT_BUDGET_PCT="10")
-        e.update(env)
-        return subprocess.run([sys.executable, str(self.script), mode], env=e, capture_output=True, text=True)
+        e.update(env, COMMENT_FILE=str(self.comment_file))
+        # The copier runs under the job script's exported kaos_comment, as on the node.
+        shell = "\n".join(jobscript.COMMENT_HELPER + ["export -f kaos_comment", 'exec "$@"'])
+        return subprocess.run(["bash", "-c", shell, "run", sys.executable, str(self.script), mode], env=e,
+                              capture_output=True, text=True)
 
     def write(self, files):
         for name, data in files.items():
