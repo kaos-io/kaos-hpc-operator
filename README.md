@@ -35,7 +35,9 @@ the job's class.
 | `Refused` / `BudgetBlocked` | It can never fit this period within the project's own share (policy `block`; `warn` admits it and raises `OverShare`) |
 | `Refused` / `SiteLimit` | It can never fit this period because the site's own monthly limit on the account is what runs out (same policy rule). A submitted job queued behind that limit (Slurm `AssocGrp...Minutes`) shows `SiteLimit` as well |
 | `Failed` / `InsufficientQuota` | Staging the dataset or image would exceed the project's scratch quota (space or files) even after evicting everything unused: the runner stops before any copy and submits nothing |
-| `Refused` / `MultiNodeUnsupported`, `WallTimeOverLimit`, `ClassNotAllowed`, `NoProject`, `NoSite` | It can never run as asked |
+| `Refused` / `TooLongNotResumable` | The declared limit is above the longest run the class or site allows (2 days on MeluXina `default`) and the step is not resumable (declared or verified, D-74), so it would be cut. The message gives the declared limit, the maximum and the two fixes: make it resumable or shorten it. Never cut silently |
+| `Refused` / `TooLongBeyondContinuations` | The step is resumable, but its declared limit needs more runs than the continuation cap allows (cap 5: 6 runs, 12 days on MeluXina `default`) |
+| `Refused` / `MultiNodeUnsupported`, `WallTimeOverLimit` (the limit is unknown), `ClassNotAllowed`, `NoProject`, `NoSite` | It can never run as asked |
 
 The ledger is derived from the jobs themselves every time, never kept as a counter, and admission
 runs one job at a time, so concurrent jobs never overbook. A job running as a guest on a node
@@ -154,6 +156,11 @@ Metrics (`:8443`, authn/authz-protected; the chart renders a `VMServiceScrape`, 
   checkpoint ends `NoProgress`; one that does (or that runs to completion, which leaves no copy to compare) marks the step key verified (`status.placement.resumable`), after
   which it keeps its declared limit and gets the wall-time signal. `spec.resumableOptOut` (`resumable=False`) turns
   continuing off; the follower passes it from `HPC_RESUMABLE=0`.
+- **Steps longer than the longest lane (D-67, D-74):** a resumable step whose declared `walltime` is above the class or
+  site maximum is admitted and run as continuations of at most that maximum each (`status.placement.timeLimitMinutes`,
+  one run booked at a time), up to the continuation cap + 1 runs in all; the follower prints "declared N min runs as
+  continuations of up to M min each". A step that is not resumable is refused at admission (`TooLongNotResumable`).
+  The `long` QoS (6 days, one job per user) is not used for this: `placement="long"` (D-71) is not built.
 - **Reported:** `status.run.checkpoint` (progress, size of the newest copy, the step's and the project's total,
   why a copy was skipped) and `HPCSite.status.checkpoints` (scratch held by steps that have not succeeded).
 

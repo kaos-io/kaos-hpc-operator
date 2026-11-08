@@ -150,7 +150,13 @@ func timeLimitText(job *hpcv1alpha1.HPCArgoWorkflowJob) string {
 			src = "retry at the full limit after a timeout"
 		}
 	}
-	return fmt.Sprintf("time limit %d min (%s)", limit, src)
+	text := fmt.Sprintf("time limit %d min (%s)", limit, src)
+	if declared := job.Spec.WallTimeMinutes; declared > limit && src == "declared" {
+		// A resumable step declared longer than the longest lane (admission refuses any other):
+		// say how it will run so the author sees the plan before the first segment ends.
+		text += fmt.Sprintf(", declared %d min runs as continuations of up to %d min each", declared, limit)
+	}
+	return text
 }
 
 // showPlacement prints the placement lines when they differ from the last print.
