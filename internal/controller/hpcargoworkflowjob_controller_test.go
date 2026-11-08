@@ -293,6 +293,56 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(siteStatus().GPU.UsedNodeMinutes).To(BeNumerically("~", 4, 1))
 	})
 
+	It("settles a failed host whose terminal report carries no start from its booking, never 0 (live 2026-11-08, site job 5435560)", func() {
+		newSite(100, nil)
+		j := newJob(envNS, 60)
+		reconcileJob(j)
+		one := int32(1)
+		end := metav1.NewTime(time.Now().Add(11 * time.Minute)) // the booking is made now: ~11 minutes of node
+		report(j, hpcv1alpha1.RunStatus{SiteJobID: "5435560", State: "FAILED", ExitCode: &one, EndTime: &end, Terminal: true})
+		_, got := reconcileJob(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(*got.Status.SettledNodeMinutes).To(BeNumerically("~", 11, 1), "a failed attempt that ran is never settled 0")
+		Expect(siteStatus().GPU.UsedNodeMinutes).To(BeNumerically("~", 11, 1))
+	})
+
+	It("settles a failed non-host from the site's own start and end", func() {
+		newSite(100, nil)
+		j := newJob(envNS, 60)
+		reconcileJob(j)
+		one := int32(1)
+		start := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+		end := metav1.NewTime(time.Now())
+		report(j, hpcv1alpha1.RunStatus{SiteJobID: "5435561", State: "FAILED", ExitCode: &one, StartTime: &start, EndTime: &end, Terminal: true})
+		_, got := reconcileJob(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(*got.Status.SettledNodeMinutes).To(Equal(int64(10)))
+	})
+
+	It("settles a failed attempt with neither start nor end up to now, capped by its booking", func() {
+		newSite(100, nil)
+		j := newJob(envNS, 60)
+		_, booked := reconcileJob(j)
+		old := booked.DeepCopy()
+		booked.Status.Booking.At = metav1.NewTime(time.Now().Add(-90 * time.Minute))
+		Expect(k8sClient.Status().Patch(ctx, booked, client.MergeFrom(old))).To(Succeed())
+		one := int32(1)
+		report(j, hpcv1alpha1.RunStatus{SiteJobID: "5435562", State: "FAILED", ExitCode: &one, Terminal: true})
+		_, got := reconcileJob(j)
+		Expect(*got.Status.SettledNodeMinutes).To(Equal(int64(60)), "90 minutes since the booking, but only 60 were booked")
+	})
+
+	It("still settles a cancelled attempt that never started 0", func() {
+		newSite(100, nil)
+		j := newJob(envNS, 60)
+		reconcileJob(j)
+		zero := int32(0)
+		end := metav1.NewTime(time.Now())
+		report(j, hpcv1alpha1.RunStatus{SiteJobID: "5435563", State: "CANCELLED", ExitCode: &zero, EndTime: &end, Terminal: true})
+		_, got := reconcileJob(j)
+		Expect(*got.Status.SettledNodeMinutes).To(BeZero())
+	})
+
 	It("waits at the concurrency limit and is never refused for it (D-49)", func() {
 		newSite(100, func(s *hpcv1alpha1.HPCSite) { s.Spec.Limits.MaxConcurrentJobs = 1 })
 		_, got := reconcileJob(newJob(envNS, 60))

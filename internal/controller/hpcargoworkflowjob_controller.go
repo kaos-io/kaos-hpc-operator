@@ -333,7 +333,7 @@ func current(run *hpcv1alpha1.RunStatus, attempt int32) bool {
 func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
 	site *hpcv1alpha1.HPCSite) (bool, error) {
 	run := job.Status.Run
-	st := settle(job.Spec.Nodes, run, r.now())
+	st := settleAttempt(job, r.now())
 	used, end := st.Minutes, st.End
 	if len(st.Discarded) > 0 && r.Recorder != nil {
 		r.Recorder.Event(job, corev1.EventTypeWarning, "ReportedTimeDiscarded",

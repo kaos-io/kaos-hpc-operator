@@ -122,6 +122,7 @@ class Runner:
         self.resubmits = 0
         self.lost_hosts = 0
         self.reported = None
+        self.starts = {}          # site job id -> the start Slurm reported for it at any poll (kept for the end report)
         self.reported_info = 'null'   # the last checkpoint report sent (json), so a change is sent once
         self.pending_reason = None
         self.hosted = None
@@ -585,7 +586,7 @@ class Runner:
                 now = (','.join(st), share.get('host'), share.get('slot'))
                 info_key = json.dumps(info, sort_keys=True)
                 if (now != self.reported or info_key != self.reported_info) and not any(x in TERMINAL for x in st):
-                    reporter.report(siteJobID=str(jid), state=now[0], startTime=site_time(job, 'start'),
+                    reporter.report(siteJobID=str(jid), state=now[0], startTime=self.start_of(job),
                                     hostSiteJobID=share.get('host'), checkpoint=info,
                                     slot=int(share['slot']) if (share.get('slot') or '').isdigit() else None)
                     self.reported, self.reported_info = now, info_key
@@ -760,6 +761,19 @@ class Runner:
             return self.slurm.live(self.jid)
         return {'state_reason': v.reason or self.pending_reason or '', 'comment': v.comment or ''}
 
+    def start_of(self, job):
+        """The start Slurm reported for the current site job: this record's, else the last one an earlier poll
+        saw. The end report rewrites every status.run field, so a record without a start (a host's comment-only
+        view, accounting that lags) must not erase a start the controller already had: it settles from it
+        (live 2026-11-08, job 5435560: a failed host settled 0 node-minutes for 11 minutes of GPU node)."""
+        key = str(self.jid)
+        seen = site_time(job, 'start')
+        # A queued job's start is Slurm's estimate (or NO_VAL), not a start: only a job that has begun is remembered.
+        began = not ({'PENDING', 'CONFIGURING'} & set((job.get('state') or {}).get('current') or []))
+        if seen and began:
+            self.starts[key] = seen
+        return self.starts.get(key)
+
     def end(self, job, st, rc, share=None):
         """The attempt's site job is over: its last log lines, then the one terminal report. The runner
         exits 0 after it (the controller decides what follows: success, failure or a continuation)."""
@@ -772,7 +786,7 @@ class Runner:
         # attempt from it and must never be left to guess.
         end_time = site_time(job, 'end') or time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time()))
         fields = dict(siteJobID=str(jid), state=','.join(st), exitCode=rc,
-                      startTime=site_time(job, 'start'), endTime=end_time, terminal=True,
+                      startTime=self.start_of(job), endTime=end_time, terminal=True,
                       # A guest names its host (parsed from the job comment) so the controller
                       # knows the host's booking covers it.
                       hostSiteJobID=share.get('host'),

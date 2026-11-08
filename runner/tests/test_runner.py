@@ -826,6 +826,27 @@ def test_a_host_reports_its_step_at_once_and_its_job_end_when_the_job_ends(rig):
     assert "outputs" not in rig.kube.patches()[-1][2]["status"]
 
 
+def test_a_failed_host_keeps_the_start_an_earlier_poll_saw_when_its_end_record_has_none(rig):
+    """Live 2026-11-08 (job 5435560): the terminal report carried no start, the controller settled 0 node-minutes."""
+    running = acc("RUNNING", start=1762300800, end=0)
+    step_over = acc("RUNNING", comment="kaos-state=done rc=1", start=0, end=0)
+    job_over = acc("FAILED", comment="kaos-state=done rc=1", start=0, end=1762301400)
+    slurm = FakeSlurm({"5001": [running, step_over, job_over]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    rig.runner.run()
+    first, last = terminal_reports(rig)[0], terminal_reports(rig)[-1]
+    assert first["startTime"] == "2025-11-05T00:00:00Z", "the start is the site's, from the earlier poll"
+    assert last["startTime"] == first["startTime"], "the host job's end report keeps it too"
+
+
+def test_a_start_is_never_carried_over_to_another_site_job(rig):
+    rig.make(FakeSlurm({"5001": [acc("COMPLETED")]}))
+    rig.runner.jid = "5001"
+    assert rig.runner.start_of(acc("RUNNING", start=1762300800)) == "2025-11-05T00:00:00Z"
+    rig.runner.jid = "5002"
+    assert rig.runner.start_of(acc("RUNNING", start=0)) is None
+
+
 def test_a_job_that_ended_by_itself_reports_its_end_once(rig):
     slurm = FakeSlurm({"5001": [acc("RUNNING"), acc("COMPLETED")]})
     rig.make(slurm)
