@@ -204,9 +204,7 @@ func standaloneSpecs() {
 			GinkgoWriter.Println(describe())
 			return kubectlGet("{.status.phase}", "hpcargoworkflowjob", e2eJobName, "-n", e2eEnvNS)
 		}, "5m", "3s").Should(Equal("Succeeded"), func() string {
-			logs, _ := utils.Run(execCommand("kubectl", "logs", "-n", e2eHPCNS,
-				"-l", "app.kubernetes.io/name=kaos-hpc-runner", "--tail=60"))
-			return describe() + "\nrunner log:\n" + logs
+			return describe() + "\n" + diagnostics()
 		})
 
 		By("checking that the site ran it and the controller booked and settled it")
@@ -215,4 +213,24 @@ func standaloneSpecs() {
 		Expect(booked).To(SatisfyAny(BeEmpty(), Equal("0")),
 			"nothing stays booked once the job has settled")
 	})
+}
+
+// diagnostics collects what explains a job that did not finish: the job and site status, the runner and fake
+// site logs, and a probe of the fake site from inside the controller's own container (same DNS, network, trust).
+func diagnostics() string {
+	probe := "import ssl,urllib.request as u;r=u.Request('https://" + fakeSlurmHost + "/slurm/v0.0.44/ping'," +
+		"headers={'X-SLURM-USER-TOKEN':'" + fakeSlurmTok + "'});print(u.urlopen(r,timeout=10).read())"
+	cmds := [][]string{
+		{"get", "hpcargoworkflowjob", e2eJobName, "-n", e2eEnvNS, "-o", "yaml"},
+		{"get", "hpcsite", "site", "-n", e2eHPCNS, "-o", "yaml"},
+		{"logs", "-n", e2eHPCNS, "-l", "app.kubernetes.io/name=kaos-hpc-runner", "--tail=60"},
+		{"logs", "-n", fakeSlurmNS, "deploy/fake-slurm", "--tail=30"},
+		{"exec", "-n", namespace, "deploy/" + release + "-controller-manager", "--", "python3", "-c", probe},
+	}
+	var b strings.Builder
+	for _, c := range cmds {
+		out, _ := utils.Run(execCommand("kubectl", c...))
+		b.WriteString("\n$ kubectl " + strings.Join(c[:3], " ") + "\n" + out)
+	}
+	return b.String()
 }
