@@ -16,6 +16,10 @@ if sys.argv[1:2] == ['--step']:
     env.setdefault('USER', me.pw_name)
     env.setdefault('PATH', '/usr/bin:/bin:/usr/local/bin')
     env.update(KAOS_IN_STEP='1', KAOS_JOB_ID=job)
+    # AC-57: the GPU set Slurm gave this step, stamped where every process of the step (also inside the
+    # container, whose own CUDA_VISIBLE_DEVICES may be renumbered) carries it for the GPU watchdog.
+    if env.get('CUDA_VISIBLE_DEVICES'):
+        env['KAOS_STEP_GPUS'] = env['CUDA_VISIBLE_DEVICES']
     os.chdir(env.get('HOME') or '/')
     if len(sys.argv) > 4:
         # The step writes its own log: srun forwards output late, and fail() reads
@@ -123,7 +127,7 @@ PART = q(ME, '%P')
 HOST_END = end_epoch()
 SHARE = mem_share_bytes()
 PAGE = os.sysconf('SC_PAGE_SIZE')
-slots = {}      # slot -> {'job', 'proc', 'claim', 'name', 'memkill'}
+slots = {}      # slot -> {'job', 'proc', 'claim', 'name', 'memkill', 'gpukill'}
 own_rc = None
 skip = set()    # jobs looked at and not ours to take
 
@@ -187,6 +191,57 @@ def step_rss():
         sid = env[b'SLURM_STEP_ID'].decode()
         rss[sid] = rss.get(sid, 0) + used
     return rss
+
+
+def gpu_ids():
+    # nvidia-smi's view of the node: {uuid: index}. Empty when there is no nvidia-smi (then nothing is watched).
+    try:
+        rc, out = run('nvidia-smi', '--query-gpu=index,uuid', '--format=csv,noheader')
+    except OSError:
+        return {}
+    ids = {}
+    for line in out.splitlines() if rc == 0 else []:
+        idx, _, uuid = [x.strip() for x in line.partition(',')]
+        if idx.isdigit() and uuid:
+            ids[uuid] = idx
+    return ids
+
+
+def gpu_users():
+    # [(pid, gpu uuid)] of every process with a compute context on any GPU of the node.
+    rc, out = run('nvidia-smi', '--query-compute-apps=gpu_uuid,pid', '--format=csv,noheader')
+    users = []
+    for line in out.splitlines() if rc == 0 else []:
+        uuid, _, pid = [x.strip() for x in line.partition(',')]
+        if pid.isdigit():
+            users.append((pid, uuid))
+    return users
+
+
+def step_gpu_claim(pid):
+    # (step id, the GPU set it was given) of a process of one of THIS job's steps, else None. The set is the
+    # KAOS_STEP_GPUS the launcher stamped; a step without one is never judged (no set, no violation).
+    try:
+        with open('/proc/%s/environ' % pid, 'rb') as f:
+            env = dict(kv.split(b'=', 1) for kv in f.read().split(b'\0') if b'=' in kv)
+    except (OSError, ValueError):
+        return None
+    if env.get(b'SLURM_JOB_ID') != ME.encode() or b'SLURM_STEP_ID' not in env:
+        return None
+    given = [x.strip() for x in env.get(b'KAOS_STEP_GPUS', b'').decode().split(',') if x.strip()]
+    return (env[b'SLURM_STEP_ID'].decode(), set(given)) if given else None
+
+
+def gpu_trespassers():
+    # {step number: [gpu index, ...]} of steps whose processes compute on a GPU outside their set. The set may
+    # list indices or UUIDs (Slurm writes either), so a GPU is allowed by its index or its uuid.
+    ids = gpu_ids()
+    bad = {}
+    for pid, uuid in gpu_users() if ids else []:
+        claim = step_gpu_claim(pid)
+        if claim and ids.get(uuid) not in claim[1] and uuid not in claim[1]:
+            bad.setdefault(claim[0], set()).add(ids.get(uuid, uuid))
+    return bad
 
 
 def step_limit_of(text):
@@ -282,7 +337,7 @@ def finish(slot, rc):
     global own_rc
     s = slots.pop(slot)
     job = s['job']
-    reason = ' reason=memkill' if s['memkill'] else ''
+    reason = ' reason=memkill' if s['memkill'] else ' reason=GPUViolation' if s.get('gpukill') else ''
     if job == ME:
         own_rc = rc
         c = comment(ME)
@@ -334,6 +389,14 @@ while True:
         if sid and rss.get(sid.split('.')[-1], 0) > SHARE and not s['memkill']:
             log('memory: step', sid, 'of', s['job'], 'uses %d MiB > %d MiB share' % (rss[sid.split('.')[-1]] >> 20, SHARE >> 20))
             s['memkill'] = True
+            run('scancel', sid)
+    # AC-57: a step that computes on a GPU that is not in its set is stopped alone, its neighbours run on.
+    bad = gpu_trespassers() if GPUS > 1 else {}
+    for s in slots.values():
+        sid = s.get('sid')
+        if sid and sid.split('.')[-1] in bad and not s.get('gpukill'):
+            log('gpu: step', sid, 'of', s['job'], 'uses GPU', ','.join(sorted(bad[sid.split('.')[-1]])), 'outside its set: stopping it')
+            s['gpukill'] = True
             run('scancel', sid)
     if tick % 5:
         continue
