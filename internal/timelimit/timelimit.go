@@ -54,6 +54,17 @@ func ImageRepo(image string) string {
 	return image
 }
 
+// AppOf is the app an image belongs to: the last path segment of its repository, as the pipeline
+// pushes one repository per app ({registry}/{project}/{app}). "" for an image with no path.
+func AppOf(image string) string {
+	repo := ImageRepo(image)
+	i := strings.LastIndex(repo, "/")
+	if i < 0 {
+		return ""
+	}
+	return repo[i+1:]
+}
+
 // Caps are the upper bounds of a limit besides the spec's: the class's and the site's maximum
 // wall time (0 means unknown, no bound).
 type Caps struct {

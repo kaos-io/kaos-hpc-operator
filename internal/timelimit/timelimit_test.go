@@ -163,3 +163,18 @@ func TestRetryNeverExceedsAnyCapAndNeverShrinks(t *testing.T) {
 		}
 	}
 }
+
+func TestAppOfIsTheLastSegmentOfTheImageRepository(t *testing.T) {
+	cases := map[string]string{
+		"reg.example/proj/app:train-1":     "app",
+		"reg.example:5000/proj/app:abc":    "app",
+		"reg.example/proj/app@sha256:0123": "app",
+		"app:v1":                           "",
+		"":                                 "",
+	}
+	for in, want := range cases {
+		if got := AppOf(in); got != want {
+			t.Errorf("AppOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

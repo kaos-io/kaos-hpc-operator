@@ -307,3 +307,39 @@ func TestRecentJobsStatusSizeStaysUnderBudget(t *testing.T) {
 		})
 	}
 }
+
+func resumeJob(name, step, image string, ev *hpcv1alpha1.ResumeEvidence) hpcv1alpha1.HPCArgoWorkflowJob {
+	j := recentJob(name, time.Hour, hpcv1alpha1.PhaseSucceeded)
+	j.Spec.StepName, j.Spec.Image = step, image
+	j.Status.ResumeEvidence = ev
+	return j
+}
+
+func TestResumableStepsPerAppAndStep(t *testing.T) {
+	at := func(h int) metav1.Time { return metav1.NewTime(recentT0.Add(time.Duration(h) * time.Hour)) }
+	ok := &hpcv1alpha1.ResumeEvidence{Verified: true, At: at(1), Reason: "a continuation loaded its checkpoint and got past it"}
+	bad := &hpcv1alpha1.ResumeEvidence{Verified: false, At: at(2), Reason: "NoProgress: the continuation saved no checkpoint before it ended"}
+	site, projectNS := recentSite(), map[string]bool{"p-train": true}
+	jobs := []hpcv1alpha1.HPCArgoWorkflowJob{
+		resumeJob("a1", "train", "reg.io/p/app-a:train-1", ok),
+		resumeJob("a2", "train", "reg.io/p/app-a:train-2", bad), // the later evidence decides
+		resumeJob("b1", "train", "reg.io/p/app-b:train-1", ok),
+		resumeJob("none", "eval", "reg.io/p/app-a:eval-1", nil), // no evidence: no entry
+		resumeJob("noimg", "train", "", ok),                     // no app: no entry
+		resumeJob("elsewhere", "train", "reg.io/p/app-c:train-1", ok),
+	}
+	jobs[5].Namespace = "other-project-ns"
+	got := resumableStepsOf(site, jobs, projectNS)
+	if len(got) != 2 {
+		t.Fatalf("want 2 entries (app-a/train, app-b/train), got %+v", got)
+	}
+	if got[0].App != "app-a" || got[0].Step != "train" || got[0].Verified || got[0].Reason[:10] != "NoProgress" {
+		t.Errorf("app-a/train must carry the later NoProgress evidence, got %+v", got[0])
+	}
+	if got[1].App != "app-b" || !got[1].Verified || got[1].Since == nil {
+		t.Errorf("app-b/train must be verified with a time, got %+v", got[1])
+	}
+	if resumableStepsOf(site, nil, projectNS) != nil {
+		t.Error("no jobs must give nil")
+	}
+}

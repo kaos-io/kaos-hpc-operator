@@ -770,6 +770,48 @@ spec:
                 maxItems: 300
                 type: array
                 x-kubernetes-list-type: atomic
+              resumableSteps:
+                description: |-
+                  ResumableSteps is what the controller recorded about the resumability of the project's steps,
+                  one entry per app and step with evidence (D-74), at most ResumableStepsMax. Written with the ledger.
+                items:
+                  description: |-
+                    ResumableStep is what the controller recorded about one step of one app (D-74): whether a
+                    continuation of it loaded its checkpoint and got past it. Only names, a verdict, a time and a
+                    reason in words: nothing about the jobs. The hub copies the list into the project's status and
+                    the app's platform context, where the pipeline linter reads it.
+                  properties:
+                    app:
+                      description: |-
+                        App is the app the step belongs to: the last path segment of the step's image repository
+                        (the pipeline builds one image repository per app).
+                      maxLength: 253
+                      type: string
+                    reason:
+                      description: Reason is the evidence in words.
+                      maxLength: 300
+                      type: string
+                    since:
+                      description: Since is when the latest evidence was recorded.
+                      format: date-time
+                      type: string
+                    step:
+                      description: Step is the DAG step's name.
+                      maxLength: 253
+                      type: string
+                    verified:
+                      description: |-
+                        Verified is true when the latest evidence is a continuation that got past its checkpoint and
+                        false when it did not (NoProgress).
+                      type: boolean
+                  required:
+                  - app
+                  - step
+                  - verified
+                  type: object
+                maxItems: 100
+                type: array
+                x-kubernetes-list-type: atomic
               runningJobs:
                 description: |-
                   RunningJobs is the number of active jobs the site reports RUNNING, plus guests running on a

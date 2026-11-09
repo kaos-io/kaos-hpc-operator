@@ -229,6 +229,11 @@ Controller flags (chart `controllerManager.container.args`, `runnerImage`, `runn
   The `long` QoS (6 days, one job per user) is not used for this: `placement="long"` (D-71) is not built.
 - **Reported:** `status.run.checkpoint` (progress, size of the newest copy, the step's and the project's total,
   why a copy was skipped) and `HPCSite.status.checkpoints` (scratch held by steps that have not succeeded).
+- **Resumable steps, for the pipeline linter:** `HPCSite.status.resumableSteps` lists, per app and step with evidence
+  (at most 100), whether the latest continuation got past its checkpoint (`verified`), when (`since`) and why not
+  (`reason`, for example `NoProgress: ...`). The app is the last path segment of the step's image repository. Only names,
+  a verdict, a time and a reason: no job details. The latest evidence decides, so a later `NoProgress` clears an earlier
+  verification. The hub copies it into the app's platform context.
 
 ## Idle watchdog for in-cluster GPU steps (PRD-HPC-1461 D-72, D-76)
 
