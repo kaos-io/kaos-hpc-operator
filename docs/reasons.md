@@ -5,8 +5,8 @@ constants live in `api/v1alpha1/hpcargoworkflowjob_types.go` and `hpcsite_types.
 `kubectl get hpcargoworkflowjobs` (columns `Phase` and `Reason`) and `kubectl describe` (the `Message`, the conditions and the events).
 
 "The follower" is the credential-free pipeline step that creates the job and prints its progress; what it prints
-is shown as *Follower*. Where the HPC job is shown on a console (`HPCSite.status.recentJobs`), phase and reason are
-copied from the job.
+is shown as *Follower*. Where the HPC job is shown on a console (`HPCSite.status.recentJobs`), phase, reason and message are
+copied from the job (the message cut to 512 characters).
 
 Phases: `Pending` (not judged yet, or the next attempt is about to be judged), `Waiting` (admissible later), `Refused`
 (never admissible as asked; terminal), `Admitted` (booked), `Running`, and the terminal `Succeeded`, `Failed`,

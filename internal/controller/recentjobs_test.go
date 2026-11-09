@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,7 +44,7 @@ func recentReconciler(t *testing.T, nss ...*corev1.Namespace) *HPCArgoWorkflowJo
 	for _, ns := range nss {
 		b = b.WithObjects(ns)
 	}
-	return &HPCArgoWorkflowJobReconciler{Client: b.Build()}
+	return &HPCArgoWorkflowJobReconciler{Client: b.Build(), Now: func() time.Time { return recentT0 }}
 }
 
 func projectNS(name, project string) *corev1.Namespace {
@@ -82,9 +84,9 @@ func TestRecentJobsOrderAndScope(t *testing.T) {
 
 func TestRecentJobsAreBoundedAndDeterministic(t *testing.T) {
 	r := recentReconciler(t, projectNS("p-train", "p"))
-	jobs := make([]hpcv1alpha1.HPCArgoWorkflowJob, 0, 80)
-	for i := range 80 {
-		jobs = append(jobs, recentJob(fmt.Sprintf("j%02d", i), time.Duration(i)*time.Minute, hpcv1alpha1.PhaseSucceeded))
+	jobs := make([]hpcv1alpha1.HPCArgoWorkflowJob, 0, hpcv1alpha1.RecentJobsMax+80)
+	for i := range hpcv1alpha1.RecentJobsMax + 80 {
+		jobs = append(jobs, recentJob(fmt.Sprintf("j%02d", i), time.Duration(i)*time.Minute, hpcv1alpha1.PhaseRunning))
 	}
 	a, err := r.recentJobsOf(context.Background(), recentSite(), jobs)
 	if err != nil {
@@ -186,6 +188,121 @@ func TestRecentJobOfSiteLimitPendingReason(t *testing.T) {
 			rj := recentJobOf(&j, time.Now())
 			if rj.PendingReason != c.wantPending || rj.Reason != c.wantReason {
 				t.Fatalf("got pending %q reason %q, want %q / %q", rj.PendingReason, rj.Reason, c.wantPending, c.wantReason)
+			}
+		})
+	}
+}
+
+func TestRecentJobsKeepActiveAndLastSevenDays(t *testing.T) {
+	r := recentReconciler(t, projectNS("p-train", "p"))
+	day := 24 * time.Hour
+	endedAgo := func(name string, ago time.Duration) hpcv1alpha1.HPCArgoWorkflowJob {
+		j := recentJob(name, ago+time.Hour, hpcv1alpha1.PhaseSucceeded)
+		end := metav1.NewTime(recentT0.Add(-ago))
+		j.Status.Run = &hpcv1alpha1.RunStatus{State: "COMPLETED", EndTime: &end}
+		return j
+	}
+	jobs := []hpcv1alpha1.HPCArgoWorkflowJob{
+		recentJob("active-ancient", 30*day, hpcv1alpha1.PhaseRunning), // active is always kept
+		endedAgo("ended-6d", 6*day),
+		endedAgo("ended-8d", 8*day),
+		recentJob("refused-8d", 8*day, hpcv1alpha1.PhaseRefused), // no run: creation time decides
+	}
+	got, err := r.recentJobsOf(context.Background(), recentSite(), jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "[active-ancient ended-6d]"; fmt.Sprint(names(got)) != want {
+		t.Fatalf("got %v, want %s", names(got), want)
+	}
+}
+
+func TestRecentJobsCapKeepsActiveBeforeEnded(t *testing.T) {
+	r := recentReconciler(t, projectNS("p-train", "p"))
+	jobs := make([]hpcv1alpha1.HPCArgoWorkflowJob, 0, hpcv1alpha1.RecentJobsMax+1)
+	for i := range hpcv1alpha1.RecentJobsMax {
+		jobs = append(jobs, recentJob(fmt.Sprintf("done%03d", i), time.Duration(i+1)*time.Minute, hpcv1alpha1.PhaseSucceeded))
+	}
+	jobs = append(jobs, recentJob("active-old", 6*time.Hour, hpcv1alpha1.PhaseRunning))
+	got, _ := r.recentJobsOf(context.Background(), recentSite(), jobs)
+	if len(got) != hpcv1alpha1.RecentJobsMax || got[0].Name != "active-old" {
+		t.Fatalf("got %d entries, first %q", len(got), got[0].Name)
+	}
+}
+
+func TestRecentJobOfCopiesAndTruncatesMessage(t *testing.T) {
+	cases := []struct {
+		name, in  string
+		wantRunes int
+	}{
+		{"should_copy_short_message_unchanged", "Idle for 20 minutes", 19},
+		{"should_truncate_long_message_to_512_characters", strings.Repeat("x", 2000), 512},
+		{"should_truncate_on_character_boundary", strings.Repeat("\u00e9", 600), 512},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			j := recentJob("m", time.Hour, hpcv1alpha1.PhaseFailed)
+			j.Status.Message = c.in
+			got := recentJobOf(&j, time.Now()).Message
+			if n := len([]rune(got)); n != c.wantRunes {
+				t.Fatalf("got %d characters, want %d", n, c.wantRunes)
+			}
+		})
+	}
+}
+
+// worstCaseRecentJob has every bounded field at its schema maximum, with 2-byte characters in the
+// message (the longest JSON a 512-character string can take without escapes).
+func worstCaseRecentJob(i int) hpcv1alpha1.RecentJob {
+	s := func(n int) string { return strings.Repeat("x", n) }
+	ts := metav1.NewTime(recentT0)
+	return hpcv1alpha1.RecentJob{
+		Name: fmt.Sprintf("%s%03d", s(250), i), Namespace: s(63), Step: s(253), Workflow: s(253),
+		Phase: hpcv1alpha1.PhaseWaiting, Reason: s(63), Message: strings.Repeat("\u00e9", hpcv1alpha1.RecentJobMessageMax),
+		SiteState: s(63), PendingReason: s(63), QOS: s(63), Reservation: s(63), RefusedQOS: s(63),
+		TimeLimitMinutes: 2147483647, LimitSource: hpcv1alpha1.PlacementTimeoutRetry, LimitSamples: 2147483647,
+		IdleTimeoutMinutes: 2147483647, Attempt: 2147483647, SiteJobID: s(63), HostSiteJobID: s(63),
+		CreatedAt: ts, StartTime: &ts, EndTime: &ts,
+		BookedNodeMinutes: 9223372036854775807, SettledNodeMinutes: 9223372036854775807,
+	}
+}
+
+func TestRecentJobsStatusSizeStaysUnderBudget(t *testing.T) {
+	// A typical entry: names of a 63-character label, a one-sentence message.
+	typical := func(i int) hpcv1alpha1.HPCArgoWorkflowJob {
+		j := recentJob(fmt.Sprintf("%s-%03d", strings.Repeat("x", 55), i), time.Duration(i+1)*time.Minute, hpcv1alpha1.PhaseFailed)
+		j.Spec.StepName = strings.Repeat("s", 63)
+		j.Spec.Workflow = &hpcv1alpha1.WorkflowRef{Name: strings.Repeat("w", 63), UID: "u"}
+		j.Status.Message = strings.Repeat("m", 200)
+		return j
+	}
+	cases := []struct {
+		name      string
+		entry     func(int) hpcv1alpha1.RecentJob
+		wantCount int // 0: only the byte bound is asserted
+	}{
+		{"should_keep_300_typical_entries_under_256KiB", func(i int) hpcv1alpha1.RecentJob {
+			j := typical(i)
+			return recentJobOf(&j, recentT0)
+		}, hpcv1alpha1.RecentJobsMax},
+		{"should_cut_worst_case_entries_to_fit_256KiB", worstCaseRecentJob, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			list := make([]hpcv1alpha1.RecentJob, 0, hpcv1alpha1.RecentJobsMax)
+			for i := range hpcv1alpha1.RecentJobsMax {
+				list = append(list, c.entry(i))
+			}
+			raw, _ := json.Marshal(list)
+			t.Logf("uncapped: %d bytes per entry, %d bytes for %d entries", len(raw)/len(list), len(raw), len(list))
+			got := capRecentBytes(list)
+			capped, _ := json.Marshal(got)
+			t.Logf("capped: %d entries, %d bytes", len(got), len(capped))
+			if len(capped) > hpcv1alpha1.RecentJobsMaxBytes {
+				t.Fatalf("%d bytes over the %d budget", len(capped), hpcv1alpha1.RecentJobsMaxBytes)
+			}
+			if c.wantCount != 0 && len(got) != c.wantCount {
+				t.Fatalf("got %d entries, want %d", len(got), c.wantCount)
 			}
 		})
 	}
