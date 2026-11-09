@@ -97,3 +97,21 @@ func (p *testPKI) write(dir string) error {
 	}
 	return nil
 }
+
+// loadTestPKI reads the files write produced (or an equivalent made by openssl) from dir.
+func loadTestPKI(dir string) (*testPKI, error) {
+	read := func(name string) ([]byte, error) { return os.ReadFile(filepath.Join(dir, name)) }
+	ca, err := read("ca.crt")
+	if err != nil {
+		return nil, err
+	}
+	cert, err := read("tls.crt")
+	if err != nil {
+		return nil, err
+	}
+	key, err := read("tls.key")
+	if err != nil {
+		return nil, err
+	}
+	return &testPKI{caPEM: ca, certPEM: cert, keyPEM: key}, nil
+}

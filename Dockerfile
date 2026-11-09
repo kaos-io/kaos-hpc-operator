@@ -40,6 +40,9 @@ RUN apk upgrade --no-cache && apk add --no-cache openssh-client ca-certificates 
               /usr/local/lib/python3.13/site-packages/pkg_resources /usr/local/lib/python3.13/site-packages/_distutils_hack \
               /usr/local/bin/pip* /usr/local/bin/wheel \
     && addgroup -g 65532 -S kaos && adduser -u 65532 -S -G kaos -h /tmp kaos
+# Private CAs for a site whose scheduler API certificate no public CA signed (certs/README.md).
+COPY certs/ /usr/local/share/ca-certificates/
+RUN update-ca-certificates
 WORKDIR /
 COPY --chmod=0555 --from=builder /workspace/manager /manager
 COPY --chmod=0555 --from=builder /workspace/follower /follower

@@ -57,6 +57,11 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(os.RemoveAll, dir)
 
+	if os.Getenv("E2E_IMAGE") != "" {
+		useExternalImages()
+		return
+	}
+
 	By("making the test CA and the fake site's certificate")
 	pki, err = newTestPKI(fakeSlurmHost)
 	Expect(err).NotTo(HaveOccurred())
@@ -83,3 +88,14 @@ var _ = BeforeSuite(func() {
 		ExpectWithOffset(1, utils.LoadImageToKindClusterWithName(img)).To(Succeed(), "Failed to load %s into Kind", img)
 	}
 })
+
+// useExternalImages takes the images and the fake site's PKI a CI run prepared (make test-e2e-cluster):
+// nothing is built here and nothing is loaded into Kind.
+func useExternalImages() {
+	projectImage = os.Getenv("E2E_IMAGE")
+	fakeSlurmImage = os.Getenv("E2E_FAKESLURM_IMAGE")
+	Expect(fakeSlurmImage).NotTo(BeEmpty(), "E2E_FAKESLURM_IMAGE must be set with E2E_IMAGE")
+	var err error
+	pki, err = loadTestPKI(os.Getenv("E2E_PKI_DIR"))
+	Expect(err).NotTo(HaveOccurred(), "E2E_PKI_DIR must hold ca.crt, tls.crt and tls.key")
+}
