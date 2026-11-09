@@ -272,6 +272,33 @@ helm install kaos-hpc-operator dist/chart -n kaos-hpc-system --create-namespace 
   --set controllerManager.container.image.repository=<registry>/kaos-hpc-operator
 ```
 
+### Standalone: no KAOS needed
+
+The controller imports no KAOS internals and the chart assumes none (PRD-HPC-1461 AC-41). It installs
+into a plain Kubernetes cluster: no KAOS CRDs, no Crossplane, no cert-manager, no Argo Workflows (the
+Workflow of a job is read only when `spec.workflow` names one). Every chart value has a neutral default;
+the one required value is the image repository. What a KAOS install renders around the controller you
+supply yourself in a standalone cluster, per project:
+
+| object | where | purpose |
+|---|---|---|
+| two namespaces labelled `hpc.kaos.io/project: <name>` | cluster | the job's namespace and the project's HPC namespace |
+| `HPCSite` | HPC namespace, same label | the site (an `https://` slurmrestd endpoint), classes, identity, budget |
+| ServiceAccount `hpc-runner`, ConfigMap `hpc-runner-config`, Secrets `meluxina-jwt` (key `token`) and `mlflow-svc` (key `ZITADEL_MACHINE_KEY`) | HPC namespace | what the runner Job of a served job mounts |
+| RoleBinding of `hpcargoworkflowjob-runner-role` to `hpc-runner` | job namespace | lets the runner read the job and report its site job |
+
+If the site's certificate is not signed by a public CA, put its CA (`*.crt`) in `certs/` before building the
+image: it is added to the trust store at build time (the runner Jobs run the same image).
+
+`make test-e2e` proves it on a plain Kind cluster: it installs this chart with Helm, runs the fake Slurm
+site of the scale test (`test/fakeslurmd`) as a Deployment, creates an `HPCSite` and a served
+`HPCArgoWorkflowJob`, and asserts the job reaches `Succeeded` through a real runner Job. It needs Docker,
+Kind, kubectl and helm. CI (Argo, no Docker) runs the same suite with prebuilt images against a vcluster:
+`make test-e2e-cluster` (see the Makefile for `E2E_IMAGE`, `E2E_FAKESLURM_IMAGE`, `E2E_PKI_DIR`). `go test ./test/importrule` (part of `make test`, so of the Argo
+`kaos-hpc-operator-validate` and `-build` workflows) fails when any package, test or harness of the module
+imports a KAOS-internal module (`novelcore/...`, `github.com/novelcore/...`, any other
+`github.com/kaos-io/...` module).
+
 The chart also installs `hpcargoworkflowjob-submitter-role`: bind it to the service account of
 the workflow steps that run on HPC, in each namespace whose workflows may use it.
 

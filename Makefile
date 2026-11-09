@@ -93,6 +93,14 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v
 	$(MAKE) cleanup-test-e2e
 
+# The same suite against the cluster KUBECONFIG points at, with images that are already built and
+# pushed (no Docker, no Kind): E2E_IMAGE (controller and runner, trusting the fake site's CA),
+# E2E_FAKESLURM_IMAGE (test/fakeslurmd) and E2E_PKI_DIR (ca.crt, tls.crt, tls.key of the fake site).
+# CI runs it against a vcluster (kubetools/system/argo-workflows/ci, kaos-hpc-operator-ci).
+.PHONY: test-e2e-cluster
+test-e2e-cluster: ## Run the e2e suite against the current cluster with prebuilt images (CI).
+	go test ./test/e2e/ -v -ginkgo.v -timeout 30m
+
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
