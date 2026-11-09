@@ -1,8 +1,8 @@
 # kaos-hpc runner
 
 The controller-owned runner of one attempt of an `HPCArgoWorkflowJob` (PRD-HPC-1461 phase 1, D-58/D-64/D-65).
-It is the proven in-pod MeluXina waiter (hera-pipeline-template `kubecore/meluxina.py`, dev be9e52b) without its
-admission client: it submits the Slurm job (or re-attaches to the one a previous runner of this attempt submitted),
+It is the proven in-pod waiter of the KAOS pipeline template (one optional integration; `kubecore/meluxina.py`, dev be9e52b),
+moved under the controller and without its admission client: it submits the Slurm job (or re-attaches to the one a previous runner of this attempt submitted),
 stages dataset and image through the login-node stager, follows the site job to its end (its state comes from the
 controller's `status.siteObservation`, D-36; the runner asks the site itself only when that is missing or stale), streams the job log, reports to the job's
 status and exits 0. A continuation is the controller's decision, so a new attempt is a new runner Job.
@@ -32,10 +32,30 @@ Env (controller): `HPC_JOB_NAMESPACE`, `HPC_JOB_NAME`, `KAOS_ATTEMPT`, `KAOS_RES
 `HPC_RESUMABLE_LEAD`, `STEP_OUTPUTS`, `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `KUBECORE_WORKFLOW_NAME`, `KUBECORE_RUN_ID`,
 `DATASET`, `HPC_SHARING` (`on`/`1`) + `HPC_SCOPE`, allowlisted `OUTPUTS_REPO`/`OUTPUTS_REF`/`CHECKPOINT_*`/
 `KAOS_LIB_SUPPORT`, site: `HPC_ACCOUNT`, `HPC_USER`, `HPC_SCRATCH`, `HPC_HOME`, `HPC_CLASSES_JSON`, `HPC_ENDPOINT`,
-`HPC_REST_VERSION`, optional `HPC_SITE_WAIT_MAX_S` (how long an unreachable site is waited for, default 1800; the controller's `--site-outage-max`), `HPC_LOGIN_HOST` (`host:port`, default login.lxp.lu:8822), `SLURM_TOKEN` (fallback),
+`HPC_REST_VERSION`, the lane the controller chose (`HPC_QOS`, `HPC_RESERVATION`, `HPC_QOS_MAX_MINUTES`), the idle window
+(`HPC_IDLE_TIMEOUT_MINUTES`, 0 = off, default 20), the site's per-user submit cap when the profile has one
+(`HPC_MAX_SUBMIT_JOBS`), optional `HPC_SITE_WAIT_MAX_S` (how long an unreachable site is waited for, default 1800; the controller's `--site-outage-max`), `HPC_LOGIN_HOST` (`host:port`, default login.lxp.lu:8822), `SLURM_TOKEN` (fallback),
 and the ConfigMap: `ZITADEL_DOMAIN`, `ZITADEL_MLFLOW_PROJECT_ID`, `MLFLOW_EXTERNAL_URL`, `LAKEFS_EXTERNAL_URL`.
 Files: `/etc/meluxina-jwt/token`, `/etc/meluxina-staging/{id_ed25519,known_hosts}`,
 `/etc/mlflow-svc/ZITADEL_MACHINE_KEY` (or `ZITADEL_MACHINE_KEY_FILE`), the pod ServiceAccount token.
+
+## Exit codes
+
+The job script and the runner reserve these codes; the controller turns them into the reasons in
+[docs/reasons.md](../docs/reasons.md).
+
+| Code | Who | Meaning | Job ends |
+|---|---|---|---|
+| 85 | the step | saved a checkpoint, continue me (the wall-time signal arrived) | continues from the newest verified copy, else `Timeout` (checkpoint missing) / `NotResumable` |
+| 210 | job script | no `apptainer` after loading the module | `SiteFAILED` |
+| 231 | job script | the image could not be pulled (the registry token expires while queued: the runner resubmits with a fresh one, bounded) | `SiteFAILED` |
+| 232 | job script | in-job dataset staging failed (never run without the data) | `SiteFAILED` |
+| 233 | job script | the batch script could not be written for the slot manager | `SiteFAILED` |
+| 234 | job script | no verified checkpoint copy to restore | `SiteFAILED` |
+| 235 | job script | the final checkpoint copy or the job comment could not be written and verified | `SiteFAILED` |
+| 236 | job script | the idle watchdog ended the step | `Idle` |
+| 237 | runner | staging does not fit the project's scratch quota (reported FAILED, no site job) | `InsufficientQuota` |
+| 238 | runner | the site refused the submit for its per-user cap (reported FAILED, no site job; the message has the cap and the count read from the site) | `SubmitLimit` |
 
 ## The site job's name, adopt, and a site that does not answer
 The site job is named `kaos-[<scope>-]<workflow uid>-<step>-<first 8 of the HPC job id>-a<attempt>`. A job script rewrites

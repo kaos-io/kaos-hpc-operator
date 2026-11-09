@@ -6,4 +6,10 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: hpcargoworkflowjob-sample
 spec:
-  # TODO(user): Add fields here
+  # In practice a pipeline step creates this object; the namespace carries the hpc.kaos.io/project label.
+  class: example-gpu
+  image: registry.example.org/team/train:v1
+  command: [python, train.py]
+  wallTimeMinutes: 120
+  stepName: train
+  workflow: {name: wf-1, uid: 5b0c3e5e-0000-4000-8000-000000000000}

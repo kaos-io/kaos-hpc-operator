@@ -140,8 +140,9 @@ type SiteReservation struct {
 	EndTime *metav1.Time `json:"endTime,omitempty"`
 }
 
-// SiteProfile is the site part of an HPCSite, rendered from the KAOS-curated profile (F-03, D-47).
-// Tenants never set it.
+// SiteProfile is the site part of an HPCSite: what the operator needs to reach and understand the site. It is
+// rendered by the platform that integrates the operator (in KAOS, from its curated site profile), never set by a
+// tenant (F-03, D-47).
 type SiteProfile struct {
 	// Transport to the scheduler.
 	// +kubebuilder:default=slurmrestd
@@ -218,8 +219,8 @@ const (
 // Budget is the project's node-hours per tier: a fixed share per period (D-10, D-11), or what
 // the site reports is left on the project's account (source site, D-56).
 type Budget struct {
-	// Source: share (default) or site. With site, GPUNodeHours and CPUNodeHours are what the
-	// site reported left at ObservedAt; the site's figure already counts every job that ran, so
+	// Source: share (default) or site. With site, the NodeHours figures (GPU, CPU, FPGA, large memory) are what
+	// the site reported left at ObservedAt; the site's figure already counts every job that ran, so
 	// only bookings and attempts that ended after ObservedAt are taken off it.
 	// +kubebuilder:default=share
 	// +optional
@@ -240,7 +241,8 @@ type Budget struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	GPUNodeHours int64 `json:"gpuNodeHours,omitempty"`
-	// CPUNodeHours per period.
+	// CPUNodeHours per period (source share) or left on the account (source site). Zero means the project
+	// may not spend CPU node-hours.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	CPUNodeHours int64 `json:"cpuNodeHours,omitempty"`
@@ -259,7 +261,9 @@ type Budget struct {
 	// +kubebuilder:default=block
 	// +optional
 	AtLimit AtLimitPolicy `json:"atLimit,omitempty"`
-	// WarnAtPercent of the share raises an alert (D-13).
+	// WarnAtPercent is the percentage of what the project may spend this month (used plus booked, over used
+	// plus the lower of share left and site left) at which the BudgetWarning condition, event and metric are
+	// raised for an allocation. Raised whatever AtLimit says; AtLimit decides only what happens at the limit.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	// +kubebuilder:default=80
@@ -269,11 +273,11 @@ type Budget struct {
 
 // SiteLeft is the site's remaining node-hours per tier, as the site reported at ObservedAt.
 type SiteLeft struct {
-	// GPUNodeHours left on the account.
+	// GPUNodeHours left on the account. Omitted means 0 left: a spent allocation.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	GPUNodeHours int64 `json:"gpuNodeHours,omitempty"`
-	// CPUNodeHours left on the account.
+	// CPUNodeHours left on the account. Omitted means 0 left: a spent allocation.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	CPUNodeHours int64 `json:"cpuNodeHours,omitempty"`
@@ -309,17 +313,17 @@ type Limits struct {
 	CheckpointBudgetPercent int32 `json:"checkpointBudgetPercent,omitempty"`
 }
 
-// HPCSiteSpec is one KAOS project's whole specification for one site (D-47).
+// HPCSiteSpec is one project's whole specification for one site (D-47).
 // +kubebuilder:validation:XValidation:rule="self.site == oldSelf.site",message="site is immutable"
 type HPCSiteSpec struct {
 	// Site is the site profile name, for example meluxina.
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Site string `json:"site"`
-	// Profile is the site part, rendered from the KAOS-curated profile.
+	// Profile is the site part, rendered by the integrating platform.
 	Profile SiteProfile `json:"profile"`
 	// Identity is the project identity on the site.
 	Identity ProjectIdentity `json:"identity"`
-	// Budget is the project's share of the org allocation.
+	// Budget is what the project may spend on this site, one figure per allocation (gpu, cpu, fpga, largemem).
 	Budget Budget `json:"budget"`
 	// Limits are the project's central job limits.
 	// +optional
@@ -479,7 +483,7 @@ type HPCSiteStatus struct {
 	// already counts everything that ended before it, so only later attempts are added.
 	// +optional
 	CountedFrom *metav1.Time `json:"countedFrom,omitempty"`
-	// GPU and CPU ledgers.
+	// GPU and CPU ledgers, one per allocation (see TierLedger).
 	// +optional
 	GPU *TierLedger `json:"gpu,omitempty"`
 	// +optional
@@ -535,9 +539,10 @@ type CheckpointUsage struct {
 // +kubebuilder:printcolumn:name="GPU left min",type=integer,JSONPath=`.status.gpu.leftNodeMinutes`
 // +kubebuilder:printcolumn:name="Active",type=integer,JSONPath=`.status.activeJobs`
 
-// HPCSite is one KAOS project's specification for one HPC site: the site part from the KAOS
-// profile and the tenant part (identity, budget share, policy, limits, classes). Owned by the
-// KubeProject and rendered by kubecore-operator (PRD-HPC-1461 D-47).
+// HPCSite is one project's specification for one HPC (Slurm) site: the site part (endpoint, classes) and the
+// tenant part (identity, budget, at-limit policy, limits). It is the only object admission reads for a project's
+// budget, and its status holds the project's ledger. It is rendered by the platform that integrates the operator
+// (in KAOS: by kubecore-operator, owned by the KubeProject; PRD-HPC-1461 D-47).
 type HPCSite struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

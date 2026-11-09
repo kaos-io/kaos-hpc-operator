@@ -4,12 +4,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// OperationKind is a KAOS operation on a site (D-17, D-31).
+// OperationKind is an operation on a site (D-17, D-31).
 // +kubebuilder:validation:Enum=Stage;CacheCheck;Cleanup;QuotaRead
 type OperationKind string
 
-// HPCOperationSpec is one KAOS operation on a site. The controller creates it, named by a hash of
-// its content, so every trigger of the same work converges on one object (D-31).
+// HPCOperationSpec is one operation on a site. By design it is named by a hash of its content, so every
+// trigger of the same work converges on one object (D-31).
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 type HPCOperationSpec struct {
 	Kind OperationKind `json:"kind"`
@@ -39,8 +39,9 @@ type HPCOperationStatus struct {
 // +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.spec.kind`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 
-// HPCOperation is a KAOS operation on a site: staging, cache check, cleanup or quota reading
-// (PRD-HPC-1461 D-17, D-31). Created only by the controller, never by pipelines.
+// HPCOperation is an operation on a site: staging, cache check, cleanup or quota reading (PRD-HPC-1461 D-17,
+// D-31). The CRD is installed, but no controller in this repository creates or reconciles it yet: the runner
+// stages and cleans up inside its own job, and the quota is read by the project's snapshot job.
 type HPCOperation struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

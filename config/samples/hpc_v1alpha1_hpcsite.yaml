@@ -6,4 +6,25 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: hpcsite-sample
 spec:
-  # TODO(user): Add fields here
+  site: example-site
+  profile:
+    transport: slurmrestd
+    endpoint: https://slurm-api.example.org
+    restVersion: v0.0.44
+    scratchRoot: /scratch/projects/p200000
+    maxSubmitJobs: 100        # the site's per-user cap on queued plus running jobs (optional)
+    classes:
+      - {name: example-gpu, partition: gpu, tier: gpu, gpus: 4, maxWallTimeMinutes: 2880}
+      - {name: example-cpu, partition: cpu, tier: cpu, maxWallTimeMinutes: 2880}
+  identity:
+    user: u100001
+    account: p200000
+    sshKeySecretRef: {name: site-ssh-key, key: id_ed25519}
+  budget:
+    source: share             # or "site": what the site reports left on the account
+    gpuNodeHours: 500         # one figure per allocation: gpu, cpu, fpga, largemem
+    cpuNodeHours: 200
+    atLimit: block
+    warnAtPercent: 80
+  limits:
+    maxConcurrentJobs: 8

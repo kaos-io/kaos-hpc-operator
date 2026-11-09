@@ -12,18 +12,29 @@ The operator decides what a tenant can decide:
 
 The site's own scheduler still decides when and where a job starts.
 
+Admission, the ledger, settlement, continuation and the site handling need only a Kubernetes cluster, Argo Workflows (a
+step creates the job; the operator reads the Workflow to know when to cancel) and an HPC site with a Slurm REST API
+(`slurmrestd`) that the project has an account on. MeluXina is the site it is proven on; the examples below name it only
+as an example. The runner's data plane (dataset staging from a lakeFS-style store, a Zitadel-minted data-plane token,
+MLflow, the login-node stager) and the objects around it (who renders the `HPCSite`, binds the roles, provides the
+Secrets) are today provided by KAOS, the platform this operator was written for; KAOS is one optional integration,
+described in [KAOS integration](#kaos-integration-optional). Installing without KAOS is not yet a documented path.
+The identifiers `PRD-HPC-1461`, `D-nn`, `AC-nn`, `F-nn` and `T-nn` in this repository's comments and docs point to the
+requirements document of that integration; they are traceability labels and nothing here depends on reading them.
+
 ## API (`hpc.kaos.io/v1alpha1`)
 
 | Kind | What it is |
 |---|---|
-| `HPCArgoWorkflowJob` | One Argo Workflow step on a site: class, image, command, wall time. Created by the step, which supplies the platform and run inputs, so it does not run on its own; the operator admits, books and settles it. (`HPCJob` is kept for a future kind that runs without a workflow.) |
-| `HPCSite` | One project's whole specification for one site: the site profile (endpoint, classes), the project identity, the budget share, the limits and the at-limit policy. Its status holds the project's ledger |
-| `HPCAllocation` | An organisation's node-hours on one site and account, from which project shares are carved |
-| `HPCOperation` | A site operation the operator runs itself (staging, cache check, cleanup) |
+| `HPCArgoWorkflowJob` | One Argo Workflow step on a site: class, image, command, wall time. Created by the step, which supplies the platform and run inputs, so it does not run on its own; the operator admits, books and settles it |
+| `HPCSite` | One project's whole specification for one site: the site profile (endpoint, classes, `maxSubmitJobs`), the project identity, the budget (one figure per allocation: gpu, cpu, fpga, largemem), the limits and the at-limit policy. Its status holds the project's ledger (`status.gpu`, `cpu`, `fpga`, `largeMem`) |
+| `HPCAllocation` | An organisation's node-hours on one site and account. **Installed but not reconciled**: nothing in this repository reads or writes it, and admission uses each project's `HPCSite` budget only |
+| `HPCOperation` | A site operation (staging, cache check, cleanup, quota read). **Installed but not reconciled yet**: no controller here creates it; the runner stages and cleans up inside its own job, and the scratch quota is read by whatever patches `HPCSite.status.storage` |
 
 A job never names its project or its site. The operator reads the project from the
 `hpc.kaos.io/project` label of the job's namespace, then picks the project's `HPCSite` that offers
-the job's class.
+the job's class. Every `Reason` the operator writes, what it means and what the user sees is in
+[docs/reasons.md](docs/reasons.md).
 
 ## Admission (phase 0)
 
@@ -32,13 +43,13 @@ the job's class.
 | `Admitted` | It fits the share. Nodes × wall time is booked |
 | `Waiting` / `WaitingForBudget` | It fits only once running jobs settle |
 | `Waiting` / `ConcurrencyLimit` | The project is at its job limit. The job waits; it is never refused for this |
-| `Refused` / `SubmitLimit` | The site caps a user's queued plus running jobs (Slurm `MaxSubmitJobs`, per-user submit limit; `HPCSite.spec.profile.maxSubmitJobs`) and the project's own jobs already fill it. The job **fails** at once, never waits (unlike `ConcurrencyLimit`), with the cap and the current count in the message; resubmit once some jobs finish. When the site itself refuses a submit (`QOSMaxSubmitJobPerUserLimit`, `AssocMaxSubmitJobLimit`, ...), the runner reports exit code 238 and the job ends `Failed` / `SubmitLimit` with the cap and the count it read from the site. Platform site operations (site jobs, staging, cancel) are not judged by KAOS admission and still submit |
+| `Refused` / `SubmitLimit` | The site caps a user's queued plus running jobs (Slurm `MaxSubmitJobs`, per-user submit limit; `HPCSite.spec.profile.maxSubmitJobs`) and the project's own site jobs (guests on a shared node hold no Slurm job and are not counted) already fill it. It is checked after the concurrency limit, so a lower `maxConcurrentJobs` still makes the job wait. The job **fails** at once, never waits (unlike `ConcurrencyLimit`), with the cap and the current count in the message; resubmit once some jobs finish. When the site itself refuses a submit (`QOSMaxSubmitJobPerUserLimit`, `AssocMaxSubmitJobLimit`, ...), the runner reports exit code 238 and the job ends `Failed` / `SubmitLimit` with the cap and the count it read from the site. Platform site operations (site jobs, staging, cancel) are not judged by KAOS admission and still submit |
 | `Refused` / `BudgetBlocked` | It can never fit this period within the project's own share (policy `block`; `warn` admits it and raises `OverShare`) |
 | `Refused` / `SiteLimit` | It can never fit this period because the site's own monthly limit on the account is what runs out (same policy rule). A submitted job queued behind that limit (Slurm `AssocGrp...Minutes`) shows `SiteLimit` as well |
 | `Failed` / `InsufficientQuota` | Staging the dataset or image would exceed the project's scratch quota (space or files) even after evicting everything unused: the runner stops before any copy and submits nothing |
 | `Refused` / `TooLongNotResumable` | The declared limit is above the longest run the class or site allows (2 days on MeluXina `default`) and the step is not resumable (declared or verified, D-74), so it would be cut. The message gives the declared limit, the maximum and the two fixes: make it resumable or shorten it. Never cut silently |
 | `Refused` / `TooLongBeyondContinuations` | The step is resumable, but its declared limit needs more runs than the continuation cap allows (cap 5: 6 runs, 12 days on MeluXina `default`) |
-| `Refused` / `MultiNodeUnsupported`, `WallTimeOverLimit` (the limit is unknown), `ClassNotAllowed`, `NoProject`, `NoSite` | It can never run as asked |
+| `Refused` / `MultiNodeUnsupported`, `WallTimeOverLimit` (the class's limit is unknown), `ClassNotAllowed`, `NoProject`, `NoSite`, `InvalidSpec` (an `env` name outside the allowlist) | It can never run as asked |
 
 The ledger is derived from the jobs themselves every time, never kept as a counter, and admission
 runs one job at a time, so concurrent jobs never overbook. A job running as a guest on a node
@@ -98,8 +109,6 @@ Slurm job id; `gpu` is the position in the node's `nvidia-smi` list). The series
 the site job is no longer running, the job is terminal or deleted, so cardinality is bounded by the GPUs
 running now. After a runner restart the highest value starts over.
 
-See [docs/design.md](docs/design.md) for the full design.
-
 ## Serve mode (phase 1, PRD-HPC-1461 D-58, D-64)
 
 An `HPCArgoWorkflowJob` with `spec.stepName` set is *served*: after admission the controller runs it
@@ -153,21 +162,41 @@ The ledger (`HPCSite.status`: used, booked, left, recent jobs) is written at mos
 `--ledger-publish-interval` (default 1 s) and site; a change inside the interval is written when it has passed,
 and the last job to end publishes again once the cache shows its end.
 
-RBAC roles shipped by the chart (bound per namespace by kubecore-operator):
+RBAC roles shipped by the chart (bound per namespace by whoever integrates the operator; in KAOS, kubecore-operator):
 
 | ClusterRole | For | Verbs |
 |---|---|---|
 | `hpcargoworkflowjob-submitter-role` | pipeline service accounts (follower) | `hpcargoworkflowjobs`: create, delete, get, list, watch. **No status verbs.** |
 | `hpcargoworkflowjob-runner-role` | `hpc-runner` in each env namespace | `hpcargoworkflowjobs`: get; `/status`: get, patch |
 | `hpcargoworkflowjob-reporter-role` | **phase 0 only**: the in-pod runner's service account, next to the submitter role | `hpcargoworkflowjobs/status`: get, patch |
-| `meluxina-snapshot` (project's snapshot job, kubecore-operator) | the snapshot CronJob's service account in the HPC namespace | `hpcsites/status`: patch, of its own site only (`resourceNames`) |
+| `meluxina-snapshot` (KAOS: the project's snapshot job, created by kubecore-operator; not part of this chart) | the snapshot CronJob's service account in the HPC namespace | `hpcsites/status`: patch, of its own site only (`resourceNames`) |
 
 `HPCSite.status.storage` (project scratch quota: space and files used/limit, `byCategory` datasets, images, checkpoints, work, other, `observedAt`/`measuredAt`) is **not written by this controller**: the project's snapshot job patches it every 10 minutes from the site stager's `usage` report. The controller's status patches are merge patches of its own fields and leave it alone.
 
 Metrics (`:8443`, authn/authz-protected; the chart renders a `VMServiceScrape`, else a
 `ServiceMonitor`, when the API exists): `kaos_hpc_job_phase`, `kaos_hpc_job_queue_seconds`,
 `kaos_hpc_job_run_seconds`, `kaos_hpc_node_minutes_booked`, `kaos_hpc_node_minutes_settled`,
-`kaos_hpc_site_node_minutes`, `kaos_hpc_active_jobs`, `kaos_hpc_runner_restarts_total`, `kaos_hpc_site_up`.
+`kaos_hpc_site_node_minutes`, `kaos_hpc_active_jobs`, `kaos_hpc_runner_restarts_total`, `kaos_hpc_site_up`,
+`kaos_hpc_lane_placements_total{qos,reservation,fallback}` (`fallback="true"` counts lanes the site refused),
+`kaos_hpc_idle_kills_total{tier,project}` (HPC steps ended `Idle`), and the budget and GPU series described above
+(`kaos_hpc_budget_warning`, `kaos_hpc_budget_percent`, `kaos_hpc_job_gpu_utilization_percent`,
+`kaos_hpc_job_gpu_utilization_max_percent`). The in-cluster idle watchdog adds the two `kaos_k8s_idle_*` series below.
+
+Controller flags (chart `controllerManager.container.args`, `runnerImage`, `runner.scheduling`, `lanes`, `idleWatchdog`):
+
+| Flag | Default | What |
+|---|---|---|
+| `--runner-image` (`$RUNNER_IMAGE`) | the controller image | image of the runner Jobs (the chart sets it) |
+| `--runner-scheduling` (`$RUNNER_SCHEDULING`) | like the controller | JSON `{nodeSelector, tolerations, affinity}` for runner pods |
+| `--lane-candidates` (`$LANE_CANDIDATES`) | empty = lanes off | QoS and reservations tried in order for each attempt |
+| `--site-poll-interval` (`$SITE_POLL_INTERVAL`) | 30 s | the batched `jobs/state` read per HPCSite; `0` turns the poller off (runners poll themselves, and the site-outage handling needs it) |
+| `--site-rest-rate`, `--site-rest-burst` | 2/s, 5 | token bucket per site profile |
+| `--site-outage-max` | 30 min | how long a job waits for an unreachable site before `Failed/SiteUnavailable` |
+| `--site-missing-grace` | 15 min | how long a booked job survives its HPCSite or project label being gone |
+| `--sweep-give-up` | 6 h | how long the orphan sweep waits for the site to confirm a job ended before settling without proof |
+| `--ledger-publish-interval` | 1 s | shortest time between two writes of one HPCSite's status; `0` writes on every change |
+| `--idle-metrics-url` and `--idle-*` | off | the in-cluster GPU idle watchdog (below) |
+| `--leader-elect`, `--metrics-bind-address`, `--metrics-secure`, `--health-probe-bind-address` | off, `0`, true, `:8081` | the usual controller-runtime options (the chart passes `:8443` for metrics) |
 
 ## Interruptions and checkpoints (PRD-HPC-1461 D-74, D-75, D-76)
 
@@ -201,6 +230,23 @@ to patch the status of and delete Argo workflow pods that hold a GPU. Design, me
 interplay with the template's re-run: [internal/idlewatch/README.md](internal/idlewatch/README.md).
 Metrics: `kaos_k8s_idle_kills_total`, `kaos_k8s_idle_watchdog_errors_total`.
 
+## KAOS integration (optional)
+
+The controller's own logic (admission, ledger, settlement, continuation) does not depend on KAOS. When the operator runs
+inside KAOS:
+
+- `kubecore-operator` renders each project's `HPCSite` (site profile, identity, budget, limits) and labels the
+  project's environment and HPC namespaces `hpc.kaos.io/project`; tenants cannot set the label.
+- It binds the chart's `hpcargoworkflowjob-*` roles per namespace and runs the project's snapshot job that writes
+  `HPCSite.status.storage`. The `hpc-runner-config` ConfigMap and the `meluxina-jwt`, `meluxina-staging` and
+  `mlflow-svc` Secrets the runner Jobs mount are provided in the project's HPC namespace by the same integration;
+  this operator only reads them.
+- The pipeline template's `step(...)` creates the `HPCArgoWorkflowJob` through the follower; `resumable`, `idle_timeout`
+  and the Argo `platform.kubecore.io/idle-timeout` annotation are its names for fields and settings documented here.
+- The budget figures of an `HPCSite` come from the project's KAOS configuration or from the site's own accounting
+  (`budget.source: site`); that rendering is the integrator's job, and a figure per allocation must be written (see
+  "One budget per allocation").
+
 ## Development
 
 ```sh
@@ -219,7 +265,7 @@ Apache License 2.0. See [LICENSE](LICENSE).
 
 ## Install
 
-The Helm chart is in `dist/chart` (CRDs, RBAC, the controller). Set the image you built:
+The Helm chart is in `dist/chart` (CRDs, RBAC, the controller; `values.yaml` is commented). Set the image you built:
 
 ```bash
 helm install kaos-hpc-operator dist/chart -n kaos-hpc-system --create-namespace \
@@ -229,6 +275,9 @@ helm install kaos-hpc-operator dist/chart -n kaos-hpc-system --create-namespace 
 The chart also installs `hpcargoworkflowjob-submitter-role`: bind it to the service account of
 the workflow steps that run on HPC, in each namespace whose workflows may use it.
 
-After an API change, regenerate the chart with `kubebuilder edit --plugins=helm/v1-alpha`;
-`make test` fails while the chart's CRDs or RBAC differ from `config/`.
+After an API change run `make generate manifests`: it regenerates the CRDs in `config/crd/bases` from the Go type
+comments (these comments are the field documentation `kubectl explain` shows) and `hack/sync-chart-crds.sh` copies
+them into `dist/chart/templates/crd`. RBAC rules are copied by hand from `config/rbac` into `dist/chart/templates/rbac`
+(the chart carries hand-written templates for the runner, lanes and idle watchdog, so it is edited in place and not
+regenerated). `make test` fails while the chart's CRDs or RBAC differ from `config/`.
 

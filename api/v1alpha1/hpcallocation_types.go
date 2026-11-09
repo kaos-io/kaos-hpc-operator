@@ -5,7 +5,8 @@ import (
 )
 
 // HPCAllocationSpec is an org's allocation on one site and account, per period (D-10, D-11).
-// Project shares are carved from it; the sum check runs on the hub (D-48).
+// A record for the integrating platform: this controller does not read it. Admission uses each project's
+// HPCSite budget only, and no sum of project shares against the allocation is checked here (D-48).
 type HPCAllocationSpec struct {
 	// Site profile name, for example meluxina.
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
@@ -21,7 +22,8 @@ type HPCAllocationSpec struct {
 	CPUNodeHours int64 `json:"cpuNodeHours,omitempty"`
 }
 
-// HPCAllocationStatus is the hub's view of what the org's projects were given.
+// HPCAllocationStatus is the integrating platform's view of what the org's projects were given. This controller
+// never writes it.
 type HPCAllocationStatus struct {
 	// SharedGPUNodeHours and SharedCPUNodeHours: the sum of the project shares.
 	// +optional
@@ -40,8 +42,8 @@ type HPCAllocationStatus struct {
 // +kubebuilder:printcolumn:name="Account",type=string,JSONPath=`.spec.account`
 // +kubebuilder:printcolumn:name="GPU h",type=integer,JSONPath=`.spec.gpuNodeHours`
 
-// HPCAllocation is an org's node-hours on one site and account (PRD-HPC-1461 F-08). It lives on
-// the hub, in the org namespace.
+// HPCAllocation is an org's node-hours on one site and account (PRD-HPC-1461 F-08). The CRD is installed, but no
+// controller in this repository reconciles it; it has no fpga or largemem figure (those exist on HPCSite only).
 type HPCAllocation struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
