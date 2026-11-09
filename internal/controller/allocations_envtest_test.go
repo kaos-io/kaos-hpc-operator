@@ -51,7 +51,7 @@ var _ = Describe("HPC per-allocation budgets", func() {
 				Identity: hpcv1alpha1.ProjectIdentity{User: "u1", Account: "p1", SSHKeySecretRef: hpcv1alpha1.SecretKeyRef{Name: "k", Key: "id"}},
 				// What the site reports left per allocation: CPU is spent (0), the rest have hours.
 				Budget: hpcv1alpha1.Budget{Source: hpcv1alpha1.BudgetSourceSite, ObservedAt: &obs,
-					GPUNodeHours: 10, CPUNodeHours: 0, FPGANodeHours: 5, LargeMemNodeHours: 5}}})).To(Succeed())
+					GPUNodeHours: 10, CPUNodeHours: 0, FPGANodeHours: i64p(5), LargeMemNodeHours: i64p(5)}}})).To(Succeed())
 	})
 
 	submit := func(class string, wall int32) *hpcv1alpha1.HPCArgoWorkflowJob {
@@ -131,3 +131,5 @@ func reconcileOnce(r *HPCArgoWorkflowJobReconciler, j *hpcv1alpha1.HPCArgoWorkfl
 	Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), got)).To(Succeed())
 	return got
 }
+
+func i64p(v int64) *int64 { return &v }

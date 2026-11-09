@@ -20,13 +20,14 @@ func allocSite(gpu, cpu, fpga, largemem int64) *hpcv1alpha1.HPCSite {
 			{Name: "fpga", Tier: hpcv1alpha1.TierFPGA, MaxWallTimeMinutes: 2880},
 			{Name: "largemem", Tier: hpcv1alpha1.TierLargeMem, MaxWallTimeMinutes: 2880},
 		}},
-		Budget: hpcv1alpha1.Budget{GPUNodeHours: gpu, CPUNodeHours: cpu, FPGANodeHours: fpga, LargeMemNodeHours: largemem}}}
+		Budget: hpcv1alpha1.Budget{GPUNodeHours: gpu, CPUNodeHours: cpu, FPGANodeHours: &fpga, LargeMemNodeHours: &largemem}}}
 }
 
 func allocLedger(s *hpcv1alpha1.HPCSite, booked map[hpcv1alpha1.Tier]int64) ledger.Ledger {
 	l := ledger.Ledger{PeriodStart: ledger.PeriodStart(time.Now()), Tiers: map[hpcv1alpha1.Tier]ledger.Tier{}}
 	for _, t := range hpcv1alpha1.Tiers {
-		l.Tiers[t] = ledger.Tier{Share: s.Spec.Budget.NodeHours(t) * 60, Booked: booked[t]}
+		hours, _ := s.Spec.Budget.NodeHours(t)
+		l.Tiers[t] = ledger.Tier{Share: hours * 60, Booked: booked[t]}
 	}
 	return l
 }
@@ -125,6 +126,36 @@ func TestDecideSiteLeftOmittedVersusExplicitZero(t *testing.T) {
 			left := c.left
 			left.ObservedAt = &obs
 			s.Spec.Budget.SiteLeft = &left
+			l := ledger.Compute(s, nil, nil, time.Now())
+			d := Decide(&hpcv1alpha1.HPCArgoWorkflowJob{Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: c.class, Image: "i", WallTimeMinutes: 60}}, s, l)
+			if d.Phase != c.phase || !strings.Contains(d.Message, c.inMsg) {
+				t.Fatalf("got %s/%s %q, want %s containing %q", d.Phase, d.Reason, d.Message, c.phase, c.inMsg)
+			}
+		})
+	}
+}
+
+// Source site, lab shape: budget has gpu and cpu figures only, and the classes include fpga and largemem.
+func TestDecideSourceSiteOmittedAllocationIsAdmittedExplicitZeroBlocked(t *testing.T) {
+	zero := int64(0)
+	cases := []struct {
+		name, class string
+		fpga        *int64
+		phase       hpcv1alpha1.Phase
+		inMsg       string
+	}{
+		{"should_admit_fpga_when_source_site_omits_it", "fpga", nil, hpcv1alpha1.PhaseAdmitted, ""},
+		{"should_admit_largemem_when_source_site_omits_it", "largemem", nil, hpcv1alpha1.PhaseAdmitted, ""},
+		{"should_block_fpga_naming_it_on_explicit_zero", "fpga", &zero, hpcv1alpha1.PhaseRefused, "FPGA allocation"},
+		{"should_block_cpu_at_zero_as_before", "cpu", nil, hpcv1alpha1.PhaseRefused, "CPU allocation"},
+		{"should_admit_gpu_with_hours", "gpu", nil, hpcv1alpha1.PhaseAdmitted, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := allocSite(10, 0, 0, 0)
+			obs := metav1.NewTime(time.Now().Add(-time.Hour))
+			s.Spec.Budget.Source, s.Spec.Budget.ObservedAt = hpcv1alpha1.BudgetSourceSite, &obs
+			s.Spec.Budget.FPGANodeHours, s.Spec.Budget.LargeMemNodeHours = c.fpga, nil
 			l := ledger.Compute(s, nil, nil, time.Now())
 			d := Decide(&hpcv1alpha1.HPCArgoWorkflowJob{Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: c.class, Image: "i", WallTimeMinutes: 60}}, s, l)
 			if d.Phase != c.phase || !strings.Contains(d.Message, c.inMsg) {

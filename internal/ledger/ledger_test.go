@@ -258,7 +258,7 @@ func TestComputeSettlesAndBoundsEachAllocationApart(t *testing.T) {
 	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 	obs := metav1.NewTime(now.Add(-time.Hour))
 	site := &hpcv1alpha1.HPCSite{Spec: hpcv1alpha1.HPCSiteSpec{Site: "m", Budget: hpcv1alpha1.Budget{
-		GPUNodeHours: 10, CPUNodeHours: 10, FPGANodeHours: 10, LargeMemNodeHours: 10,
+		GPUNodeHours: 10, CPUNodeHours: 10, FPGANodeHours: ptr(10), LargeMemNodeHours: ptr(10),
 		SiteLeft: &hpcv1alpha1.SiteLeft{GPUNodeHours: 10, CPUNodeHours: 0, FPGANodeHours: ptr(2), LargeMemNodeHours: nil, ObservedAt: &obs}}}}
 	site.Name, site.Namespace = "s", "ns"
 	jobs := make([]hpcv1alpha1.HPCArgoWorkflowJob, 0, len(hpcv1alpha1.Tiers))
@@ -297,7 +297,7 @@ func TestComputeOmittedSiteLeftAllocationIsNotBoundToZero(t *testing.T) {
 	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 	obs := metav1.NewTime(now.Add(-time.Hour))
 	site := &hpcv1alpha1.HPCSite{Spec: hpcv1alpha1.HPCSiteSpec{Budget: hpcv1alpha1.Budget{
-		GPUNodeHours: 10, FPGANodeHours: 10, LargeMemNodeHours: 10,
+		GPUNodeHours: 10, FPGANodeHours: ptr(10), LargeMemNodeHours: ptr(10),
 		SiteLeft: &hpcv1alpha1.SiteLeft{GPUNodeHours: 5, ObservedAt: &obs}}}}
 	l := Compute(site, nil, nil, now)
 	if tr := l.Tiers[hpcv1alpha1.TierFPGA]; tr.SiteBound || tr.Ceiling() != 600 {
@@ -310,5 +310,29 @@ func TestComputeOmittedSiteLeftAllocationIsNotBoundToZero(t *testing.T) {
 	l = Compute(site, nil, nil, now)
 	if tr := l.Tiers[hpcv1alpha1.TierLargeMem]; !tr.SiteBound || tr.Ceiling() != 0 {
 		t.Fatalf("explicit 0 is spent: %v %d", tr.SiteBound, tr.Ceiling())
+	}
+}
+
+// Source site: an omitted fpga/largemem figure is "no figure": unbounded, still settled; an explicit value bounds it.
+func TestComputeSourceSiteOmittedAllocationIsUnboundedButStillSettled(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	obs := metav1.NewTime(now.Add(-time.Hour))
+	site := &hpcv1alpha1.HPCSite{Spec: hpcv1alpha1.HPCSiteSpec{Budget: hpcv1alpha1.Budget{
+		Source: hpcv1alpha1.BudgetSourceSite, ObservedAt: &obs, GPUNodeHours: 10, CPUNodeHours: 0, LargeMemNodeHours: ptr(0)}}}
+	site.Name, site.Namespace = "s", "ns"
+	j := hpcv1alpha1.HPCArgoWorkflowJob{}
+	j.Status.Site = &hpcv1alpha1.SiteRef{Name: "s", Namespace: "ns"}
+	j.Status.Attempts = []hpcv1alpha1.AttemptRecord{{Attempt: 1, Tier: hpcv1alpha1.TierFPGA, SettledNodeMinutes: 25,
+		EndTime: metav1.NewTime(now.Add(-10 * time.Minute))}}
+	l := Compute(site, []hpcv1alpha1.HPCArgoWorkflowJob{j}, nil, now)
+	f := l.Tiers[hpcv1alpha1.TierFPGA]
+	if !f.Unbounded || f.Used != 25 || f.Left() <= 0 || f.Percent() != -1 {
+		t.Fatalf("fpga omitted: %+v", f)
+	}
+	if m := l.Tiers[hpcv1alpha1.TierLargeMem]; m.Unbounded || m.Left() != 0 {
+		t.Fatalf("largemem explicit 0 is bounded and spent: %+v", m)
+	}
+	if c := l.Tiers[hpcv1alpha1.TierCPU]; c.Unbounded || c.Left() != 0 {
+		t.Fatalf("cpu omitted stays 0 as before: %+v", c)
 	}
 }

@@ -244,16 +244,17 @@ type Budget struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	CPUNodeHours int64 `json:"cpuNodeHours,omitempty"`
-	// FPGANodeHours per period (source share) or left on the account (source site). Zero means the
-	// project may not spend FPGA node-hours (AC-84).
+	// FPGANodeHours per period (source share) or left on the account (source site). Source share: absent or
+	// zero means the project may not spend FPGA node-hours. Source site: absent means the site gave no figure
+	// (not bounded by the ledger, use is still recorded); an explicit value, 0 included, bounds it (AC-84).
 	// +kubebuilder:validation:Minimum=0
 	// +optional
-	FPGANodeHours int64 `json:"fpgaNodeHours,omitempty"`
-	// LargeMemNodeHours per period (source share) or left on the account (source site). Zero means the
-	// project may not spend large-memory node-hours (AC-84).
+	FPGANodeHours *int64 `json:"fpgaNodeHours,omitempty"`
+	// LargeMemNodeHours per period (source share) or left on the account (source site). Absent and zero mean
+	// what they do for FPGANodeHours.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
-	LargeMemNodeHours int64 `json:"largeMemNodeHours,omitempty"`
+	LargeMemNodeHours *int64 `json:"largeMemNodeHours,omitempty"`
 	// AtLimit: block (default) or warn (D-13).
 	// +kubebuilder:default=block
 	// +optional
@@ -340,6 +341,10 @@ type TierLedger struct {
 	BookedNodeMinutes int64 `json:"bookedNodeMinutes"`
 	// LeftNodeMinutes = share - used - booked, never below zero.
 	LeftNodeMinutes int64 `json:"leftNodeMinutes"`
+	// Unbounded is true when the site gave no figure for this allocation (source site, AC-84): nothing
+	// limits it here, so leftNodeMinutes is 0 and means nothing. Used and booked are still recorded.
+	// +optional
+	Unbounded bool `json:"unbounded,omitempty"`
 }
 
 // RecentJobsMax bounds HPCSiteStatus.RecentJobs. Each entry is a few hundred bytes, so the list
@@ -555,19 +560,28 @@ func init() {
 }
 
 // NodeHours is the budget's figure for one allocation: the share per period, or (source site) what the
-// site reported left. Zero for an unknown tier.
-func (b Budget) NodeHours(t Tier) int64 {
+// site reported left, and whether there is one. GPU and CPU always have one (an omitted 0 means no spend,
+// as before AC-84). FPGA and large memory have one when set; when omitted, source site means "no figure"
+// (false: the caller must not bound the tier) and source share means 0, no spend.
+func (b Budget) NodeHours(t Tier) (int64, bool) {
 	switch t {
 	case TierGPU:
-		return b.GPUNodeHours
+		return b.GPUNodeHours, true
 	case TierCPU:
-		return b.CPUNodeHours
+		return b.CPUNodeHours, true
 	case TierFPGA:
-		return b.FPGANodeHours
+		return optionalNodeHours(b.FPGANodeHours, b.Source)
 	case TierLargeMem:
-		return b.LargeMemNodeHours
+		return optionalNodeHours(b.LargeMemNodeHours, b.Source)
 	}
-	return 0
+	return 0, false
+}
+
+func optionalNodeHours(v *int64, src BudgetSource) (int64, bool) {
+	if v != nil {
+		return *v, true
+	}
+	return 0, src != BudgetSourceSite
 }
 
 // NodeHours is what the site reported left on the account for one allocation, and whether it gave a figure.
