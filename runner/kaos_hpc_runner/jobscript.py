@@ -178,6 +178,24 @@ def batch_lines(scope, scratch):
         # --nv only on GPU classes: on the cpu/largemem partitions there is
         # no driver to bind and the flag makes Apptainer warn or fail.
         'NV=""; [ "${HPC_GPUS:-0}" -gt 0 ] && NV="--nv"',
+        # PRD-HPC-1461 AC-57 / D-29: on a shared node (slot manager: KUBECORE_SLOT_SHARED=1) a step must not see
+        # a GPU outside its set. MeluXina has ConstrainDevices=no, so CUDA_VISIBLE_DEVICES only steers CUDA.
+        # Prevention: where Apptainer can use nvidia-container-cli (--nvccli, probed with a throw-away start,
+        # never assumed), bind only the step's own device files. Inside, they are numbered 0..G-1, so
+        # CUDA_VISIBLE_DEVICES is rewritten to match. Without it the slot manager's watchdog still stops a
+        # step that touches another GPU (reason GPUViolation).
+        'if [ -n "$NV" ] && [ "${KUBECORE_SLOT_SHARED:-0}" = 1 ] && [ -n "$CUDA_VISIBLE_DEVICES" ]'
+        ' && command -v nvidia-container-cli >/dev/null 2>&1; then',
+        '  export APPTAINERENV_NVIDIA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES',
+        '  KAOS_NGPU=$(echo "$CUDA_VISIBLE_DEVICES" | tr "," "\n" | grep -c .)',
+        '  export APPTAINERENV_CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((KAOS_NGPU - 1)))',
+        '  if apptainer exec --nv --nvccli "$SIF" true >/dev/null 2>&1; then NV="--nv --nvccli";'
+        ' echo "gpu fence: nvccli, only GPU(s) $CUDA_VISIBLE_DEVICES are visible to the step"',
+        '  else unset APPTAINERENV_NVIDIA_VISIBLE_DEVICES APPTAINERENV_CUDA_VISIBLE_DEVICES;'
+        ' echo "gpu fence: --nvccli unusable here, env steering and the slot watchdog only"; fi',
+        'elif [ -n "$NV" ] && [ "${KUBECORE_SLOT_SHARED:-0}" = 1 ]; then',
+        '  echo "gpu fence: no nvidia-container-cli, env steering and the slot watchdog only"',
+        'fi',
         '[ -n "$STEP_CMD" ] || STEP_CMD="nvidia-smi -L || nproc"',
         # PRD-HPC-1461 D-38/D-44: Slurm sends USR1 to this shell about 10 minutes
         # before the time limit. The step runs in its own process group (set -m), and

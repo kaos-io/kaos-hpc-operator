@@ -31,11 +31,20 @@ def _job(name, script_body, state="PENDING", comment="", limit="10:00", header=H
             "comment": comment, "script": header + script_body, "held": False}
 
 
+FAKE_NVIDIA_SMI = """#!/bin/bash
+case "$*" in
+  *--query-gpu=index,uuid*) for i in 0 1 2 3; do echo "$i, GPU-$i"; done;;
+  *--query-compute-apps*) cat "$OUT/gpuuse" 2>/dev/null;;
+esac
+exit 0
+"""
+
+
 class Node:
     """One MeluXina node with a fake Slurm and the slot manager as host job 100."""
 
     def __init__(self, tmp_path, guests, own_body="echo own $KAOS_JOB_ID $CUDA_VISIBLE_DEVICES > $OUT/own\nexit 0\n",
-                 mem_mb=491520, extra_env=None, host_secs=3600):
+                 mem_mb=491520, extra_env=None, host_secs=3600, gpu_smi=False):
         self.tmp = tmp_path
         self.out = tmp_path / "out"
         self.out.mkdir()
@@ -64,6 +73,9 @@ class Node:
                     "HPC_GPUS": "4", "KAOS_SCOPE": SCOPE, "KAOS_SCR": str(tmp_path / "scratch"),
                     "KAOS_IDLE_S": "1", "KAOS_POLL_S": "0.2", "OUT": str(self.out),
                     "HOST_SECRET": "the host's own token", "SLURM_EXPORT_ENV": "NONE", **(extra_env or {})}
+        if gpu_smi:   # a 4-GPU node's nvidia-smi: the compute contexts are the "uuid, pid" lines steps write to $OUT/gpuuse
+            (bindir / "nvidia-smi").write_text(FAKE_NVIDIA_SMI)
+            (bindir / "nvidia-smi").chmod(0o755)
         self.log = tmp_path / "host.log"
         self.proc = subprocess.Popen([sys.executable, str(slots), str(own)], env=self.env,
                                      stdout=open(self.log, "w"), stderr=subprocess.STDOUT)
@@ -353,3 +365,52 @@ def test_a_host_write_keeps_the_checkpoint_lease_and_copy_words_too(tmp_path):
     rc, log = node.finish()
     assert rc == 0, log
     assert node.jobs()["101"]["comment"] == "kaos-commit=bbbbbbb2 " + ck + " kaos-state=done rc=0 host=100"
+
+
+# ---------------------------------------------- AC-57 / D-29: a step stays on its own GPU
+
+# A step that computes on the GPU next to its own, like a script that ignores CUDA_VISIBLE_DEVICES.
+TRESPASS = ('echo "GPU-$(( (CUDA_VISIBLE_DEVICES + 1) % 4 )), $$" >> $OUT/gpuuse\nsleep 30\n')
+# A step that computes on its own GPU only, then ends.
+HONEST = 'echo "GPU-$CUDA_VISIBLE_DEVICES, $$" >> $OUT/gpuuse\nsleep 3\nexit 0\n'
+
+
+def test_a_step_on_a_gpu_outside_its_set_is_stopped_alone_with_gpuviolation(tmp_path):
+    guests = {"101": _job("kaos-%s-wf1-train" % SCOPE, TRESPASS, comment="kaos-commit=bbbbbbb2"),
+              "102": _job("kaos-%s-wf2-train" % SCOPE, HONEST, comment="kaos-commit=bbbbbbb3")}
+    node = Node(tmp_path, guests, gpu_smi=True)
+    rc, log = node.finish()
+    assert rc == 0, log
+    jobs = node.jobs()
+    assert "kaos-state=done" in jobs["101"]["comment"] and "reason=GPUViolation" in jobs["101"]["comment"], log
+    assert "rc=0" not in jobs["101"]["comment"] and "memkill" not in jobs["101"]["comment"]
+    assert jobs["102"]["comment"] == "kaos-commit=bbbbbbb3 kaos-state=done rc=0 host=100", "the neighbour ran on"
+    assert "outside its set" in log
+
+
+def test_a_step_on_its_own_gpu_only_is_left_alone(tmp_path):
+    guests = {"101": _job("kaos-%s-wf1-train" % SCOPE, HONEST, comment="kaos-commit=bbbbbbb2")}
+    node = Node(tmp_path, guests, gpu_smi=True)
+    rc, log = node.finish()
+    assert rc == 0, log
+    assert node.jobs()["101"]["comment"] == "kaos-commit=bbbbbbb2 kaos-state=done rc=0 host=100"
+    assert "outside its set" not in log
+
+
+def test_a_node_without_nvidia_smi_watches_nothing_and_stops_nothing(tmp_path):
+    guests = {"101": _job("kaos-%s-wf1-train" % SCOPE, "echo x > $OUT/gpuuse\nsleep 2\nexit 0\n",
+                          comment="kaos-commit=bbbbbbb2")}
+    node = Node(tmp_path, guests, extra_env={"PATH": str(tmp_path / "bin") + os.pathsep + "/usr/bin:/bin"})
+    rc, log = node.finish()
+    assert rc == 0, log
+    assert "GPUViolation" not in node.jobs()["101"]["comment"]
+
+
+def test_every_step_carries_the_gpu_set_slurm_gave_it(tmp_path):
+    guests = {"101": _job("kaos-%s-wf1-train" % SCOPE, 'echo "$KAOS_STEP_GPUS $CUDA_VISIBLE_DEVICES" > $OUT/101\nexit 0\n',
+                          comment="kaos-commit=bbbbbbb2")}
+    node = Node(tmp_path, guests)
+    rc, log = node.finish()
+    assert rc == 0, log
+    given, cuda = (node.out / "101").read_text().split()
+    assert given == cuda != ""

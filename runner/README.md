@@ -81,3 +81,17 @@ manifest; the runner's message says which of the two is unknown.
 
 Each lesson of the old in-pod waiter and the test that pins it: [docs/live-lessons.md](../docs/live-lessons.md)
 (PRD-HPC-1461 AC-11). A new live incident gets a test named after it, with the live job id, and a row there.
+
+## GPU isolation on a shared node (AC-57 / D-29)
+
+MeluXina has `ConstrainDevices=no`: a step's `CUDA_VISIBLE_DEVICES` steers CUDA but every GPU device file is
+still visible. On a shared node (`KUBECORE_SLOT_SHARED=1`) two layers keep a step on its own GPU(s):
+
+- **Prevention (`jobscript.py`).** If `nvidia-container-cli` exists and a throw-away `apptainer exec --nv --nvccli`
+  succeeds, the step runs with `--nv --nvccli`, `NVIDIA_VISIBLE_DEVICES` set to its GPUs and
+  `CUDA_VISIBLE_DEVICES` rewritten to `0..G-1` (the bound devices are renumbered). The job log says
+  `gpu fence: nvccli ...` or why not. Otherwise plain `--nv`.
+- **Detection (`payload/slots.py`).** The slot manager reads `nvidia-smi --query-compute-apps`, attributes each pid
+  to a step through `SLURM_STEP_ID` and its `KAOS_STEP_GPUS` (the set the step launcher stamped), and cancels a
+  step that computes on a GPU outside it. Only that step stops; its host comment gets `reason=GPUViolation`.
+  No `nvidia-smi` (CPU classes) or a step with no stamped set: nothing is judged.

@@ -107,12 +107,15 @@ def test_fetch_workdir_presents_the_token_only_to_gar_hosts__live_job_5140432(re
     assert reg.requests and all(r.get_header('Authorization') == 'Bearer tok' for r in reg.requests)
 
 
-def _exec_script(tmp_path, workdir, gpus):
+def _exec_script(tmp_path, workdir, gpus, extra_env=None, probe_ok=True):
     """The batch script's PWD_OPT/NV lines and the `apptainer exec`, run against a recording fake apptainer."""
     block = _span('PWD_OPT=""', 'apptainer exec') + ['wait']
-    _fake(tmp_path / 'bin', 'apptainer', 'echo "$@" > "$OUT"\n')
+    # The fence probe is `apptainer exec --nv --nvccli img.sif true`; the step's own exec records args and env.
+    _fake(tmp_path / 'bin', 'apptainer',
+          '[ "$*" = "exec --nv --nvccli img.sif true" ] && exit %d\n' % (0 if probe_ok else 1) +
+          'echo "$@" > "$OUT"; env | grep "^APPTAINERENV_" | sort >> "$OUT.env"\n')
     env = dict(os.environ, PATH=str(tmp_path / 'bin') + os.pathsep + os.environ['PATH'], OUT=str(tmp_path / 'args'),
-               SIF='img.sif', BIND='', STEP_CMD='true', STEP_WORKDIR=workdir)
+               SIF='img.sif', BIND='', STEP_CMD='true', STEP_WORKDIR=workdir, **(extra_env or {}))
     env.pop('HPC_GPUS', None)
     if gpus is not None:
         env['HPC_GPUS'] = str(gpus)
@@ -143,6 +146,45 @@ def test_nv_is_passed_on_gpu_classes_only__cpu_and_largemem_partitions(tmp_path,
     assert ('--nv' in args) is want_nv
     if want_nv:
         assert args.index('--nv') < args.index('img.sif')
+
+
+# ------------------------------------------------ AC-57 / D-29: a shared-node step sees only its own GPUs
+
+def _fenced(tmp_path, cuda, shared='1', cli=True, probe_ok=True):
+    if cli:
+        _fake(tmp_path / 'bin', 'nvidia-container-cli', 'exit 0\n')
+    env = {'KUBECORE_SLOT_SHARED': shared, 'CUDA_VISIBLE_DEVICES': cuda}
+    args = _exec_script(tmp_path, '', gpus=4, extra_env=env, probe_ok=probe_ok)
+    envf = tmp_path / 'args.env'
+    return args, (envf.read_text().split() if envf.exists() else [])
+
+
+def test_a_shared_step_gets_only_its_gpu_bound_and_renumbered_when_nvccli_works(tmp_path):
+    args, env = _fenced(tmp_path, '2')
+    assert args[:3] == ['exec', '--nv', '--nvccli']
+    assert env == ['APPTAINERENV_CUDA_VISIBLE_DEVICES=0', 'APPTAINERENV_NVIDIA_VISIBLE_DEVICES=2']
+
+
+def test_a_two_gpu_shared_step_sees_cuda_0_and_1(tmp_path):
+    args, env = _fenced(tmp_path, '1,3')
+    assert '--nvccli' in args
+    assert env == ['APPTAINERENV_CUDA_VISIBLE_DEVICES=0,1', 'APPTAINERENV_NVIDIA_VISIBLE_DEVICES=1,3']
+
+
+def test_a_step_falls_back_to_plain_nv_when_the_nvccli_probe_fails(tmp_path):
+    args, env = _fenced(tmp_path, '2', probe_ok=False)
+    assert '--nv' in args and '--nvccli' not in args
+    assert env == [], 'no renumbered devices without the fence: the slot manager watchdog is the guard'
+
+
+def test_a_step_falls_back_to_plain_nv_without_nvidia_container_cli(tmp_path):
+    args, env = _fenced(tmp_path, '2', cli=False)
+    assert '--nv' in args and '--nvccli' not in args and env == []
+
+
+def test_a_job_that_owns_its_node_is_not_fenced(tmp_path):
+    args, env = _fenced(tmp_path, '0', shared='0')
+    assert '--nv' in args and '--nvccli' not in args and env == []
 
 
 # ------------------------------------------------ Lmod: module load, exit 210 without apptainer
