@@ -648,6 +648,16 @@ func (in *HPCSiteStatus) DeepCopyInto(out *HPCSiteStatus) {
 		*out = new(TierLedger)
 		**out = **in
 	}
+	if in.FPGA != nil {
+		in, out := &in.FPGA, &out.FPGA
+		*out = new(TierLedger)
+		**out = **in
+	}
+	if in.LargeMem != nil {
+		in, out := &in.LargeMem, &out.LargeMem
+		*out = new(TierLedger)
+		**out = **in
+	}
 	if in.RecentJobs != nil {
 		in, out := &in.RecentJobs, &out.RecentJobs
 		*out = make([]RecentJob, len(*in))

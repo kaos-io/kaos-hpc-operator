@@ -251,3 +251,41 @@ func TestComputeCountsSiteJobsWithoutGuests(t *testing.T) {
 		t.Fatalf("active %d site jobs %d, want 4 and 3 (the guest holds no Slurm job)", l.Active, l.SiteJobs)
 	}
 }
+
+// AC-84: settlement is per allocation: an attempt's minutes count only in the tier it booked, and a
+// site-reported remainder bounds only its own allocation.
+func TestComputeSettlesAndBoundsEachAllocationApart(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	obs := metav1.NewTime(now.Add(-time.Hour))
+	site := &hpcv1alpha1.HPCSite{Spec: hpcv1alpha1.HPCSiteSpec{Site: "m", Budget: hpcv1alpha1.Budget{
+		GPUNodeHours: 10, CPUNodeHours: 10, FPGANodeHours: 10, LargeMemNodeHours: 10,
+		SiteLeft: &hpcv1alpha1.SiteLeft{GPUNodeHours: 10, CPUNodeHours: 0, FPGANodeHours: 2, LargeMemNodeHours: 10, ObservedAt: &obs}}}}
+	site.Name, site.Namespace = "s", "ns"
+	jobs := make([]hpcv1alpha1.HPCArgoWorkflowJob, 0, len(hpcv1alpha1.Tiers))
+	for i, tier := range hpcv1alpha1.Tiers {
+		j := hpcv1alpha1.HPCArgoWorkflowJob{}
+		j.UID = types.UID(string(rune('a' + i)))
+		j.Status.Booking = nil
+		j.Status.Site = &hpcv1alpha1.SiteRef{Name: "s", Namespace: "ns"}
+		j.Status.Attempts = []hpcv1alpha1.AttemptRecord{{Attempt: 1, Tier: tier, SettledNodeMinutes: int64(10 * (i + 1)),
+			EndTime: metav1.NewTime(now.Add(-10 * time.Minute))}}
+		jobs = append(jobs, j)
+	}
+	l := Compute(site, jobs, nil, now)
+	want := map[hpcv1alpha1.Tier]int64{hpcv1alpha1.TierGPU: 10, hpcv1alpha1.TierCPU: 20, hpcv1alpha1.TierFPGA: 30, hpcv1alpha1.TierLargeMem: 40}
+	for tier, used := range want {
+		if l.Tiers[tier].Used != used {
+			t.Fatalf("%s used %d, want %d", tier, l.Tiers[tier].Used, used)
+		}
+	}
+	// CPU: the site says 0 left: nothing may be spent. FPGA: 2 h = 120 less 30 ended since = 90.
+	if c := l.Tiers[hpcv1alpha1.TierCPU].Ceiling(); c != -20 {
+		t.Fatalf("cpu ceiling %d, want -20 (the site's 0 less 20 used)", c)
+	}
+	if c := l.Tiers[hpcv1alpha1.TierFPGA].Ceiling(); c != 90 {
+		t.Fatalf("fpga ceiling %d, want 90", c)
+	}
+	if c := l.Tiers[hpcv1alpha1.TierGPU].Ceiling(); c != 590 {
+		t.Fatalf("gpu ceiling %d, want min(600-10, 600-10)", c)
+	}
+}

@@ -154,10 +154,11 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 	if b := site.Spec.Budget; b.Source == hpcv1alpha1.BudgetSourceSite && b.ObservedAt != nil {
 		start = b.ObservedAt.UTC()
 	}
-	l := Ledger{PeriodStart: periodStart, CountedFrom: start, Tiers: map[hpcv1alpha1.Tier]Tier{
-		hpcv1alpha1.TierGPU: {Share: site.Spec.Budget.GPUNodeHours * 60, SiteSource: siteSource},
-		hpcv1alpha1.TierCPU: {Share: site.Spec.Budget.CPUNodeHours * 60, SiteSource: siteSource},
-	}}
+	// Every allocation has its own ledger (AC-84): a spent one never touches another.
+	l := Ledger{PeriodStart: periodStart, CountedFrom: start, Tiers: map[hpcv1alpha1.Tier]Tier{}}
+	for _, tier := range hpcv1alpha1.Tiers {
+		l.Tiers[tier] = Tier{Share: site.Spec.Budget.NodeHours(tier) * 60, SiteSource: siteSource}
+	}
 	// Source share with siteLeft: the site's remainder is an upper bound beside the share. It counts
 	// only when observed within this period, since what ended before the observation is already in
 	// the site's figure and a figure from last month says nothing about this one. Attempts that ended
@@ -167,8 +168,9 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 	if b := site.Spec.Budget; b.Source != hpcv1alpha1.BudgetSourceSite && b.SiteLeft != nil &&
 		b.SiteLeft.ObservedAt != nil && !b.SiteLeft.ObservedAt.UTC().Before(start) {
 		siteObserved = b.SiteLeft.ObservedAt.UTC()
-		l.Tiers[hpcv1alpha1.TierGPU] = withSiteBound(l.Tiers[hpcv1alpha1.TierGPU], b.SiteLeft.GPUNodeHours*60)
-		l.Tiers[hpcv1alpha1.TierCPU] = withSiteBound(l.Tiers[hpcv1alpha1.TierCPU], b.SiteLeft.CPUNodeHours*60)
+		for _, tier := range hpcv1alpha1.Tiers {
+			l.Tiers[tier] = withSiteBound(l.Tiers[tier], b.SiteLeft.NodeHours(tier)*60)
+		}
 	}
 	seen := map[string]bool{}
 	for i := range jobs {

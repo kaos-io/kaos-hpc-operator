@@ -4,14 +4,37 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Tier is the kind of node-hours a class spends. Sites meter GPU and CPU nodes separately.
-// +kubebuilder:validation:Enum=gpu;cpu
+// Tier is the kind of node-hours a class spends. Sites meter every allocation separately (MeluXina: Slurm
+// GrpTRESMins per partition, AssocGrp<TRES>Minutes when one is spent): GPU, CPU, FPGA and large memory
+// nodes each have their own budget (PRD-HPC-1461 AC-84).
+// +kubebuilder:validation:Enum=gpu;cpu;fpga;largemem
 type Tier string
 
 const (
-	TierGPU Tier = "gpu"
-	TierCPU Tier = "cpu"
+	TierGPU      Tier = "gpu"
+	TierCPU      Tier = "cpu"
+	TierFPGA     Tier = "fpga"
+	TierLargeMem Tier = "largemem"
 )
+
+// Tiers lists every allocation a project can have a budget for, in the order they are shown. Add a new
+// allocation here, in Budget.NodeHours, SiteLeft.NodeHours, HPCSiteStatus and its ledger accessors; nothing else enumerates them.
+var Tiers = []Tier{TierGPU, TierCPU, TierFPGA, TierLargeMem}
+
+// Label is the allocation's name in a sentence a person reads: "GPU", "CPU", "FPGA", "large memory".
+func (t Tier) Label() string {
+	switch t {
+	case TierGPU:
+		return "GPU"
+	case TierCPU:
+		return "CPU"
+	case TierFPGA:
+		return "FPGA"
+	case TierLargeMem:
+		return "large memory"
+	}
+	return string(t)
+}
 
 // Transport is how the controller reaches the site's scheduler (PRD-HPC-1461 D-35).
 // Only slurmrestd is built in v1alpha1; the others are reserved names.
@@ -221,6 +244,16 @@ type Budget struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	CPUNodeHours int64 `json:"cpuNodeHours,omitempty"`
+	// FPGANodeHours per period (source share) or left on the account (source site). Zero means the
+	// project may not spend FPGA node-hours (AC-84).
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	FPGANodeHours int64 `json:"fpgaNodeHours,omitempty"`
+	// LargeMemNodeHours per period (source share) or left on the account (source site). Zero means the
+	// project may not spend large-memory node-hours (AC-84).
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	LargeMemNodeHours int64 `json:"largeMemNodeHours,omitempty"`
 	// AtLimit: block (default) or warn (D-13).
 	// +kubebuilder:default=block
 	// +optional
@@ -243,6 +276,14 @@ type SiteLeft struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	CPUNodeHours int64 `json:"cpuNodeHours,omitempty"`
+	// FPGANodeHours left on the account (AC-84).
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	FPGANodeHours int64 `json:"fpgaNodeHours,omitempty"`
+	// LargeMemNodeHours left on the account (AC-84).
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	LargeMemNodeHours int64 `json:"largeMemNodeHours,omitempty"`
 	// ObservedAt is when the site reported it. Without it, or from before the current period, the
 	// figure is ignored: it cannot be placed against what ended since.
 	// +optional
@@ -439,6 +480,11 @@ type HPCSiteStatus struct {
 	GPU *TierLedger `json:"gpu,omitempty"`
 	// +optional
 	CPU *TierLedger `json:"cpu,omitempty"`
+	// FPGA and LargeMem are the other two allocations (AC-84). Additive: gpu and cpu are unchanged.
+	// +optional
+	FPGA *TierLedger `json:"fpga,omitempty"`
+	// +optional
+	LargeMem *TierLedger `json:"largeMem,omitempty"`
 	// ActiveJobs is the number of admitted jobs that have not ended (= queuedJobs + runningJobs).
 	// +optional
 	ActiveJobs int32 `json:"activeJobs,omitempty"`
@@ -507,4 +553,64 @@ type HPCSiteList struct {
 
 func init() {
 	SchemeBuilder.Register(&HPCSite{}, &HPCSiteList{})
+}
+
+// NodeHours is the budget's figure for one allocation: the share per period, or (source site) what the
+// site reported left. Zero for an unknown tier.
+func (b Budget) NodeHours(t Tier) int64 {
+	switch t {
+	case TierGPU:
+		return b.GPUNodeHours
+	case TierCPU:
+		return b.CPUNodeHours
+	case TierFPGA:
+		return b.FPGANodeHours
+	case TierLargeMem:
+		return b.LargeMemNodeHours
+	}
+	return 0
+}
+
+// NodeHours is what the site reported left on the account for one allocation. Zero for an unknown tier.
+func (l SiteLeft) NodeHours(t Tier) int64 {
+	switch t {
+	case TierGPU:
+		return l.GPUNodeHours
+	case TierCPU:
+		return l.CPUNodeHours
+	case TierFPGA:
+		return l.FPGANodeHours
+	case TierLargeMem:
+		return l.LargeMemNodeHours
+	}
+	return 0
+}
+
+// LedgerOf is the status ledger of one allocation, nil when it has not been published.
+func (s *HPCSiteStatus) LedgerOf(t Tier) *TierLedger {
+	switch t {
+	case TierGPU:
+		return s.GPU
+	case TierCPU:
+		return s.CPU
+	case TierFPGA:
+		return s.FPGA
+	case TierLargeMem:
+		return s.LargeMem
+	}
+	return nil
+}
+
+// SetLedger stores the status ledger of one allocation.
+func (s *HPCSiteStatus) SetLedger(t Tier, l *TierLedger) {
+	switch t {
+	case TierGPU:
+		s.GPU = l
+	case TierCPU:
+		s.CPU = l
+	case TierFPGA:
+		s.FPGA = l
+	case TierLargeMem:
+		s.LargeMem = l
+	}
 }

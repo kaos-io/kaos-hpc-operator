@@ -479,10 +479,9 @@ func (r *HPCArgoWorkflowJobReconciler) publishLedgerNow(ctx context.Context, sit
 	site.Status.QueuedJobs = l.Queued
 	site.Status.RunningJobs = l.Running
 	site.Status.RecentJobs = recent
-	for tier, dst := range map[hpcv1alpha1.Tier]**hpcv1alpha1.TierLedger{
-		hpcv1alpha1.TierGPU: &site.Status.GPU, hpcv1alpha1.TierCPU: &site.Status.CPU} {
+	for _, tier := range hpcv1alpha1.Tiers {
 		t := l.Tiers[tier]
-		*dst = &hpcv1alpha1.TierLedger{UsedNodeMinutes: t.Used, BookedNodeMinutes: t.Booked, LeftNodeMinutes: t.Left()}
+		site.Status.SetLedger(tier, &hpcv1alpha1.TierLedger{UsedNodeMinutes: t.Used, BookedNodeMinutes: t.Booked, LeftNodeMinutes: t.Left()})
 		metrics.SetSiteLedger(site.Spec.Site, projectOf(site), string(tier), t.Used, t.Booked, t.Left())
 	}
 	metrics.ActiveJobs.WithLabelValues(projectOf(site), site.Spec.Site).Set(float64(l.Active))

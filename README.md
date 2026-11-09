@@ -53,7 +53,7 @@ everything that ended before it, so earlier attempts are not added again).
 | Source | Admission counts against |
 |---|---|
 | `site` | What the site reported left on the project's account at `observedAt`, less the attempts that ended since and the bookings |
-| `share` | The project's own optional cap, `gpuNodeHours` / `cpuNodeHours` per calendar month (UTC), less what its own settled attempts used this month and its bookings. With `siteLeft{gpuNodeHours,cpuNodeHours,observedAt}` the site's remainder is an upper bound too: the limit is `min(share left, site left)` |
+| `share` | The project's own optional cap, `gpuNodeHours` / `cpuNodeHours` / `fpgaNodeHours` / `largeMemNodeHours` per calendar month (UTC), less what its own settled attempts used this month and its bookings. With `siteLeft{gpuNodeHours,cpuNodeHours,fpgaNodeHours,largeMemNodeHours,observedAt}` the site's remainder is an upper bound too: the limit is `min(share left, site left)` |
 
 For `share`, `used` restarts on the 1st at 00:00 UTC, with no re-render needed. A `siteLeft` observed
 before the current month is ignored (the share alone governs until the next observation). A job that
@@ -63,6 +63,19 @@ can never fit the lower of the two is `Refused`: `BudgetBlocked` when the projec
 one that fits it once bookings settle is `Waiting` / `WaitingForBudget`. Policy `warn` admits beyond
 it and raises the `OverShare` event. A zero in a tier means no spend in that tier. There is no org
 allocation and no cross-project sum: each project's share is its own.
+
+**One budget per allocation (AC-84).** A project has four allocations, each metered by the site on its own
+(MeluXina partitions `gpu`, `cpu`, `fpga`, `largemem`; Slurm `GrpTRESMins`, shown as `AssocGrp<TRES>Minutes` when spent):
+the class's `tier` (`gpu`, `cpu`, `fpga`, `largemem`) names the allocation a step spends. Each has its own figure in
+`spec.budget` (and `siteLeft`), its own ledger in `status.gpu`, `status.cpu`, `status.fpga`, `status.largeMem`
+(`usedNodeMinutes`, `bookedNodeMinutes`, `leftNodeMinutes`; the existing fields are unchanged, the two new ones
+are additive), its own admission check, its own settlement (an attempt settles into the tier it booked) and its own
+warning percentage. A spent allocation blocks only the steps that spend it: a CPU allocation with nothing left refuses
+(`SiteLimit` / `BudgetBlocked`) or holds (`WaitingForBudget`) CPU steps with a message that names the CPU allocation,
+and GPU, FPGA and large-memory steps are admitted as before. Whoever renders the `HPCSite` from the site's accounting
+(source `site`, or `siteLeft`) must write a figure per allocation; with `siteLeft` present, an allocation it does not
+list counts as 0 left. A zero is a real figure: the 2026-11-05 incident (CPU limit 0, cpu jobs held forever with
+`AssocGrpGRESMinutes`) is now refused at admission with the reason, not queued.
 
 **Warning threshold (AC-22).** `budget.warnAtPercent` (default 80) is a percentage of what the project
 may spend this month: used plus booked, over used plus the ceiling (the lower of share left and site left).
