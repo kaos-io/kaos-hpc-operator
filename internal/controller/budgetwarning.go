@@ -31,8 +31,8 @@ func evaluateBudgetWarnings(site *hpcv1alpha1.HPCSite, l ledger.Ledger) []budget
 	if threshold <= 0 {
 		threshold = int64(DefaultWarnAtPercent)
 	}
-	out := make([]budgetWarning, 0, 2)
-	for _, tier := range []hpcv1alpha1.Tier{hpcv1alpha1.TierGPU, hpcv1alpha1.TierCPU} {
+	out := make([]budgetWarning, 0, len(hpcv1alpha1.Tiers))
+	for _, tier := range hpcv1alpha1.Tiers {
 		pct := l.Tiers[tier].Percent()
 		out = append(out, budgetWarning{tier: tier, percent: pct, over: pct >= threshold})
 	}

@@ -263,6 +263,8 @@ spec:
                       enum:
                       - gpu
                       - cpu
+                      - fpga
+                      - largemem
                       type: string
                   required:
                   - attempt
@@ -295,11 +297,15 @@ spec:
                       HPC namespace).
                     type: string
                   tier:
-                    description: Tier is the kind of node-hours a class spends. Sites
-                      meter GPU and CPU nodes separately.
+                    description: |-
+                      Tier is the kind of node-hours a class spends. Sites meter every allocation separately (MeluXina: Slurm
+                      GrpTRESMins per partition, AssocGrp<TRES>Minutes when one is spent): GPU, CPU, FPGA and large memory
+                      nodes each have their own budget (PRD-HPC-1461 AC-84).
                     enum:
                     - gpu
                     - cpu
+                    - fpga
+                    - largemem
                     type: string
                 required:
                 - at

@@ -5,6 +5,7 @@
 package ledger
 
 import (
+	"math"
 	"time"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
@@ -20,6 +21,9 @@ type Tier struct {
 	SiteBound bool
 	SiteLeft  int64
 	SiteUsed  int64
+	// Unbounded is true when the site gave no figure for this allocation (source site, AC-84): nothing
+	// bounds it, but its use is still settled and recorded.
+	Unbounded bool
 	// SiteSource is true when the budget is the site's own remainder (source site): there is no
 	// project share, so the site's limit is the only one.
 	SiteSource bool
@@ -29,6 +33,9 @@ type Tier struct {
 // less what was used, bounded by the site's remainder less what ended since it was observed
 // (min(share left, site left), PRD-HPC-1461 D-10, D-56). May be negative.
 func (t Tier) Ceiling() int64 {
+	if t.Unbounded {
+		return math.MaxInt64 / 4
+	}
 	c := t.Share - t.Used
 	if s := t.SiteLeft - t.SiteUsed; t.SiteBound && s < c {
 		return s
@@ -51,6 +58,9 @@ func (t Tier) Total() int64 { return t.Used + t.Ceiling() }
 // Percent is used plus booked as a share of Total, rounded down, capped at 100 000 so a tiny total
 // cannot overflow a gauge. -1 when the total is not positive (nothing may be spent: no percentage).
 func (t Tier) Percent() int64 {
+	if t.Unbounded {
+		return -1 // no figure from the site: nothing to be a percentage of
+	}
 	total := t.Total()
 	if total <= 0 {
 		return -1
@@ -154,10 +164,12 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 	if b := site.Spec.Budget; b.Source == hpcv1alpha1.BudgetSourceSite && b.ObservedAt != nil {
 		start = b.ObservedAt.UTC()
 	}
-	l := Ledger{PeriodStart: periodStart, CountedFrom: start, Tiers: map[hpcv1alpha1.Tier]Tier{
-		hpcv1alpha1.TierGPU: {Share: site.Spec.Budget.GPUNodeHours * 60, SiteSource: siteSource},
-		hpcv1alpha1.TierCPU: {Share: site.Spec.Budget.CPUNodeHours * 60, SiteSource: siteSource},
-	}}
+	// Every allocation has its own ledger (AC-84): a spent one never touches another.
+	l := Ledger{PeriodStart: periodStart, CountedFrom: start, Tiers: map[hpcv1alpha1.Tier]Tier{}}
+	for _, tier := range hpcv1alpha1.Tiers {
+		hours, known := site.Spec.Budget.NodeHours(tier)
+		l.Tiers[tier] = Tier{Share: hours * 60, SiteSource: siteSource, Unbounded: !known}
+	}
 	// Source share with siteLeft: the site's remainder is an upper bound beside the share. It counts
 	// only when observed within this period, since what ended before the observation is already in
 	// the site's figure and a figure from last month says nothing about this one. Attempts that ended
@@ -167,8 +179,12 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 	if b := site.Spec.Budget; b.Source != hpcv1alpha1.BudgetSourceSite && b.SiteLeft != nil &&
 		b.SiteLeft.ObservedAt != nil && !b.SiteLeft.ObservedAt.UTC().Before(start) {
 		siteObserved = b.SiteLeft.ObservedAt.UTC()
-		l.Tiers[hpcv1alpha1.TierGPU] = withSiteBound(l.Tiers[hpcv1alpha1.TierGPU], b.SiteLeft.GPUNodeHours*60)
-		l.Tiers[hpcv1alpha1.TierCPU] = withSiteBound(l.Tiers[hpcv1alpha1.TierCPU], b.SiteLeft.CPUNodeHours*60)
+		for _, tier := range hpcv1alpha1.Tiers {
+			// No figure for an allocation: no site bound, the share alone applies (AC-84).
+			if left, ok := b.SiteLeft.NodeHours(tier); ok {
+				l.Tiers[tier] = withSiteBound(l.Tiers[tier], left*60)
+			}
+		}
 	}
 	seen := map[string]bool{}
 	for i := range jobs {

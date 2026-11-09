@@ -84,10 +84,25 @@ spec:
                     format: int64
                     minimum: 0
                     type: integer
+                  fpgaNodeHours:
+                    description: |-
+                      FPGANodeHours per period (source share) or left on the account (source site). Source share: absent or
+                      zero means the project may not spend FPGA node-hours. Source site: absent means the site gave no figure
+                      (not bounded by the ledger, use is still recorded); an explicit value, 0 included, bounds it (AC-84).
+                    format: int64
+                    minimum: 0
+                    type: integer
                   gpuNodeHours:
                     description: |-
                       GPUNodeHours per period (source share) or left on the account (source site). Zero means
                       the project may not spend GPU node-hours.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  largeMemNodeHours:
+                    description: |-
+                      LargeMemNodeHours per period (source share) or left on the account (source site). Absent and zero mean
+                      what they do for FPGANodeHours.
                     format: int64
                     minimum: 0
                     type: integer
@@ -107,10 +122,21 @@ spec:
                         format: int64
                         minimum: 0
                         type: integer
+                      fpgaNodeHours:
+                        description: |-
+                          FPGANodeHours left on the account (AC-84). Absent means the site gave no figure: no site bound, the
+                          share alone applies. An explicit 0 (or a negative remainder) means the allocation is spent.
+                        format: int64
+                        type: integer
                       gpuNodeHours:
                         description: GPUNodeHours left on the account.
                         format: int64
                         minimum: 0
+                        type: integer
+                      largeMemNodeHours:
+                        description: LargeMemNodeHours left on the account (AC-84).
+                          Absent and zero mean what they do for FPGANodeHours.
+                        format: int64
                         type: integer
                       observedAt:
                         description: |-
@@ -233,6 +259,8 @@ spec:
                           enum:
                           - gpu
                           - cpu
+                          - fpga
+                          - largemem
                           type: string
                       required:
                       - maxWallTimeMinutes
@@ -493,6 +521,39 @@ spec:
                       zero.
                     format: int64
                     type: integer
+                  unbounded:
+                    description: |-
+                      Unbounded is true when the site gave no figure for this allocation (source site, AC-84): nothing
+                      limits it here, so leftNodeMinutes is 0 and means nothing. Used and booked are still recorded.
+                    type: boolean
+                  usedNodeMinutes:
+                    description: UsedNodeMinutes settled from finished jobs this period.
+                    format: int64
+                    type: integer
+                required:
+                - bookedNodeMinutes
+                - leftNodeMinutes
+                - usedNodeMinutes
+                type: object
+              fpga:
+                description: 'FPGA and LargeMem are the other two allocations (AC-84).
+                  Additive: gpu and cpu are unchanged.'
+                properties:
+                  bookedNodeMinutes:
+                    description: BookedNodeMinutes held by admitted jobs that have
+                      not ended (worst case, D-12).
+                    format: int64
+                    type: integer
+                  leftNodeMinutes:
+                    description: LeftNodeMinutes = share - used - booked, never below
+                      zero.
+                    format: int64
+                    type: integer
+                  unbounded:
+                    description: |-
+                      Unbounded is true when the site gave no figure for this allocation (source site, AC-84): nothing
+                      limits it here, so leftNodeMinutes is 0 and means nothing. Used and booked are still recorded.
+                    type: boolean
                   usedNodeMinutes:
                     description: UsedNodeMinutes settled from finished jobs this period.
                     format: int64
@@ -515,6 +576,40 @@ spec:
                       zero.
                     format: int64
                     type: integer
+                  unbounded:
+                    description: |-
+                      Unbounded is true when the site gave no figure for this allocation (source site, AC-84): nothing
+                      limits it here, so leftNodeMinutes is 0 and means nothing. Used and booked are still recorded.
+                    type: boolean
+                  usedNodeMinutes:
+                    description: UsedNodeMinutes settled from finished jobs this period.
+                    format: int64
+                    type: integer
+                required:
+                - bookedNodeMinutes
+                - leftNodeMinutes
+                - usedNodeMinutes
+                type: object
+              largeMem:
+                description: |-
+                  TierLedger is the project's spend in one tier for the current period, in node-minutes (the
+                  site meters node-minutes; shares are set in node-hours).
+                properties:
+                  bookedNodeMinutes:
+                    description: BookedNodeMinutes held by admitted jobs that have
+                      not ended (worst case, D-12).
+                    format: int64
+                    type: integer
+                  leftNodeMinutes:
+                    description: LeftNodeMinutes = share - used - booked, never below
+                      zero.
+                    format: int64
+                    type: integer
+                  unbounded:
+                    description: |-
+                      Unbounded is true when the site gave no figure for this allocation (source site, AC-84): nothing
+                      limits it here, so leftNodeMinutes is 0 and means nothing. Used and booked are still recorded.
+                    type: boolean
                   usedNodeMinutes:
                     description: UsedNodeMinutes settled from finished jobs this period.
                     format: int64

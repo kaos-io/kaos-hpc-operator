@@ -79,8 +79,10 @@ func DecideFor(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, l
 		if t.SiteBinds() {
 			reason, what = hpcv1alpha1.ReasonSiteLimit, "the site reports the account has"
 		}
-		return refuse(reason, "needs %d %s node-minutes; %s %d left this period after what was used",
-			cost, class.Tier, what, max(t.Ceiling(), 0))
+		// Only this allocation is named: a spent CPU allocation says so and blocks CPU steps alone (AC-84).
+		return refuse(reason, "needs %d %s node-minutes; %s %d left on the %s allocation this period after what was used; "+
+			"steps on the project's other allocations are not affected",
+			cost, class.Tier.Label(), what, max(t.Ceiling(), 0), class.Tier.Label())
 	}
 	if m := site.Spec.Limits.MaxConcurrentJobs; m > 0 && l.Active >= m {
 		return Decision{Phase: hpcv1alpha1.PhaseWaiting, Reason: hpcv1alpha1.ReasonConcurrencyLimit,
@@ -96,11 +98,11 @@ func DecideFor(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, l
 	over := cost > t.Left()
 	if over && block {
 		return Decision{Phase: hpcv1alpha1.PhaseWaiting, Reason: hpcv1alpha1.ReasonWaitingForBudget,
-			Message: fmt.Sprintf("needs %d %s node-minutes; %d are free until running jobs settle",
-				cost, class.Tier, t.Left())}
+			Message: fmt.Sprintf("needs %d %s node-minutes; %d are free on the %s allocation until running jobs settle",
+				cost, class.Tier.Label(), t.Left(), class.Tier.Label())}
 	}
 	d := Decision{Phase: hpcv1alpha1.PhaseAdmitted, Reason: hpcv1alpha1.ReasonAdmitted,
-		Message: fmt.Sprintf("booked %d %s node-minutes", cost, class.Tier),
+		Message: fmt.Sprintf("booked %d %s node-minutes", cost, class.Tier.Label()),
 		Tier:    class.Tier, Cost: cost, OverShare: over}
 	if over {
 		d.Message += " beyond the project's share (policy warn)"
