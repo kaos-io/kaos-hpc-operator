@@ -25,8 +25,9 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          HPCOperation is a KAOS operation on a site: staging, cache check, cleanup or quota reading
-          (PRD-HPC-1461 D-17, D-31). Created only by the controller, never by pipelines.
+          HPCOperation is an operation on a site: staging, cache check, cleanup or quota reading (PRD-HPC-1461 D-17,
+          D-31). The CRD is installed, but no controller in this repository creates or reconciles it yet: the runner
+          stages and cleans up inside its own job, and the quota is read by the project's snapshot job.
         properties:
           apiVersion:
             description: |-
@@ -47,11 +48,11 @@ spec:
             type: object
           spec:
             description: |-
-              HPCOperationSpec is one KAOS operation on a site. The controller creates it, named by a hash of
-              its content, so every trigger of the same work converges on one object (D-31).
+              HPCOperationSpec is one operation on a site. By design it is named by a hash of its content, so every
+              trigger of the same work converges on one object (D-31).
             properties:
               kind:
-                description: OperationKind is a KAOS operation on a site (D-17, D-31).
+                description: OperationKind is an operation on a site (D-17, D-31).
                 enum:
                 - Stage
                 - CacheCheck
@@ -212,15 +213,19 @@ spec:
                     type: object
                   checkpointRef:
                     description: |-
-                      CheckpointRef is set with exit code 85: the lakeFS commit (or URI) of the checkpoint the job
-                      staged out before it exited, checked by the submitter (T-19). Without it nothing continues.
+                      CheckpointRef names the newest verified checkpoint copy the job left on the site's scratch, as
+                      scratch://<tar path>#<sha256> (T-19). It is reported with every recoverable end (exit 85, wall time, node
+                      failure, pre-emption, idle kill). Without it a step is not continued from a checkpoint.
                     type: string
                   endTime:
                     format: date-time
                     type: string
                   exitCode:
-                    description: ExitCode of the job's step; 85 means it saved and
-                      continues (D-44).
+                    description: |-
+                      ExitCode of the job's step; 85 means it saved and continues (D-44). Codes the job script and the runner
+                      reserve: 210 (no Apptainer), 231 (image pull), 232 (staging), 233 (batch script), 234 (no verified
+                      checkpoint to restore), 235 (checkpoint copy or job comment failed), 236 (Idle), 237 (InsufficientQuota),
+                      238 (SubmitLimit).
                     format: int32
                     type: integer
                   gpuUtilization:
@@ -281,7 +286,8 @@ spec:
                   message:
                     description: |-
                       Message is a plain sentence from the submitter about why the attempt ended, set when the controller
-                      cannot know it from the site (InsufficientQuota: what did not fit). At most 512 characters.
+                      cannot know it from the site (InsufficientQuota: what did not fit; SubmitLimit: the site's cap and the
+                      count it read). At most 512 characters.
                     maxLength: 512
                     type: string
                   qos:

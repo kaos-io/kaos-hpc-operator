@@ -34,9 +34,10 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          HPCSite is one KAOS project's specification for one HPC site: the site part from the KAOS
-          profile and the tenant part (identity, budget share, policy, limits, classes). Owned by the
-          KubeProject and rendered by kubecore-operator (PRD-HPC-1461 D-47).
+          HPCSite is one project's specification for one HPC (Slurm) site: the site part (endpoint, classes) and the
+          tenant part (identity, budget, at-limit policy, limits). It is the only object admission reads for a project's
+          budget, and its status holds the project's ledger. It is rendered by the platform that integrates the operator
+          (in KAOS: by kubecore-operator, owned by the KubeProject; PRD-HPC-1461 D-47).
         properties:
           apiVersion:
             description: |-
@@ -56,8 +57,8 @@ spec:
           metadata:
             type: object
           spec:
-            description: HPCSiteSpec is one KAOS project's whole specification for
-              one site (D-47).
+            description: HPCSiteSpec is one project's whole specification for one
+              site (D-47).
             properties:
               allowedClasses:
                 description: AllowedClasses restricts the profile's classes for this
@@ -66,7 +67,8 @@ spec:
                   type: string
                 type: array
               budget:
-                description: Budget is the project's share of the org allocation.
+                description: Budget is what the project may spend on this site, one
+                  figure per allocation (gpu, cpu, fpga, largemem).
                 properties:
                   allocationRef:
                     description: 'AllocationRef is reserved and unused: the share
@@ -80,7 +82,9 @@ spec:
                     - warn
                     type: string
                   cpuNodeHours:
-                    description: CPUNodeHours per period.
+                    description: |-
+                      CPUNodeHours per period (source share) or left on the account (source site). Zero means the project
+                      may not spend CPU node-hours.
                     format: int64
                     minimum: 0
                     type: integer
@@ -118,7 +122,8 @@ spec:
                       month and SiteLeft less what ended since it was observed. Absent: the share alone.
                     properties:
                       cpuNodeHours:
-                        description: CPUNodeHours left on the account.
+                        description: 'CPUNodeHours left on the account. Omitted means
+                          0 left: a spent allocation.'
                         format: int64
                         minimum: 0
                         type: integer
@@ -129,7 +134,8 @@ spec:
                         format: int64
                         type: integer
                       gpuNodeHours:
-                        description: GPUNodeHours left on the account.
+                        description: 'GPUNodeHours left on the account. Omitted means
+                          0 left: a spent allocation.'
                         format: int64
                         minimum: 0
                         type: integer
@@ -148,8 +154,8 @@ spec:
                   source:
                     default: share
                     description: |-
-                      Source: share (default) or site. With site, GPUNodeHours and CPUNodeHours are what the
-                      site reported left at ObservedAt; the site's figure already counts every job that ran, so
+                      Source: share (default) or site. With site, the NodeHours figures (GPU, CPU, FPGA, large memory) are what
+                      the site reported left at ObservedAt; the site's figure already counts every job that ran, so
                       only bookings and attempts that ended after ObservedAt are taken off it.
                     enum:
                     - share
@@ -157,7 +163,10 @@ spec:
                     type: string
                   warnAtPercent:
                     default: 80
-                    description: WarnAtPercent of the share raises an alert (D-13).
+                    description: |-
+                      WarnAtPercent is the percentage of what the project may spend this month (used plus booked, over used
+                      plus the lower of share left and site left) at which the BudgetWarning condition, event and metric are
+                      raised for an allocation. Raised whatever AtLimit says; AtLimit decides only what happens at the limit.
                     format: int32
                     maximum: 100
                     minimum: 1
@@ -216,8 +225,8 @@ spec:
                     type: integer
                 type: object
               profile:
-                description: Profile is the site part, rendered from the KAOS-curated
-                  profile.
+                description: Profile is the site part, rendered by the integrating
+                  platform.
                 properties:
                   classes:
                     description: Classes offered by the site.
@@ -564,7 +573,7 @@ spec:
                 - usedNodeMinutes
                 type: object
               gpu:
-                description: GPU and CPU ledgers.
+                description: GPU and CPU ledgers, one per allocation (see TierLedger).
                 properties:
                   bookedNodeMinutes:
                     description: BookedNodeMinutes held by admitted jobs that have

@@ -6,4 +6,6 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: hpcoperation-sample
 spec:
-  # TODO(user): Add fields here
+  # The CRD is installed but no controller in this repository creates or reconciles it yet.
+  kind: CacheCheck
+  siteName: hpcsite-sample

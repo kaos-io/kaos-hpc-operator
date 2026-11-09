@@ -1,4 +1,9 @@
 # [MANAGER]: Manager Deployment Configurations
+# Optional keys the templates read when set (not declared here): controllerManager.pod.labels (extra pod labels),
+# controllerManager.container.env (map of NAME: value for the controller), controllerManager.serviceAccount.annotations,
+# nameOverride, and networkPolicy.enable (a NetworkPolicy that lets only namespaces labelled `metrics: enabled`
+# reach the metrics endpoint). The controller's flags (poll interval, outage bound, sweep give-up, ...) are listed in
+# the README; add them to `args` below.
 controllerManager:
   replicas: 1
   container:
@@ -114,7 +119,9 @@ metrics:
 prometheus:
   enable: true
 
-# [CERT-MANAGER]: To enable cert-manager injection to webhooks set true
+# [CERT-MANAGER]: set true to have cert-manager issue the metrics endpoint's serving certificate
+# (a self-signed Issuer and a Certificate, mounted into the controller; needs metrics.enable). The operator has no
+# webhooks.
 certmanager:
   enable: false
 

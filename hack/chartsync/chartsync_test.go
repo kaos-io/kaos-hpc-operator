@@ -1,6 +1,7 @@
 // Package chartsync checks that the Helm chart in dist/chart ships the CRDs and RBAC generated from
 // the API types (config/), so an API change can never be released with a stale chart.
-// Regenerate the chart with: kubebuilder edit --plugins=helm/v1-alpha
+// CRDs: make manifests (hack/sync-chart-crds.sh copies them into the chart). RBAC rules: copy from config/rbac by hand;
+// the chart has hand-written templates, so it is edited in place and not regenerated.
 package chartsync
 
 import (

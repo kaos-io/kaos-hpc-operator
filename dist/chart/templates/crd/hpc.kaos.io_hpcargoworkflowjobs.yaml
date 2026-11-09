@@ -140,10 +140,13 @@ spec:
                 type: array
               resumable:
                 description: |-
-                  Resumable makes the step continue across jobs: it gets the wall-time signal LeadMinutes before
-                  its wall time, saves a checkpoint through the KAOS library and exits 85, and the job continues
-                  from that checkpoint in a new site job under this same HPCArgoWorkflowJob (D-38, D-44 as amended
-                  2026-11-05, F-29). Absent: the step ends when its wall time is reached.
+                  Resumable declares that the step continues across jobs: it gets the wall-time signal LeadMinutes before
+                  its wall time, saves a checkpoint (its checkpoint folder, or the KAOS library) and exits 85, and the job
+                  continues from that checkpoint in a new site job under this same HPCArgoWorkflowJob (D-38, D-44 as amended
+                  2026-11-05, F-29). A declared step may also ask for more wall time than the longest run the class allows: it
+                  then runs as continuations. Absent: the step is not declared resumable, but one that left a checkpoint copy
+                  is still continued (capped at 5) and one that did so successfully is verified resumable (D-74); a step
+                  that is neither is refused with TooLongNotResumable when it asks for more than the longest run.
                 properties:
                   leadMinutes:
                     default: 10
@@ -592,15 +595,19 @@ spec:
                     type: object
                   checkpointRef:
                     description: |-
-                      CheckpointRef is set with exit code 85: the lakeFS commit (or URI) of the checkpoint the job
-                      staged out before it exited, checked by the submitter (T-19). Without it nothing continues.
+                      CheckpointRef names the newest verified checkpoint copy the job left on the site's scratch, as
+                      scratch://<tar path>#<sha256> (T-19). It is reported with every recoverable end (exit 85, wall time, node
+                      failure, pre-emption, idle kill). Without it a step is not continued from a checkpoint.
                     type: string
                   endTime:
                     format: date-time
                     type: string
                   exitCode:
-                    description: ExitCode of the job's step; 85 means it saved and
-                      continues (D-44).
+                    description: |-
+                      ExitCode of the job's step; 85 means it saved and continues (D-44). Codes the job script and the runner
+                      reserve: 210 (no Apptainer), 231 (image pull), 232 (staging), 233 (batch script), 234 (no verified
+                      checkpoint to restore), 235 (checkpoint copy or job comment failed), 236 (Idle), 237 (InsufficientQuota),
+                      238 (SubmitLimit).
                     format: int32
                     type: integer
                   gpuUtilization:
@@ -661,7 +668,8 @@ spec:
                   message:
                     description: |-
                       Message is a plain sentence from the submitter about why the attempt ended, set when the controller
-                      cannot know it from the site (InsufficientQuota: what did not fit). At most 512 characters.
+                      cannot know it from the site (InsufficientQuota: what did not fit; SubmitLimit: the site's cap and the
+                      count it read). At most 512 characters.
                     maxLength: 512
                     type: string
                   qos:

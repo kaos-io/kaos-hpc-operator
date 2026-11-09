@@ -6,4 +6,8 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: hpcallocation-sample
 spec:
-  # TODO(user): Add fields here
+  # A record only: this controller does not read it.
+  site: example-site
+  account: p200000
+  gpuNodeHours: 1000
+  cpuNodeHours: 400

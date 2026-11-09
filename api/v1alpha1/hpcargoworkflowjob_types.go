@@ -30,7 +30,8 @@ const (
 	PhaseCancelled Phase = "Cancelled"
 )
 
-// Reasons the controller writes in status.reason.
+// Reasons the controller writes in status.reason. docs/reasons.md says what each one means and what the user
+// sees.
 const (
 	ReasonAdmitted         = "Admitted"
 	ReasonWaitingForBudget = "WaitingForBudget"
@@ -63,12 +64,20 @@ const (
 	ReasonNoProject                  = "NoProject"
 	ReasonNoSite                     = "NoSite"
 	// Continuation (D-44 as amended 2026-11-05, F-29, T-19).
-	ReasonContinuing        = "Continuing"
+	// ReasonContinuing: the attempt ended with a verified checkpoint copy and the next attempt (phase Pending)
+	// starts from it.
+	ReasonContinuing = "Continuing"
+	// ReasonContinuationLimit: the step used all its continuations (spec.resumable.maxContinuations, default 5).
 	ReasonContinuationLimit = "ContinuationLimit"
-	ReasonNotResumable      = "NotResumable"
+	// ReasonNotResumable: the step exited 85 ("saved, continue me") but opted out (resumable=False) or, in the
+	// phase-0 path, was not declared resumable.
+	ReasonNotResumable = "NotResumable"
+	// ReasonCheckpointMissing: the step exited 85 but no verified checkpoint copy exists to continue from. The
+	// reason string is "Timeout" for historical reasons; read it as "checkpoint missing".
 	ReasonCheckpointMissing = "Timeout"
-	ReasonWallTimeReached   = "WallTimeReached"
-	ExitCodeContinue        = int32(85)
+	// ReasonWallTimeReached: the step ran to its time limit (Slurm TIMEOUT) and was not continued.
+	ReasonWallTimeReached = "WallTimeReached"
+	ExitCodeContinue      = int32(85)
 	// ReasonIdle: the on-node idle watchdog ended a hung step (PRD-HPC-1461 D-72, F-46). The job
 	// script exits ExitCodeIdle for it; the attempt is Failed with this reason.
 	ReasonIdle = "Idle"
@@ -188,10 +197,13 @@ type HPCArgoWorkflowJobSpec struct {
 	// Outputs the step declares.
 	// +optional
 	Outputs []string `json:"outputs,omitempty"`
-	// Resumable makes the step continue across jobs: it gets the wall-time signal LeadMinutes before
-	// its wall time, saves a checkpoint through the KAOS library and exits 85, and the job continues
-	// from that checkpoint in a new site job under this same HPCArgoWorkflowJob (D-38, D-44 as amended
-	// 2026-11-05, F-29). Absent: the step ends when its wall time is reached.
+	// Resumable declares that the step continues across jobs: it gets the wall-time signal LeadMinutes before
+	// its wall time, saves a checkpoint (its checkpoint folder, or the KAOS library) and exits 85, and the job
+	// continues from that checkpoint in a new site job under this same HPCArgoWorkflowJob (D-38, D-44 as amended
+	// 2026-11-05, F-29). A declared step may also ask for more wall time than the longest run the class allows: it
+	// then runs as continuations. Absent: the step is not declared resumable, but one that left a checkpoint copy
+	// is still continued (capped at 5) and one that did so successfully is verified resumable (D-74); a step
+	// that is neither is refused with TooLongNotResumable when it asks for more than the longest run.
 	// +optional
 	Resumable *Resumable `json:"resumable,omitempty"`
 	// ResumableOptOut is resumable=False: the step is never continued from a checkpoint, even when it
@@ -294,7 +306,10 @@ type RunStatus struct {
 	// State is the scheduler's job state, for example PENDING, RUNNING, COMPLETED, FAILED, TIMEOUT.
 	// +optional
 	State string `json:"state,omitempty"`
-	// ExitCode of the job's step; 85 means it saved and continues (D-44).
+	// ExitCode of the job's step; 85 means it saved and continues (D-44). Codes the job script and the runner
+	// reserve: 210 (no Apptainer), 231 (image pull), 232 (staging), 233 (batch script), 234 (no verified
+	// checkpoint to restore), 235 (checkpoint copy or job comment failed), 236 (Idle), 237 (InsufficientQuota),
+	// 238 (SubmitLimit).
 	// +optional
 	ExitCode *int32 `json:"exitCode,omitempty"`
 	// StartTime and EndTime as the site reports them.
@@ -312,8 +327,9 @@ type RunStatus struct {
 	// Slot is the GPU slot the host gave this job.
 	// +optional
 	Slot *int32 `json:"slot,omitempty"`
-	// CheckpointRef is set with exit code 85: the lakeFS commit (or URI) of the checkpoint the job
-	// staged out before it exited, checked by the submitter (T-19). Without it nothing continues.
+	// CheckpointRef names the newest verified checkpoint copy the job left on the site's scratch, as
+	// scratch://<tar path>#<sha256> (T-19). It is reported with every recoverable end (exit 85, wall time, node
+	// failure, pre-emption, idle kill). Without it a step is not continued from a checkpoint.
 	// +optional
 	CheckpointRef string `json:"checkpointRef,omitempty"`
 	// LogOffset is how far into the site job's output file the runner has printed (bytes), so a
@@ -335,7 +351,8 @@ type RunStatus struct {
 	// +optional
 	LastLog string `json:"lastLog,omitempty"`
 	// Message is a plain sentence from the submitter about why the attempt ended, set when the controller
-	// cannot know it from the site (InsufficientQuota: what did not fit). At most 512 characters.
+	// cannot know it from the site (InsufficientQuota: what did not fit; SubmitLimit: the site's cap and the
+	// count it read). At most 512 characters.
 	// +kubebuilder:validation:MaxLength=512
 	// +optional
 	Message string `json:"message,omitempty"`
