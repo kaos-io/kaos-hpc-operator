@@ -200,8 +200,12 @@ func standaloneSpecs() {
 				kubectlGet("{.status.reason}", "hpcargoworkflowjob", e2eJobName, "-n", e2eEnvNS),
 				kubectlGet("{.status.run.siteJobID}", "hpcargoworkflowjob", e2eJobName, "-n", e2eEnvNS))
 		}
+		polls := 0
 		Eventually(func() string {
 			GinkgoWriter.Println(describe())
+			if polls++; polls == 20 { // a minute in: the cause is still there to be read, whatever happens later
+				GinkgoWriter.Println("diagnostics after 1 minute:" + diagnostics())
+			}
 			return kubectlGet("{.status.phase}", "hpcargoworkflowjob", e2eJobName, "-n", e2eEnvNS)
 		}, "5m", "3s").Should(Equal("Succeeded"), func() string {
 			return describe() + "\n" + diagnostics()
