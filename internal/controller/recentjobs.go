@@ -104,6 +104,16 @@ func truncateMessage(s string) string {
 	return s
 }
 
+// resumableStepsFor is resumableStepsOf for the site's project: the namespaces are read here.
+func (r *HPCArgoWorkflowJobReconciler) resumableStepsFor(ctx context.Context, site *hpcv1alpha1.HPCSite,
+	jobs []hpcv1alpha1.HPCArgoWorkflowJob) ([]hpcv1alpha1.ResumableStep, error) {
+	projectNS, err := r.projectNamespaces(ctx, site)
+	if err != nil {
+		return nil, err
+	}
+	return resumableStepsOf(site, jobs, projectNS), nil
+}
+
 // projectNamespaces are the namespaces labelled with the site's project; a job that was never
 // admitted (Waiting, Pending) names no site yet, so its namespace decides.
 func (r *HPCArgoWorkflowJobReconciler) projectNamespaces(ctx context.Context, site *hpcv1alpha1.HPCSite) (map[string]bool, error) {

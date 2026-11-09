@@ -448,6 +448,33 @@ type RecentJob struct {
 	SettledNodeMinutes int64 `json:"settledNodeMinutes,omitempty"`
 }
 
+// ResumableStepsMax bounds HPCSiteStatus.ResumableSteps (one entry per app and step).
+const ResumableStepsMax = 100
+
+// ResumableStep is what the controller recorded about one step of one app (D-74): whether a
+// continuation of it loaded its checkpoint and got past it. Only names, a verdict, a time and a
+// reason in words: nothing about the jobs. The hub copies the list into the project's status and
+// the app's platform context, where the pipeline linter reads it.
+type ResumableStep struct {
+	// App is the app the step belongs to: the last path segment of the step's image repository
+	// (the pipeline builds one image repository per app).
+	// +kubebuilder:validation:MaxLength=253
+	App string `json:"app"`
+	// Step is the DAG step's name.
+	// +kubebuilder:validation:MaxLength=253
+	Step string `json:"step"`
+	// Verified is true when the latest evidence is a continuation that got past its checkpoint and
+	// false when it did not (NoProgress).
+	Verified bool `json:"verified"`
+	// Since is when the latest evidence was recorded.
+	// +optional
+	Since *metav1.Time `json:"since,omitempty"`
+	// Reason is the evidence in words.
+	// +kubebuilder:validation:MaxLength=300
+	// +optional
+	Reason string `json:"reason,omitempty"`
+}
+
 // SiteStorage is the project's scratch storage on the site: the quota (the whole subscription's,
 // shared with its other users) and which of KAOS's own categories use it. All sizes are bytes.
 type SiteStorage struct {
@@ -529,6 +556,12 @@ type HPCSiteStatus struct {
 	// +listType=atomic
 	// +optional
 	RecentJobs []RecentJob `json:"recentJobs,omitempty"`
+	// ResumableSteps is what the controller recorded about the resumability of the project's steps,
+	// one entry per app and step with evidence (D-74), at most ResumableStepsMax. Written with the ledger.
+	// +kubebuilder:validation:MaxItems=100
+	// +listType=atomic
+	// +optional
+	ResumableSteps []ResumableStep `json:"resumableSteps,omitempty"`
 	// Storage is the project's scratch quota on the site and what uses it. It is NOT written by
 	// this controller: the project's snapshot job (it holds the staging key) patches this one
 	// field every 10 minutes from the site stager's `usage` report. The controller's status patches

@@ -470,6 +470,10 @@ func (r *HPCArgoWorkflowJobReconciler) publishLedgerNow(ctx context.Context, sit
 	if err != nil {
 		return err
 	}
+	steps, err := r.resumableStepsFor(ctx, site, jobs)
+	if err != nil {
+		return err
+	}
 	orig := site.DeepCopy()
 	start := metav1.NewTime(l.PeriodStart)
 	site.Status.PeriodStart = &start
@@ -479,6 +483,7 @@ func (r *HPCArgoWorkflowJobReconciler) publishLedgerNow(ctx context.Context, sit
 	site.Status.QueuedJobs = l.Queued
 	site.Status.RunningJobs = l.Running
 	site.Status.RecentJobs = recent
+	site.Status.ResumableSteps = steps
 	for _, tier := range hpcv1alpha1.Tiers {
 		t := l.Tiers[tier]
 		left := t.Left()
