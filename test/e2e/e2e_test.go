@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -33,11 +34,14 @@ import (
 // namespace where the project is deployed in
 const namespace = "kaos-hpc-system"
 
+// release is the Helm release name of the controller.
+const release = "kaos-hpc-operator"
+
 // serviceAccountName created for the project
-const serviceAccountName = "kaos-hpc-controller-manager"
+const serviceAccountName = "kaos-hpc-operator-controller-manager"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "kaos-hpc-controller-manager-metrics-service"
+const metricsServiceName = "kaos-hpc-operator-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "kaos-hpc-metrics-binding"
@@ -60,15 +64,16 @@ var _ = Describe("Manager", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
 
-		By("installing CRDs")
-		cmd = exec.Command("make", "install")
+		By("installing the Helm chart (CRDs, RBAC, controller) into the plain cluster")
+		repo, tag, _ := strings.Cut(projectImage, ":")
+		cmd = exec.Command("helm", "install", release, "dist/chart", "-n", namespace,
+			"--set", "controllerManager.container.image.repository="+repo,
+			"--set", "controllerManager.container.image.tag="+tag,
+			// Poll the site every 2 s so the run ends in seconds, not the production cadence.
+			"--set-string", "controllerManager.container.env.SITE_POLL_INTERVAL=2s",
+			"--wait", "--timeout", "3m")
 		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
-
-		By("deploying the controller-manager")
-		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectImage))
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+		Expect(err).NotTo(HaveOccurred(), "Failed to helm install the chart")
 	})
 
 	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
@@ -78,12 +83,13 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
 		_, _ = utils.Run(cmd)
 
-		By("undeploying the controller-manager")
-		cmd = exec.Command("make", "undeploy")
+		By("uninstalling the Helm release")
+		cmd = exec.Command("helm", "uninstall", release, "-n", namespace)
 		_, _ = utils.Run(cmd)
 
-		By("uninstalling CRDs")
-		cmd = exec.Command("make", "uninstall")
+		By("deleting the CRDs (the chart keeps them on uninstall)")
+		cmd = exec.Command("kubectl", "delete", "crd", "--ignore-not-found",
+			"hpcsites.hpc.kaos.io", "hpcargoworkflowjobs.hpc.kaos.io", "hpcallocations.hpc.kaos.io", "hpcoperations.hpc.kaos.io")
 		_, _ = utils.Run(cmd)
 
 		By("removing manager namespace")
@@ -173,7 +179,7 @@ var _ = Describe("Manager", Ordered, func() {
 		It("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
 			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
-				"--clusterrole=kaos-hpc-metrics-reader",
+				"--clusterrole=kaos-hpc-operator-metrics-reader",
 				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
 			)
 			_, err := utils.Run(cmd)
@@ -259,14 +265,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput := getMetricsOutput()
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+		standaloneSpecs()
 	})
 })
 

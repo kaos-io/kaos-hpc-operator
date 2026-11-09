@@ -11,6 +11,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -127,6 +128,10 @@ func (r *HPCArgoWorkflowJobReconciler) workflowCancelCause(ctx context.Context, 
 	switch {
 	case apierrors.IsNotFound(err):
 		return "the Workflow " + ref.Name + " was deleted", nil
+	case meta.IsNoMatchError(err):
+		// No Argo API in this cluster (a standalone install, PRD-HPC-1461 AC-41): nothing can end
+		// the Workflow, so it is no reason to cancel and not a reason to fail every reconcile.
+		return "", nil
 	case err != nil:
 		return "", err
 	case string(wf.GetUID()) != ref.UID:
