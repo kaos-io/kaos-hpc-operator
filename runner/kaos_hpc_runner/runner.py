@@ -22,8 +22,8 @@ from .logs import LogStreamer
 from .reporter import OutputsTooLarge, Reporter, checkpoint_uri
 from .sharing import inputs_in_script
 from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_site_down, lane_refusal,
-                    share_state, site_time)
-from .settings import CHECKPOINT_EXIT, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT, OFFER_S, Settings
+                    share_state, site_time, submit_limit_refusal)
+from .settings import CHECKPOINT_EXIT, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT, OFFER_S, SUBMIT_LIMIT_EXIT, Settings
 
 POLL_S = 30
 # --cancel-only (the controller's orphan sweep, PRD AC-08): how long one such runner works before it gives up
@@ -279,7 +279,7 @@ class Runner:
                 why = resp.get('errors')
         except Refused as e:
             if not (lane and lane_refusal(e)):
-                settings.fail_start('job submit refused: %s' % e, 1)
+                self.fail_submit(e)
             why = e
         if why is not None:
             print('lane qos=%s reservation=%s refused by the site (%s): submitting again on QoS %s '
@@ -289,10 +289,36 @@ class Runner:
             try:
                 resp = self.slurm.submit(body)
             except Refused as e:
-                settings.fail_start('job submit refused: %s' % e, 1)
+                self.fail_submit(e)
         self.reporter.qos = body['job']['qos']
         self.reporter.reservation = body['job'].get('reservation')
         return resp
+
+    def fail_submit(self, err):
+        """The site refused the job for good. A refusal for its submit cap (AC-39) is a clear terminal report,
+        reason SubmitLimit, naming the cap and the count; any other refusal still fails the start loudly."""
+        if not submit_limit_refusal(err):
+            settings.fail_start('job submit refused: %s' % err, 1)
+        msg = self.submit_limit_message(err)
+        print('ERROR: SubmitLimit:', msg, flush=True)
+        self.write_termination('SubmitLimit: ' + msg)
+        self.reporter.report(must=True, state='FAILED', exitCode=SUBMIT_LIMIT_EXIT, terminal=True,
+                             endTime=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), message=msg[:500])
+        sys.exit(0)   # reported: the pod ends cleanly, the controller ends the job SubmitLimit
+
+    def submit_limit_message(self, err):
+        """The sentence of a SubmitLimit failure: the site's cap (from the profile) and how many jobs it
+        counts now (read from the site; left out when the site cannot be asked)."""
+        cap = self.cfg.max_submit_jobs
+        try:
+            count = self.slurm.active_count(self.cfg.identity()['user'])
+        except Exception:
+            count = None
+        head = 'the site accepts at most %s queued or running jobs per user' % (cap or 'a fixed number of')
+        if count is not None:
+            head += ' and %d are already queued or running' % count
+        return ('%s; a new job is not accepted until some finish. Resubmit when the count is below the cap '
+                '(site said: %s)' % (head, str(err)[:200]))
 
     def resubmit(self, why):
         """Replace the site job of this attempt (cancel, then submit a fresh one)."""

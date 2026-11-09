@@ -1040,3 +1040,60 @@ def test_a_cancel_and_a_submit_still_go_to_the_site(rig):
     drive(rig, [lambda t: obs("COMPLETED", t)])
     rig.runner.run()
     assert len(slurm.submitted) == 1, "submit is the runner's own call; cancel on SIGTERM is covered by the sigterm tests"
+
+
+# ---------------------------------------------------------------- the site's submit cap (PRD-HPC-1461 AC-39)
+
+class CappedSlurm(LaneSlurm):
+    """Refuses with the given texts and reports `queued` of the user's jobs as queued or running."""
+    queued = 5
+
+    def active_count(self, user):
+        return self.queued
+
+
+SUBMIT_CAP = "HTTP 500 {'errors': [{'error': 'QOSMaxSubmitJobPerUserLimit'}]}"
+
+
+def test_a_submit_refused_for_the_site_cap_ends_the_attempt_submit_limit_with_the_cap_and_the_count(rig, capsys):
+    slurm = CappedSlurm([SUBMIT_CAP])
+    rig.make(slurm, HPC_MAX_SUBMIT_JOBS="5")
+    with pytest.raises(SystemExit) as e:
+        rig.runner.run()
+    assert e.value.code == 0 and len(slurm.submitted) == 1
+    run = rig.kube.run
+    assert run["state"] == "FAILED" and run["exitCode"] == 238 and run["terminal"] is True
+    assert "at most 5" in run["message"] and "5 are already queued or running" in run["message"]
+    assert not run.get("siteJobID") and "SubmitLimit" in capsys.readouterr().out
+
+
+def test_a_cap_refusal_on_a_lane_is_first_retried_on_the_class_qos(rig):
+    slurm = CappedSlurm([SUBMIT_CAP], jobs={"5001": [acc("COMPLETED")]})
+    rig.make(slurm, HPC_QOS="test", HPC_MAX_SUBMIT_JOBS="5")
+    assert rig.runner.run() == 0
+    assert [s["job"]["qos"] for s in slurm.submitted] == ["test", "default"]
+
+
+def test_a_cap_refusal_without_a_known_cap_or_count_is_still_submit_limit(rig):
+    class Blind(CappedSlurm):
+        def active_count(self, user):
+            raise OSError("site silent")
+    slurm = Blind([SUBMIT_CAP])
+    rig.make(slurm)
+    with pytest.raises(SystemExit):
+        rig.runner.run()
+    assert rig.kube.run["exitCode"] == 238 and "a fixed number of" in rig.kube.run["message"]
+
+
+def test_the_generic_accounting_policy_refusal_is_not_called_a_cap(rig):
+    slurm = CappedSlurm(["HTTP 500 Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)"])
+    rig.make(slurm)
+    with pytest.raises(SystemExit) as e:
+        rig.runner.run()
+    assert e.value.code == 1 and rig.kube.run.get("exitCode") != 238
+
+
+def test_only_the_cap_texts_are_matched_as_submit_limit(rig):
+    assert slurmmod.submit_limit_refusal("QOSMaxSubmitJobPerUserLimit")
+    assert slurmmod.submit_limit_refusal("AssocMaxSubmitJobLimit")
+    assert not slurmmod.submit_limit_refusal("Invalid account or account/partition combination specified")

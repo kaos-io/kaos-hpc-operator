@@ -32,6 +32,7 @@ the job's class.
 | `Admitted` | It fits the share. Nodes × wall time is booked |
 | `Waiting` / `WaitingForBudget` | It fits only once running jobs settle |
 | `Waiting` / `ConcurrencyLimit` | The project is at its job limit. The job waits; it is never refused for this |
+| `Refused` / `SubmitLimit` | The site caps a user's queued plus running jobs (Slurm `MaxSubmitJobs`, per-user submit limit; `HPCSite.spec.profile.maxSubmitJobs`) and the project's own jobs already fill it. The job **fails** at once, never waits (unlike `ConcurrencyLimit`), with the cap and the current count in the message; resubmit once some jobs finish. When the site itself refuses a submit (`QOSMaxSubmitJobPerUserLimit`, `AssocMaxSubmitJobLimit`, ...), the runner reports exit code 238 and the job ends `Failed` / `SubmitLimit` with the cap and the count it read from the site. Platform site operations (site jobs, staging, cancel) are not judged by KAOS admission and still submit |
 | `Refused` / `BudgetBlocked` | It can never fit this period within the project's own share (policy `block`; `warn` admits it and raises `OverShare`) |
 | `Refused` / `SiteLimit` | It can never fit this period because the site's own monthly limit on the account is what runs out (same policy rule). A submitted job queued behind that limit (Slurm `AssocGrp...Minutes`) shows `SiteLimit` as well |
 | `Failed` / `InsufficientQuota` | Staging the dataset or image would exceed the project's scratch quota (space or files) even after evicting everything unused: the runner stops before any copy and submits nothing |

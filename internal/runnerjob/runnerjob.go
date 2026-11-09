@@ -302,6 +302,10 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 	if res := job.EffectiveResumable(); res != nil {
 		kv = append(kv, [2]string{"HPC_RESUMABLE_LEAD", strconv.Itoa(int(res.LeadMinutes))})
 	}
+	// AC-39: the site's submit cap, so a refusal for it can name the cap beside the count the runner reads.
+	if m := site.Spec.Profile.MaxSubmitJobs; m > 0 {
+		kv = append(kv, [2]string{"HPC_MAX_SUBMIT_JOBS", strconv.Itoa(int(m))})
+	}
 	kv = append(kv, [2]string{"HPC_CKPT_BUDGET_PERCENT", strconv.Itoa(int(checkpointBudgetPercent(site)))})
 	if r := job.Status.Resume; r != nil && attempt > 1 {
 		kv = append(kv, [2]string{"KAOS_RESUME_REF", r.CheckpointRef},

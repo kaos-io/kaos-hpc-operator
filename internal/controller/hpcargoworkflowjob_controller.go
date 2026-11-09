@@ -368,6 +368,13 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		}
 	}
 
+	if reason == hpcv1alpha1.ReasonSubmitLimit {
+		msg = submitLimitMessage(run, site)
+		if r.Recorder != nil {
+			r.Recorder.Event(job, corev1.EventTypeWarning, hpcv1alpha1.ReasonSubmitLimit, msg)
+		}
+	}
+
 	v := r.recoverAttempt(job, run, attempt, attemptEnd{phase: phase, reason: reason, msg: msg})
 	phase, reason, msg, next := v.phase, v.reason, v.msg, v.next
 	if retry := timeoutRetry(job, site, run); !next && reason == hpcv1alpha1.ReasonWallTimeReached && retry != nil {
@@ -407,15 +414,18 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 // outcome maps the site's final state and exit code of one attempt to the job's phase.
 func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 	state := strings.ToUpper(run.State)
+	failed := state == "FAILED"
 	switch {
 	case strings.HasPrefix(state, "CANCELLED"):
 		return hpcv1alpha1.PhaseCancelled, "Cancelled"
 	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeContinue:
 		return hpcv1alpha1.PhaseFailed, "Continued"
-	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeIdle && state == "FAILED":
+	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeIdle && failed:
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonIdle
-	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeInsufficientQuota && state == "FAILED":
+	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeInsufficientQuota && failed:
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonInsufficientQuota
+	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeSubmitLimit && failed:
+		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonSubmitLimit
 	case state == "COMPLETED" && (run.ExitCode == nil || *run.ExitCode == 0):
 		return hpcv1alpha1.PhaseSucceeded, "Completed"
 	case state == "TIMEOUT":
@@ -614,4 +624,17 @@ func quotaMessage(run *hpcv1alpha1.RunStatus) string {
 	}
 	return "not enough scratch space or files left on the site for the dataset or image this step needs; " +
 		"nothing was copied and nothing in use was deleted. Free space on the project's scratch or raise its quota"
+}
+
+// submitLimitMessage is the plain sentence of an attempt the site refused for its submit cap (AC-39):
+// what the runner said (it names the cap and the count it read from the site), else the profile's cap.
+func submitLimitMessage(run *hpcv1alpha1.RunStatus, site *hpcv1alpha1.HPCSite) string {
+	if m := strings.TrimSpace(run.Message); m != "" {
+		return m
+	}
+	msg := "the site refused the job: too many queued or running jobs for the project's user"
+	if c := site.Spec.Profile.MaxSubmitJobs; c > 0 {
+		msg += " (cap " + strconv.Itoa(int(c)) + ")"
+	}
+	return msg
 }

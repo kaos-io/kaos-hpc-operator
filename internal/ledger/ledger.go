@@ -76,6 +76,9 @@ type Ledger struct {
 	Tiers       map[hpcv1alpha1.Tier]Tier
 	// Active is the number of jobs holding a booking or running as a guest: Queued + Running.
 	Active int32
+	// SiteJobs is the number of Slurm jobs the project's active jobs hold: Active less guests, which ride
+	// on a host's job and are not submitted themselves (the count a site's submit cap applies to, AC-39).
+	SiteJobs int32
 	// Queued is the number of active jobs the site has not started: admitted, submitted or pending.
 	Queued int32
 	// Running is the number of active jobs the site reports RUNNING, plus guests on a running host.
@@ -189,6 +192,7 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 		if b := j.Status.Booking; b != nil && b.SiteName == site.Name && b.SiteNamespace == site.Namespace {
 			seen[string(j.UID)] = true
 			if Holds(j) {
+				l.SiteJobs++
 				t := l.Tiers[b.Tier]
 				t.Booked += b.NodeMinutes
 				l.Tiers[b.Tier] = t
@@ -207,6 +211,7 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 		t.Booked += b.NodeMinutes
 		l.Tiers[b.Tier] = t
 		l.count(false) // booked in this process, not yet submitted
+		l.SiteJobs++
 	}
 	return l
 }

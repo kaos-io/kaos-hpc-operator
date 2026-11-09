@@ -40,6 +40,13 @@ const (
 	// (PRD-HPC-1461 AC-23). Refused at admission when the site's remainder is what the job cannot fit;
 	// shown instead of Slurm's AssocGrp*Minutes while a submitted job queues behind that limit.
 	ReasonSiteLimit = "SiteLimit"
+	// ReasonSubmitLimit: the site's cap on queued plus running jobs per user (Slurm MaxSubmitJobs, or a
+	// QOSMaxSubmitJobPerUserLimit refusal) stops a new job (PRD-HPC-1461 AC-39, amended 2026-11-09). The
+	// job FAILS with the cap and the count in the message; it does not wait (unlike ConcurrencyLimit,
+	// D-49). Refused at admission when the project's own jobs already fill the cap from the site profile
+	// (HPCSite spec.profile.maxSubmitJobs); Failed when the site itself refused the submit (the runner
+	// reports ExitCodeSubmitLimit). Platform site operations (site jobs, staging, cancel) are not judged.
+	ReasonSubmitLimit = "SubmitLimit"
 	// ReasonInsufficientQuota: staging the dataset or the image would exceed the project's scratch
 	// quota (space or files) even after evicting everything unused; the step stops before any copy
 	// (PRD-HPC-1461 AC-33, D-06). Terminal. The runner reports it with ExitCodeInsufficientQuota.
@@ -71,6 +78,9 @@ const (
 	// ExitCodeInsufficientQuota is the exit code the runner reports (state FAILED, no site job) when staging
 	// stopped for want of scratch quota. Next to ExitCodeIdle, in the same reserved range.
 	ExitCodeInsufficientQuota = int32(237)
+	// ExitCodeSubmitLimit is the exit code the runner reports (state FAILED, no site job) when the site
+	// refused the submit because of its submit cap (AC-39). Next to ExitCodeInsufficientQuota.
+	ExitCodeSubmitLimit = int32(238)
 	// DefaultIdleTimeoutMinutes is the idle window of a step that does not set one (D-72).
 	DefaultIdleTimeoutMinutes = int32(20)
 	// ReasonSiteUnavailable: the site does not answer (connection errors, 5xx, timeouts, slurmctld down). The job

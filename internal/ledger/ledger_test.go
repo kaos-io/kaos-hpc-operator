@@ -232,3 +232,22 @@ func TestPoolBudgetCountsEveryAttemptSettledInTheMonthWhateverTheRestart(t *test
 		}
 	}
 }
+
+func TestComputeCountsSiteJobsWithoutGuests(t *testing.T) {
+	site := &hpcv1alpha1.HPCSite{Spec: hpcv1alpha1.HPCSiteSpec{Site: "m"}}
+	site.Name, site.Namespace = "s", "ns"
+	mk := func(uid string, host string) hpcv1alpha1.HPCArgoWorkflowJob {
+		j := hpcv1alpha1.HPCArgoWorkflowJob{}
+		j.UID = types.UID(uid)
+		j.Status.Phase = hpcv1alpha1.PhaseRunning
+		j.Status.Booking = &hpcv1alpha1.Booking{SiteName: "s", SiteNamespace: "ns", Tier: hpcv1alpha1.TierGPU, NodeMinutes: 60}
+		j.Status.Run = &hpcv1alpha1.RunStatus{HostSiteJobID: host}
+		return j
+	}
+	jobs := []hpcv1alpha1.HPCArgoWorkflowJob{mk("a", ""), mk("b", ""), mk("g", "99")}
+	l := Compute(site, jobs, map[string]hpcv1alpha1.Booking{
+		"p": {SiteName: "s", SiteNamespace: "ns", Tier: hpcv1alpha1.TierGPU, NodeMinutes: 10}}, time.Now())
+	if l.Active != 4 || l.SiteJobs != 3 {
+		t.Fatalf("active %d site jobs %d, want 4 and 3 (the guest holds no Slurm job)", l.Active, l.SiteJobs)
+	}
+}

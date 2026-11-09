@@ -66,6 +66,13 @@ class Slurm:
                 return j.get('job_id')
         return None
 
+    def active_count(self, user):
+        """How many jobs of this user the scheduler holds queued, running or suspended: what a submit cap
+        counts (AC-39). Raises like get() when the site does not answer; the caller decides what that means."""
+        return sum(1 for j in (self.get(self.cfg.api + '/jobs').get('jobs') or [])
+                   if j.get('user_name') == user and any(x in ('PENDING', 'RUNNING', 'SUSPENDED')
+                                                         for x in (j.get('job_state') or [])))
+
     def find_finished(self, after=0, now=time.time):
         """The newest job of this attempt (by NAME) that slurmdbd lists and that was not cancelled, or None.
         A submit whose answer was lost and whose job ended before the runner came back is found here, not
@@ -171,6 +178,19 @@ LANE_REFUSALS = ('qos',                       # Invalid qos specification, Job v
                                               # QOSMaxJobsPerUserLimit, QOSMaxSubmitJobPerUserLimit, ...
                  'reservation',               # Requested reservation is invalid, Access denied to requested reservation
                  'time limit is invalid')     # Requested time limit is invalid (missing or exceeds some limit)
+
+
+# Slurm's reasons for refusing a job because the user already has the most jobs the site allows (AC-39):
+# QOSMaxSubmitJobPerUserLimit, QOSMaxSubmitJobPerAccountLimit, AssocMaxSubmitJobLimit, AssocGrpSubmitJobsLimit.
+# Matched case-insensitively. The generic "job submit limit, user's size and/or time limits" wording is NOT
+# matched: it also covers size and time limits, so naming it a cap would mislead.
+SUBMIT_LIMIT_TEXTS = ('maxsubmitjob', 'grpsubmitjobs', 'max submit job')
+
+
+def submit_limit_refusal(text):
+    """True when a refusal text says the site's cap on queued plus running jobs is reached."""
+    t = str(text).lower()
+    return any(m in t for m in SUBMIT_LIMIT_TEXTS)
 
 
 def lane_refusal(text):
