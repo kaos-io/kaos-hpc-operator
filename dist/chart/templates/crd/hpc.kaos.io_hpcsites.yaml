@@ -642,8 +642,9 @@ spec:
                 type: integer
               recentJobs:
                 description: |-
-                  RecentJobs are at most RecentJobsMax of the project's jobs on this site: active jobs first,
-                  then ended ones, newest first within each group. Written with the ledger, for the console.
+                  RecentJobs are the project's jobs on this site: every active job, then the jobs that ended in the
+                  last RecentJobsWindow (7 days), newest first within each group, at most RecentJobsMax (300) entries
+                  (active jobs are kept first when the cap bites). Written with the ledger, for the console.
                 items:
                   description: |-
                     RecentJob is the console's view of one HPCArgoWorkflowJob of the project (PRD-HPC-1461 F-43,
@@ -686,6 +687,11 @@ spec:
                       - declared
                       - learned
                       - timeout-retry
+                      type: string
+                    message:
+                      description: Message is the job's status.message (a plain sentence
+                        for the user), cut to RecentJobMessageMax characters.
+                      maxLength: 512
                       type: string
                     name:
                       description: Name and Namespace of the HPCArgoWorkflowJob (the
@@ -761,7 +767,7 @@ spec:
                   - createdAt
                   - name
                   type: object
-                maxItems: 50
+                maxItems: 300
                 type: array
                 x-kubernetes-list-type: atomic
               runningJobs:

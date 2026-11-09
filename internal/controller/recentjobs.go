@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"time"
 
@@ -20,17 +21,19 @@ const siteStateRunning = "RUNNING"
 // from HPCSite.status, because the hub holds no pool kubeconfig. It is built from the jobs the
 // ledger already read, so it costs no site call.
 
-// recentJobsOf returns at most RecentJobsMax jobs of the site's project, active first, newest
-// first within each group, ties broken by name so the list is deterministic.
+// recentJobsOf returns the site's project jobs that are active, or ended within RecentJobsWindow,
+// active first, newest first within each group, ties broken by name so the list is deterministic,
+// cut at RecentJobsMax entries.
 func (r *HPCArgoWorkflowJobReconciler) recentJobsOf(ctx context.Context, site *hpcv1alpha1.HPCSite,
 	jobs []hpcv1alpha1.HPCArgoWorkflowJob) ([]hpcv1alpha1.RecentJob, error) {
 	projectNS, err := r.projectNamespaces(ctx, site)
 	if err != nil {
 		return nil, err
 	}
+	now := r.now()
 	var mine []*hpcv1alpha1.HPCArgoWorkflowJob
 	for i := range jobs {
-		if jobOfSite(&jobs[i], site, projectNS) {
+		if jobOfSite(&jobs[i], site, projectNS) && inRecentWindow(&jobs[i], now) {
 			mine = append(mine, &jobs[i])
 		}
 	}
@@ -48,14 +51,57 @@ func (r *HPCArgoWorkflowJobReconciler) recentJobsOf(ctx context.Context, site *h
 		mine = mine[:hpcv1alpha1.RecentJobsMax]
 	}
 	out := make([]hpcv1alpha1.RecentJob, 0, len(mine))
-	now := r.now()
 	for _, j := range mine {
 		out = append(out, recentJobOf(j, now))
 	}
 	if len(out) == 0 {
 		return nil, nil
 	}
-	return out, nil
+	return capRecentBytes(out), nil
+}
+
+// capRecentBytes drops the tail (the oldest ended jobs) until the JSON of the list fits
+// RecentJobsMaxBytes, so a list of worst-case entries can never grow the status past it.
+func capRecentBytes(list []hpcv1alpha1.RecentJob) []hpcv1alpha1.RecentJob {
+	total := 2 // the brackets
+	for i := range list {
+		raw, err := json.Marshal(&list[i])
+		if err != nil { // cannot happen for these plain fields; keep the list rather than lose it
+			return list
+		}
+		if total += len(raw) + 1; total > hpcv1alpha1.RecentJobsMaxBytes {
+			return list[:i]
+		}
+	}
+	return list
+}
+
+// inRecentWindow keeps every active job, and an ended one for RecentJobsWindow after it ended.
+func inRecentWindow(j *hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) bool {
+	if !j.Status.Phase.Terminal() {
+		return true
+	}
+	return now.Sub(endedAt(j)) <= hpcv1alpha1.RecentJobsWindow
+}
+
+// endedAt is when an ended job ended: the site's end time of its current run, else the end of its
+// last settled attempt, else (refused, or cancelled before any site job) its creation.
+func endedAt(j *hpcv1alpha1.HPCArgoWorkflowJob) time.Time {
+	if run := j.Status.Run; run != nil && run.EndTime != nil && !run.EndTime.IsZero() {
+		return run.EndTime.Time
+	}
+	if n := len(j.Status.Attempts); n > 0 {
+		return j.Status.Attempts[n-1].EndTime.Time
+	}
+	return j.CreationTimestamp.Time
+}
+
+// truncateMessage cuts s to RecentJobMessageMax characters (never inside a UTF-8 sequence).
+func truncateMessage(s string) string {
+	if r := []rune(s); len(r) > hpcv1alpha1.RecentJobMessageMax {
+		return string(r[:hpcv1alpha1.RecentJobMessageMax])
+	}
+	return s
 }
 
 // projectNamespaces are the namespaces labelled with the site's project; a job that was never
@@ -97,7 +143,7 @@ func recentJobOf(j *hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) hpcv1alpha1.R
 	st := &j.Status
 	rj := hpcv1alpha1.RecentJob{
 		Name: j.Name, Namespace: j.Namespace, Step: j.Spec.StepName,
-		Phase: st.Phase, Reason: st.Reason, Attempt: st.Attempt,
+		Phase: st.Phase, Reason: st.Reason, Message: truncateMessage(st.Message), Attempt: st.Attempt,
 		CreatedAt:          j.CreationTimestamp,
 		IdleTimeoutMinutes: j.EffectiveIdleTimeoutMinutes(),
 		TimeLimitMinutes:   j.EffectiveWallMinutes(),

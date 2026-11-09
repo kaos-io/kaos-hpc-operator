@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"time"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -351,9 +353,21 @@ type TierLedger struct {
 	Unbounded bool `json:"unbounded,omitempty"`
 }
 
-// RecentJobsMax bounds HPCSiteStatus.RecentJobs. Each entry is a few hundred bytes, so the list
-// stays far below the object size limit (about 25 KiB at the bound).
-const RecentJobsMax = 50
+// RecentJobsMax bounds HPCSiteStatus.RecentJobs: every active job plus the jobs that ended in the
+// last RecentJobsWindow, newest first, cut at this many entries or at RecentJobsMaxBytes, whichever
+// comes first. A typical entry is about 0.6 KiB (300 of them about 180 KiB); a theoretical worst
+// entry (every bounded field at its schema maximum) is about 2.9 KiB, which the byte cap catches.
+const RecentJobsMax = 300
+
+// RecentJobsMaxBytes is the most the JSON of HPCSiteStatus.RecentJobs may take, far below the etcd
+// object limit (about 1.5 MiB) and leaving room for the rest of the status.
+const RecentJobsMaxBytes = 256 * 1024
+
+// RecentJobsWindow is how long an ended job stays in HPCSiteStatus.RecentJobs.
+const RecentJobsWindow = 7 * 24 * time.Hour
+
+// RecentJobMessageMax is the longest RecentJob.Message, in characters.
+const RecentJobMessageMax = 512
 
 // RecentJob is the console's view of one HPCArgoWorkflowJob of the project (PRD-HPC-1461 F-43,
 // AC-76, AC-26, AC-46). Copied from the job's status when the ledger is published: no site call.
@@ -375,6 +389,10 @@ type RecentJob struct {
 	// +kubebuilder:validation:MaxLength=63
 	// +optional
 	Reason string `json:"reason,omitempty"`
+	// Message is the job's status.message (a plain sentence for the user), cut to RecentJobMessageMax characters.
+	// +kubebuilder:validation:MaxLength=512
+	// +optional
+	Message string `json:"message,omitempty"`
 	// SiteState is the scheduler's state of the current site job (PENDING, RUNNING, ...).
 	// +kubebuilder:validation:MaxLength=63
 	// +optional
@@ -504,9 +522,10 @@ type HPCSiteStatus struct {
 	// running host's node.
 	// +optional
 	RunningJobs int32 `json:"runningJobs,omitempty"`
-	// RecentJobs are at most RecentJobsMax of the project's jobs on this site: active jobs first,
-	// then ended ones, newest first within each group. Written with the ledger, for the console.
-	// +kubebuilder:validation:MaxItems=50
+	// RecentJobs are the project's jobs on this site: every active job, then the jobs that ended in the
+	// last RecentJobsWindow (7 days), newest first within each group, at most RecentJobsMax (300) entries
+	// (active jobs are kept first when the cap bites). Written with the ledger, for the console.
+	// +kubebuilder:validation:MaxItems=300
 	// +listType=atomic
 	// +optional
 	RecentJobs []RecentJob `json:"recentJobs,omitempty"`
