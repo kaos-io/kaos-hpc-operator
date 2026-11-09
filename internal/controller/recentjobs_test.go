@@ -325,7 +325,7 @@ func TestResumableStepsPerAppAndStep(t *testing.T) {
 		resumeJob("a2", "fit", "reg.io/p/app-a:fit-2", bad), // the later evidence decides
 		resumeJob("b1", "fit", "reg.io/p/app-b:fit-1", ok),
 		resumeJob("none", "eval", "reg.io/p/app-a:eval-1", nil), // no evidence: no entry
-		resumeJob("noimg", "fit", "", ok),                     // no app: no entry
+		resumeJob("noimg", "fit", "", ok),                       // no app: no entry
 		resumeJob("elsewhere", "fit", "reg.io/p/app-c:fit-1", ok),
 	}
 	jobs[5].Namespace = "other-project-ns"
