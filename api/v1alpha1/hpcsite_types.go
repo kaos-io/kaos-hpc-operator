@@ -139,6 +139,13 @@ type SiteProfile struct {
 	// /home/users. The runner's HOME is HomeRoot/<identity.user>. Empty means /home/users.
 	// +optional
 	HomeRoot string `json:"homeRoot,omitempty"`
+	// MaxSubmitJobs is the site's cap on a user's queued plus running jobs (Slurm MaxSubmitJobs, per-user
+	// submit limit; AC-39). A new job that would exceed it FAILS with reason SubmitLimit instead of an
+	// opaque Slurm error; it does not wait. Zero or absent: no cap known to KAOS (the site's own refusal
+	// is still reported as SubmitLimit).
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxSubmitJobs int32 `json:"maxSubmitJobs,omitempty"`
 	// Classes offered by the site.
 	// +kubebuilder:validation:MinItems=1
 	// +listType=map

@@ -331,3 +331,24 @@ func TestShouldBuildACancelOnlyRunnerThatNeverCollidesWithTheAttemptsRunner(t *t
 		t.Fatal("the attempt's own runner must be untouched")
 	}
 }
+
+func TestEnvCarriesTheSitesSubmitCapOnlyWhenKnown(t *testing.T) {
+	job, site := fixtures()
+	env, err := Env(job, site, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range env {
+		if e.Name == "HPC_MAX_SUBMIT_JOBS" {
+			t.Fatalf("no cap known, yet %s=%s", e.Name, e.Value)
+		}
+	}
+	site.Spec.Profile.MaxSubmitJobs = 5
+	env, _ = Env(job, site, 1)
+	for _, e := range env {
+		if e.Name == "HPC_MAX_SUBMIT_JOBS" && e.Value == "5" {
+			return
+		}
+	}
+	t.Fatal("HPC_MAX_SUBMIT_JOBS=5 missing")
+}

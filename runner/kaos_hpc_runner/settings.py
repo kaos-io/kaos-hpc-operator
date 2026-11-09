@@ -26,6 +26,8 @@ CHECKPOINT_EXIT = 85
 # PRD-HPC-1461 D-72: the job script's exit code for a step the idle watchdog ended (reason Idle).
 IDLE_EXIT = 236
 INSUFFICIENT_QUOTA_EXIT = 237   # the runner reports it (FAILED, no site job) when staging does not fit the quota (AC-33)
+# AC-39: the runner reports it (FAILED, no site job) when the site refused the submit for its submit cap.
+SUBMIT_LIMIT_EXIT = 238
 DEFAULT_IDLE_TIMEOUT_MIN = 20
 # AC-28: a site that does not answer is waited for this long (the controller passes its --site-outage-max).
 DEFAULT_SITE_WAIT_MAX_S = 30 * 60
@@ -95,6 +97,9 @@ class Settings:
         # the step as Idle; 0 = off. The controller always sets it; 20 when it is absent or unreadable.
         raw = (g('HPC_IDLE_TIMEOUT_MINUTES') or '').strip()
         self.idle_timeout = int(raw) if raw.isdigit() else DEFAULT_IDLE_TIMEOUT_MIN
+        # AC-39: the site's cap on queued plus running jobs per user, when the profile knows it (0 = unknown).
+        raw = (g('HPC_MAX_SUBMIT_JOBS') or '').strip()
+        self.max_submit_jobs = int(raw) if raw.isdigit() else 0
         self.output_names = [n for n in (g('STEP_OUTPUTS') or '').split(',') if n]
         self.dataset = (g('DATASET') or '').strip()
         # PRD-1609 node sharing: off unless the operator turned it on for this project and gave

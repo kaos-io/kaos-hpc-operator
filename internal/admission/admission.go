@@ -86,6 +86,13 @@ func DecideFor(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, l
 		return Decision{Phase: hpcv1alpha1.PhaseWaiting, Reason: hpcv1alpha1.ReasonConcurrencyLimit,
 			Message: fmt.Sprintf("the project runs %d jobs, its limit; this one waits for a slot", l.Active)}
 	}
+	// The site's submit cap fails the job; it never waits (AC-39, unlike the concurrency limit above).
+	// Checked after it, so a project whose concurrency limit is the lower one still waits.
+	if m := site.Spec.Profile.MaxSubmitJobs; m > 0 && l.SiteJobs >= m {
+		return refuse(hpcv1alpha1.ReasonSubmitLimit,
+			"the site allows %d queued or running jobs per user (maxSubmitJobs) and this project already has %d; "+
+				"a new job is not accepted until some finish. Resubmit when the count is below the cap", m, l.SiteJobs)
+	}
 	over := cost > t.Left()
 	if over && block {
 		return Decision{Phase: hpcv1alpha1.PhaseWaiting, Reason: hpcv1alpha1.ReasonWaitingForBudget,
