@@ -276,14 +276,13 @@ type SiteLeft struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	CPUNodeHours int64 `json:"cpuNodeHours,omitempty"`
-	// FPGANodeHours left on the account (AC-84).
-	// +kubebuilder:validation:Minimum=0
+	// FPGANodeHours left on the account (AC-84). Absent means the site gave no figure: no site bound, the
+	// share alone applies. An explicit 0 (or a negative remainder) means the allocation is spent.
 	// +optional
-	FPGANodeHours int64 `json:"fpgaNodeHours,omitempty"`
-	// LargeMemNodeHours left on the account (AC-84).
-	// +kubebuilder:validation:Minimum=0
+	FPGANodeHours *int64 `json:"fpgaNodeHours,omitempty"`
+	// LargeMemNodeHours left on the account (AC-84). Absent and zero mean what they do for FPGANodeHours.
 	// +optional
-	LargeMemNodeHours int64 `json:"largeMemNodeHours,omitempty"`
+	LargeMemNodeHours *int64 `json:"largeMemNodeHours,omitempty"`
 	// ObservedAt is when the site reported it. Without it, or from before the current period, the
 	// figure is ignored: it cannot be placed against what ended since.
 	// +optional
@@ -571,19 +570,25 @@ func (b Budget) NodeHours(t Tier) int64 {
 	return 0
 }
 
-// NodeHours is what the site reported left on the account for one allocation. Zero for an unknown tier.
-func (l SiteLeft) NodeHours(t Tier) int64 {
+// NodeHours is what the site reported left on the account for one allocation, and whether it gave a figure.
+// GPU and CPU always count as reported (an omitted 0 is a spent allocation, as before AC-84); FPGA and
+// large memory are reported only when present, because a writer that predates them omits them.
+func (l SiteLeft) NodeHours(t Tier) (int64, bool) {
 	switch t {
 	case TierGPU:
-		return l.GPUNodeHours
+		return l.GPUNodeHours, true
 	case TierCPU:
-		return l.CPUNodeHours
+		return l.CPUNodeHours, true
 	case TierFPGA:
-		return l.FPGANodeHours
+		if l.FPGANodeHours != nil {
+			return *l.FPGANodeHours, true
+		}
 	case TierLargeMem:
-		return l.LargeMemNodeHours
+		if l.LargeMemNodeHours != nil {
+			return *l.LargeMemNodeHours, true
+		}
 	}
-	return 0
+	return 0, false
 }
 
 // LedgerOf is the status ledger of one allocation, nil when it has not been published.

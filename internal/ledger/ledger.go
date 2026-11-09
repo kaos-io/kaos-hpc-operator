@@ -169,7 +169,10 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 		b.SiteLeft.ObservedAt != nil && !b.SiteLeft.ObservedAt.UTC().Before(start) {
 		siteObserved = b.SiteLeft.ObservedAt.UTC()
 		for _, tier := range hpcv1alpha1.Tiers {
-			l.Tiers[tier] = withSiteBound(l.Tiers[tier], b.SiteLeft.NodeHours(tier)*60)
+			// No figure for an allocation: no site bound, the share alone applies (AC-84).
+			if left, ok := b.SiteLeft.NodeHours(tier); ok {
+				l.Tiers[tier] = withSiteBound(l.Tiers[tier], left*60)
+			}
 		}
 	}
 	seen := map[string]bool{}

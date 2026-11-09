@@ -259,7 +259,7 @@ func TestComputeSettlesAndBoundsEachAllocationApart(t *testing.T) {
 	obs := metav1.NewTime(now.Add(-time.Hour))
 	site := &hpcv1alpha1.HPCSite{Spec: hpcv1alpha1.HPCSiteSpec{Site: "m", Budget: hpcv1alpha1.Budget{
 		GPUNodeHours: 10, CPUNodeHours: 10, FPGANodeHours: 10, LargeMemNodeHours: 10,
-		SiteLeft: &hpcv1alpha1.SiteLeft{GPUNodeHours: 10, CPUNodeHours: 0, FPGANodeHours: 2, LargeMemNodeHours: 10, ObservedAt: &obs}}}}
+		SiteLeft: &hpcv1alpha1.SiteLeft{GPUNodeHours: 10, CPUNodeHours: 0, FPGANodeHours: ptr(2), LargeMemNodeHours: nil, ObservedAt: &obs}}}}
 	site.Name, site.Namespace = "s", "ns"
 	jobs := make([]hpcv1alpha1.HPCArgoWorkflowJob, 0, len(hpcv1alpha1.Tiers))
 	for i, tier := range hpcv1alpha1.Tiers {
@@ -287,5 +287,28 @@ func TestComputeSettlesAndBoundsEachAllocationApart(t *testing.T) {
 	}
 	if c := l.Tiers[hpcv1alpha1.TierGPU].Ceiling(); c != 590 {
 		t.Fatalf("gpu ceiling %d, want min(600-10, 600-10)", c)
+	}
+}
+
+func ptr(v int64) *int64 { return &v }
+
+// An allocation siteLeft omits has no site bound: the share alone applies (a writer that predates it).
+func TestComputeOmittedSiteLeftAllocationIsNotBoundToZero(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	obs := metav1.NewTime(now.Add(-time.Hour))
+	site := &hpcv1alpha1.HPCSite{Spec: hpcv1alpha1.HPCSiteSpec{Budget: hpcv1alpha1.Budget{
+		GPUNodeHours: 10, FPGANodeHours: 10, LargeMemNodeHours: 10,
+		SiteLeft: &hpcv1alpha1.SiteLeft{GPUNodeHours: 5, ObservedAt: &obs}}}}
+	l := Compute(site, nil, nil, now)
+	if tr := l.Tiers[hpcv1alpha1.TierFPGA]; tr.SiteBound || tr.Ceiling() != 600 {
+		t.Fatalf("fpga bound %v ceiling %d, want unbound 600", tr.SiteBound, tr.Ceiling())
+	}
+	if tr := l.Tiers[hpcv1alpha1.TierGPU]; !tr.SiteBound || tr.Ceiling() != 300 {
+		t.Fatalf("gpu still bound by the site: %v %d", tr.SiteBound, tr.Ceiling())
+	}
+	site.Spec.Budget.SiteLeft.LargeMemNodeHours = ptr(0)
+	l = Compute(site, nil, nil, now)
+	if tr := l.Tiers[hpcv1alpha1.TierLargeMem]; !tr.SiteBound || tr.Ceiling() != 0 {
+		t.Fatalf("explicit 0 is spent: %v %d", tr.SiteBound, tr.Ceiling())
 	}
 }

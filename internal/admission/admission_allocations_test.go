@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 	"github.com/kaos-io/kaos-hpc-operator/internal/ledger"
 )
@@ -96,5 +98,38 @@ func TestDecideSpentSiteAllocationIsSiteLimit(t *testing.T) {
 	}
 	if d := Decide(job("gpu", 60, 1), s, l); d.Phase != hpcv1alpha1.PhaseAdmitted {
 		t.Fatalf("gpu must not be blocked: %s/%s", d.Phase, d.Reason)
+	}
+}
+
+// siteLeft omitting an allocation means no site figure (share applies); an explicit 0 is a spent allocation.
+func TestDecideSiteLeftOmittedVersusExplicitZero(t *testing.T) {
+	zero := int64(0)
+	cases := []struct {
+		name  string
+		left  hpcv1alpha1.SiteLeft
+		class string
+		phase hpcv1alpha1.Phase
+		inMsg string
+	}{
+		{"should_admit_fpga_when_site_left_omits_it", hpcv1alpha1.SiteLeft{GPUNodeHours: 5}, "fpga", hpcv1alpha1.PhaseAdmitted, ""},
+		{"should_admit_largemem_when_site_left_omits_it", hpcv1alpha1.SiteLeft{GPUNodeHours: 5}, "largemem", hpcv1alpha1.PhaseAdmitted, ""},
+		{"should_block_fpga_naming_it_when_site_left_says_zero", hpcv1alpha1.SiteLeft{GPUNodeHours: 5, FPGANodeHours: &zero},
+			"fpga", hpcv1alpha1.PhaseRefused, "FPGA allocation"},
+		{"should_block_cpu_when_cpu_omitted_as_before", hpcv1alpha1.SiteLeft{GPUNodeHours: 5}, "cpu", hpcv1alpha1.PhaseRefused, "CPU allocation"},
+		{"should_still_admit_gpu_present", hpcv1alpha1.SiteLeft{GPUNodeHours: 5}, "gpu", hpcv1alpha1.PhaseAdmitted, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := allocSite(10, 10, 10, 10)
+			obs := metav1.NewTime(time.Now().Add(-time.Hour))
+			left := c.left
+			left.ObservedAt = &obs
+			s.Spec.Budget.SiteLeft = &left
+			l := ledger.Compute(s, nil, nil, time.Now())
+			d := Decide(&hpcv1alpha1.HPCArgoWorkflowJob{Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: c.class, Image: "i", WallTimeMinutes: 60}}, s, l)
+			if d.Phase != c.phase || !strings.Contains(d.Message, c.inMsg) {
+				t.Fatalf("got %s/%s %q, want %s containing %q", d.Phase, d.Reason, d.Message, c.phase, c.inMsg)
+			}
+		})
 	}
 }

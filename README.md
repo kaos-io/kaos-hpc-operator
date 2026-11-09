@@ -73,8 +73,8 @@ are additive), its own admission check, its own settlement (an attempt settles i
 warning percentage. A spent allocation blocks only the steps that spend it: a CPU allocation with nothing left refuses
 (`SiteLimit` / `BudgetBlocked`) or holds (`WaitingForBudget`) CPU steps with a message that names the CPU allocation,
 and GPU, FPGA and large-memory steps are admitted as before. Whoever renders the `HPCSite` from the site's accounting
-(source `site`, or `siteLeft`) must write a figure per allocation; with `siteLeft` present, an allocation it does not
-list counts as 0 left. A zero is a real figure: the 2026-11-05 incident (CPU limit 0, cpu jobs held forever with
+(source `site`, or `siteLeft`) must write a figure per allocation; an allocation `siteLeft` omits (fpga, largemem) means the site gave no figure: no site bound, the share alone
+applies; only an explicit 0 (or a negative remainder) means spent. GPU and CPU keep their earlier meaning (an omitted 0 is 0 left). A zero is a real figure: the 2026-11-05 incident (CPU limit 0, cpu jobs held forever with
 `AssocGrpGRESMinutes`) is now refused at admission with the reason, not queued.
 
 **Warning threshold (AC-22).** `budget.warnAtPercent` (default 80) is a percentage of what the project

@@ -116,9 +116,10 @@ spec:
                         minimum: 0
                         type: integer
                       fpgaNodeHours:
-                        description: FPGANodeHours left on the account (AC-84).
+                        description: |-
+                          FPGANodeHours left on the account (AC-84). Absent means the site gave no figure: no site bound, the
+                          share alone applies. An explicit 0 (or a negative remainder) means the allocation is spent.
                         format: int64
-                        minimum: 0
                         type: integer
                       gpuNodeHours:
                         description: GPUNodeHours left on the account.
@@ -127,8 +128,8 @@ spec:
                         type: integer
                       largeMemNodeHours:
                         description: LargeMemNodeHours left on the account (AC-84).
+                          Absent and zero mean what they do for FPGANodeHours.
                         format: int64
-                        minimum: 0
                         type: integer
                       observedAt:
                         description: |-
