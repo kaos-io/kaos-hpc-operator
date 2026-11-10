@@ -159,3 +159,29 @@ func TestIsAnswer(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldReportASiteAsFailingFromTheFirstFailedProbeUntilAGoodOne(t *testing.T) {
+	h, now := NewHealth(), time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)
+	if h.Failing("s") {
+		t.Fatal("a site nobody probed is not failing")
+	}
+	h.Observe("s", Down, "503", now)
+	if !h.Failing("s") {
+		t.Fatal("one failed probe must already report failing")
+	}
+	if _, down := h.Down("s"); down {
+		t.Fatal("failing is not down")
+	}
+	h.Observe("s", Unknown, "", now.Add(time.Second))
+	if !h.Failing("s") {
+		t.Fatal("an answer that says nothing must not clear failing")
+	}
+	h.Observe("s", Up, "", now.Add(2*time.Second))
+	if h.Failing("s") {
+		t.Fatal("a good probe must clear failing at once")
+	}
+	var none *Health
+	if none.Failing("s") {
+		t.Fatal("no health store: every site is up")
+	}
+}

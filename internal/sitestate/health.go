@@ -184,6 +184,19 @@ func (h *Health) Observe(key string, v Verdict, why string, now time.Time) (chan
 	return false
 }
 
+// Failing reports whether the latest probe of the site `key` found it unreachable, whether or not the run of
+// failures is long enough to count as down. It is the early signal: nothing new should be started against a
+// site whose last probe failed, but jobs are not told the site is unavailable until Down says so.
+func (h *Health) Failing(key string) bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	e := h.m[key]
+	return e != nil && e.failures > 0
+}
+
 // Down returns the outage of the site `key`, ok false when the site is believed up.
 func (h *Health) Down(key string) (Outage, bool) {
 	if h == nil {
