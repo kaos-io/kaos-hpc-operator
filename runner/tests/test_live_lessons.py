@@ -263,7 +263,7 @@ def _stagein(tmp_path, stagein_py, staged_ready=False):
     if staged_ready:
         (staged / '.kaos-ready').write_text('')
     env = dict(os.environ, SCR=str(tmp_path / 'scr'), KAOS_JOB_ID='9', LAKEFS_BEARER_TOKEN='w', LAKEFS_ENDPOINT='http://x',
-               DATASET_REPO='r', DATASET_REF='c0ffee12', DATASET_STAGED=str(staged),
+               DATASET_REPO='r', DATASET_COMMIT='c0ffee12', DATASET_STAGED=str(staged),
                STAGEIN_B64=base64.b64encode(stagein_py.encode()).decode())
     (tmp_path / 'scr' / 'kaos-tmp').mkdir(parents=True)
     script = 'fail(){ echo "$1" > failed; exit "$1"; }\n' + '\n'.join(block) + '\necho "DIR=$DATASET_DIR"\n'
@@ -297,7 +297,7 @@ def test_a_queued_job_names_its_dataset_commit_where_the_stagers_lease_pattern_f
     (PRD-1541 D-06). The lease word must therefore be a lowercase hex commit the stager's LEASE_RE finds,
     next to the image and checkpoint leases that must not hide it."""
     src = (Path(__file__).resolve().parents[1] / 'kaos_hpc_runner' / 'runner.py').read_text()
-    assert "lease.append('kaos-commit=' + commit)" in src
+    assert "lease.append('kaos-commit=' + cfg.dataset_commit)" in src
     comment = 'kaos-commit=c0ffee12 kaos-image=0123456789abcdef kaos-ckpt-lease=wf1/train'
     assert LEASE_RE.findall(comment) == ['c0ffee12']
 

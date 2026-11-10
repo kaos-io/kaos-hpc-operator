@@ -103,7 +103,7 @@ func TestEngineGoldenIsAValidFollowerEnvironment(t *testing.T) {
 	if cfg.IdleTimeout == nil || *cfg.IdleTimeout != 40 {
 		t.Errorf("HPC_IDLE_TIMEOUT_MINUTES did not come through: %v", cfg.IdleTimeout)
 	}
-	if len(cfg.Outputs) != 2 || len(cfg.Command) != 3 || cfg.Dataset != "dataset-default@latest" {
+	if len(cfg.Outputs) != 2 || len(cfg.Command) != 3 || cfg.Dataset == nil || cfg.Dataset.Repo != "dataset-default" || cfg.Dataset.Version != "latest" {
 		t.Errorf("outputs, command or dataset did not come through: %+v", cfg)
 	}
 }
@@ -111,7 +111,7 @@ func TestEngineGoldenIsAValidFollowerEnvironment(t *testing.T) {
 func TestEngineGoldenSetsNoVariableTheFollowerIgnores(t *testing.T) {
 	read := map[string]bool{
 		"HPC_JOB_NAMESPACE": true, "WF_NAME": true, "WF_UID": true, "STEP_NAME": true, "NODE_KEY": true,
-		"IMAGE_REF": true, "HPC_CLASS": true, "DATASET": true, "HPC_SCOPE": true, "STEP_COMMAND": true,
+		"IMAGE_REF": true, "HPC_CLASS": true, "DATASET": true, "DATA_LOCK": true, "HPC_SCOPE": true, "STEP_COMMAND": true,
 		"SLURM_TIME_LIMIT": true, "HPC_IDLE_TIMEOUT_MINUTES": true, "STEP_OUTPUTS": true, "HPC_SHARING": true,
 		"HPC_RESUMABLE_LEAD": true, "HPC_RESUMABLE": true, "HPC_MAX_CONTINUATIONS": true,
 	}

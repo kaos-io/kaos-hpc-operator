@@ -426,3 +426,36 @@ func TestShouldReattachToTheJobAsTheAPIServerStoredItAndRefuseRealConflicts(t *t
 		})
 	}
 }
+
+func TestTheDatasetIsTheCommitTheRunsDataLockHoldsForIt(t *testing.T) {
+	commit := strings.Repeat("c2", 32)
+	lock := `{"version":1,"reads":[{"repo":"dataset-a","owner":null,"ref":"latest","commit":"` + commit + `"},` +
+		`{"repo":"dataset-a","owner":"other","ref":"v2","commit":"` + strings.Repeat("d3", 32) + `"}]}`
+	cfg, err := ConfigFromEnv(podEnv(map[string]string{"DATASET": "dataset-a@latest", "DATA_LOCK": lock}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := cfg.Job().Spec.Dataset; d == nil || d.Repo != "dataset-a" || d.Version != "latest" || d.Commit != commit || d.Owner != "" {
+		t.Errorf("spec.dataset = %+v", d)
+	}
+	cfg, err = ConfigFromEnv(podEnv(map[string]string{"DATASET": "other/dataset-a@v2", "DATA_LOCK": lock}))
+	if err != nil || cfg.Dataset.Owner != "other" || cfg.Dataset.Commit != strings.Repeat("d3", 32) {
+		t.Errorf("a shared dataset is matched on its owner: %+v, %v", cfg.Dataset, err)
+	}
+	if cfg, err = ConfigFromEnv(podEnv(nil)); err != nil || cfg.Job().Spec.Dataset != nil {
+		t.Errorf("no dataset: no pin and no error, got %+v, %v", cfg.Dataset, err)
+	}
+	// The follower never resolves a version: a dataset the lock does not hold fails the step.
+	for name, env := range map[string]map[string]string{
+		"no lock":       {"DATASET": "dataset-a@latest"},
+		"other version": {"DATASET": "dataset-a@v9", "DATA_LOCK": lock},
+		"other owner":   {"DATASET": "dataset-a@v2", "DATA_LOCK": lock},
+		"not a lock":    {"DATASET": "dataset-a@latest", "DATA_LOCK": "{"},
+		"new version":   {"DATASET": "dataset-a@latest", "DATA_LOCK": `{"version":2,"reads":[]}`},
+		"no version":    {"DATASET": "dataset-a", "DATA_LOCK": lock},
+	} {
+		if _, err := ConfigFromEnv(podEnv(env)); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}

@@ -13,7 +13,8 @@ BASE_ENV = {
     "STEP_COMMAND": json.dumps(["python", "-m", "train", "--epochs", "3"]),
     "SLURM_TIME_LIMIT": "720", "HPC_CLASS": "meluxina-gpu", "HPC_CLASSES_JSON": json.dumps(CLASSES),
     "HPC_USER": "u1", "HPC_ACCOUNT": "p1", "HPC_SCRATCH": "/scr", "HPC_HOME": "/home/u1",
-    "STEP_OUTPUTS": "training-result", "DATASET": "dataset-default@latest", "OUTPUTS_REPO": "outputs-yolo",
+    "STEP_OUTPUTS": "training-result", "DATASET_REPO": "dataset-default", "DATASET_VERSION": "latest",
+    "DATASET_COMMIT": "c0ffee1200000000000000000000000000000000000000000000000000000000", "OUTPUTS_REPO": "outputs-yolo",
     "LAKEFS_EXTERNAL_URL": "https://lakefs.example", "MLFLOW_EXTERNAL_URL": "https://mlflow.example",
 }
 

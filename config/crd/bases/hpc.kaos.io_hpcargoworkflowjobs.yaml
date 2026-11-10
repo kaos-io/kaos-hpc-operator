@@ -73,9 +73,38 @@ spec:
                 items:
                   type: string
                 type: array
-              datasetRef:
-                description: DatasetRef the step reads, <dataset-repo>@<version>.
-                type: string
+              dataset:
+                description: |-
+                  Dataset is the dataset the step reads, pinned to one commit by the pipeline's compose step.
+                  The runner stages exactly this commit and never resolves a version itself. Absent: the step
+                  runs without a dataset.
+                properties:
+                  commit:
+                    description: Commit is the lakeFS commit the version was resolved
+                      to when the run started.
+                    pattern: ^[0-9a-f]{64}$
+                    type: string
+                  owner:
+                    description: 'Owner is the project that shares the dataset with
+                      this one. Absent: the project''s own dataset.'
+                    pattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+                    type: string
+                  repo:
+                    description: Repo is the lakeFS repository of the dataset.
+                    pattern: ^[a-z0-9][a-z0-9-]{0,62}$
+                    type: string
+                  version:
+                    description: |-
+                      Version is what the run asked for (latest, v3, a branch or a tag). It is a label: the commit decides
+                      what is read.
+                    maxLength: 255
+                    minLength: 1
+                    type: string
+                required:
+                - commit
+                - repo
+                - version
+                type: object
               env:
                 description: |-
                   Env is extra environment for the runner, from a fixed allowlist: OUTPUTS_REPO, OUTPUTS_REF,

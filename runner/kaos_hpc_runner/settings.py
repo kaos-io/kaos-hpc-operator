@@ -102,7 +102,21 @@ class Settings:
         raw = (g('HPC_MAX_SUBMIT_JOBS') or '').strip()
         self.max_submit_jobs = int(raw) if raw.isdigit() else 0
         self.output_names = [n for n in (g('STEP_OUTPUTS') or '').split(',') if n]
-        self.dataset = (g('DATASET') or '').strip()
+        # The step's dataset, pinned by the pipeline's compose step (spec.dataset). The runner stages this
+        # commit; it never resolves a version.
+        self.dataset_repo = (g('DATASET_REPO') or '').strip()
+        self.dataset_version = (g('DATASET_VERSION') or '').strip()
+        self.dataset_commit = (g('DATASET_COMMIT') or '').strip()
+        self.dataset_owner = (g('DATASET_OWNER') or '').strip()
+        if self.dataset_repo and not re.fullmatch('[0-9a-f]{64}', self.dataset_commit):
+            fail_start('dataset %s@%s has no pinned commit (got %r): the pipeline pins it before any step '
+                       'runs, the runner never resolves a version'
+                       % (self.dataset_repo, self.dataset_version, self.dataset_commit), 1)
+        if self.dataset_owner:
+            fail_start('dataset %s/%s@%s is shared by project %s: datasets of another project cannot be '
+                       'read on HPC yet. Run this step on a cluster class, or copy the dataset into this '
+                       'project.' % (self.dataset_owner, self.dataset_repo, self.dataset_version,
+                                     self.dataset_owner), 1)
         # PRD-1609 node sharing: off unless the operator turned it on for this project and gave
         # its scope. A host on a shared node takes only jobs whose name and script header carry it.
         self.scope = g('HPC_SCOPE') or ''
@@ -175,29 +189,17 @@ class Settings:
 
     # ---- dataset
 
-    def dataset_coords(self):
-        """(repo, ref) of the run's `dataset` (`<dataset-repo>@<version>`): the dataset repository
-        and the lakeFS ref to resolve when no commit was pinned (`latest` is the head of `main`).
-        ('', '') when the job has no dataset (the batch then runs the step data-less)."""
-        if not self.dataset:
-            return '', ''
-        repo, sep, version = self.dataset.partition('@')
-        if not (sep and re.match(r'^dataset-[a-z0-9][a-z0-9-]*$', repo)
-                and re.match(r'^(latest|v[0-9]+)$', version)):
-            fail_start('dataset must be <dataset-repo>@<version> (e.g. dataset-default@latest), got %r'
-                       % self.dataset, 1)
-        return repo, ('main' if version == 'latest' else version)
+    @property
+    def dataset_ref(self):
+        """The label the site's stager files the copy under: `main` for `latest` (as before), else the
+        version. The commit, not this label, decides what is copied."""
+        return 'main' if self.dataset_version == 'latest' else self.dataset_version
 
-    def pinned_commit(self):
-        """The lakeFS commit an upstream step recorded as `dataset_commit` in a JSON output that
-        rides in this step's own command. "" when no argument carries one (the first step)."""
-        for tok in self.command_tokens:
-            if not (isinstance(tok, str) and tok.lstrip().startswith('{')):
-                continue
-            try:
-                commit = str(json.loads(tok).get('dataset_commit') or '')
-            except (ValueError, AttributeError):
-                continue
-            if commit:
-                return commit
-        return ''
+    def data_lock(self):
+        """The run's data lock for this step's dataset (kaos-lib's KAOS_LIB_LOCK, version 1): the step's
+        kaos-lib then reads the pinned commit. "" when the job has no dataset."""
+        if not self.dataset_repo:
+            return ''
+        return json.dumps({'version': 1, 'reads': [{
+            'repo': self.dataset_repo, 'owner': self.dataset_owner or None,
+            'ref': self.dataset_version, 'commit': self.dataset_commit}]}, separators=(',', ':'))

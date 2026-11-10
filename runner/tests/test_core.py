@@ -138,15 +138,23 @@ def test_the_job_name_carries_the_hpc_job_and_the_attempt():
 
 # ---------------------------------------------------------------- dataset
 
-def test_dataset_coordinates_and_the_upstream_pin():
-    assert helpers.settings().dataset_coords() == ("dataset-default", "main")
-    assert helpers.settings(DATASET="dataset-cars@v3").dataset_coords() == ("dataset-cars", "v3")
-    assert helpers.settings(DATASET=None).dataset_coords() == ("", "")
+def test_the_dataset_is_the_pinned_commit_and_nothing_is_resolved():
+    commit = "c0ffee12" + "0" * 56
+    cfg = helpers.settings()
+    assert (cfg.dataset_repo, cfg.dataset_ref, cfg.dataset_commit) == ("dataset-default", "main", commit)
+    assert helpers.settings(DATASET_REPO="my-repo", DATASET_VERSION="v3").dataset_ref == "v3", "any repository"
+    assert json.loads(cfg.data_lock()) == {"version": 1, "reads": [
+        {"repo": "dataset-default", "owner": None, "ref": "latest", "commit": commit}]}
+    none = helpers.settings(DATASET_REPO=None, DATASET_VERSION=None, DATASET_COMMIT=None)
+    assert none.dataset_repo == "" and none.data_lock() == ""
+    for bad in (None, "c0ffee12", "main"):
+        with pytest.raises(SystemExit):
+            helpers.settings(DATASET_COMMIT=bad)   # a dataset without a full pinned commit never starts
+
+
+def test_a_dataset_shared_by_another_project_is_refused_before_any_submit():
     with pytest.raises(SystemExit):
-        helpers.settings(DATASET="cars@latest").dataset_coords()
-    summary = json.dumps({"dataset_commit": "c0ffee12"})
-    assert helpers.settings(STEP_COMMAND=json.dumps(["x", "--info", summary])).pinned_commit() == "c0ffee12"
-    assert helpers.settings().pinned_commit() == ""
+        helpers.settings(DATASET_OWNER="other-project")
 
 
 # ---------------------------------------------------------------- Slurm readings

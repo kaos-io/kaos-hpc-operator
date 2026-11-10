@@ -118,7 +118,7 @@ class Runner:
         self._mint = mint or (lambda: wallet.mint_wallet(cfg.env))
         self.jid = None
         self.wallet, self.wallet_exp = '', 0.0
-        self.staged, self.stage_tried, self.pinned = '', False, ''
+        self.staged, self.stage_tried = '', False
         self.resubmits = 0
         self.lost_hosts = 0
         self.reported = None
@@ -140,7 +140,7 @@ class Runner:
             # Once per runner: a resubmit reuses the staged copy (or the in-job fallback) instead of
             # spending the staging budget again.
             self.stage_tried = True
-            self.staged, self.pinned = staging.stage_dataset(cfg, self.stager, self._mint)
+            self.staged = staging.stage_dataset(cfg, self.stager, self._mint)
         reg = ''
         try:
             r = urllib.request.Request(
@@ -191,17 +191,16 @@ class Runner:
             if cfg.mlflow_url:
                 env += ['MLFLOW_TRACKING_URI=' + cfg.mlflow_url, 'MLFLOW_TRACKING_TOKEN=' + w]
             if cfg.lakefs_url:
-                repo, ref = cfg.dataset_coords()
                 env += ['LAKEFS_ENDPOINT=' + cfg.lakefs_url,
                         'LAKEFS_BEARER_TOKEN=' + w,
-                        'DATASET_REPO=' + repo, 'DATASET_REF=' + ref,
-                        'DATASET_COMMIT=' + (self.pinned or cfg.pinned_commit()),
+                        'DATASET_REPO=' + cfg.dataset_repo, 'DATASET_COMMIT=' + cfg.dataset_commit,
                         'OUTPUTS_REPO=' + cfg.outputs_repo, 'OUTPUTS_REF=' + cfg.outputs_ref,
                         'STAGEIN_B64=' + payloads.b64(payloads.STAGEIN),
                         'STAGEOUT_B64=' + payloads.b64(payloads.STAGEOUT)]
-        commit = cfg.pinned_commit()
-        if commit:
-            env.append('KAOS_COMMIT=' + commit)   # fail() keeps the dataset lease
+        if cfg.dataset_commit:
+            env.append('KAOS_COMMIT=' + cfg.dataset_commit)   # fail() keeps the dataset lease
+            # The step's kaos-lib reads the pinned commit (Apptainer passes the job's environment on).
+            env.append('KAOS_LIB_LOCK=' + cfg.data_lock())
         step_limit = cfg.time_limit
         job_limit = step_limit
         class_qos = hpc.get('qos') or 'default'
@@ -236,8 +235,8 @@ class Runner:
         # Leases (the stager never evicts what a queued or running job names here, squeue %k):
         # kaos-commit= for the dataset commit (PRD-1541 D-06), kaos-image= for the staged image tar (D-62).
         lease = []
-        if commit:
-            lease.append('kaos-commit=' + commit)
+        if cfg.dataset_commit:
+            lease.append('kaos-commit=' + cfg.dataset_commit)
         # AC-65: always. The SIF has the tar's key, so the lease also keeps the SIF (staged or not) from the
         # stager's cleanup while this job queues or runs.
         lease.append('kaos-image=' + imagemod.image_key(cfg.image))

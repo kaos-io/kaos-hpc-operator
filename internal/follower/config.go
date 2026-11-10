@@ -41,7 +41,7 @@ type Config struct {
 	MaxContinuations int32
 	ResumableOptOut  bool     // HPC_RESUMABLE=0|false (resumable=False in pipeline.py): never continued from a checkpoint
 	Outputs          []string // STEP_OUTPUTS, comma separated
-	Dataset          string
+	Dataset          *hpcv1alpha1.DatasetPin // DATASET (the run's choice) looked up in DATA_LOCK (the run's data lock)
 	Scope            string // HPC_SCOPE: set means node sharing
 	IdleTimeout      *int32 // HPC_IDLE_TIMEOUT_MINUTES: nil = the platform's 20, 0 = off (step idle_timeout=)
 	Env              []hpcv1alpha1.NameValue
@@ -52,8 +52,13 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 	c := Config{
 		Namespace: get("HPC_JOB_NAMESPACE"), WorkflowName: get("WF_NAME"), WorkflowUID: get("WF_UID"),
 		StepName: get("STEP_NAME"), NodeKey: get("NODE_KEY"), Image: get("IMAGE_REF"),
-		Class: get("HPC_CLASS"), Dataset: get("DATASET"), Scope: get("HPC_SCOPE"),
+		Class: get("HPC_CLASS"), Scope: get("HPC_SCOPE"),
 	}
+	pin, err := datasetPin(get("DATASET"), get("DATA_LOCK"))
+	if err != nil {
+		return c, err
+	}
+	c.Dataset = pin
 	var missing []string
 	for name, v := range map[string]string{"HPC_JOB_NAMESPACE": c.Namespace, "WF_NAME": c.WorkflowName, "WF_UID": c.WorkflowUID,
 		"STEP_NAME": c.StepName, "NODE_KEY": c.NodeKey, "IMAGE_REF": c.Image, "HPC_CLASS": c.Class} {
@@ -124,6 +129,51 @@ func (c *Config) readResumable(get func(string) string) error {
 	return nil
 }
 
+// datasetPin is the step's dataset at the commit the run's data lock holds for it. choice is the run's
+// `dataset` parameter, [<owner>/]<repository>@<version>; lock is the data lock the compose step wrote
+// ({"version": 1, "reads": [{"repo", "owner", "ref", "commit"}]}). No choice: no dataset. A choice the
+// lock does not hold is an error: the follower never resolves a version, and neither does the runner.
+func datasetPin(choice, lock string) (*hpcv1alpha1.DatasetPin, error) {
+	choice = strings.TrimSpace(choice)
+	if choice == "" {
+		return nil, nil
+	}
+	name, version, ok := strings.Cut(choice, "@")
+	if !ok || name == "" || version == "" {
+		return nil, fmt.Errorf("DATASET must be [<owner>/]<repository>@<version>, got %q", choice)
+	}
+	owner, repo := "", name
+	if o, r, shared := strings.Cut(name, "/"); shared {
+		owner, repo = o, r
+	}
+	var doc struct {
+		Version int `json:"version"`
+		Reads   []struct {
+			Repo, Ref, Commit string
+			Owner             *string
+		} `json:"reads"`
+	}
+	if strings.TrimSpace(lock) == "" {
+		return nil, fmt.Errorf("DATA_LOCK is empty: the run pinned no commit for dataset %s", choice)
+	}
+	if err := json.Unmarshal([]byte(lock), &doc); err != nil {
+		return nil, fmt.Errorf("DATA_LOCK is not a data lock: %w", err)
+	}
+	if doc.Version != 1 {
+		return nil, fmt.Errorf("DATA_LOCK has version %d; this follower reads version 1", doc.Version)
+	}
+	for _, r := range doc.Reads {
+		readOwner := ""
+		if r.Owner != nil {
+			readOwner = *r.Owner
+		}
+		if r.Repo == repo && r.Ref == version && readOwner == owner && r.Commit != "" {
+			return &hpcv1alpha1.DatasetPin{Repo: repo, Version: version, Commit: r.Commit, Owner: owner}, nil
+		}
+	}
+	return nil, fmt.Errorf("DATA_LOCK holds no commit for dataset %s", choice)
+}
+
 // JobName is the deterministic name of the step's job: hpc- plus the first 20 hex characters of
 // sha256(workflow uid + "/" + node key). A re-created pod of the same step computes the same name.
 func JobName(workflowUID, nodeKey string) string {
@@ -135,7 +185,7 @@ func JobName(workflowUID, nodeKey string) string {
 func (c Config) Job() *hpcv1alpha1.HPCArgoWorkflowJob {
 	spec := hpcv1alpha1.HPCArgoWorkflowJobSpec{
 		Class: c.Class, Image: c.Image, Command: c.Command, WallTimeMinutes: c.WallTimeMinutes, Nodes: 1,
-		DatasetRef: c.Dataset, Outputs: c.Outputs, StepName: c.StepName,
+		Dataset: c.Dataset, Outputs: c.Outputs, StepName: c.StepName,
 		Workflow: &hpcv1alpha1.WorkflowRef{Name: c.WorkflowName, UID: c.WorkflowUID}, Env: c.Env,
 	}
 	if c.ResumableLead > 0 {

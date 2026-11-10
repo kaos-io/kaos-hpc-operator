@@ -2,18 +2,14 @@
 import concurrent.futures, json, os, pathlib, sys, urllib.parse, urllib.request
 EP = os.environ['LAKEFS_ENDPOINT'].rstrip('/')
 H = {'Authorization': 'Bearer ' + os.environ['LAKEFS_BEARER_TOKEN']}
-REPO, REF = os.environ['DATASET_REPO'], os.environ['DATASET_REF']
+REPO = os.environ['DATASET_REPO']
 def get(url):
     return urllib.request.urlopen(
         urllib.request.Request(url, headers=H), timeout=120)
 base = EP + '/api/v1/repositories/' + urllib.parse.quote(REPO, safe='')
-# The commit dataset-loading pinned, so this step reads exactly what the
-# in-cluster steps read. Without one (older step code): ref -> tip commit via
-# the commit LOG (amount=1). GET /refs/{ref} does not exist on our lakeFS
-# version (404, live job 5143633) — /refs/{ref}/commits is the proven one.
-commit = os.environ.get('DATASET_COMMIT') or json.load(
-    get(base + '/refs/' + urllib.parse.quote(REF, safe='')
-        + '/commits?amount=1'))['results'][0]['id']
+# The commit the pipeline pinned for the run, so this step reads exactly what
+# the in-cluster steps read. Nothing is resolved here.
+commit = os.environ['DATASET_COMMIT']
 dest = pathlib.Path(os.environ['DATASET_CACHE']) / REPO / commit
 open(os.environ['DATASET_DIRFILE'], 'w').write(str(dest))
 if (dest / '.complete').exists():

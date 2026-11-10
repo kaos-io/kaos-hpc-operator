@@ -273,6 +273,10 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 	if spec.Sharing != nil && site.Spec.Sharing {
 		sharing, scope = "1", spec.Sharing.Scope
 	}
+	ds := hpcv1alpha1.DatasetPin{}
+	if spec.Dataset != nil {
+		ds = *spec.Dataset
+	}
 	kv := [][2]string{
 		{"HPC_JOB_NAMESPACE", job.Namespace}, {"HPC_JOB_NAME", job.Name},
 		{"KAOS_ATTEMPT", strconv.Itoa(int(attempt))},
@@ -281,7 +285,8 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 		{"STEP_OUTPUTS", strings.Join(spec.Outputs, ",")}, {"HPC_CLASS", spec.Class},
 		{"STEP_NAME", spec.StepName}, {"WF_UID", wfUID},
 		{"KUBECORE_WORKFLOW_NAME", wfName}, {"KUBECORE_RUN_ID", wfName},
-		{"DATASET", spec.DatasetRef}, {"HPC_SHARING", sharing}, {"HPC_SCOPE", scope},
+		{"DATASET_REPO", ds.Repo}, {"DATASET_VERSION", ds.Version}, {"DATASET_COMMIT", ds.Commit},
+		{"DATASET_OWNER", ds.Owner}, {"HPC_SHARING", sharing}, {"HPC_SCOPE", scope},
 		{"HPC_SITE", site.Spec.Site}, {"HPC_ACCOUNT", site.Spec.Identity.Account}, {"HPC_USER", site.Spec.Identity.User},
 		{"HPC_SCRATCH", site.Spec.Profile.ScratchRoot}, {"HPC_HOME", homeOf(site)},
 		{"HPC_CLASSES_JSON", classes}, {"HPC_ENDPOINT", site.Spec.Profile.Endpoint},
