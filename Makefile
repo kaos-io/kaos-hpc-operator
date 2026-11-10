@@ -59,7 +59,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
+test: manifests generate fmt vet setup-envtest ## Run tests (Go and envtest; the pipeline engine's Python tests run in the engine image build, see test-engine).
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
 # The scale test runs the real controller binary against envtest, fake runner pods and fake Slurm sites
@@ -106,7 +106,7 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter
+lint: golangci-lint ## Run golangci-lint linter (ruff on engine/ is lint-engine, run in the engine image build)
 	$(GOLANGCI_LINT) run
 
 .PHONY: lint-fix
@@ -116,6 +116,40 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 .PHONY: lint-config
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	$(GOLANGCI_LINT) config verify
+
+##@ Pipeline engine (engine/, D-79)
+
+# CI (the Go container has no Python) runs the engine tests and ruff in the `engine-tests` stage of
+# engine/Dockerfile.engine, which the validate and build workflows build on every PR / merge; these targets are the
+# same checks for a workstation (Python 3.12 + network).
+# The engine's Python environment: the pinned render dependencies of engine/requirements.txt in a venv.
+ENGINE_VENV ?= $(CURDIR)/bin/engine-venv
+ENGINE_PYTHON ?= python3.12
+ENGINE_PY = $(ENGINE_VENV)/bin/python
+
+$(ENGINE_VENV)/.stamp: engine/requirements-dev.txt engine/requirements.txt
+	$(ENGINE_PYTHON) -m venv $(ENGINE_VENV)
+	$(ENGINE_PY) -m pip install -q -r engine/requirements-dev.txt
+	@touch $@
+
+.PHONY: engine-venv
+engine-venv: $(ENGINE_VENV)/.stamp ## Create the engine's Python venv (pinned hera/hydra/omegaconf/PyYAML).
+
+.PHONY: test-engine
+test-engine: engine-venv ## Run the engine tests (the template's kubecore tests, runner, wheel, compat surface, follower contract).
+	PYTHONDONTWRITEBYTECODE=1 $(ENGINE_PY) -m pytest -c engine/pytest.ini engine/tests -q
+
+# Needs network: clones both templates and the private apps in $$KAOS_ENGINE_CORPUS_LAB into .corpus/.
+CORPUS_DIR ?= $(CURDIR)/.corpus
+.PHONY: engine-corpus
+engine-corpus: engine-venv ## Render every historical template state and the lab apps with the engine and with their own vendored copy; write engine/CORPUS_REPORT.md.
+	hack/engine-corpus-fetch.sh $(CORPUS_DIR)
+	$(ENGINE_PY) engine/tools/corpus.py --corpus $(CORPUS_DIR) --report engine/CORPUS_REPORT.md > /dev/null
+	KAOS_ENGINE_CORPUS_DIR=$(CORPUS_DIR) PYTHONDONTWRITEBYTECODE=1 $(ENGINE_PY) -m pytest -c engine/pytest.ini engine/tests/test_corpus.py -q
+
+.PHONY: lint-engine
+lint-engine: engine-venv ## Run ruff on the engine's own Python (the byte-copied kubecore/ and the template tests are excluded).
+	cd engine && $(ENGINE_VENV)/bin/ruff check --config ruff.toml .
 
 ##@ Build
 

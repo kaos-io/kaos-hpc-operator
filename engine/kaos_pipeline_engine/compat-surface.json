@@ -1,0 +1,530 @@
+{
+ "modules": {
+  "authoring": {
+   "AuthoringError": {
+    "first_seen": {
+     "commit": "2456dfce588b3468e1f8d5f358cec3127efb5f1e",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "class"
+   },
+   "CHECKPOINT_EVERY_ANNOTATION": {
+    "first_seen": {
+     "commit": "d61a40cc1bb58a48569d6b5f5c5d989037133fe8",
+     "date": "2026-11-07",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "COMPOSE_COMMAND": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "COMPOSE_STEP": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "Container": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "DAG": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "DEFAULT_RESUMABLE_LEAD": {
+    "first_seen": {
+     "commit": "bd62cd8af2f287846215817e1629c8736a65e074",
+     "date": "2026-11-05",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "HPC_RESUMABLE_ANNOTATION": {
+    "first_seen": {
+     "commit": "bd62cd8af2f287846215817e1629c8736a65e074",
+     "date": "2026-11-05",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "IDLE_TIMEOUT_ANNOTATION": {
+    "first_seen": {
+     "commit": "7421e8793f04f17617b0582508f0dcd5e22bd818",
+     "date": "2026-11-07",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "IMAGE": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "PARAMS_PATH": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "Parameter": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "RESUMABLE_OFF": {
+    "first_seen": {
+     "commit": "88f179c974d4774b89dc83f7d73d7dd25f625c2c",
+     "date": "2026-11-07",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "Resources": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "STEP_COMMAND": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "Step": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "class"
+   },
+   "ValueFrom": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "WorkflowTemplate": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "_CHECKPOINT_EVERY_RE": {
+    "first_seen": {
+     "commit": "d61a40cc1bb58a48569d6b5f5c5d989037133fe8",
+     "date": "2026-11-07",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "_DISK_QUANTITY_RE": {
+    "first_seen": {
+     "commit": "b6b29d2c2df4871114829f7df32a27a62999ff4c",
+     "date": "2026-08-11",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "_HPC_TIME_LIMIT_RE": {
+    "first_seen": {
+     "commit": "52755f85175a0694d1c6143aa5467b7c6aa5a3f9",
+     "date": "2026-08-27",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "_STEP_NAME_RE": {
+    "first_seen": {
+     "commit": "2456dfce588b3468e1f8d5f358cec3127efb5f1e",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "_checkpoint_every_minutes": {
+    "first_seen": {
+     "commit": "d61a40cc1bb58a48569d6b5f5c5d989037133fe8",
+     "date": "2026-11-07",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   },
+   "_current": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "_idle_timeout_minutes": {
+    "first_seen": {
+     "commit": "7421e8793f04f17617b0582508f0dcd5e22bd818",
+     "date": "2026-11-07",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   },
+   "derive_tree": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "json": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "pipeline": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "class"
+   },
+   "re": {
+    "first_seen": {
+     "commit": "2456dfce588b3468e1f8d5f358cec3127efb5f1e",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "step": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   }
+  },
+  "derive_tree": {
+   "ADVANCED_PARAM_KWARGS": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "CONFIG_DIR": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "ConfigStore": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "DataConfig": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "class"
+   },
+   "DataSource": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "class"
+   },
+   "DeriveError": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "class"
+   },
+   "DerivedForm": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "class"
+   },
+   "Enum": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "HERE": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "OmegaConf": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "PLATFORM_SEARCHPATH": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "PLATFORM_SECTIONS": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "Path": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "QuantizationConfig": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "class"
+   },
+   "QuantizationMode": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "class"
+   },
+   "SCHEMAS": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "SCHEMA_BACKED": {
+    "first_seen": {
+     "commit": "c6b01f478b057364a092a14065c52578795263df",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "SCHEMA_SECTIONS": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "assign"
+   },
+   "_compose": {
+    "first_seen": {
+     "commit": "d65750511a22937e431a78d71c6d61bf6fa8c1cd",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   },
+   "_group_choices": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   },
+   "_group_options": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   },
+   "_has_config_source": {
+    "first_seen": {
+     "commit": "c6b01f478b057364a092a14065c52578795263df",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   },
+   "_mapped": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   },
+   "_register_schemas": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   },
+   "_value_str": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   },
+   "_walk_scalars": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   },
+   "compose": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "compose_tree": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   },
+   "dataclass": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "derive": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   },
+   "field": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "initialize_config_dir": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "os": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "import"
+   },
+   "searchpath_override": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   },
+   "validate_reads": {
+    "first_seen": {
+     "commit": "c329996b93fb5f3bb328ead3a919a224c3d3c47d",
+     "date": "2026-07-14",
+     "repo": "hera-pipeline-template"
+    },
+    "kind": "function"
+   }
+  }
+ },
+ "removed": {},
+ "schema": 1
+}
