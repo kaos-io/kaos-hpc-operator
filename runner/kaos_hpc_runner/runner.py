@@ -696,6 +696,8 @@ class Runner:
                         # PRD-1609 D-04: a host ran this step on a shared node and then cancelled this
                         # job; the step's result is in the comment.
                         rc = int(share['rc']) if share.get('rc', '').isdigit() else 1
+                        if rc == 0 and share.get('reason') in ('memkill', 'GPUViolation'):
+                            rc = 1      # a step the slot manager stopped did not succeed, whatever exit code it left
                         print('ran on a shared node: host job', share.get('host'),
                               'exit:', share.get('rc'), 'reason:', share.get('reason'), flush=True)
                         st = ['COMPLETED'] if rc == 0 else ['FAILED']

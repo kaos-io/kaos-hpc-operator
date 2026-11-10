@@ -990,6 +990,21 @@ def test_a_resumable_guest_that_saved_is_reported_like_a_resumable_step_alone(ri
     assert run["checkpoint"]["progressValues"] == [3, 40] and "hostJobOpen" not in run
 
 
+def test_a_step_the_slot_manager_stopped_is_a_failure_even_with_exit_0__live_job_5442274(rig):
+    """Live 2026-11-10: `reason=GPUViolation` with rc 0 ended the HPC job Succeeded. Whatever exit code an older
+    slot manager wrote, a memkill or GPUViolation step is FAILED, as a guest and as a host's own step."""
+    for reason in ("GPUViolation", "memkill"):
+        taken = acc("PENDING", comment="kaos-state=taken host=5442272 slot=2 attempt=1")
+        done = acc("CANCELLED", comment="kaos-state=done rc=0 host=5442272 reason=" + reason, start=4294967294, end=0)
+        rig.make(FakeSlurm({"5001": [taken, done], "5442272": [acc("RUNNING")]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+        rig.runner.run()
+        assert (rig.kube.run["state"], rig.kube.run["exitCode"]) == ("FAILED", 1), reason
+    own = acc("COMPLETED", comment="kaos-state=done rc=0 reason=GPUViolation", start=1762300800, end=1762301400)
+    rig.make(FakeSlurm({"5001": [own]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    rig.runner.run()
+    assert (rig.kube.run["state"], rig.kube.run["exitCode"]) == ("FAILED", 1)
+
+
 # ---------------------------------------------------------------- the controller's batched reading (D-36)
 
 T0 = 1762500000.0     # the tests' clock: 2025-11-07T08:00:00Z

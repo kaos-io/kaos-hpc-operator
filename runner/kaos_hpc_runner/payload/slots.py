@@ -46,6 +46,7 @@ HOME = os.environ.get('HOME') or '/'
 GPUS = max(1, int(os.environ.get('HPC_GPUS') or 1))
 CPUS = max(1, int(os.environ.get('SLURM_CPUS_ON_NODE') or GPUS) // GPUS)
 IDLE_S = int(os.environ.get('KAOS_IDLE_S') or 120)
+KILLED_EXIT = 137       # 128 + KILL: the exit code of a step the slot manager stopped itself
 CHECKPOINT_EXIT = 85    # the step saved its checkpoint (D-44; resume.Classify)
 MARGIN_S = 300          # a guest must end this long before the host's own limit
 LEAD_UNIT_S = 60        # a resumable step's lead is declared in minutes
@@ -407,6 +408,10 @@ def finish(slot, rc):
     global own_rc
     s = slots.pop(slot)
     job = s['job']
+    if rc == 0 and (s['memkill'] or s.get('gpukill')):
+        # A step the slot manager stopped (memory, GPU trespass) did not succeed, whatever srun says: live 2026-11-10
+        # (job 5442274) srun returned 0 for a scancelled step and the job ended Succeeded.
+        rc = KILLED_EXIT
     reason = (' reason=memkill' if s['memkill'] else ' reason=GPUViolation' if s.get('gpukill')
               else ' reason=TIMEOUT' if timed_out(s, rc) else '')
     if job == ME:

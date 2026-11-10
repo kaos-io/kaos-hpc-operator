@@ -610,6 +610,22 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		}
 	})
 
+	// Live 2026-11-10 (job 5442274): a step the slot manager stopped (GPUViolation) must end Failed, not Succeeded.
+	It("fails a step the slot manager stopped (exit 137 on a shared node), settled by its own run, not Succeeded", func() {
+		newSite(10, nil)
+		j := newJob(envNS, 60)
+		reconcileJob(j)
+		code := int32(137)
+		start := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+		endT := metav1.NewTime(time.Now())
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5442274", State: "FAILED", ExitCode: &code,
+			StartTime: &start, EndTime: &endT, Terminal: true})
+		_, got := reconcileJob(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal("SiteFAILED"))
+		Expect(got.Status.Attempts[0].Outcome).To(Equal("SiteFAILED"))
+	})
+
 	It("keeps a guest at zero when a later end is reported", func() {
 		newSite(10, nil)
 		j := newJob(envNS, 240)

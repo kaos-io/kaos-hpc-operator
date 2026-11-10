@@ -94,7 +94,7 @@ may still run). See [extreme-cases.md](extreme-cases.md) 2.13 and 2.17.
 - `GPUViolation`: on a shared node, a step computed on a GPU outside its own set and the slot manager stopped that
   step alone (AC-57 / D-29). It is written into the host job's Slurm comment (`kaos-state=done rc=N
   reason=GPUViolation`) and the job log (`gpu: step ... outside its set: stopping it`), not into the status of an
-  HPC job. Neighbouring steps keep running. Prevention first: where `nvidia-container-cli` works the step cannot see
+  HPC job: the step's attempt ends `Failed/SiteFAILED` (exit 137, never 0, also for `reason=memkill`; live 2026-11-10, job 5442274). Neighbouring steps keep running. Prevention first: where `nvidia-container-cli` works the step cannot see
   the other GPUs (`gpu fence: nvccli` in the job log).
 - Events not tied to a reason constant: `LaneRefused` (the site refused the lane; the attempt ran on the class
   default), `HostSettledToJobEnd` (a host's attempt settled to its Slurm job's end, booking released), `HostEndUnknown`

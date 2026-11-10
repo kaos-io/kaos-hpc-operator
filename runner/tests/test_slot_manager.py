@@ -466,3 +466,28 @@ def test_a_padded_gpu_list_from_slurm_reaches_the_step_clean__live_job_5439721(t
     assert rc == 0, log
     got = (node.out / "101").read_text().strip()
     assert got.count("[") == 2 and " " not in got and "[]" not in got, got
+
+
+def test_a_step_stopped_by_the_slot_manager_never_ends_with_exit_0__live_job_5442274(tmp_path):
+    """Live 2026-11-10 (job 5442274): the trespasser was stopped (`reason=GPUViolation`) but srun returned 0 for the
+    scancelled step, the host wrote `rc=0` and the HPC job ended Succeeded. A step the slot manager stopped itself
+    ends non-zero, as a guest and as the host's own step, for a GPU violation and for a memory kill."""
+    guests = {"101": _job("kaos-%s-wf1-train" % SCOPE, TRESPASS, comment="kaos-commit=bbbbbbb2")}
+    (tmp_path / "g").mkdir()
+    node = Node(tmp_path / "g", guests, own_body="sleep 6\nexit 0\n", gpu_smi=True,
+                extra_env={"FAKE_CANCELLED_STEP_EXITS_0": "1"})
+    node.finish()
+    assert node.jobs()["101"]["comment"] == "kaos-commit=bbbbbbb2 kaos-state=done rc=137 host=100 reason=GPUViolation"
+    # the host's own step is the trespasser: its job comment and its exit code say Failed too
+    (tmp_path / "o").mkdir()
+    own = Node(tmp_path / "o", {}, own_body=TRESPASS, gpu_smi=True, extra_env={"FAKE_CANCELLED_STEP_EXITS_0": "1"})
+    rc, log = own.finish()
+    assert own.jobs()["100"]["comment"] == "kaos-commit=aaaaaaa1 kaos-state=done rc=137 reason=GPUViolation", log
+    assert rc == 137, log
+    (tmp_path / "m").mkdir()
+    hog = ("python3 -c \"b = bytearray(400 * 1024 * 1024)\nfor i in range(0, len(b), 4096): b[i] = 1\n"
+           "import time; time.sleep(30)\"\n")
+    mem = Node(tmp_path / "m", {"101": _job("kaos-%s-wf1-train" % SCOPE, hog, comment="kaos-commit=bbbbbbb2")},
+               mem_mb=1024, own_body="sleep 6\nexit 0\n", extra_env={"FAKE_CANCELLED_STEP_EXITS_0": "1"})
+    mem.finish()
+    assert mem.jobs()["101"]["comment"] == "kaos-commit=bbbbbbb2 kaos-state=done rc=137 host=100 reason=memkill"
