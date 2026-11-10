@@ -525,6 +525,16 @@ def test_a_guest_that_never_started_reports_its_host_slot_and_an_end(rig, monkey
     assert run["endTime"] == "2025-11-05T01:00:00Z", "no end from Slurm: when the runner saw it over"
 
 
+def test_a_guest_reports_the_step_start_its_host_wrote(rig, monkeypatch):
+    """D-67: a guest's own job never starts; the start its host wrote is its step's, so its run time is a sample."""
+    taken = acc("PENDING", comment="kaos-state=taken host=5439966 slot=0 attempt=1")
+    done = acc("CANCELLED", comment="kaos-state=done rc=0 host=5439966 start=1762300800", start=4294967294, end=1762301700)
+    rig.make(FakeSlurm({"5001": [taken, done], "5439966": [acc("RUNNING")]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    rig.runner.run()
+    run = rig.kube.run
+    assert (run["startTime"], run["endTime"], run["hostSiteJobID"]) == ("2025-11-05T00:00:00Z", "2025-11-05T00:15:00Z", "5439966")
+
+
 def test_a_host_that_died_with_the_job_starts_it_over_bounded(rig):
     taken = acc("PENDING", comment="kaos-state=taken host=4000 slot=0 attempt=1")
     slurm = FakeSlurm({"5001": [taken], "5002": [acc("COMPLETED")], "4000": [acc("NODE_FAIL")]})
@@ -821,9 +831,10 @@ def test_a_host_reports_its_step_at_once_and_its_job_end_when_the_job_ends(rig):
     assert len(terminal_reports(rig)) == 2
     assert first["state"] == "COMPLETED" and first.get("hostSiteJobID") is None
     assert first["hostJobOpen"] is True, "D-26: the controller holds the host's booking until the job's end"
-    assert last["endTime"] == "2025-11-05T00:03:00Z", "the host job's own end, not the step's"
+    assert last["hostJobEndTime"] == "2025-11-05T00:03:00Z", "the host job's own end, for the settlement"
+    assert last["endTime"] == first["endTime"], "endTime stays the step's end: the learned limit's sample (D-67)"
     assert last["hostJobOpen"] is None and "hostJobOpen" not in rig.kube.run, "the job's end closes the host"
-    same = ("endTime", "hostJobOpen")
+    same = ("hostJobEndTime", "hostJobOpen")
     assert {k: v for k, v in last.items() if k not in same} == {k: v for k, v in first.items() if k not in same}
     outputs_patches = [c for c in rig.kube.patches() if "outputs" in c[2]["status"]]
     assert len(outputs_patches) <= 1, "outputs ride with the step's report only"
@@ -879,7 +890,7 @@ def test_a_host_job_that_never_ends_is_given_up_after_its_limit_plus_margin(rig,
     first, last = terminal_reports(rig)
     assert first["hostJobOpen"] is True and last["hostJobOpen"] is None, "the host is closed all the same"
     limit_s = rig.runner.job_limit_min * 60
-    assert last["endTime"] == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(1762300800 + limit_s)), \
+    assert last["hostJobEndTime"] == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(1762300800 + limit_s)), \
         "the latest end Slurm allows the job: its start plus its time limit"
 
 
@@ -891,7 +902,8 @@ def test_a_restarted_host_runner_follows_its_host_job_to_its_end_without_submitt
     rig.make(slurm, status={"run": dict(opened)}, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
     assert rig.runner.run() == 0
     assert slurm.submitted == [] and slurm.cancelled == []
-    assert rig.kube.run["endTime"] == "2025-11-05T00:21:00Z" and "hostJobOpen" not in rig.kube.run
+    assert rig.kube.run["hostJobEndTime"] == "2025-11-05T00:21:00Z" and "hostJobOpen" not in rig.kube.run
+    assert rig.kube.run["endTime"] == "2025-11-05T00:01:00Z", "the step's end is kept"
     assert rig.kube.run["state"] == "COMPLETED" and rig.kube.run["exitCode"] == 0 and rig.kube.run["terminal"]
 
 

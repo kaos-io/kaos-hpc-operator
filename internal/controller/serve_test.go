@@ -568,6 +568,8 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Sharing = &hpcv1alpha1.Sharing{Scope: "abcdef12"} })
 		_, got := reconcileOnce(j)
 		Expect(got.Status.Booking).NotTo(BeNil())
+		before, err := r.ledgerOf(ctx, theSite())
+		Expect(err).NotTo(HaveOccurred())
 		start := metav1.NewTime(time.Now().Add(-20 * time.Minute).Truncate(time.Second))
 		stepEnd, rc := metav1.NewTime(start.Add(2*time.Minute)), int32(0)
 		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5439966", State: "COMPLETED", ExitCode: &rc,
@@ -579,8 +581,8 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Message).To(Equal("attempt 1 settled 2 node-minutes" + hostOpenNote))
 		l, err := r.ledgerOf(ctx, theSite())
 		Expect(err).NotTo(HaveOccurred())
-		Expect(l.Tiers[hpcv1alpha1.TierGPU].Booked).To(Equal(int64(60)), "the open host holds its booking")
-		Expect(l.Tiers[hpcv1alpha1.TierGPU].Used).To(BeZero(), "its provisional settlement is not counted twice")
+		Expect(l.Tiers[hpcv1alpha1.TierGPU].Booked).To(Equal(before.Tiers[hpcv1alpha1.TierGPU].Booked), "the open host holds its booking (60)")
+		Expect(l.Tiers[hpcv1alpha1.TierGPU].Used).To(Equal(before.Tiers[hpcv1alpha1.TierGPU].Used), "its provisional settlement is not counted twice")
 		res, _ := reconcileOnce(j)
 		Expect(res.RequeueAfter).To(Equal(OpenHostPoll), "looked at again while its runner runs")
 		return j, start
@@ -589,9 +591,11 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 	It("holds an ended host's booking while its Slurm job keeps the node, then settles it to that job's end (D-26)", func() {
 		j, start := hostOpen()
 		jobEnd, rc := metav1.NewTime(start.Add(21*time.Minute)), int32(0)
+		stepEnd := metav1.NewTime(start.Add(2 * time.Minute))
 		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5439966", State: "COMPLETED", ExitCode: &rc,
-			StartTime: &start, EndTime: &jobEnd, Terminal: true})
+			StartTime: &start, EndTime: &stepEnd, HostJobEndTime: &jobEnd, Terminal: true})
 		_, got := reconcileOnce(j)
+		Expect(got.Status.Run.EndTime.Time).To(BeTemporally("==", stepEnd.Time), "the step's own end is kept for learning")
 		Expect(got.Status.Booking).To(BeNil(), "released once the host job ended")
 		Expect(got.Status.Attempts[0].HostJobOpen).To(BeFalse())
 		Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(21)), "what the site charged for the node")
@@ -602,6 +606,21 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(l.Tiers[hpcv1alpha1.TierGPU].Used).To(Equal(int64(21)))
 		Expect(l.Tiers[hpcv1alpha1.TierGPU].Booked).To(BeZero())
+	})
+
+	It("learns a host's limit from its own step time, not from the time its job kept the node for a guest (D-67)", func() {
+		for range 3 {
+			j, start := hostOpen() // a 2-minute step
+			jobEnd, stepEnd, rc := metav1.NewTime(start.Add(50*time.Minute)), metav1.NewTime(start.Add(2*time.Minute)), int32(0)
+			report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5439966", State: "COMPLETED", ExitCode: &rc,
+				StartTime: &start, EndTime: &stepEnd, HostJobEndTime: &jobEnd, Terminal: true})
+			_, got := reconcileOnce(j)
+			Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(50)), "settled to the node the site charged")
+		}
+		next := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Sharing = &hpcv1alpha1.Sharing{Scope: "abcdef12"} })
+		_, got := reconcileOnce(next)
+		Expect(got.Status.Placement).To(Equal(&hpcv1alpha1.Placement{TimeLimitMinutes: 15, Source: hpcv1alpha1.PlacementLearned, Samples: 3}),
+			"3 samples of 2 minutes give the 15-minute floor; the 50-minute jobs would have given the declared 60")
 	})
 
 	It("closes an open host whose runner ended without its job's end, settled up to now", func() {

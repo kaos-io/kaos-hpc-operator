@@ -68,7 +68,7 @@ const (
 	EnvHostTailMinutes = "FAKE_HOST_TAIL_MINUTES"
 	// EnvGuest makes the job a guest: it never starts on its own. A running host of its account whose job
 	// outlasts the guest's run takes it ("kaos-state=taken host=H slot=1", held), runs it, and cancels it
-	// ("kaos-state=done rc=0 host=H"): the guest's own job is charged nothing.
+	// ("kaos-state=done rc=0 host=H start=<step start>"): the guest's own job is charged nothing.
 	EnvGuest = "FAKE_GUEST"
 	// EnvResumeRef is the checkpoint reference of the attempt (set by the controller via the runner).
 	EnvResumeRef = "KAOS_RESUME_REF"
@@ -724,7 +724,8 @@ func (s *Site) guestLocked(j *Job, now time.Time) {
 		return
 	}
 	if now.Sub(j.takenAt) >= j.runReal {
-		j.Cm = strings.Replace(j.Cm, fmt.Sprintf("kaos-state=taken host=%d slot=1", j.host), fmt.Sprintf("kaos-state=done rc=0 host=%d", j.host), 1)
+		j.Cm = strings.Replace(j.Cm, fmt.Sprintf("kaos-state=taken host=%d slot=1", j.host),
+			fmt.Sprintf("kaos-state=done rc=0 host=%d start=%d", j.host, j.takenAt.Unix()), 1)
 		s.endLocked(j, Cancelled, 0, now)
 	}
 }

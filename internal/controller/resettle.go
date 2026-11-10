@@ -34,8 +34,8 @@ func settledWords(attempt int32, minutes int64) string {
 // attempt record to correct and the new settlement, or ok=false when there is nothing to correct.
 //
 // An open host attempt (D-26: its booking is still held) is closed by the first report without
-// hostJobOpen: settled from the job's start to its end, never below what was already settled; an end the
-// site did not give settles up to now (conservative). An attempt settled before (a runner without
+// hostJobOpen: settled from the job's start to its end (hostJobEndTime), never below what was already
+// settled; an end the site did not give settles up to now (conservative). An attempt settled before (a runner without
 // hostJobOpen) only ever grows, and only from an end time that is valid and later than the one already
 // recorded, so a repeated report changes nothing and an implausible one (NO_VAL, which settle() would turn
 // into "now") can never extend the spend.
@@ -53,7 +53,10 @@ func lateEnd(job *hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) (int, settlemen
 		if run.HostJobOpen {
 			return 0, settlement{}, false // the host job still runs
 		}
-		st := settle(job.Spec.Nodes, run, now)
+		// Settled to the host job's end; run.EndTime stays the step's own end (the learned limit's sample).
+		toJobEnd := *run
+		toJobEnd.EndTime = run.HostJobEndTime
+		st := settle(job.Spec.Nodes, &toJobEnd, now)
 		st.Minutes = max(st.Minutes, rec.SettledNodeMinutes)
 		if st.End.Before(&rec.EndTime) {
 			st.End = rec.EndTime
@@ -101,7 +104,7 @@ func (r *HPCArgoWorkflowJobReconciler) abandonedHost(ctx context.Context, job *h
 		return ctrl.Result{RequeueAfter: RunnerReportGrace}, nil
 	}
 	closed := job.DeepCopy()
-	closed.Status.Run.HostJobOpen, closed.Status.Run.EndTime = false, &metav1.Time{Time: r.now()}
+	closed.Status.Run.HostJobOpen, closed.Status.Run.HostJobEndTime = false, &metav1.Time{Time: r.now()}
 	i, st, ok := lateEnd(closed, r.now())
 	if !ok {
 		return ctrl.Result{}, nil

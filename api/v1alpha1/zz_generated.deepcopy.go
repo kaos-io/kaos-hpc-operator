@@ -911,6 +911,10 @@ func (in *RunStatus) DeepCopyInto(out *RunStatus) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.HostJobEndTime != nil {
+		in, out := &in.HostJobEndTime, &out.HostJobEndTime
+		*out = (*in).DeepCopy()
+	}
 	if in.GPUUtilization != nil {
 		in, out := &in.GPUUtilization, &out.GPUUtilization
 		*out = make([]GPUUtilization, len(*in))

@@ -373,7 +373,9 @@ def finish(slot, rc):
         requeue(s)
         return
     c = comment(job)
-    set_comment(job, '%skaos-state=done rc=%d host=%s%s%s' % (lease(c), rc, ME, reason, err_part(c)))
+    # start=: when the guest's step began. Its own job never starts, so this is the only start Slurm's records
+    # give it: a learned limit comes from the step's own run time (D-67).
+    set_comment(job, '%skaos-state=done rc=%d host=%s start=%d%s%s' % (lease(c), rc, ME, int(s['start']), reason, err_part(c)))
     run('scancel', job)
     unlock(s.get('claim'))
     log('guest', job, 'done rc=%d%s' % (rc, reason))

@@ -155,7 +155,7 @@ func TestScaleShared(t *testing.T) {
 	r.row("duration", dur.Round(time.Second))
 	r.row("final phases", histogram(jobs))
 	var used int64
-	hostsClosed, guestsZero := 0, 0
+	hostsClosed, guestsZero, guestSamples := 0, 0, 0
 	for i := range jobs {
 		j := &jobs[i]
 		if j.Status.Phase != hpcv1alpha1.PhaseSucceeded || j.Status.Booking != nil || len(j.Status.Attempts) != 1 {
@@ -172,14 +172,27 @@ func TestScaleShared(t *testing.T) {
 			} else {
 				guestsZero++
 			}
+			if _, ok := runSample(j); ok {
+				guestSamples++ // its step start from its host's comment: a learned-limit sample (D-67)
+			}
 		case a.HostJobOpen || !strings.Contains(j.Status.Message, "its Slurm job held the node until"):
 			r.fail("host %s not settled to its job's end: open %v, %q", j.Name, a.HostJobOpen, j.Status.Message)
 		default:
 			hostsClosed++
+			// D-67: the learned-limit sample is the step's run time; the node kept for guests is hostJobEndTime.
+			run := j.Status.Run
+			if d, ok := runSample(j); !ok || run.HostJobEndTime == nil || !run.HostJobEndTime.After(run.EndTime.Time) ||
+				float64(a.SettledNodeMinutes) < d.Minutes() {
+				r.fail("host %s: step %v, job end %v, settled %d: want the step's own time below the job's", j.Name, d, run.HostJobEndTime, a.SettledNodeMinutes)
+			}
 		}
 	}
 	charged := site.Charged(p.account)
 	r.row("hosts settled to their job's end / guests settled 0", fmt.Sprintf("%d of 8 / %d of 16", hostsClosed, guestsZero))
+	r.row("guests with a step-time sample (start from the host)", fmt.Sprintf("%d of 16", guestSamples))
+	if guestSamples != 16 {
+		r.fail("%d of 16 guests carry their step's start", guestSamples)
+	}
 	r.row("controller settled node-min / site charged", fmt.Sprintf("%d / %.1f", used, charged))
 	// Each attempt is settled in whole minutes, rounded up: at most one minute above the site's figure per host.
 	if float64(used) < charged-0.5 || float64(used) > charged+8 {
@@ -189,6 +202,15 @@ func TestScaleShared(t *testing.T) {
 	w.budgetRows(r, jobs)
 	w.verifyPublishedLedger(r, jobs)
 	w.reconcileRows(r, start, dur)
+}
+
+// runSample is the step's own run time, start to end of the final report: what a learned limit is made of (D-67).
+func runSample(j *hpcv1alpha1.HPCArgoWorkflowJob) (time.Duration, bool) {
+	run := j.Status.Run
+	if run == nil || run.StartTime == nil || run.EndTime == nil || !run.EndTime.After(run.StartTime.Time) {
+		return 0, false
+	}
+	return run.EndTime.Sub(run.StartTime.Time), true
 }
 
 // TestScaleM: 50 jobs of mixed classes against a share that admits only part of them.

@@ -50,6 +50,29 @@ func TestRunTime(t *testing.T) {
 	}
 }
 
+// D-67: a learned limit predicts how long the STEP runs. A host that kept its node for a guest (D-26) is
+// sampled from its own step (run.endTime), never from its Slurm job's end (run.hostJobEndTime); a guest,
+// whose own job never starts, from the step start its host wrote.
+func TestSamplesAreTheStepsOwnRunTimeForHostsAndGuests(t *testing.T) {
+	now := ts("2026-11-10T06:00:00Z").Time
+	job := func(run hpcv1alpha1.RunStatus) *hpcv1alpha1.HPCArgoWorkflowJob {
+		run.Attempt = 1
+		j := &hpcv1alpha1.HPCArgoWorkflowJob{}
+		j.Status.Phase, j.Status.Attempt, j.Status.Run = hpcv1alpha1.PhaseSucceeded, 1, &run
+		return j
+	}
+	// Live 2026-11-10: host 5439966's step 04:24:34-04:26:09, its job held the node for guest 5439976 until 04:45:23.
+	host := job(hpcv1alpha1.RunStatus{SiteJobID: "5439966", State: "COMPLETED", Terminal: true,
+		StartTime: ts("2026-11-10T04:24:34Z"), EndTime: ts("2026-11-10T04:26:09Z"), HostJobEndTime: ts("2026-11-10T04:45:23Z")})
+	guest := job(hpcv1alpha1.RunStatus{SiteJobID: "5439977", State: "COMPLETED", Terminal: true, HostSiteJobID: "5439966",
+		StartTime: ts("2026-11-10T04:27:58Z"), EndTime: ts("2026-11-10T04:43:16Z")})
+	got := samplesOf([]*hpcv1alpha1.HPCArgoWorkflowJob{host, guest}, now)
+	want := []time.Duration{95 * time.Second, 15*time.Minute + 18*time.Second}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("samples %v, want the steps' own run times %v", got, want)
+	}
+}
+
 func TestTimeoutRetry(t *testing.T) {
 	site := &hpcv1alpha1.HPCSite{Spec: hpcv1alpha1.HPCSiteSpec{Profile: hpcv1alpha1.SiteProfile{
 		Classes: []hpcv1alpha1.SiteClass{{Name: "c", MaxWallTimeMinutes: 2880}}}}}

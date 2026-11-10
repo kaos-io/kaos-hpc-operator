@@ -84,7 +84,11 @@ func TestLateEnd(t *testing.T) {
 	guest := host(ts("2026-11-07T09:53:00Z"))
 	guest.HostSiteJobID = "1"
 	open := func(run hpcv1alpha1.RunStatus, stillOpen bool) *hpcv1alpha1.HPCArgoWorkflowJob {
+		// The step ended at 09:51; the report of the job's end carries it in hostJobEndTime (D-26, D-67).
 		run.HostJobOpen = stillOpen
+		if !stillOpen {
+			run.HostJobEndTime, run.EndTime = run.EndTime, ts("2026-11-07T09:51:00Z")
+		}
 		j := mk(run, 1, "2026-11-07T09:51:00Z")
 		j.Status.Attempts[0].HostJobOpen = true
 		return j

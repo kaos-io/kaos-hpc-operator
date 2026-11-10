@@ -711,7 +711,8 @@ class Runner:
         until the job ends, ~2 minutes after the last step (it waits for guests). The step's result and
         outputs were reported at its end with hostJobOpen (nothing waits for them; the controller keeps the
         host's booking held, D-26); this follows the job until it is terminal, bounded by its time limit plus
-        a margin, and resends the same terminal report with the job's own end time and hostJobOpen cleared.
+        a margin, and resends the same terminal report with hostJobEndTime, the job's own end, and hostJobOpen
+        cleared. endTime stays the step's end: a learned limit is the step's run time, not the node's (D-67).
         A job whose end cannot be read in that time is closed at the latest end Slurm allows it: its start
         plus its time limit, else now (conservative, never below what the site charged)."""
         if not self.host_job_open or not self.reporter.last_run:
@@ -737,7 +738,7 @@ class Runner:
             end_time = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(min(latest, time.time())))
             print('host job did not end within its time limit + margin: closed at', end_time,
                   '(its start plus its time limit)', flush=True)
-        run.update(endTime=end_time, hostJobOpen=None)
+        run.update(hostJobEndTime=end_time, hostJobOpen=None)
         self.reporter.report(must=True, **run)
 
     def view(self):
@@ -828,8 +829,12 @@ class Runner:
         # The end is Slurm's, else when this runner saw the job over: the controller settles the
         # attempt from it and must never be left to guess.
         end_time = site_time(job, 'end') or time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time()))
+        start = self.start_of(job)
+        if not start and share.get('host') and (share.get('start') or '').isdigit():
+            # A guest's own job never starts: its step's start is the one its host wrote (D-67 samples).
+            start = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(int(share['start'])))
         fields = dict(siteJobID=str(jid), state=','.join(st), exitCode=rc,
-                      startTime=self.start_of(job), endTime=end_time, terminal=True,
+                      startTime=start, endTime=end_time, terminal=True,
                       # A guest names its host (parsed from the job comment) so the controller
                       # knows the host's booking covers it.
                       hostSiteJobID=share.get('host'),

@@ -64,8 +64,10 @@ GPU kill) stays `SiteFAILED` and is not retried.
 
 A host on a shared node (D-26) is `Succeeded` or `Failed` when its step ends, but while its Slurm job still holds the
 node for guests the message ends "its Slurm job still holds the node for guests: the booking is held until that job
-ends" and the booking stays in the ledger. When the runner reports the job's end the attempt is settled to it and the
-message reads "attempt N settled M node-minutes (its Slurm job held the node until <time>)".
+ends" and the booking stays in the ledger. When the runner reports the job's end (`status.run.hostJobEndTime`) the
+attempt is settled to it and the message reads "attempt N settled M node-minutes (its Slurm job held the node until
+<time>)". `status.run.endTime` stays the step's own end: a learned time limit comes from the step's run time, never
+from the time the node was kept for guests (D-67).
 
 ## Cancelling
 

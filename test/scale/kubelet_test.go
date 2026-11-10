@@ -625,8 +625,11 @@ func (k *kubelet) reportEnd(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCA
 		}
 		rs.EndTime = end
 		rs.QOS, rs.Reservation = r.rj.Annotations["fake.qos"], r.rj.Annotations["fake.reservation"]
-		if share["kaos-state"] == "done" {
+		if share["kaos-state"] == "done" && share["host"] != "" {
 			rs.HostSiteJobID = share["host"]
+			if n, err := strconv.ParseInt(share["start"], 10, 64); err == nil && rs.StartTime == nil {
+				rs.StartTime = siteTime(true, n) // a guest's step start, as its host wrote it (D-67)
+			}
 		}
 		if recoverable && seq > 0 {
 			path := fmt.Sprintf("scratch://ckpt/%s/%d.tar", j.UID, seq)
@@ -645,7 +648,7 @@ func (k *kubelet) reportEnd(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCA
 func shareOf(comment string) map[string]string {
 	out := map[string]string{}
 	for _, w := range strings.Fields(comment) {
-		if k, v, ok := strings.Cut(w, "="); ok && (k == "kaos-state" || k == "host" || k == "slot" || k == "rc") {
+		if k, v, ok := strings.Cut(w, "="); ok && (k == "kaos-state" || k == "host" || k == "slot" || k == "rc" || k == "start") {
 			out[k] = v
 		}
 	}
@@ -668,8 +671,8 @@ func (k *kubelet) reportStepEnd(ctx context.Context, r *frunner, j *hpcv1alpha1.
 	}
 }
 
-// followHostEnd follows a host's Slurm job to its end and resends the step's report with the job's own end
-// and hostJobOpen cleared (runner.follow_host_job_end).
+// followHostEnd follows a host's Slurm job to its end and resends the step's report with hostJobEndTime, the
+// job's own end, and hostJobOpen cleared (runner.follow_host_job_end).
 func (k *kubelet) followHostEnd(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCArgoWorkflowJob) {
 	rec, err := k.accounting(ctx, r.site, r.siteJobID)
 	if err != nil || len(rec.State.Current) == 0 || !terminalStates[rec.State.Current[0]] {
@@ -677,8 +680,10 @@ func (k *kubelet) followHostEnd(ctx context.Context, r *frunner, j *hpcv1alpha1.
 	}
 	closing := *r.hostOpen
 	closing.HostJobOpen = false
-	if end := siteTime(rec.Time.End.Set, rec.Time.End.Number); end != nil {
-		closing.EndTime = end
+	closing.HostJobEndTime = siteTime(rec.Time.End.Set, rec.Time.End.Number) // endTime stays the step's (D-67)
+	if closing.HostJobEndTime == nil {
+		n := metav1.Now()
+		closing.HostJobEndTime = &n
 	}
 	if k.report(ctx, r, j, func(rs *hpcv1alpha1.RunStatus) { *rs = closing }) {
 		k.finish(r)

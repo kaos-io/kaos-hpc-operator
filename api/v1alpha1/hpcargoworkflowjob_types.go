@@ -332,6 +332,11 @@ type RunStatus struct {
 	// reports the job's own end with HostJobOpen unset; until then the host's booking stays held.
 	// +optional
 	HostJobOpen bool `json:"hostJobOpen,omitempty"`
+	// HostJobEndTime is the end of a host's Slurm job when it ended after the step (D-26): the attempt is
+	// settled to it. EndTime stays the step's own end, so a learned limit comes from the step's run time,
+	// never from the time the node was kept for guests (D-67).
+	// +optional
+	HostJobEndTime *metav1.Time `json:"hostJobEndTime,omitempty"`
 	// CheckpointRef names the newest verified checkpoint copy the job left on the site's scratch, as
 	// scratch://<tar path>#<sha256> (T-19). It is reported with every recoverable end (exit 85, wall time, node
 	// failure, pre-emption, idle kill). Without it a step is not continued from a checkpoint.

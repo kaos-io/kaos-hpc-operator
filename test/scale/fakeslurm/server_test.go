@@ -179,7 +179,7 @@ func TestShouldKeepAHostRunningForItsGuestAndChargeOnlyTheHost(t *testing.T) {
 	}
 	time.Sleep(2 * time.Second) // 24 minutes: both are over
 	h, g = job(host), job(guest)
-	if h.State != Completed || g.State != Cancelled || !strings.Contains(g.Cm, fmt.Sprintf("kaos-state=done rc=0 host=%d", host)) {
+	if h.State != Completed || g.State != Cancelled || !strings.Contains(g.Cm, fmt.Sprintf("kaos-state=done rc=0 host=%d start=%d", host, g.takenAt.Unix())) {
 		t.Fatalf("host %s, guest %s %q", h.State, g.State, g.Cm)
 	}
 	if ran := h.EndAt.Sub(h.StartAt).Minutes(); ran < 19.9 || ran > 20.1 {
