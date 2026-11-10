@@ -24,7 +24,10 @@ LEASE_RE = re.compile(r'kaos-commit=([0-9a-f]{6,64})')
 def test_the_runner_has_no_identity_literals():
     for f in PKG.rglob("*.py"):
         text = f.read_text()
-        for literal in ("u104378", "p201342", "/home/users/u", "/project/scratch/p"):
+        # a site user (u + 6 digits) or project (p + 6 digits) and their home/scratch paths come from the HPCSite
+        m = re.search(r"\b[up]\d{6}\b", text)
+        assert not m, f"{f.name}: identity literal {m.group()!r} must come from the HPCSite"
+        for literal in ("/home/users/u", "/project/scratch/p"):
             assert literal not in text, f"{f.name}: identity literal {literal!r} must come from the HPCSite"
 
 

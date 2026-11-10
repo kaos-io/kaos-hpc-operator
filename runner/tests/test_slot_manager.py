@@ -69,7 +69,7 @@ class Node:
         slots = tmp_path / "slots.py"
         slots.write_text(_slots_code())
         self.env = {"PATH": str(bindir) + os.pathsep + os.environ["PATH"], "HOME": str(tmp_path / "home"),
-                    "USER": "u104378", "LANG": "C.UTF-8", "FAKE_SLURM_STATE": str(self.state),
+                    "USER": "u000001", "LANG": "C.UTF-8", "FAKE_SLURM_STATE": str(self.state),
                     "SLURM_JOB_ID": "100", "SLURM_CPUS_ON_NODE": "128", "SLURM_MEM_PER_NODE": str(mem_mb),
                     "HPC_GPUS": "4", "KAOS_SCOPE": SCOPE, "KAOS_SCR": str(tmp_path / "scratch"),
                     "KAOS_IDLE_S": "1", "KAOS_POLL_S": "0.2", "OUT": str(self.out),
@@ -308,7 +308,7 @@ def test_every_step_has_its_login_basics(tmp_path):
     got = (node.out / "101").read_text().split()
     import pwd
     # A login shell may reset USER from `id -un` (Fedora's /etc/profile); on MeluXina both are the job's user.
-    assert got[0] == "home=" + home and got[1] in ("user=u104378", "user=" + pwd.getpwuid(os.getuid()).pw_name)
+    assert got[0] == "home=" + home and got[1] in ("user=u000001", "user=" + pwd.getpwuid(os.getuid()).pw_name)
     assert got[2:] == ["pwd=" + home, "path=set"], got
 
 

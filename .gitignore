@@ -31,3 +31,7 @@ engine/*.egg-info/
 __pycache__/
 *.pyc
 engine/tests/app/out/
+
+# Python bytecode
+__pycache__/
+*.pyc
