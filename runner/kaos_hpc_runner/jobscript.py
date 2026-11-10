@@ -178,6 +178,14 @@ def batch_lines(scope, scratch):
         # --nv only on GPU classes: on the cpu/largemem partitions there is
         # no driver to bind and the flag makes Apptainer warn or fail.
         'NV=""; [ "${HPC_GPUS:-0}" -gt 0 ] && NV="--nv"',
+        # PRD-HPC-1461 AC-37 (live job 5439721): CUDA_VISIBLE_DEVICES reached the step as "0,1,2,3     " (trailing
+        # blanks); CUDA tools may drop the last device or reject the value. Whatever the path (alone, shared,
+        # fenced or not), the step sees a clean comma list.
+        'for KAOS_V in CUDA_VISIBLE_DEVICES NVIDIA_VISIBLE_DEVICES; do'
+        ' if [ -n "${!KAOS_V}" ]; then KAOS_C=${!KAOS_V//[[:space:]]/}; export "$KAOS_V=$KAOS_C"; fi; done',
+        # AC-37: a step of a G-GPU class sees G devices and KUBECORE_SLOT_GPUS=G, alone too. The slot manager
+        # sets 1 for a shared slot; a step running alone gets the class's GPU count.
+        '[ -z "$KUBECORE_SLOT_GPUS" ] && [ "${HPC_GPUS:-0}" -gt 0 ] && export KUBECORE_SLOT_GPUS=$HPC_GPUS',
         # PRD-HPC-1461 AC-57 / D-29: on a shared node (slot manager: KUBECORE_SLOT_SHARED=1) a step must not see
         # a GPU outside its set. MeluXina has ConstrainDevices=no, so CUDA_VISIBLE_DEVICES only steers CUDA.
         # Prevention: where Apptainer can use nvidia-container-cli (--nvccli, probed with a throw-away start,

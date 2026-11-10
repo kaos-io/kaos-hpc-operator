@@ -141,7 +141,7 @@ def srun():
         base = dict((k, v) for k, v in os.environ.items() if k.startswith("SLURM_"))
     else:
         base = dict(os.environ)
-    env = dict(base, SLURM_STEP_ID=str(n), CUDA_VISIBLE_DEVICES=str(n % 4))
+    env = dict(base, SLURM_STEP_ID=str(n), CUDA_VISIBLE_DEVICES=str(n % 4) + os.environ.get("FAKE_GRES_PAD", ""))
     # Like srun's I/O forwarding as seen live: the step's output reaches srun's stdout
     # only later (here: after the step exits).
     proc = subprocess.Popen(cmd, env=env, start_new_session=True, stdout=subprocess.PIPE,

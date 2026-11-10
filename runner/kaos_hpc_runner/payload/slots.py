@@ -18,6 +18,8 @@ if sys.argv[1:2] == ['--step']:
     env.update(KAOS_IN_STEP='1', KAOS_JOB_ID=job)
     # AC-57: the GPU set Slurm gave this step, stamped where every process of the step (also inside the
     # container, whose own CUDA_VISIBLE_DEVICES may be renumbered) carries it for the GPU watchdog.
+    if 'CUDA_VISIBLE_DEVICES' in env:     # Slurm pads the list with blanks (live job 5439721, AC-37)
+        env['CUDA_VISIBLE_DEVICES'] = ''.join(env['CUDA_VISIBLE_DEVICES'].split())
     if env.get('CUDA_VISIBLE_DEVICES'):
         env['KAOS_STEP_GPUS'] = env['CUDA_VISIBLE_DEVICES']
     os.chdir(env.get('HOME') or '/')

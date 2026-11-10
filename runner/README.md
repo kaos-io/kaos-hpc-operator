@@ -102,6 +102,14 @@ manifest; the runner's message says which of the two is unknown.
 Each lesson of the old in-pod waiter and the test that pins it: [docs/live-lessons.md](../docs/live-lessons.md)
 (PRD-HPC-1461 AC-11). A new live incident gets a test named after it, with the live job id, and a row there.
 
+## The step's GPU variables (AC-37, live job 5439721)
+
+Before the step starts, the job script strips whitespace from `CUDA_VISIBLE_DEVICES` and `NVIDIA_VISIBLE_DEVICES`
+(on MeluXina a whole-node step got `"0,1,2,3     "`; CUDA tools may drop the last device or reject the value), in
+every path: alone or shared, fenced or not (the slot launcher also cleans the list it stamps as `KAOS_STEP_GPUS`).
+A step of a G-GPU class also sees `KUBECORE_SLOT_GPUS=G` when it runs alone (`HPC_GPUS`); on a shared node the slot
+manager sets it (1). `KUBECORE_SLOT_INDEX` is not set by the runner.
+
 ## GPU isolation on a shared node (AC-57 / D-29)
 
 MeluXina has `ConstrainDevices=no`: a step's `CUDA_VISIBLE_DEVICES` steers CUDA but every GPU device file is
