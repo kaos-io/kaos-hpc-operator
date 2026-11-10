@@ -494,12 +494,128 @@ type SiteStorage struct {
 	// +listType=atomic
 	// +optional
 	ByCategory []StorageCategory `json:"byCategory,omitempty"`
+	// Images breaks the images category down (PRD-HPC-1461 AC-65): SIFs, staged tars, the layer
+	// cache, what a queued or running job leases, the largest (app, step) lineages, the images
+	// budget and the last cleanup. Bounded: at most ImageLineagesMax lineages are named.
+	// +optional
+	Images *ImageStorage `json:"images,omitempty"`
 	// ObservedAt is when the quota was read; MeasuredAt is when the category sizes were last
 	// measured (re-measured at most hourly, the quota on every report).
 	// +optional
 	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
 	// +optional
 	MeasuredAt *metav1.Time `json:"measuredAt,omitempty"`
+}
+
+// ImageLineagesMax bounds ImageStorage.Lineages (the HPCSite object is capped near 256 KiB).
+const ImageLineagesMax = 20
+
+// ImageGroup is a count, the allocated bytes and the age of the oldest member (by last use).
+type ImageGroup struct {
+	// +optional
+	Count int64 `json:"count,omitempty"`
+	// Space is allocated bytes, as the site's quota counts them.
+	// +optional
+	Space int64 `json:"space,omitempty"`
+	// +optional
+	OldestAgeSeconds int64 `json:"oldestAgeSeconds,omitempty"`
+}
+
+// ImageCache is the Apptainer layer cache.
+type ImageCache struct {
+	// +optional
+	Space int64 `json:"space,omitempty"`
+	// +optional
+	Files int64 `json:"files,omitempty"`
+	// Partial is true when the measurement hit its time bound (a lower bound).
+	// +optional
+	Partial bool `json:"partial,omitempty"`
+}
+
+// ImageLineage is the SIFs of one (app, step): the last path segment of the step's image repository
+// and the DAG step's name. Normally one SIF (the newest) plus those a queued or running job still uses.
+type ImageLineage struct {
+	// +kubebuilder:validation:MaxLength=253
+	App string `json:"app"`
+	// +kubebuilder:validation:MaxLength=253
+	Step string `json:"step"`
+	// +optional
+	SIFs int64 `json:"sifs,omitempty"`
+	// +optional
+	Space int64 `json:"space,omitempty"`
+	// NewestAgeSeconds and OldestAgeSeconds are the age of the newest and oldest build of the lineage.
+	// +optional
+	NewestAgeSeconds int64 `json:"newestAgeSeconds,omitempty"`
+	// +optional
+	OldestAgeSeconds int64 `json:"oldestAgeSeconds,omitempty"`
+}
+
+// ImageCleanupReason is what one kind of deletion removed in the last cleanup.
+type ImageCleanupReason struct {
+	// Reason is superseded, orphan, unused, tar_built, tar_unleased, stale_part, orphan_meta or over_budget.
+	// +kubebuilder:validation:MaxLength=64
+	Reason string `json:"reason"`
+	// +optional
+	Count int64 `json:"count,omitempty"`
+	// +optional
+	Space int64 `json:"space,omitempty"`
+}
+
+// ImageCleanup is the summary of the stager's last image cleanup.
+type ImageCleanup struct {
+	// +optional
+	At *metav1.Time `json:"at,omitempty"`
+	// FreedBytes is the allocated bytes the cleanup released (files and layer cache).
+	// +optional
+	FreedBytes int64 `json:"freedBytes,omitempty"`
+	// +optional
+	CacheFilesRemoved int64 `json:"cacheFilesRemoved,omitempty"`
+	// OverBudget is true when leased files alone kept the images over the budget.
+	// +optional
+	OverBudget bool `json:"overBudget,omitempty"`
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=atomic
+	// +optional
+	ByReason []ImageCleanupReason `json:"byReason,omitempty"`
+}
+
+// ImageStorage is what the images category of SiteStorage holds, written with the rest of the
+// storage report by the project's snapshot job from the site stager's `usage` (AC-65). All sizes
+// are allocated bytes.
+type ImageStorage struct {
+	// SIFs are the built images in the SIF cache, Tars the staged docker-archives waiting for a
+	// build, Parts half-written files of builds and streams in flight, UnlabeledSIFs the SIFs with
+	// no (app, step) label (built before the lifecycle existed; they go after three days).
+	// +optional
+	SIFs ImageGroup `json:"sifs,omitempty"`
+	// +optional
+	Tars ImageGroup `json:"tars,omitempty"`
+	// +optional
+	Parts ImageGroup `json:"parts,omitempty"`
+	// +optional
+	UnlabeledSIFs ImageGroup `json:"unlabeledSifs,omitempty"`
+	// Leased is what a queued or running job names (never deleted). Absent when the queue could not
+	// be read.
+	// +optional
+	Leased *ImageGroup `json:"leased,omitempty"`
+	// +optional
+	Cache *ImageCache `json:"cache,omitempty"`
+	// Lineages are the largest (app, step) groups, at most ImageLineagesMax; LineagesTotal counts all.
+	// +kubebuilder:validation:MaxItems=20
+	// +listType=atomic
+	// +optional
+	Lineages []ImageLineage `json:"lineages,omitempty"`
+	// +optional
+	LineagesTotal int64 `json:"lineagesTotal,omitempty"`
+	// BudgetBytes is the cap on SIFs, tars and layer cache (default 60 GB). Over it, the cleanup
+	// removes the least recently used SIFs no job leases; OverBudget is true when leased files alone
+	// keep the images above it.
+	// +optional
+	BudgetBytes int64 `json:"budgetBytes,omitempty"`
+	// +optional
+	OverBudget bool `json:"overBudget,omitempty"`
+	// +optional
+	LastCleanup *ImageCleanup `json:"lastCleanup,omitempty"`
 }
 
 // StorageCategory is one use of the project's scratch storage.
