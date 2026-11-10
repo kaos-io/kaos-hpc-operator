@@ -414,3 +414,13 @@ def test_every_step_carries_the_gpu_set_slurm_gave_it(tmp_path):
     assert rc == 0, log
     given, cuda = (node.out / "101").read_text().split()
     assert given == cuda != ""
+
+
+def test_a_padded_gpu_list_from_slurm_reaches_the_step_clean__live_job_5439721(tmp_path):
+    guests = {"101": _job("kaos-%s-wf1-train" % SCOPE, 'echo "[$KAOS_STEP_GPUS][$CUDA_VISIBLE_DEVICES]" > $OUT/101\nexit 0\n',
+                          comment="kaos-commit=bbbbbbb2")}
+    node = Node(tmp_path, guests, extra_env={"FAKE_GRES_PAD": "     "})
+    rc, log = node.finish()
+    assert rc == 0, log
+    got = (node.out / "101").read_text().strip()
+    assert got.count("[") == 2 and " " not in got and "[]" not in got, got

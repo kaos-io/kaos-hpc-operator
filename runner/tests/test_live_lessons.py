@@ -113,7 +113,8 @@ def _exec_script(tmp_path, workdir, gpus, extra_env=None, probe_ok=True):
     # The fence probe is `apptainer exec --nv --nvccli img.sif true`; the step's own exec records args and env.
     _fake(tmp_path / 'bin', 'apptainer',
           '[ "$*" = "exec --nv --nvccli img.sif true" ] && exit %d\n' % (0 if probe_ok else 1) +
-          'echo "$@" > "$OUT"; env | grep "^APPTAINERENV_" | sort >> "$OUT.env"\n')
+          'echo "$@" > "$OUT"; env | grep "^APPTAINERENV_" | sort >> "$OUT.env"\n'
+          'env | grep -E "^(CUDA_VISIBLE_DEVICES|NVIDIA_VISIBLE_DEVICES|KUBECORE_SLOT_GPUS)=" | sort > "$OUT.host"\n')
     env = dict(os.environ, PATH=str(tmp_path / 'bin') + os.pathsep + os.environ['PATH'], OUT=str(tmp_path / 'args'),
                SIF='img.sif', BIND='', STEP_CMD='true', STEP_WORKDIR=workdir, **(extra_env or {}))
     env.pop('HPC_GPUS', None)
@@ -315,3 +316,35 @@ def test_a_resident_copy_is_marked_used_by_the_job_that_starts_on_it_so_the_24h_
     env = dict(os.environ, KAOS_JOB_ID='9', DATASET_STAGED=str(staged))
     subprocess.run([BASH, '-c', 'fail(){ exit "$1"; }\n' + '\n'.join(block)], env=env, check=True)
     assert time.time() - marker.stat().st_mtime < 60
+
+
+# ------------------------------------------------ AC-37 (live job 5439721): clean GPU list, slot GPUs when alone
+
+def _host_env(tmp_path, gpus, extra_env):
+    _exec_script(tmp_path, '', gpus=gpus, extra_env=extra_env)
+    return (tmp_path / 'args.host').read_text().splitlines()
+
+
+def test_a_step_alone_sees_cuda_without_trailing_blanks_and_slot_gpus_from_its_class__live_job_5439721(tmp_path):
+    host = _host_env(tmp_path, 4, {'CUDA_VISIBLE_DEVICES': '0,1,2,3     '})
+    assert host == ['CUDA_VISIBLE_DEVICES=0,1,2,3', 'KUBECORE_SLOT_GPUS=4']
+
+
+def test_padding_is_removed_from_nvidia_visible_devices_too__live_job_5439721(tmp_path):
+    host = _host_env(tmp_path, 4, {'CUDA_VISIBLE_DEVICES': ' 0, 1,2,3\t', 'NVIDIA_VISIBLE_DEVICES': '0,1,2,3  '})
+    assert 'CUDA_VISIBLE_DEVICES=0,1,2,3' in host and 'NVIDIA_VISIBLE_DEVICES=0,1,2,3' in host
+
+
+def test_a_shared_slot_keeps_the_slot_managers_slot_gpus_and_gets_a_clean_list__live_job_5439721(tmp_path):
+    host = _host_env(tmp_path, 4, {'CUDA_VISIBLE_DEVICES': '2   ', 'KUBECORE_SLOT_GPUS': '1', 'KUBECORE_SLOT_SHARED': '1'})
+    assert host == ['CUDA_VISIBLE_DEVICES=2', 'KUBECORE_SLOT_GPUS=1']
+
+
+def test_a_padded_list_reaches_the_container_clean_on_the_fenced_path_too__live_job_5439721(tmp_path):
+    args, env = _fenced(tmp_path, '1,3   ')
+    assert '--nvccli' in args
+    assert env == ['APPTAINERENV_CUDA_VISIBLE_DEVICES=0,1', 'APPTAINERENV_NVIDIA_VISIBLE_DEVICES=1,3']
+
+
+def test_a_cpu_class_gets_no_slot_gpus_and_no_cuda_variable__live_job_5439721(tmp_path):
+    assert _host_env(tmp_path, 0, {}) == []
