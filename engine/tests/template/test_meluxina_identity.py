@@ -4,11 +4,14 @@ never through the pipeline template, and the module carries no literal user, acc
 Run:  python -m pytest tests/ -v
 """
 
+import re
 import runpy
 import sys
 from pathlib import Path
 
 import yaml
+
+SITE_ID = re.compile(r"\b[up]\d{6}\b")
 
 ROOT = Path(__file__).resolve().parents[2]  # engine/
 sys.path.insert(0, str(ROOT))
@@ -38,5 +41,7 @@ def test_twin_carries_no_project_identity():
 
 def test_module_has_no_identity_literals():
     src = (ROOT / "kubecore" / "meluxina.py").read_text()
-    for literal in ("u104378", "p201342", "/home/users/u", "/project/scratch/p"):
+    # A site user (u + 6 digits) or project (p + 6 digits) and their home/scratch paths must come from the context.
+    assert not SITE_ID.search(src), f"identity literal {SITE_ID.search(src).group()!r} must come from the context"
+    for literal in ("/home/users/u", "/project/scratch/p"):
         assert literal not in src, f"identity literal {literal!r} must come from the context"
