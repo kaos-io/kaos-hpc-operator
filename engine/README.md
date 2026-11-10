@@ -34,9 +34,9 @@ node (GKE, EKS) in a POSIX `sh -c` prelude: the NVIDIA driver folders (`/usr/loc
 fails the step in its first second with a `KAOS: this GPU step cannot reach the NVIDIA driver (...)` line (skipped
 with a notice when the image has no python3, and when the step was given 0 GPUs, a cpu class), then `exec "$@"`
 runs the original command unchanged. It runs after the HPC twin is built, so a Slurm step (follower + Apptainer
-`--nv`) is never wrapped. The same change is in hera-pipeline-template `kubecore/enhance.py` (#100); the engine copy
-is that change applied to the engine's template commit, so `UPSTREAM.json` records its blob and the next
-`sync_upstream.py` converges on the template. Tests: `tests/template/test_gpu_driver_prelude.py`.
+`--nv`) is never wrapped. The same change is in hera-pipeline-template `kubecore/enhance.py` (#100); `kubecore/` is synced to that template
+commit (d167461), so the engine enhancer is byte for byte the legacy one (including `--helper-configmap`, which the
+chart has passed since 0.12.149). Tests: `tests/template/test_gpu_driver_prelude.py`.
 
 ## Versioning
 
