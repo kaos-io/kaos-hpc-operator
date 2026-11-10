@@ -338,3 +338,11 @@ def test_the_engine_entry_point_says_so_when_the_engine_has_no_compose(tmp_path)
     done = subprocess.run([sys.executable, "-I", "-c", code, "--output", str(tmp_path / "p.yaml")],
                           capture_output=True, text=True, env={"KAOS_ENGINE_DIR": str(broken), "PATH": "/usr/bin:/bin"})
     assert done.returncode == 4 and "has no kubecore/compose.py" in done.stderr and "Traceback" not in done.stderr
+
+
+def test_the_engine_image_carries_what_kaos_lib_needs_so_the_compose_image_adds_only_kaos_lib():
+    """The compose image installs kaos-lib with --no-deps: every library kaos-lib imports must already be in
+    the engine's pinned, scanned set, or the compose step fails at import (or cannot read a shared dataset)."""
+    pinned = {line.split("==")[0].strip().lower() for line in (ENGINE / "requirements.txt").read_text().splitlines()
+              if "==" in line and not line.startswith("#")}
+    assert {"requests", "pyyaml", "packaging", "pyjwt", "cryptography"} <= pinned

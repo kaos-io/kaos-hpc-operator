@@ -22,3 +22,12 @@ requests==2.34.2
 typing-extensions==4.16.0
 typing-inspection==0.4.5
 urllib3==2.8.0
+# What kaos-lib needs at run time beyond the set above (requests, PyYAML and packaging are already there): the
+# compose step resolves the run's data with kaos-lib, and a dataset shared by another project is read with a
+# token minted from the step's machine key (kaos-lib[zitadel]). They are pinned and scanned HERE, with the
+# engine, so the compose image only adds kaos-lib itself (pip install --no-deps) and never pulls an unpinned
+# library at an app's build time.
+cffi==2.1.1
+cryptography==50.0.2
+pycparser==3.12
+pyjwt==2.15.1
