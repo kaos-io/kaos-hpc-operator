@@ -183,6 +183,23 @@ def test_a_step_over_its_memory_share_is_stopped_alone(tmp_path):
     assert jobs["102"]["comment"] == "kaos-commit=bbbbbbb3 kaos-state=done rc=0 host=100", "the neighbour finished"
 
 
+def test_a_step_stopped_by_its_own_time_limit_is_reported_as_a_timeout_and_no_other_kill_is(tmp_path):
+    # PRD-HPC-1461 AC-72 / D-67 (live 2026-11-10, guest 5439976 on host 5439966): srun --time stops a step at its
+    # learned limit with TERM (rc 143). That is a TIMEOUT, so the controller retries it at the declared limit; a
+    # step TERMed before its limit is an ordinary failure. Real time: srun limits are whole minutes.
+    limited = "export KAOS_STEP_LIMIT_MIN=1\n"
+    guests = {"101": _job("kaos-%s-wf1-train" % SCOPE, limited + "sleep 120\n", comment="kaos-commit=bbbbbbb2"),
+              "102": _job("kaos-%s-wf2-train" % SCOPE, limited + "kill -TERM $$\n", comment="kaos-commit=bbbbbbb3")}
+    node = Node(tmp_path, guests, own_body="sleep 120\n", extra_env={"KAOS_STEP_LIMIT_MIN": "1"})
+    rc, log = node.finish(timeout=150)
+    jobs = node.jobs()
+    assert jobs["101"]["comment"] == "kaos-commit=bbbbbbb2 kaos-state=done rc=143 host=100 reason=TIMEOUT", log
+    assert jobs["102"]["comment"] == "kaos-commit=bbbbbbb3 kaos-state=done rc=143 host=100", "TERM before the limit: no TIMEOUT"
+    assert jobs["100"]["comment"] == "kaos-commit=aaaaaaa1 kaos-state=done rc=143 reason=TIMEOUT", "the host's own step too"
+    assert rc == 143, log
+    assert "--time=1" in " ".join(" ".join(c) for c in json.loads(node.state.read_text())["calls"] if c[0] == "srun")
+
+
 def test_a_terminated_host_hands_its_guests_back_to_the_queue(tmp_path):
     guests = {"101": _job("kaos-%s-wf1-train" % SCOPE, "sleep 60\n", comment="kaos-commit=bbbbbbb2")}
     node = Node(tmp_path, guests, own_body="sleep 60\n")

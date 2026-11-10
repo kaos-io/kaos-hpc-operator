@@ -678,8 +678,12 @@ class Runner:
                         # job; the step's result is in the comment.
                         rc = int(share['rc']) if share.get('rc', '').isdigit() else 1
                         print('ran on a shared node: host job', share.get('host'),
-                              'exit:', share.get('rc'), flush=True)
+                              'exit:', share.get('rc'), 'reason:', share.get('reason'), flush=True)
                         st = ['COMPLETED'] if rc == 0 else ['FAILED']
+                        if rc != 0 and share.get('reason') == 'TIMEOUT':
+                            # AC-72 / D-67: the step's own time limit stopped it on the shared node (the slot
+                            # manager says so): a TIMEOUT like a job alone, so a learned limit is retried.
+                            st = ['TIMEOUT']
                     if 'FAILED' in st and rc == 231 and self.resubmits < PULL_RESUBMITS:
                         # A cache-missing pull after a LONG queue wait runs with the registry token
                         # minted at submit time - GCP tokens live 1h, so it can be stale (live job

@@ -6,7 +6,9 @@ depends on it (verified live 2026-11-03):
 * `scontrol hold` works only on a pending job and shows it as PENDING/JobHeldUser;
 * `squeue` without -t reports pending, running and completing jobs only;
 * `srun` runs one job step with its own SLURM_STEP_ID and CUDA_VISIBLE_DEVICES;
-* `scancel <job>.<step>` ends that step only.
+* `scancel <job>.<step>` ends that step only;
+* `srun --time=N` stops its step after N minutes with TERM and says so, as Slurm does (live job
+  5439966, 2026-11-10: "*** step 5439966.1 CANCELLED DUE TO TIME LIMIT ***", srun exit 143).
 
 Symlink it under each tool's name. Every call is appended to state["calls"].
 """
@@ -16,6 +18,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 
 # A step's environment is clean (only Slurm's own variables), so the state file is also
 # found next to the bin folder the tools are linked from.
@@ -111,11 +114,14 @@ def scancel(st):
 
 
 def srun():
-    cmd, name, export, i = [], "step", None, 0
+    cmd, name, export, limit, i = [], "step", None, None, 0
     while i < len(ARGS):
         a = ARGS[i]
         if a.startswith("--export="):
             export = a.split("=", 1)[1]
+            i += 1
+        elif a.startswith("--time="):
+            limit = int(a.split("=", 1)[1]) * 60
             i += 1
         elif a in ("-c", "--job-name"):
             if a == "--job-name":
@@ -150,9 +156,22 @@ def srun():
     def started(st):
         st.setdefault("steps", {})["%s.%d" % (job, n)] = {"name": name, "pid": proc.pid}
     locked(started)
+    stopped = []
+
+    def time_limit():
+        stopped.append(b"error: *** step %s.%d CANCELLED DUE TO TIME LIMIT ***\n" % (job.encode(), n))
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    timer = threading.Timer(limit, time_limit) if limit else None
+    if timer:
+        timer.start()
     forwarded = proc.stdout.read()
     rc = proc.wait()
-    sys.stdout.buffer.write(forwarded)
+    if timer:
+        timer.cancel()
+    sys.stdout.buffer.write(forwarded + b"".join(stopped))
     sys.stdout.flush()
 
     def ended(st):
