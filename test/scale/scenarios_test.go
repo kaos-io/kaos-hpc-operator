@@ -204,6 +204,119 @@ func TestScaleShared(t *testing.T) {
 	w.reconcileRows(r, start, dur)
 }
 
+// TestScaleSharedResumable: resumable steps share nodes (PRD-HPC-1461 AC-73, reversing D-44's gate). A mix of
+// resumable and plain steps packs onto hosts: resumable guests are taken when only their lead fits, are signalled
+// at their host job's end minus the lead and exit 85, and their continuations (a new job each) host, guest or run
+// alone. Every job succeeds, every resumable one through the right number of continuations, guests settle 0, a
+// plain step never continues, and the controller's ledger equals what the site charged.
+func TestScaleSharedResumable(t *testing.T) {
+	r := newResult(t, "S-shared-resumable (node sharing with resumable steps)", "10 hosts (6 resumable with 3 segments, 4 plain) "+
+		"and 30 guests (20 resumable with 2-3 segments, 10 plain) that run 8-16 minutes on hosts that end sooner: resumable guests are "+
+		"signalled and continued, plain ones fit or run alone; the ledger equals the site's charge.")
+	w := newWorld(t, ctrlOpts{pollInterval: 2 * time.Second, restRate: 4, restBurst: 10})
+	opts := siteOptions("meluxina", 11)
+	opts.GuestAloneAfter = 6 * time.Second
+	site := fakeslurm.New(opts)
+	p := w.addProject("psr", "meluxina", "u1", "acct1", site, budget{gpuShare: 100000, cpuShare: 10, gpuSiteLeft: 90000, cpuSiteLeft: 8}, 0)
+	p.coverage = true
+	w.startController()
+	w.startKubelet()
+	w.startSampler()
+	w.startMonitor()
+	start := time.Now()
+	rng := rand.New(rand.NewSource(11))
+	hosts := make([]jobSpec, 10)
+	for i := range hosts {
+		hosts[i] = jobSpec{class: "hpc-gpu", wallMinutes: 60, run: fmt.Sprintf("%.1f", 6+2*rng.Float64()),
+			hostTail: fmt.Sprintf("%.1f", 12+8*rng.Float64())}
+		if i < 6 {
+			hosts[i].resumable, hosts[i].segments, hosts[i].maxCont = true, 3, 12
+		}
+	}
+	w.createJobs(p, hosts)
+	time.Sleep(3 * time.Second) // the hosts start first, as a host must be running to take a guest
+	guests := make([]jobSpec, 30)
+	for i := range guests {
+		guests[i] = jobSpec{class: "hpc-gpu", wallMinutes: 60, run: fmt.Sprintf("%.1f", 8+8*rng.Float64()), guest: true}
+		if i < 20 {
+			guests[i].resumable, guests[i].segments, guests[i].maxCont = true, 2+i%2, 12
+		}
+	}
+	w.createJobs(p, guests)
+	all := append(hosts, guests...)
+	deadline := time.Now().Add(5 * time.Minute)
+	var jobs []hpcv1alpha1.HPCArgoWorkflowJob
+	for time.Now().Before(deadline) {
+		jobs = w.allJobs()
+		open := 0
+		for i := range jobs {
+			if !jobs[i].Status.Phase.Terminal() || jobs[i].Status.Booking != nil {
+				open++
+			}
+		}
+		if len(jobs) == len(all) && open == 0 {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	dur := time.Since(start)
+	r.row("duration", dur.Round(time.Second))
+	r.row("final phases", histogram(jobs))
+	byName := map[string]jobSpec{}
+	for i, name := range p.jobs {
+		byName[name] = all[i]
+	}
+	var used int64
+	continued, plainContinued := 0, 0
+	for i := range jobs {
+		j := &jobs[i]
+		spec := byName[j.Name]
+		for _, a := range j.Status.Attempts {
+			used += a.SettledNodeMinutes
+		}
+		if j.Status.Phase != hpcv1alpha1.PhaseSucceeded || j.Status.Booking != nil {
+			r.fail("%s ended %s/%s booking %v: %s", j.Name, j.Status.Phase, j.Status.Reason, j.Status.Booking, j.Status.Message)
+			continue
+		}
+		attempts := len(j.Status.Attempts)
+		switch {
+		case !spec.resumable && attempts != 1:
+			plainContinued++
+			r.fail("%s is not resumable but ran %d attempts", j.Name, attempts)
+		case spec.resumable:
+			// A resumable step makes at least its segments in all; a continuation each time but the last.
+			if attempts < spec.segments || int(j.Status.Continuations) != attempts-1 {
+				r.fail("%s: %d attempts, %d continuations for %d segments", j.Name, attempts, j.Status.Continuations, spec.segments)
+			}
+			if attempts > 1 {
+				continued++
+				if j.Status.Resume == nil || j.Status.Resume.CheckpointRef == "" {
+					r.fail("%s continued without a checkpoint to continue from", j.Name)
+				}
+			}
+		}
+	}
+	snap := site.Snapshot()
+	charged := site.Charged(p.account)
+	r.row("guests taken by a host / resumable guests signalled before their run was over", fmt.Sprintf("%d / %d", snap.GuestsTaken, snap.GuestsSignalled))
+	r.row("resumable jobs continued / plain jobs that continued", fmt.Sprintf("%d of 26 / %d", continued, plainContinued))
+	r.row("controller settled node-min / site charged", fmt.Sprintf("%d / %.1f", used, charged))
+	if snap.GuestsTaken == 0 || snap.GuestsSignalled == 0 {
+		r.fail("the packing did not happen: %d guests taken, %d signalled", snap.GuestsTaken, snap.GuestsSignalled)
+	}
+	if continued != 26 {
+		r.fail("%d of 26 resumable jobs continued, want all", continued)
+	}
+	// Each attempt is settled in whole minutes, rounded up: a little above the site's figure per attempt that ran.
+	if float64(used) < charged-0.5 || float64(used) > charged+float64(len(jobs))*2 {
+		r.fail("the ledger settled %d node-minutes for what the site charged %.1f", used, charged)
+	}
+	w.verifySubmits(r, jobs)
+	w.budgetRows(r, jobs)
+	w.verifyPublishedLedger(r, jobs)
+	w.reconcileRows(r, start, dur)
+}
+
 // runSample is the step's own run time, start to end of the final report: what a learned limit is made of (D-67).
 func runSample(j *hpcv1alpha1.HPCArgoWorkflowJob) (time.Duration, bool) {
 	run := j.Status.Run

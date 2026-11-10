@@ -97,6 +97,16 @@ script exits (the job is still live); a comment that cannot be verified ends the
 reach (the staging key runs only the stager's fixed commands), so a missing comment word cannot be repaired from the copy
 manifest; the runner's message says which of the two is unknown.
 
+## The stop signal on a shared node (AC-73)
+
+A step alone is told to save by Slurm (`kill_warning_signal` USR1 to the batch shell, `lead` minutes before the wall
+time). On a shared node the batch shell is the slot manager and a guest is only a `srun` step of the host's job, so
+the job's signal cannot serve them: the job does not ask for it (`runner.py`), and `payload/slots.py` runs one timer
+per step. A step's lead comes from `KAOS_RESUMABLE_LEAD_MIN` (its script, or the host's environment for its own step);
+USR1 goes to the step's own shell (its pid, written by the launcher) at `signal_at()` = `min(start + limit, host job
+end) - lead`, and the shell does what it does for a step alone (`kaos_stop`: copy now, USR1 only to processes that
+handle it). `srun --signal` is not used: see `docs/extreme-cases.md` 4.14. Admission is `fits()`.
+
 ## Live lessons
 
 Each lesson of the old in-pod waiter and the test that pins it: [docs/live-lessons.md](../docs/live-lessons.md)

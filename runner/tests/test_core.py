@@ -112,10 +112,12 @@ def test_sharing_stays_off_without_a_valid_scope(capsys):
     assert helpers.settings(HPC_SHARING="0", HPC_SCOPE="a1b2c3d4e5").sharing is False
 
 
-def test_a_resumable_step_never_shares_a_node(capsys):
-    """A host's slot manager does not pass the signal on (#1609)."""
-    assert helpers.settings(HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", HPC_RESUMABLE_LEAD="10").sharing is False
-    assert "it is resumable" in capsys.readouterr().out
+def test_a_resumable_step_may_share_a_node(capsys):
+    """AC-73 reverses D-44's gate: the slot manager signals each step itself, so a resumable step is a host or a guest."""
+    cfg = helpers.settings(HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", HPC_RESUMABLE_LEAD="10")
+    assert cfg.sharing is True and cfg.resumable_lead == 10
+    assert "it is resumable" not in capsys.readouterr().out
+    assert cfg.legacy_site_name.startswith("kaos-a1b2c3d4e5-"), "named for its scope: a host can take it"
 
 
 def test_the_job_name_carries_the_scope_only_with_sharing_on():

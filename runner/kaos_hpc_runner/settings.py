@@ -90,8 +90,9 @@ class Settings:
         self.qos = g('HPC_QOS') or ''
         self.reservation = g('HPC_RESERVATION') or ''
         self.qos_max = int(g('HPC_QOS_MAX_MINUTES') or 0)
-        # PRD-HPC-1461 D-44 (amended 2026-11-05): only a step declared resumable gets the stop
-        # signal, this many minutes before its wall time; 0 = not resumable.
+        # PRD-HPC-1461 D-44 (amended 2026-11-05, 2026-11-10): only a step declared resumable gets the stop
+        # signal, this many minutes before its wall time; 0 = not resumable. On a shared node the slot
+        # manager sends it, step by step (AC-73), so a resumable step may host or be a guest.
         self.resumable_lead = int(g('HPC_RESUMABLE_LEAD') or 0)
         # D-72: minutes of idleness (GPU/CPU below 5 % and a silent log) after which the job ends
         # the step as Idle; 0 = off. The controller always sets it; 20 when it is absent or unreadable.
@@ -110,10 +111,6 @@ class Settings:
         if sharing and not self.sharing:
             print('node sharing: scope %r is not 8-16 lowercase letters or digits - running alone'
                   % self.scope, flush=True)
-        if self.sharing and self.resumable_lead:
-            # A step on a shared node is not passed the stop signal (#1609), so it runs alone.
-            print('node sharing: off for this step - it is resumable', flush=True)
-            self.sharing = False
         # The site job's NAME is its immutable key (a job script rewrites the comment, never the name). It carries
         # the HPC job's identity and the attempt, so the finished job of a submit whose answer was lost is found
         # again by name (Runner.adopt) and is never taken for another attempt's or another Argo retry's job.

@@ -45,7 +45,7 @@ class Node:
     """One MeluXina node with a fake Slurm and the slot manager as host job 100."""
 
     def __init__(self, tmp_path, guests, own_body="echo own $KAOS_JOB_ID $CUDA_VISIBLE_DEVICES > $OUT/own\nexit 0\n",
-                 mem_mb=491520, extra_env=None, host_secs=3600, gpu_smi=False):
+                 mem_mb=491520, extra_env=None, host_secs=3600, gpu_smi=False, patch=None):
         self.tmp = tmp_path
         self.out = tmp_path / "out"
         self.out.mkdir()
@@ -67,7 +67,11 @@ class Node:
         own = tmp_path / "own.sh"
         own.write_text(jobs["100"]["script"])
         slots = tmp_path / "slots.py"
-        slots.write_text(_slots_code())
+        code = _slots_code()
+        for old, new in (patch or {}).items():   # a test shortens a constant (a lead's unit, a margin): real time stays short
+            assert old in code, old
+            code = code.replace(old, new)
+        slots.write_text(code)
         self.env = {"PATH": str(bindir) + os.pathsep + os.environ["PATH"], "HOME": str(tmp_path / "home"),
                     "USER": "u000001", "LANG": "C.UTF-8", "FAKE_SLURM_STATE": str(self.state),
                     "SLURM_JOB_ID": "100", "SLURM_CPUS_ON_NODE": "128", "SLURM_MEM_PER_NODE": str(mem_mb),

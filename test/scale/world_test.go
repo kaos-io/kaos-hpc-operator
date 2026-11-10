@@ -231,6 +231,7 @@ type jobSpec struct {
 	forceEnd    string
 	segments    int
 	resumable   bool
+	maxCont     int32  // continuations a resumable job may make (0: 5)
 	hostTail    string // a node-sharing host: dilated minutes its Slurm job keeps the node after its step
 	guest       bool   // a node-sharing guest: taken by a running host, never started on its own
 }
@@ -262,7 +263,7 @@ func (w *world) createJobs(p *project, specs []jobSpec) {
 				j.Annotations[annSegments] = fmt.Sprint(s.segments)
 			}
 			if s.resumable {
-				j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 5, MaxContinuations: 5}
+				j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 5, MaxContinuations: max(s.maxCont, 5)}
 			}
 			if s.hostTail != "" || s.guest {
 				j.Spec.Sharing = &hpcv1alpha1.Sharing{Scope: "scalescope1"}

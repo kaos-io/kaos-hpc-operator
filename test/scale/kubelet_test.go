@@ -63,6 +63,9 @@ const (
 	annGuest      = "fake.kaos.io/guest"
 )
 
+// envLead is the lead of a resumable step in the fake site's environment (AC-73).
+const envLead = fakeslurm.EnvLeadMinutes
+
 // siteWiring tells the kubelet which fake site serves an HPCSite namespace.
 type siteWiring struct {
 	hpcNS   string
@@ -361,6 +364,9 @@ func (k *kubelet) submit(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCArgo
 			env = append(env, key+"="+v)
 		}
 	}
+	if res := j.Spec.Resumable; res != nil {
+		env = append(env, fmt.Sprintf("%s=%d", envLead, res.LeadMinutes))
+	}
 	body := submitReq{Job: map[string]any{"name": name, "partition": cls.Partition, "account": r.site.account, "qos": qos,
 		"time_limit": limit, "comment": "kaos-ckpt-lease=" + string(j.UID) + "/" + j.Spec.StepName, "environment": env}}
 	if resv != "" {
@@ -561,7 +567,9 @@ func (k *kubelet) stepFollow(ctx context.Context, r *frunner, j *hpcv1alpha1.HPC
 			return
 		}
 		share := shareOf(rec.Comment.Job)
-		if sharing && first == "RUNNING" && share["kaos-state"] == "done" && share["host"] == "" {
+		// AC-73: a resumable host whose step saved (exit 85) is reported with its Slurm job's end, once, as the
+		// runner does (a continuation must not start while the old job still holds the node): not here.
+		if sharing && first == "RUNNING" && share["kaos-state"] == "done" && share["host"] == "" && share["rc"] != "85" {
 			k.reportStepEnd(ctx, r, j, rec, share)
 			return
 		}
