@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,7 +42,7 @@ type Config struct {
 	MaxContinuations int32
 	ResumableOptOut  bool                    // HPC_RESUMABLE=0|false (resumable=False in pipeline.py): never continued from a checkpoint
 	Outputs          []string                // STEP_OUTPUTS, comma separated
-	Dataset          *hpcv1alpha1.DatasetPin // DATASET (the run's choice) looked up in DATA_LOCK (the run's data lock)
+	Dataset          *hpcv1alpha1.DatasetPin // DATASET_PIN: the run's dataset as the compose step pinned it
 	Scope            string                  // HPC_SCOPE: set means node sharing
 	IdleTimeout      *int32                  // HPC_IDLE_TIMEOUT_MINUTES: nil = the platform's 20, 0 = off (step idle_timeout=)
 	Env              []hpcv1alpha1.NameValue
@@ -54,7 +55,12 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 		StepName: get("STEP_NAME"), NodeKey: get("NODE_KEY"), Image: get("IMAGE_REF"),
 		Class: get("HPC_CLASS"), Scope: get("HPC_SCOPE"),
 	}
-	pin, err := datasetPin(get("DATASET"), get("DATA_LOCK"))
+	if old := strings.TrimSpace(get("DATASET")); old != "" {
+		// A pipeline rendered before the run's data was pinned: it names a dataset and no commit.
+		return c, fmt.Errorf("this pipeline was released before the platform update that pins a run's dataset "+
+			"(it names dataset %s and no commit). It is re-released by the platform shortly; run it again then", old)
+	}
+	pin, err := datasetPin(get("DATASET_PIN"))
 	if err != nil {
 		return c, err
 	}
@@ -129,49 +135,51 @@ func (c *Config) readResumable(get func(string) string) error {
 	return nil
 }
 
-// datasetPin is the step's dataset at the commit the run's data lock holds for it. choice is the run's
-// `dataset` parameter, [<owner>/]<repository>@<version>; lock is the data lock the compose step wrote
-// ({"version": 1, "reads": [{"repo", "owner", "ref", "commit"}]}). No choice: no dataset. A choice the
-// lock does not hold is an error: the follower never resolves a version, and neither does the runner.
-func datasetPin(choice, lock string) (*hpcv1alpha1.DatasetPin, error) {
-	choice = strings.TrimSpace(choice)
-	if choice == "" {
+var (
+	pinRepo    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
+	pinVersion = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$`)
+	pinCommit  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+// datasetPin is the run's dataset as the pipeline's compose step pinned it: the JSON object
+// {"repo","version","commit","owner"} it wrote, or nothing when the run reads no dataset. The follower
+// resolves and matches nothing: the job is created from exactly what the compose step decided, which is
+// what every other step of the run reads. Anything else in the value is an error, never a job without data.
+func datasetPin(raw string) (*hpcv1alpha1.DatasetPin, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
 		return nil, nil
 	}
-	name, version, ok := strings.Cut(choice, "@")
-	if !ok || name == "" || version == "" {
-		return nil, fmt.Errorf("DATASET must be [<owner>/]<repository>@<version>, got %q", choice)
+	var pin struct {
+		Repo, Version, Commit, Owner *string
 	}
-	owner, repo := "", name
-	if o, r, shared := strings.Cut(name, "/"); shared {
-		owner, repo = o, r
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&pin); err != nil {
+		return nil, fmt.Errorf("DATASET_PIN is not the run's dataset pin: %w", err)
 	}
-	var doc struct {
-		Version int `json:"version"`
-		Reads   []struct {
-			Repo, Ref, Commit string
-			Owner             *string
-		} `json:"reads"`
+	if dec.More() {
+		return nil, fmt.Errorf("DATASET_PIN holds more than one value")
 	}
-	if strings.TrimSpace(lock) == "" {
-		return nil, fmt.Errorf("DATA_LOCK is empty: the run pinned no commit for dataset %s", choice)
-	}
-	if err := json.Unmarshal([]byte(lock), &doc); err != nil {
-		return nil, fmt.Errorf("DATA_LOCK is not a data lock: %w", err)
-	}
-	if doc.Version != 1 {
-		return nil, fmt.Errorf("DATA_LOCK has version %d; this follower reads version 1", doc.Version)
-	}
-	for _, r := range doc.Reads {
-		readOwner := ""
-		if r.Owner != nil {
-			readOwner = *r.Owner
+	get := func(v *string) string {
+		if v == nil {
+			return ""
 		}
-		if r.Repo == repo && r.Ref == version && readOwner == owner && r.Commit != "" {
-			return &hpcv1alpha1.DatasetPin{Repo: repo, Version: version, Commit: r.Commit, Owner: owner}, nil
-		}
+		return *v
 	}
-	return nil, fmt.Errorf("DATA_LOCK holds no commit for dataset %s", choice)
+	out := &hpcv1alpha1.DatasetPin{Repo: get(pin.Repo), Version: get(pin.Version), Commit: get(pin.Commit), Owner: get(pin.Owner)}
+	switch {
+	case !pinRepo.MatchString(out.Repo):
+		return nil, fmt.Errorf("DATASET_PIN: %q is not a dataset repository name", out.Repo)
+	case !pinVersion.MatchString(out.Version):
+		return nil, fmt.Errorf("DATASET_PIN: %q is not a dataset version", out.Version)
+	case !pinCommit.MatchString(out.Commit):
+		return nil, fmt.Errorf("DATASET_PIN: dataset %s@%s has no commit (got %q): the run pins it before any step", out.Repo, out.Version, out.Commit)
+	case out.Owner != "":
+		return nil, fmt.Errorf("dataset %s/%s@%s is shared by project %s: a dataset of another project cannot be read "+
+			"on HPC yet. Run this step on a cluster class, or copy the dataset into this project", out.Owner, out.Repo, out.Version, out.Owner)
+	}
+	return out, nil
 }
 
 // JobName is the deterministic name of the step's job: hpc- plus the first 20 hex characters of

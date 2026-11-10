@@ -15,7 +15,7 @@ inputs:
     value: auto
   - name: idle-timeout
     value: ''
-  - name: data-lock
+  - name: dataset-pin
     value: ''
 activeDeadlineSeconds: '{{inputs.parameters.deadline-seconds}}'
 retryStrategy:
@@ -72,10 +72,8 @@ container:
     value: '5'
   - name: STEP_OUTPUTS
     value: '{{inputs.parameters.step-outputs}}'
-  - name: DATASET
-    value: '{{workflow.parameters.dataset}}'
-  - name: DATA_LOCK
-    value: '{{inputs.parameters.data-lock}}'
+  - name: DATASET_PIN
+    value: '{{inputs.parameters.dataset-pin}}'
   - name: OUTPUTS_REPO
     value: outputs-PLACEHOLDER-app
   - name: OUTPUTS_REF
@@ -84,4 +82,5 @@ container:
     value: outputs-PLACEHOLDER-app
   - name: CHECKPOINT_PREFIX
     value: main/checkpoints
+  terminationMessagePolicy: FallbackToLogsOnError
 serviceAccountName: hpc-submitter

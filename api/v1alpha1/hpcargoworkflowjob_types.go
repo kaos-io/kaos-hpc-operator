@@ -191,6 +191,12 @@ type HPCArgoWorkflowJobSpec struct {
 	// +kubebuilder:default=1
 	// +optional
 	Nodes int32 `json:"nodes,omitempty"`
+	// DatasetRef is DEPRECATED and never read as a dataset: before the run's data was pinned by the
+	// pipeline, a job named its dataset as <dataset-repo>@<version> and the runner resolved it. The field
+	// stays in the schema so that a job stored with it, or created by an older follower, keeps it and is
+	// REFUSED with a clear reason instead of running without its data.
+	// +optional
+	DatasetRef string `json:"datasetRef,omitempty"`
 	// Dataset is the dataset the step reads, pinned to one commit by the pipeline's compose step.
 	// The runner stages exactly this commit and never resolves a version itself. Absent: the step
 	// runs without a dataset.
@@ -247,12 +253,11 @@ type HPCArgoWorkflowJobSpec struct {
 // DatasetPin is one dataset at one commit: what the run's data lock recorded for the step's dataset.
 type DatasetPin struct {
 	// Repo is the lakeFS repository of the dataset.
-	// +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9-]{0,62}$`
+	// +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9-]{1,62}$`
 	Repo string `json:"repo"`
 	// Version is what the run asked for (latest, v3, a branch or a tag). It is a label: the commit decides
 	// what is read.
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$`
 	Version string `json:"version"`
 	// Commit is the lakeFS commit the version was resolved to when the run started.
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`

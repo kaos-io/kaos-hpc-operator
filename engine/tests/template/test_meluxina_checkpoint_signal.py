@@ -49,10 +49,25 @@ def test_a_bad_lead_is_refused(value):
         authoring.step("train", gpu=True, resumable=value)
 
 
-def test_resumable_needs_a_gpu_step():
+def test_a_step_without_a_gpu_may_be_resumable_and_have_an_hpc_time_limit():
+    """Every step can be placed on an HPC class, and a CPU step on a spot machine is interrupted too."""
     from kubecore import authoring
-    with pytest.raises(authoring.AuthoringError), authoring.pipeline("t"):
-        authoring.step("prep", resumable=True)
+    with authoring.pipeline("t") as p:
+        authoring.step("prep", resumable=True, hpc_time_limit="2h")
+    step = p.steps[0]
+    assert step.resumable == authoring.DEFAULT_RESUMABLE_LEAD and step.hpc_time_limit == "2h" and not step.gpu
+
+
+def test_a_resumable_cpu_step_gets_its_checkpoint_copies():
+    from kubecore import resilience
+    ctx = {"lakefs": {"endpoint": "e", "adminSecret": "s", "adminSecretKeys": {"accessKey": "a", "secretKey": "b"}},
+           "checkpoints": {"helperImage": "registry.example/helper:v1"}}
+    declared = {"name": "prep", "metadata": {"annotations": {resilience.RESUMABLE_ANNOTATION: "10m"}}}
+    plain = {"name": "prep"}
+    off = {"name": "prep", "metadata": {"annotations": {resilience.RESUMABLE_ANNOTATION: resilience.RESUMABLE_OFF}}}
+    assert resilience.wants_helper(declared, False, "", ctx, False, set()) is True
+    assert resilience.wants_helper(plain, False, "", ctx, False, set()) is False
+    assert resilience.wants_helper(off, False, "", ctx, False, set()) is False
 
 
 def test_a_resumable_steps_follower_gets_its_lead_and_a_deadline_for_every_continuation():

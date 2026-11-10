@@ -140,6 +140,7 @@ class Runner:
             # Once per runner: a resubmit reuses the staged copy (or the in-job fallback) instead of
             # spending the staging budget again.
             self.stage_tried = True
+            cfg.check_dataset()
             self.staged = staging.stage_dataset(cfg, self.stager, self._mint)
         reg = ''
         try:

@@ -71,6 +71,12 @@ def retry_strategy() -> dict:
             "backoff": dict(RETRY_BACKOFF)}
 
 
+# The annotation step(resumable=...) renders (kubecore/authoring.py) and its opt-out value; kubecore/meluxina.py
+# reads the same two for the HPC variant.
+RESUMABLE_ANNOTATION = "platform.kubecore.io/hpc-resumable"
+RESUMABLE_OFF = "off"
+
+
 def helper_image(ctx: dict) -> str:
     """The image the helper containers run, from the platform registry: `checkpoints.helperImage`, which the
     operator publishes in every app's pipeline context (the pool's pinned kaos-hpc-operator image), else the
@@ -147,14 +153,17 @@ def wants_helper(step: dict, gpu: bool, every: str, ctx: dict, inject_off: bool,
     lakefs = ctx.get("lakefs") or {}
     if not (lakefs.get("endpoint") and lakefs.get("adminSecret") and lakefs.get("adminSecretKeys")):
         return False
-    if not (gpu or every):
+    # A step that declares resumable= saves and continues: its checkpoints are copied whether it has a GPU or
+    # not (a CPU step on a spot machine or an HPC class is interrupted like any other).
+    declared = ((step.get("metadata") or {}).get("annotations") or {}).get(RESUMABLE_ANNOTATION)
+    if not (gpu or every or declared not in (None, "", RESUMABLE_OFF)):
         return False
     if not helper_image(ctx):
         print("kubecore: step %r: no checkpoints.helperImage in the pipeline context; its checkpoint copies are "
               "off until the platform publishes it (re-run and folder are still injected)" % step["name"],
               file=sys.stderr)
         return False
-    return True    # CPU steps opt in with a checkpoint_every value
+    return True    # CPU steps opt in with a checkpoint_every value or resumable=
 
 
 def _add_named(items: list, entry: dict) -> None:

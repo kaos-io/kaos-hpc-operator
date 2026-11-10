@@ -108,15 +108,9 @@ class Settings:
         self.dataset_version = (g('DATASET_VERSION') or '').strip()
         self.dataset_commit = (g('DATASET_COMMIT') or '').strip()
         self.dataset_owner = (g('DATASET_OWNER') or '').strip()
-        if self.dataset_repo and not re.fullmatch('[0-9a-f]{64}', self.dataset_commit):
-            fail_start('dataset %s@%s has no pinned commit (got %r): the pipeline pins it before any step '
-                       'runs, the runner never resolves a version'
-                       % (self.dataset_repo, self.dataset_version, self.dataset_commit), 1)
-        if self.dataset_owner:
-            fail_start('dataset %s/%s@%s is shared by project %s: datasets of another project cannot be '
-                       'read on HPC yet. Run this step on a cluster class, or copy the dataset into this '
-                       'project.' % (self.dataset_owner, self.dataset_repo, self.dataset_version,
-                                     self.dataset_owner), 1)
+        # A dataset named the way jobs did before the run's data was pinned (by an older controller as DATASET,
+        # or by this one for a job stored before the update): there is no commit to stage.
+        self.dataset_unpinned = (g('DATASET_UNPINNED') or g('DATASET') or '').strip()
         # PRD-1609 node sharing: off unless the operator turned it on for this project and gave
         # its scope. A host on a shared node takes only jobs whose name and script header carry it.
         self.scope = g('HPC_SCOPE') or ''
@@ -188,6 +182,24 @@ class Settings:
         return min(caps) if caps else 0
 
     # ---- dataset
+
+    def check_dataset(self):
+        """Refuse to start an attempt whose dataset cannot be staged as pinned. Called before staging and before
+        any submission, and never by the cancel-only runner (which must be able to clean up whatever the job
+        asks for)."""
+        if self.dataset_unpinned and not self.dataset_repo:
+            fail_start('this job names dataset %s without a pinned commit: it was created before the platform '
+                       'update that pins a run\'s dataset. Running it now would run the step without its data. '
+                       'Run the pipeline again.' % self.dataset_unpinned, 1)
+        if self.dataset_repo and not re.fullmatch('[0-9a-f]{64}', self.dataset_commit):
+            fail_start('dataset %s@%s has no pinned commit (got %r): the pipeline pins it before any step '
+                       'runs, the runner never resolves a version'
+                       % (self.dataset_repo, self.dataset_version, self.dataset_commit), 1)
+        if self.dataset_owner:
+            fail_start('dataset %s/%s@%s is shared by project %s: datasets of another project cannot be '
+                       'read on HPC yet. Run this step on a cluster class, or copy the dataset into this '
+                       'project.' % (self.dataset_owner, self.dataset_repo, self.dataset_version,
+                                     self.dataset_owner), 1)
 
     @property
     def dataset_ref(self):

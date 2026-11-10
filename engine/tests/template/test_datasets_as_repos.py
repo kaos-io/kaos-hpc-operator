@@ -8,6 +8,7 @@ values moved to the controller's runner (PRD-HPC-1461 F-35).
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]  # engine/
@@ -43,45 +44,54 @@ def test_results_go_to_the_apps_outputs_repository():
     assert env["KUBECORE_WORKFLOW_NAME"] == "{{workflow.name}}", "names the MLflow run"
     mr = next(t for t in out["spec"]["templates"] if t["name"] == "hpc-follower")
     menv = {e["name"]: e.get("value") for e in mr["container"]["env"]}
-    assert menv["DATASET"] == "", "no compose step pinned the dataset: the HPC step asks for none"
+    assert menv["DATASET_PIN"] == "{{inputs.parameters.dataset-pin}}"
     assert menv["OUTPUTS_REPO"] == "outputs-myapp" and menv["OUTPUTS_REF"] == "main"
     assert "DATASET_REPO" not in menv and "OUTPUTS_BRANCH" not in menv
 
 
-def _with_compose(reads_dataset: bool) -> dict:
-    """_raw() plus the platform's compose step as authoring renders it (data-lock output; --require per reads=)."""
+def _with_compose() -> dict:
+    """_raw() plus the platform's compose step as authoring renders it (its outputs)."""
     raw = _raw()
     raw["spec"]["templates"].append({
-        "name": "compose-and-validate",
-        "container": {"image": "i", "args": ["--require=dataset"] if reads_dataset else ["--require=train"]},
-        "outputs": {"parameters": [{"name": "params"}, {"name": "data-lock"}]}})
+        "name": "compose-and-validate", "container": {"image": "i", "args": []},
+        "outputs": {"parameters": [{"name": "params"}, {"name": "data-lock"}, {"name": "dataset-pin"}]}})
     tasks = raw["spec"]["templates"][0]["dag"]["tasks"]
     tasks.insert(0, {"name": "compose-and-validate", "template": "compose-and-validate"})
     tasks[1]["depends"] = "compose-and-validate"
     return raw
 
 
-def test_the_follower_gets_the_dataset_and_the_runs_data_lock_only_when_a_step_reads_the_dataset():
+def test_the_follower_is_told_the_dataset_by_the_compose_step_never_by_a_run_parameter():
+    """The run form's `dataset` can differ from what the compose step resolved (an override, an owner that is
+    the own project): the HPC job is created from the compose step's pin, the same fact the cluster steps read."""
     ctx = yaml.safe_load(CTX_PATH.read_text())
-    out = enhance(_with_compose(reads_dataset=True), ctx)
+    out = enhance(_with_compose(), ctx)
     follower = next(t for t in out["spec"]["templates"] if t["name"] == "hpc-follower")
     env = {e["name"]: e.get("value") for e in follower["container"]["env"]}
-    assert env["DATASET"] == "{{workflow.parameters.dataset}}"
-    assert env["DATA_LOCK"] == "{{inputs.parameters.data-lock}}"
+    assert env["DATASET_PIN"] == "{{inputs.parameters.dataset-pin}}"
+    assert "DATASET" not in env and "DATA_LOCK" not in env
+    assert "workflow.parameters.dataset" not in yaml.safe_dump(follower)
+    assert follower["container"]["terminationMessagePolicy"] == "FallbackToLogsOnError"
     twin = next(t for t in out["spec"]["templates"][0]["dag"]["tasks"] if t["name"] == "model-training-hpc")
     args = {p["name"]: p["value"] for p in twin["arguments"]["parameters"]}
-    assert args["data-lock"] == "{{tasks.compose-and-validate.outputs.parameters.data-lock}}"
+    assert args["dataset-pin"] == "{{tasks.compose-and-validate.outputs.parameters.dataset-pin}}"
     assert "compose-and-validate" in twin["depends"], "Argo exposes a task's outputs only to tasks that depend on it"
 
-    out = enhance(_with_compose(reads_dataset=False), ctx)
-    follower = next(t for t in out["spec"]["templates"] if t["name"] == "hpc-follower")
-    env = {e["name"]: e.get("value") for e in follower["container"]["env"]}
-    assert env["DATASET"] == "", "a dataset in the config that no step reads is not asked of the HPC step"
+
+def test_a_task_that_already_has_the_hpc_variants_name_stops_the_render():
+    """authoring refuses such step names; a hand-made template that has one anyway must not render two tasks
+    with one name."""
+    ctx = yaml.safe_load(CTX_PATH.read_text())
+    raw = _with_compose()
+    raw["spec"]["templates"].append({"name": "x", "container": {"image": "i", "command": ["c"]}})
+    raw["spec"]["templates"][0]["dag"]["tasks"].append({"name": "model-training-hpc", "template": "x"})
+    with pytest.raises(ValueError, match="already exists"):
+        enhance(raw, ctx)
 
 
 def test_the_compose_step_has_no_hpc_twin_and_its_class_choice_offers_no_hpc_class():
     ctx = yaml.safe_load(CTX_PATH.read_text())
-    out = enhance(_with_compose(reads_dataset=True), ctx)
+    out = enhance(_with_compose(), ctx)
     names = [t["name"] for t in out["spec"]["templates"][0]["dag"]["tasks"]]
     assert "compose-and-validate-hpc" not in names and "model-training-hpc" in names
     assert not any(n.endswith("-meluxina") for n in names)
@@ -108,5 +118,7 @@ def test_a_pipeline_without_a_dataset_parameter_runs_data_less_on_hpc():
     ctx = yaml.safe_load(CTX_PATH.read_text())
     raw = _raw()
     raw["spec"]["arguments"]["parameters"] = []
-    mr = next(t for t in enhance(raw, ctx)["spec"]["templates"] if t["name"] == "hpc-follower")
-    assert {e["name"]: e.get("value") for e in mr["container"]["env"]}["DATASET"] == ""
+    out = enhance(raw, ctx)
+    twin = next(t for t in out["spec"]["templates"][0]["dag"]["tasks"] if t["name"] == "model-training-hpc")
+    args = {p["name"]: p["value"] for p in twin["arguments"]["parameters"]}
+    assert args["dataset-pin"] == "", "no compose step, no pin: the follower creates a job without a dataset"

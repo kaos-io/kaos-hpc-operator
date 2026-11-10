@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 
 from kaos_engine import engine_version
-from kaos_engine.render import EngineError, find_engine_dir, import_engine
+from kaos_engine.render import EXIT_ENGINE_BROKEN, EngineError, find_engine_dir, import_engine
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,6 +27,9 @@ def main(argv: list[str] | None = None) -> int:
     except EngineError as exc:
         print(f"kaos-engine: {exc}", file=sys.stderr)
         return exc.code
+    if "kubecore.compose" not in modules:
+        print(f"kaos-engine: the engine at {engine} has no kubecore/compose.py", file=sys.stderr)
+        return EXIT_ENGINE_BROKEN
     print(f"kaos-engine: version={engine_version()} engine={engine}", file=sys.stderr)
     modules["kubecore.compose"].main(argv)
     return 0

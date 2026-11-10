@@ -97,20 +97,26 @@ spec:
                     type: string
                   repo:
                     description: Repo is the lakeFS repository of the dataset.
-                    pattern: ^[a-z0-9][a-z0-9-]{0,62}$
+                    pattern: ^[a-z0-9][a-z0-9-]{1,62}$
                     type: string
                   version:
                     description: |-
                       Version is what the run asked for (latest, v3, a branch or a tag). It is a label: the commit decides
                       what is read.
-                    maxLength: 255
-                    minLength: 1
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$
                     type: string
                 required:
                 - commit
                 - repo
                 - version
                 type: object
+              datasetRef:
+                description: |-
+                  DatasetRef is DEPRECATED and never read as a dataset: before the run's data was pinned by the
+                  pipeline, a job named its dataset as <dataset-repo>@<version> and the runner resolved it. The field
+                  stays in the schema so that a job stored with it, or created by an older follower, keeps it and is
+                  REFUSED with a clear reason instead of running without its data.
+                type: string
               env:
                 description: |-
                   Env is extra environment for the runner, from a fixed allowlist: OUTPUTS_REPO, OUTPUTS_REF,

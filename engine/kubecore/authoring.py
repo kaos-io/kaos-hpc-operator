@@ -52,6 +52,15 @@ PARAMS_PATH = "/work/params.yaml"
 DATA_LOCK_PARAM = "data-lock"
 DATA_LOCK_PATH = "/work/data-lock.json"
 DATA_LOCK_ENV = "KAOS_LIB_LOCK"
+# The run's dataset as one object {"repo","version","commit","owner"} ("" when the run has none): what an
+# HPC step's job is created from (kubecore/meluxina.py).
+DATASET_PIN_PARAM = "dataset-pin"
+DATASET_PIN_PATH = "/work/dataset-pin.json"
+# Names the platform uses itself: a step's output with one of them would replace the platform's value in the
+# steps that need it.
+RESERVED_OUTPUTS = ("params", DATA_LOCK_PARAM, DATASET_PIN_PARAM)
+# A step's HPC variant is the task `<step>-hpc` (kubecore/meluxina.py); a step may not take such a name.
+RESERVED_STEP_SUFFIX = "-hpc"
 STEP_LABEL = "platform.kubecore.io/step"
 STEP_KIND_LABEL = "platform.kubecore.io/step-kind"
 # The compose step runs `python -m kubecore.compose` inside its own image;
@@ -139,6 +148,17 @@ def step(name, reads=None, gpu=False, needs=None, outputs=None, when=None, disk=
             f"(e.g. 'model-evaluation'). The name becomes the Argo template, the "
             f"steps/<dir> folder, and the image-<step> parameter."
         )
+    if name.endswith(RESERVED_STEP_SUFFIX) or name == COMPOSE_STEP:
+        raise AuthoringError(
+            f"step name {name!r} is reserved — the platform names a step's HPC variant '<step>{RESERVED_STEP_SUFFIX}' "
+            f"and its own first step '{COMPOSE_STEP}'. Choose another name."
+        )
+    taken = sorted(set(outputs or []) & set(RESERVED_OUTPUTS))
+    if taken:
+        raise AuthoringError(
+            f"step {name!r}: output name(s) {', '.join(taken)} are reserved — the platform passes its own "
+            f"'{', '.join(RESERVED_OUTPUTS)}' to every step. Rename the output."
+        )
     if any(s.name == name for s in _current.steps):
         raise AuthoringError(
             f"duplicate step name {name!r} — every step must be uniquely named "
@@ -154,13 +174,8 @@ def step(name, reads=None, gpu=False, needs=None, outputs=None, when=None, disk=
     ):
         raise AuthoringError(
             f"step {name!r}: hpc_time_limit={hpc_time_limit!r} must be minutes or hours as a "
-            f"string like '90m', '12h' or '720' (the Slurm wall-clock limit when this GPU step "
-            f"runs on the HPC target; the run is killed when it elapses)."
-        )
-    if hpc_time_limit is not None and not gpu:
-        raise AuthoringError(
-            f"step {name!r}: hpc_time_limit only applies to gpu=True steps — only GPU steps "
-            f"are routed to the HPC target."
+            f"string like '90m', '12h' or '720' (the Slurm wall-clock limit when this step "
+            f"runs on an HPC class; the run is killed when it elapses)."
         )
     if resumable is True:
         resumable = DEFAULT_RESUMABLE_LEAD
@@ -173,11 +188,8 @@ def step(name, reads=None, gpu=False, needs=None, outputs=None, when=None, disk=
             f"step {name!r}: resumable={resumable!r} must be True or a lead time like '20m' or '1h': how long "
             f"before its HPC wall time the step is told to save its checkpoint (kaos_lib.checkpoint)."
         )
-    if resumable not in (None, RESUMABLE_OFF) and not gpu:
-        raise AuthoringError(
-            f"step {name!r}: resumable only applies to gpu=True steps — only GPU steps are routed to the "
-            f"HPC target."
-        )
+    # Any step may declare these, GPU or not: every step can be placed on an HPC class, and a step on a spot
+    # machine is interrupted too. A resumable step gets its checkpoint copies wherever it runs (resilience.py).
     checkpoint_every = _checkpoint_every_minutes(name, checkpoint_every)
     idle_timeout = _idle_timeout_minutes(name, idle_timeout)
     s = Step(name, reads, gpu, needs, outputs, when, disk, hpc_time_limit, resumable, checkpoint_every,
@@ -224,10 +236,11 @@ class pipeline:
                 + ["--render-defaults", json.dumps(form.render_defaults, separators=(",", ":"))]
                 + ["--advanced", "{{workflow.parameters.config}}"]
                 + [f"--require={sec}" for sec in required]
-                + ["--output", PARAMS_PATH, "--lock-output", DATA_LOCK_PATH],
+                + ["--output", PARAMS_PATH, "--lock-output", DATA_LOCK_PATH, "--pin-output", DATASET_PIN_PATH],
                 labels={STEP_LABEL: COMPOSE_STEP, STEP_KIND_LABEL: "control"},
                 outputs=[Parameter(name="params", value_from=ValueFrom(path=PARAMS_PATH)),
-                         Parameter(name=DATA_LOCK_PARAM, value_from=ValueFrom(path=DATA_LOCK_PATH))],
+                         Parameter(name=DATA_LOCK_PARAM, value_from=ValueFrom(path=DATA_LOCK_PATH)),
+                         Parameter(name=DATASET_PIN_PARAM, value_from=ValueFrom(path=DATASET_PIN_PATH))],
             )
             containers = {}
             for s in self.steps:

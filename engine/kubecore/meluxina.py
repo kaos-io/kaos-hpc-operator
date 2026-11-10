@@ -7,7 +7,7 @@ parent KubePool is HPC-ready, so non-HPC pools render byte-identically).
 What it does (F-02/F-03/F-06):
   * re-emits the `target` submit-form parameter (gcp | <provider>);
   * every GPU step WITHOUT an existing task `when` (quantization-gated steps
-    keep in-cluster-only behaviour this slice) gains a `-meluxina` twin DAG
+    keep in-cluster-only behaviour this slice) gains a `<step>-hpc` twin DAG
     task with complementary `when:` clauses on `target`;
   * downstream `depends` tokens that reference a routed step are rewritten to
     gate on the Succeeded||Skipped twin pair (exactly one twin runs);
@@ -121,7 +121,7 @@ HPC_MAX_CONTINUATIONS = 5
 # it, alone, to the controller's submitter role plus Argo's workflowtaskresults Role); ordinary step pods
 # run as the pipeline's account, which holds no HPC right.
 HPC_SUBMITTER_SA = "hpc-submitter"
-# The WorkflowTemplate template every `<step>-meluxina` twin task calls (follower, or the refusal
+# The WorkflowTemplate template every `<step>-hpc` twin task calls (follower, or the refusal
 # when the controller does not serve the project). Was `meluxina-run` until PRD-HPC-1461 AC-12; a
 # Workflow submitted before the rename keeps the old name in its own spec and runs to the end.
 HPC_TWIN_TEMPLATE = "hpc-follower"
@@ -129,8 +129,9 @@ HPC_TWIN_TEMPLATE = "hpc-follower"
 HPC_TWIN_SUFFIX = "hpc"
 # The platform's own first step. It composes the config and pins the run's data: it never runs on HPC.
 COMPOSE_STEP = "compose-and-validate"
-# The compose step's output that holds the run's data lock (kubecore/authoring.py).
-DATA_LOCK_PARAM = "data-lock"
+# The compose step's output that holds the run's dataset as one object, {"repo","version","commit","owner"}, or
+# "" when the run reads none (kubecore/authoring.py, kubecore/compose.py). The follower creates the job from it.
+DATASET_PIN_PARAM = "dataset-pin"
 HPC_ANNOTATION = "platform.kubecore.io/hpc"
 # step(resumable=...): how long before its wall time the step is told to save (D-44 as amended
 # 2026-11-05). Only resumable steps get the signal and continue.
@@ -164,7 +165,7 @@ def controller_serves(ctx: dict) -> bool:
     return (ctx.get("hpc") or {}).get("controller") == "serve"
 
 
-def follower_template(ctx: dict, tpl: dict, dataset: str) -> dict:
+def follower_template(ctx: dict, tpl: dict) -> dict:
     """The `hpc-follower` template as the follower (PRD-HPC-1461 D-59): it creates the step's
     HPCArgoWorkflowJob, prints its progress and writes the Argo outputs from its status. It holds no
     Slurm, staging or MLflow credential and no Secret volume: the controller's runner Job carries them,
@@ -194,10 +195,10 @@ def follower_template(ctx: dict, tpl: dict, dataset: str) -> dict:
         {"name": "HPC_IDLE_TIMEOUT_MINUTES", "value": "{{inputs.parameters.idle-timeout}}"},
         {"name": "HPC_MAX_CONTINUATIONS", "value": str(HPC_MAX_CONTINUATIONS)},
         {"name": "STEP_OUTPUTS", "value": "{{inputs.parameters.step-outputs}}"},
-        {"name": "DATASET", "value": dataset},
-        # The run's data lock (the compose step's output): the follower takes the dataset's commit from it
-        # and writes it into the job, so the runner stages that commit and never resolves a version (D-81).
-        {"name": "DATA_LOCK", "value": "{{inputs.parameters.%s}}" % DATA_LOCK_PARAM},
+        # The run's dataset, pinned to a commit by the compose step: the job is created from exactly this, so an
+        # HPC step reads what every other step of the run reads, and neither the follower nor the runner ever
+        # resolves a version (D-81). Empty: the run reads no dataset.
+        {"name": "DATASET_PIN", "value": "{{inputs.parameters.%s}}" % DATASET_PIN_PARAM},
         # The only spec env the controller admits (allowlist).
         {"name": "OUTPUTS_REPO", "value": outputs_repo(ctx)},
         {"name": "OUTPUTS_REF", "value": OUTPUTS_REF},
@@ -206,7 +207,9 @@ def follower_template(ctx: dict, tpl: dict, dataset: str) -> dict:
     ] + ([{"name": KAOS_LIB_SUPPORT_ENV, "value": support_value(ctx)}] if support_value(ctx) else []) \
       + sharing_env(ctx)
     follower = dict(tpl)
-    follower["container"] = {"image": str(image), "command": ["/follower"], "env": env}
+    # A follower that cannot start the job says why in its last lines: show them as the step's message.
+    follower["container"] = {"image": str(image), "command": ["/follower"], "env": env,
+                             "terminationMessagePolicy": "FallbackToLogsOnError"}
     # Template-level: overrides the workflow's account for this one template (AC-18).
     follower["serviceAccountName"] = HPC_SUBMITTER_SA
     return follower
@@ -340,15 +343,13 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
                 and "platform.kubecore.io/compute-class" not in annots)
 
     routable = {t["name"] for t in tasks if _routable(t)}
-    # The compose step's outputs decide what the follower is told about data: the run's data lock, and the
-    # dataset only when a step reads it (`--require=dataset`). A config that carries a `dataset` no step
-    # reads must not make an HPC step ask for a commit nobody pinned.
+    # The follower is told the run's dataset by the compose step, never by a raw run parameter: what the
+    # compose step pinned is what every step reads.
     compose = by_tpl.get(COMPOSE_STEP) or {}
     compose_outputs = {o.get("name") for o in ((compose.get("outputs") or {}).get("parameters") or [])}
-    compose_args = (compose.get("container") or {}).get("args") or []
     has_compose_task = any(t.get("name") == COMPOSE_STEP for t in tasks)
-    data_lock = ("{{tasks.%s.outputs.parameters.%s}}" % (COMPOSE_STEP, DATA_LOCK_PARAM)
-                 if has_compose_task and DATA_LOCK_PARAM in compose_outputs else "")
+    dataset_pin = ("{{tasks.%s.outputs.parameters.%s}}" % (COMPOSE_STEP, DATASET_PIN_PARAM)
+                   if has_compose_task and DATASET_PIN_PARAM in compose_outputs else "")
     # The compose step is placed on the cluster only: its class choice offers no HPC class.
     for p in parameters:
         if p.get("name") == COMPOSE_STEP + "-class" and p.get("enum"):
@@ -387,6 +388,9 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
         step_outputs = [o["name"] for o in
                         ((step.get("outputs") or {}).get("parameters") or [])]
         outputs_union.update(step_outputs)
+        if any(t["name"] == task["name"] + "-" + HPC_TWIN_SUFFIX for t in tasks):
+            raise ValueError("meluxina: a task named %r already exists, so step %r cannot get its HPC variant"
+                             % (task["name"] + "-" + HPC_TWIN_SUFFIX, task["name"]))
         twin = {
             "name": task["name"] + "-" + HPC_TWIN_SUFFIX,
             "template": HPC_TWIN_TEMPLATE,
@@ -405,7 +409,7 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
                 {"name": "idle-timeout", "value": step_idle_timeout(step)},
                 {"name": "step-outputs", "value": ",".join(step_outputs)},
                 {"name": "hpc-class", "value": "{{workflow.parameters.%s-class}}" % step["name"]},
-                {"name": DATA_LOCK_PARAM, "value": data_lock},
+                {"name": DATASET_PIN_PARAM, "value": dataset_pin},
             ]},
         }
         if task.get("depends"):
@@ -466,12 +470,6 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
             dep = re.sub(r"(?<![\w.-])%s(?![\w.-])" % re.escape(r), pair, dep)
         task["depends"] = dep
 
-    # The pipeline's `dataset` workflow parameter (`[<owner>/]<repository>@<version>`) is
-    # handed to the follower when a step reads it and the compose step pinned it;
-    # otherwise no stage-in, the step runs data-less.
-    wf_params = {p.get("name") for p in parameters}
-    dataset = ("{{workflow.parameters.dataset}}"
-               if "dataset" in wf_params and data_lock and "--require=dataset" in compose_args else "")
     tpl = {
         "name": HPC_TWIN_TEMPLATE,
         "inputs": {"parameters": [
@@ -480,7 +478,7 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
             {"name": "step-outputs", "value": ""}, {"name": "hpc-class"},
             {"name": "resumable-lead", "value": "0"}, {"name": "resumable", "value": "auto"},
             {"name": "idle-timeout", "value": ""},
-            {"name": DATA_LOCK_PARAM, "value": ""}]},
+            {"name": DATASET_PIN_PARAM, "value": ""}]},
         # Per-step: Slurm time limit + queue/prep allowance (see
         # QUEUE_ALLOWANCE_MINUTES). Argo resolves the parameter here.
         "activeDeadlineSeconds": "{{inputs.parameters.deadline-seconds}}",
@@ -502,5 +500,5 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
                        for n in sorted(outputs_union)]},
     }
     # F-35: the controller's follower, or a refusal; never an in-pod submitter.
-    tpl = follower_template(ctx, tpl, dataset) if controller_serves(ctx) else refusal_template(tpl)
+    tpl = follower_template(ctx, tpl) if controller_serves(ctx) else refusal_template(tpl)
     spec["templates"].append(tpl)
