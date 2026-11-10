@@ -122,7 +122,6 @@ func BuildCancel(cfg Config, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alp
 	return rj, nil
 }
 
-// ValidateEnv enforces the allowlist on spec.env (the CRD enforces it too; this is the second lock).
 // ValidateDataset refuses a job that names a dataset without a pinned commit: one stored before the run's
 // data was pinned by the pipeline, or created by an older follower (spec.datasetRef). Running it would run
 // the step without its data.
@@ -134,6 +133,7 @@ func ValidateDataset(spec *hpcv1alpha1.HPCArgoWorkflowJobSpec) error {
 	return nil
 }
 
+// ValidateEnv enforces the allowlist on spec.env (the CRD enforces it too; this is the second lock).
 func ValidateEnv(env []hpcv1alpha1.NameValue) error {
 	if len(env) > maxEnvItems {
 		return fmt.Errorf("env has %d entries, at most %d are allowed", len(env), maxEnvItems)

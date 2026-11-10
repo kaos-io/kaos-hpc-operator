@@ -104,7 +104,8 @@ spec:
                     description: |-
                       Version is what the run asked for (latest, v3, a branch or a tag). It is a label: the commit decides
                       what is read.
-                    pattern: ^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$
+                    maxLength: 255
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$
                     type: string
                 required:
                 - commit

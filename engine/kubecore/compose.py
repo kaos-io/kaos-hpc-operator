@@ -327,12 +327,14 @@ def _kaos_lib():
 
 
 def data_lock(resolved: dict, required: list, offline: bool = False, datasets=None, lock=None, client=None) -> tuple:
-    """(the run's data lock, the run's dataset pin), both JSON text.
+    """(the run's data lock, the run's dataset pin, the dataset reference as the lock holds it); the first two
+    are JSON text, the third is "" when nothing was pinned.
 
     The lock (kaos-lib's format) holds the commit of every data input a step reads; every step gets it as
     $KAOS_LIB_LOCK. The pin is the same fact for the run's dataset as one object,
     `{"repo", "version", "commit", "owner"}` ("" when the run has none): an HPC step's job is created from it,
-    so a cluster step and an HPC step can never disagree about what the run reads.
+    so a cluster step and an HPC step can never disagree about what the run reads. The reference is what the
+    caller writes into the params every step reads, so a step always asks the lock in the form the lock holds.
 
     `resolved` is the composed config, `required` the sections steps declared with reads=. Only a `dataset`
     some step reads is resolved, and only when it is a string: a config that carries a `dataset` no step reads,
@@ -341,11 +343,11 @@ def data_lock(resolved: dict, required: list, offline: bool = False, datasets=No
     """
     wanted = resolved.get(DATASET_FIELD) if DATASET_FIELD in (required or []) else None
     if offline or wanted is None or (isinstance(wanted, str) and not wanted.strip()):
-        return EMPTY_LOCK, ""
+        return EMPTY_LOCK, "", ""
     if not isinstance(wanted, str):
         print(f"compose-and-validate: `{DATASET_FIELD}` is not a <dataset>@<version> string: nothing is pinned for "
               "this run", file=sys.stderr)
-        return EMPTY_LOCK, ""
+        return EMPTY_LOCK, "", ""
     if datasets is None or lock is None:
         datasets, lock, client = _kaos_lib()
     try:
@@ -365,14 +367,11 @@ def data_lock(resolved: dict, required: list, offline: bool = False, datasets=No
     if read is None:
         raise ComposeError(f"{DATASET_FIELD}: cannot use {wanted!r}: resolving it recorded no read "
                            f"(the lock holds {reads!r})")
-    # A reference that names the own project as owner is recorded without one. A step that parses the same
-    # text asks the lock with the owner as written, so the read is recorded both ways.
-    if (ref.owner or None) != (read.get("owner") or None):
-        lock.record(ref.repo, ref.version, commit, ref.owner)
     text = lock.current().to_json()
     pin = json.dumps({"repo": read["repo"], "version": read["ref"], "commit": commit,
                       "owner": read.get("owner") or ""}, separators=(",", ":"))
-    return text, pin
+    canonical = f"{read['owner']}/{read['repo']}@{read['ref']}" if read.get("owner") else f"{read['repo']}@{read['ref']}"
+    return text, pin, canonical
 
 
 def main(argv=None) -> None:
@@ -402,7 +401,16 @@ def main(argv=None) -> None:
             if args.offline:
                 print("compose-and-validate: OFFLINE - no data input was resolved; the data lock is empty",
                       file=sys.stderr)
-            lock_text, pin_text = data_lock(yaml.safe_load(text) or {}, args.require, args.offline)
+            resolved = yaml.safe_load(text) or {}
+            lock_text, pin_text, canonical = data_lock(resolved, args.require, args.offline)
+            if canonical and resolved.get(DATASET_FIELD) != canonical:
+                # A reference that names the own project as owner resolves, and is locked, without one. Every
+                # step reads the dataset from these params: they get the reference exactly as the lock holds
+                # it, so the lock always answers, on a cluster and on HPC alike.
+                print(f"compose-and-validate: {DATASET_FIELD} {resolved[DATASET_FIELD]!r} is {canonical!r} for this run",
+                      file=sys.stderr)
+                resolved[DATASET_FIELD] = canonical
+                text = OmegaConf.to_yaml(OmegaConf.create(resolved), resolve=True)
     except Exception as exc:  # any composition failure = hard error, pre-GPU
         message = str(exc)
         if exc.__cause__ is not None:  # e.g. enum ValidationError inside Hydra's wrapper

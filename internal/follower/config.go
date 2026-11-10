@@ -136,8 +136,8 @@ func (c *Config) readResumable(get func(string) string) error {
 }
 
 var (
-	pinRepo    = regexp.MustCompile(`^dataset-[a-z0-9][a-z0-9-]{0,54}$`) // a platform Dataset: dataset-<name>
-	pinVersion = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$`)
+	pinRepo    = regexp.MustCompile(`^dataset-[a-z0-9][a-z0-9-]{0,54}$`)                          // a platform Dataset: dataset-<name>
+	pinVersion = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`) // at most 255, below
 	pinCommit  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
@@ -171,7 +171,7 @@ func datasetPin(raw string) (*hpcv1alpha1.DatasetPin, error) {
 	switch {
 	case !pinRepo.MatchString(out.Repo):
 		return nil, fmt.Errorf("DATASET_PIN: %q is not a dataset (a dataset is a repository named dataset-<name>)", out.Repo)
-	case !pinVersion.MatchString(out.Version):
+	case len(out.Version) > 255 || !pinVersion.MatchString(out.Version):
 		return nil, fmt.Errorf("DATASET_PIN: %q is not a dataset version", out.Version)
 	case !pinCommit.MatchString(out.Commit):
 		return nil, fmt.Errorf("DATASET_PIN: dataset %s@%s has no commit (got %q): the run pins it before any step", out.Repo, out.Version, out.Commit)

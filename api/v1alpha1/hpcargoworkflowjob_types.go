@@ -257,7 +257,8 @@ type DatasetPin struct {
 	Repo string `json:"repo"`
 	// Version is what the run asked for (latest, v3, a branch or a tag). It is a label: the commit decides
 	// what is read.
-	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$`
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`
+	// +kubebuilder:validation:MaxLength=255
 	Version string `json:"version"`
 	// Commit is the lakeFS commit the version was resolved to when the run started.
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`

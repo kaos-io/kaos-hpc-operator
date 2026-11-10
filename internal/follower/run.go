@@ -85,7 +85,21 @@ func (f *follower) say(format string, args ...any) {
 // every retry of the step is what makes a re-created pod re-attach instead of submitting twice.
 func (f *follower) attach(ctx context.Context) error {
 	for {
-		err := f.c.Create(ctx, f.cfg.Job())
+		// Strict: a cluster whose CRD does not know a field this follower sets (an older CRD without
+		// spec.dataset) refuses the create instead of dropping the field, which would run the step without
+		// its data. The stored object is checked as well, for an API server that does not validate.
+		job := f.cfg.Job()
+		err := f.c.Create(ctx, job, client.FieldValidation("Strict"))
+		if err == nil && f.cfg.Dataset != nil && (job.Spec.Dataset == nil || *job.Spec.Dataset != *f.cfg.Dataset) {
+			// The job exists without its dataset: it must not be run. The Workflow owns it, so it would go
+			// with the Workflow anyway; removing it now keeps the controller from starting it meanwhile.
+			if derr := f.c.Delete(ctx, job); derr != nil && !apierrors.IsNotFound(derr) {
+				f.say("could not remove %s: %v", f.key, derr)
+			}
+			return &droppedError{msg: fmt.Sprintf("the cluster stored %s without its dataset %s@%s: the platform's "+
+				"HPC controller is older than this pipeline. Run it again once the platform update is complete",
+				f.key, f.cfg.Dataset.Repo, f.cfg.Dataset.Version)}
+		}
 		if err == nil {
 			f.say("created %s", f.key)
 			return nil
@@ -129,6 +143,11 @@ type mismatchError struct{ name string }
 func (e *mismatchError) Error() string {
 	return "job " + e.name + " exists with a different spec; refusing to follow it"
 }
+
+// droppedError: the cluster stored the job without something this follower set. Trying again cannot help.
+type droppedError struct{ msg string }
+
+func (e *droppedError) Error() string { return e.msg }
 
 // permanent reports whether an error will not go away by trying again.
 func permanent(err error) bool {

@@ -331,6 +331,7 @@ class Runner:
     def resubmit(self, why):
         """Replace the site job of this attempt (cancel, then submit a fresh one)."""
         print(why, flush=True)
+        self.cfg.check_dataset()         # before the cancel: a job that cannot be replaced is not cancelled for it
         self.logs.finish()               # what the old job wrote, before its offset is replaced
         self.slurm.cancel(self.jid)
         self.jid = self.submit()

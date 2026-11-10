@@ -473,6 +473,10 @@ func TestAPinThatIsNotCompleteAndOwnIsRefused(t *testing.T) {
 		"no version":       `{"repo":"dataset-a","commit":"` + commit + `"}`,
 		"version option":   `{"repo":"dataset-a","version":"--base=/etc","commit":"` + commit + `"}`,
 		"version shell":    `{"repo":"dataset-a","version":"x; rm -rf /","commit":"` + commit + `"}`,
+		"version dot-dot":  `{"repo":"dataset-a","version":"a/../b","commit":"` + commit + `"}`,
+		"version slashes":  `{"repo":"dataset-a","version":"a//b","commit":"` + commit + `"}`,
+		"version trailing": `{"repo":"dataset-a","version":"a/","commit":"` + commit + `"}`,
+		"version too long": `{"repo":"dataset-a","version":"` + strings.Repeat("v", 256) + `","commit":"` + commit + `"}`,
 		"version subshell": `{"repo":"dataset-a","version":"$(id)","commit":"` + commit + `"}`,
 		"shared dataset":   `{"repo":"dataset-a","version":"v1","commit":"` + commit + `","owner":"other"}`,
 	} {
@@ -493,5 +497,38 @@ func TestAPipelineReleasedBeforeThePinIsRefused(t *testing.T) {
 	_, err := ConfigFromEnv(podEnv(map[string]string{"DATASET": "dataset-a@latest"}))
 	if err == nil || !strings.Contains(err.Error(), "released before the platform update") {
 		t.Errorf("got %v", err)
+	}
+}
+
+// A cluster whose CRD is older than this follower would drop spec.dataset and run the step without its data.
+// The follower creates strictly (such a cluster refuses the create), and when a server stores the job without
+// the dataset anyway, the follower removes the job and fails the step.
+func TestAJobStoredWithoutItsDatasetIsRemovedAndTheStepFails(t *testing.T) {
+	pin := `{"repo":"dataset-a","version":"latest","commit":"` + strings.Repeat("c2", 32) + `","owner":""}`
+	cfg, err := ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": pin}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict := false
+	h := newHarness(t, interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, o ...client.CreateOption) error {
+		opts := &client.CreateOptions{}
+		opts.ApplyOptions(o)
+		strict = opts.FieldValidation == "Strict"
+		obj.(*hpcv1alpha1.HPCArgoWorkflowJob).Spec.Dataset = nil // what an older CRD does to the field
+		return c.Create(ctx, obj, o...)
+	}})
+	if code := h.run(context.Background(), cfg); code != ExitFailed {
+		t.Fatalf("exit %d, want the step to fail", code)
+	}
+	if !strict {
+		t.Error("the job must be created with strict field validation")
+	}
+	if !strings.Contains(h.out.String(), "without its dataset dataset-a@latest") {
+		t.Errorf("the reason must be printed:\n%s", h.out)
+	}
+	var left hpcv1alpha1.HPCArgoWorkflowJob
+	key := client.ObjectKey{Namespace: cfg.Namespace, Name: JobName(cfg.WorkflowUID, cfg.NodeKey)}
+	if err := h.c.Get(context.Background(), key, &left); !apierrors.IsNotFound(err) {
+		t.Errorf("the job without its data must be gone, got err=%v", err)
 	}
 }

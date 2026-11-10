@@ -361,3 +361,12 @@ def test_main_py_is_the_entrypoint_the_job_runs(tmp_path):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("HPC_", "KAOS_", "PYTHONPATH"))}
     r = subprocess.run(["python3", "-u", str(PKG.parent / "main.py")], cwd=tmp_path, env=env, capture_output=True, text=True)
     assert r.returncode == 2 and "HPC_JOB_NAMESPACE" in r.stdout
+
+
+def test_a_job_that_cannot_be_replaced_is_not_cancelled_for_it():
+    """resubmit() is cancel-then-submit. The dataset check must run BEFORE the cancel: a healthy running job
+    whose replacement would be refused keeps running instead of being cancelled and then not replaced."""
+    import inspect
+    from kaos_hpc_runner import runner as runmod
+    body = inspect.getsource(runmod.Runner.resubmit)
+    assert body.index("check_dataset()") < body.index("self.slurm.cancel(")

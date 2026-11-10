@@ -54,7 +54,8 @@ class FakeDatasets:
 def test_a_dataset_a_step_reads_is_resolved_once_into_the_lock_and_the_pin():
     lock = FakeLock()
     ds = FakeDatasets(lock)
-    text, pin = compose.data_lock({"dataset": "dataset-a@latest"}, ["dataset", "train"], datasets=ds, lock=lock)
+    text, pin, ref = compose.data_lock({"dataset": "dataset-a@latest"}, ["dataset", "train"], datasets=ds, lock=lock)
+    assert ref == "dataset-a@latest"
     assert json.loads(text) == {"version": 1, "reads": [
         {"repo": "dataset-a", "owner": None, "ref": "latest", "commit": COMMIT}]}
     assert json.loads(pin) == {"repo": "dataset-a", "version": "latest", "commit": COMMIT, "owner": ""}
@@ -63,24 +64,45 @@ def test_a_dataset_a_step_reads_is_resolved_once_into_the_lock_and_the_pin():
 
 def test_a_dataset_shared_by_another_project_keeps_its_owner():
     lock = FakeLock()
-    text, pin = compose.data_lock({"dataset": "other/dataset-a@v2"}, ["dataset"], datasets=FakeDatasets(lock), lock=lock)
+    text, pin, ref = compose.data_lock({"dataset": "other/dataset-a@v2"}, ["dataset"], datasets=FakeDatasets(lock),
+                                       lock=lock)
     assert json.loads(text)["reads"][0]["owner"] == "other" and json.loads(pin)["owner"] == "other"
+    assert ref == "other/dataset-a@v2"
 
 
-def test_a_reference_that_names_the_own_project_is_locked_as_written_too():
-    """kaos-lib records `me/dataset-a@v1` of project `me` without an owner. A step that parses the same text
-    asks the lock WITH the owner, so the lock answers both ways; the pin is the canonical one (no owner)."""
+class OwnProject(FakeDatasets):
+    """kaos-lib for a reference that names the OWN project as owner: the read is recorded without an owner."""
+
+    def resolve(self, ref, client=None):
+        self.lock.reads.append({"repo": ref.repo, "owner": None, "ref": ref.version, "commit": COMMIT})
+        return COMMIT
+
+
+def test_a_reference_that_names_the_own_project_gets_one_form_for_the_whole_run():
+    """`me/dataset-a@v1` in project `me` is locked as `dataset-a@v1`. A step that parsed the text as written
+    would ask the lock for owner `me`, miss, and resolve again by itself (unpinned). So the run gets ONE form:
+    the lock holds one read, and the reference handed back is the form the lock holds."""
     lock = FakeLock()
+    text, pin, ref = compose.data_lock({"dataset": "me/dataset-a@v1"}, ["dataset"], datasets=OwnProject(lock), lock=lock)
+    assert json.loads(text)["reads"] == [{"repo": "dataset-a", "owner": None, "ref": "v1", "commit": COMMIT}]
+    assert json.loads(pin)["owner"] == "" and ref == "dataset-a@v1"
 
-    class OwnProject(FakeDatasets):
-        def resolve(self, ref, client=None):
-            self.lock.reads.append({"repo": ref.repo, "owner": None, "ref": ref.version, "commit": COMMIT})
-            return COMMIT
 
-    text, pin = compose.data_lock({"dataset": "me/dataset-a@v1"}, ["dataset"], datasets=OwnProject(lock), lock=lock)
-    owners = sorted(str(r["owner"]) for r in json.loads(text)["reads"])
-    assert owners == ["None", "me"] and {r["commit"] for r in json.loads(text)["reads"]} == {COMMIT}
-    assert json.loads(pin)["owner"] == ""
+def test_the_params_every_step_reads_carry_the_reference_as_the_lock_holds_it(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(compose, "compose_and_validate",
+                        lambda *a, **k: "dataset: me/dataset-a@v1\ntrain:\n  epochs: 3\n")
+    lock = FakeLock()
+    real = compose.data_lock
+    monkeypatch.setattr(compose, "data_lock",
+                        lambda resolved, required, offline: real(resolved, required, offline,
+                                                                 datasets=OwnProject(lock), lock=lock))
+    out, lock_out, pin_out = tmp_path / "params.yaml", tmp_path / "lock.json", tmp_path / "pin.json"
+    compose.main(["--require=dataset", "--output", str(out), "--lock-output", str(lock_out),
+                  "--pin-output", str(pin_out)])
+    params = yaml.safe_load(out.read_text())
+    assert params == {"dataset": "dataset-a@v1", "train": {"epochs": 3}}, "only the reference changed"
+    assert json.loads(pin_out.read_text())["repo"] == "dataset-a"
+    assert "'me/dataset-a@v1' is 'dataset-a@v1' for this run" in capsys.readouterr().err
 
 
 def test_a_dataset_no_step_reads_is_never_resolved_and_cannot_fail_the_run():
@@ -89,7 +111,7 @@ def test_a_dataset_no_step_reads_is_never_resolved_and_cannot_fail_the_run():
     for resolved, required in (({"dataset": "dataset-a@latest"}, ["train"]), ({}, ["dataset"]),
                                ({"dataset": ""}, ["dataset"]), ({"dataset": "  "}, ["dataset"]),
                                ({"dataset": None}, ["dataset"])):
-        assert compose.data_lock(resolved, required, datasets=ds, lock=lock) == (compose.EMPTY_LOCK, "")
+        assert compose.data_lock(resolved, required, datasets=ds, lock=lock) == (compose.EMPTY_LOCK, "", "")
 
 
 @pytest.mark.parametrize("value", [{"name": "dataset-a", "version": "latest"}, ["dataset-a@v1"], 123, True])
@@ -98,7 +120,7 @@ def test_a_dataset_section_that_is_not_a_reference_string_is_left_alone(value, c
     platform can pin, and it composed before the pin existed, so it still does. It is said in the log."""
     lock = FakeLock()
     ds = FakeDatasets(lock, error=RuntimeError("must not be called"))
-    assert compose.data_lock({"dataset": value}, ["dataset"], datasets=ds, lock=lock) == (compose.EMPTY_LOCK, "")
+    assert compose.data_lock({"dataset": value}, ["dataset"], datasets=ds, lock=lock) == (compose.EMPTY_LOCK, "", "")
     assert "nothing is pinned for this run" in capsys.readouterr().err
 
 
@@ -157,7 +179,7 @@ def test_offline_resolves_nothing_and_writes_an_empty_lock():
     lock = FakeLock()
     ds = FakeDatasets(lock, error=RuntimeError("must not be called"))
     assert compose.data_lock({"dataset": "dataset-a@latest"}, ["dataset"], offline=True, datasets=ds, lock=lock) \
-        == (compose.EMPTY_LOCK, "")
+        == (compose.EMPTY_LOCK, "", "")
     assert json.loads(compose.EMPTY_LOCK) == {"version": 1, "reads": []}
 
 
