@@ -162,3 +162,55 @@ def test_the_compose_entry_point_runs_the_engines_compose_isolated_and_writes_pa
     assert "experiment" in yaml.safe_load(out.read_text())
     assert json.loads(lock.read_text()) == {"version": 1, "reads": []}, "no step reads the dataset here"
     assert "kaos-engine: version=" in done.stderr
+
+
+# ------------------------------------------------------------------ a step without a built image never starts a run
+
+GOOD = "zot.example:5000/proj/app:train-0a1b2c3"
+
+
+@pytest.mark.parametrize("ref", [GOOD, "registry.example/p/a/b:v1", "r.example/p/a@sha256:" + "a" * 64])
+def test_real_image_references_pass(ref):
+    compose.check_step_images(json.dumps({"train": ref}))
+    compose.check_step_images(None)
+    compose.check_step_images("")
+
+
+@pytest.mark.parametrize("ref", [":probe-learn-latest", "", "probe-learn-latest", "/proj/app:tag", "zot.example/proj/app",
+                                 "zot.example/:tag", "zot.example/proj/app:", "{{workflow.parameters.image-x}}", None, 7])
+def test_a_reference_without_registry_repository_or_tag_stops_the_run_naming_the_step(ref):
+    with pytest.raises(compose.ComposeError) as exc:
+        compose.check_step_images(json.dumps({"train": GOOD, "probe-learn": ref}))
+    assert "no image has been built yet for: probe-learn" in str(exc.value) and "train (" not in str(exc.value)
+
+
+@pytest.mark.parametrize("raw", ["{", "[]", '"x"'])
+def test_an_unreadable_image_list_stops_the_run_instead_of_being_skipped(raw):
+    with pytest.raises(compose.ComposeError, match="cannot read the steps' images"):
+        compose.check_step_images(raw)
+
+
+def test_the_compose_entry_point_refuses_the_run_before_composing(tmp_path):
+    out = tmp_path / "params.yaml"
+    env = {"KAOS_ENGINE_DIR": str(ENGINE), "KUBECORE_CONFIG_DIR": str(TEST_APP / "config"),
+           "KUBECORE_SCHEMA_PROFILE": "hera", "PATH": "/usr/bin:/bin",
+           "KAOS_STEP_IMAGES": json.dumps({"probe-learn": ":probe-learn-latest"})}
+    code = (f"import sys; sys.path.insert(0, {str(ENGINE)!r}); from kaos_engine import compose; "
+            "sys.exit(compose.main(sys.argv[1:]))")
+    done = subprocess.run([sys.executable, "-I", "-c", code, "--output", str(out), "--lock-output",
+                           str(tmp_path / "lock.json")], capture_output=True, text=True, env=env, cwd=tmp_path)
+    assert done.returncode == 1 and "no image has been built yet for: probe-learn" in done.stderr
+    assert not out.exists() and not (tmp_path / "lock.json").exists(), "a refused run publishes nothing"
+
+
+def test_the_enhancer_hands_the_compose_step_every_other_steps_image():
+    from kubecore import enhance
+    steps = [{"name": "compose-and-validate", "container": {"image": "{{workflow.parameters.image-compose-and-validate}}"}},
+             {"name": "train", "container": {"image": "{{workflow.parameters.image-train}}"}},
+             {"name": "util", "container": {"image": "busybox:1.36"}}]      # a verbatim image annotation: no parameter
+    enhance.enhance_image_guard(steps)
+    env = {e["name"]: e["value"] for e in steps[0]["container"]["env"]}
+    assert json.loads(env["KAOS_STEP_IMAGES"]) == {"train": "{{workflow.parameters.image-train}}"}
+    enhance.enhance_image_guard(steps)
+    assert len(steps[0]["container"]["env"]) == 1, "idempotent"
+    assert "env" not in steps[1]["container"]

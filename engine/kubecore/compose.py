@@ -46,6 +46,7 @@ only, never in a rendered pipeline) resolves nothing and writes an empty lock.
 
 import argparse
 import json
+import os
 import re
 import sys
 from enum import Enum
@@ -61,6 +62,10 @@ MAX_PARAMS_BYTES = 200 * 1024
 MAX_LOCK_BYTES = 16 * 1024
 DATASET_FIELD = "dataset"          # the top-level config leaf and form field that names the run's dataset
 EMPTY_LOCK = '{"version":1,"reads":[]}'
+STEP_IMAGES_ENV = "KAOS_STEP_IMAGES"   # {"<step>": "<the image the run resolved for it>"}, set by the enhancer
+# registry[:port]/repository[/...] then :tag or @digest. A reference without a registry and a repository is what
+# the image record holds for a step whose image was never built (":<step>-latest").
+_IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?(/[A-Za-z0-9][A-Za-z0-9._-]*)+(:[A-Za-z0-9_][A-Za-z0-9._-]*|@sha256:[0-9a-f]{64})$")
 
 HERE = Path(__file__).parent  # kubecore/
 DEFAULT_OUTPUT = HERE.parent / "out" / "params.yaml"
@@ -273,6 +278,30 @@ def compose_and_validate(overrides: list, advanced: str = "", required: list = N
     return text
 
 
+def check_step_images(raw) -> None:
+    """Refuse the run when a step has no real image, before any step starts.
+
+    A step added to pipeline.py appears in the released pipeline before its first image is built; until then
+    its image reference has no registry and no repository, and the run would fail later with an image pull
+    error (or, on HPC, after a queue wait). `raw` is $KAOS_STEP_IMAGES; absent means nothing to check.
+    """
+    if not raw:
+        return
+    try:
+        images = json.loads(raw)
+        if not isinstance(images, dict):
+            raise ValueError("not a JSON object")
+    except ValueError as exc:
+        raise ComposeError(f"cannot read the steps' images ({STEP_IMAGES_ENV}: {exc})") from None
+    bad = {step: ref for step, ref in images.items() if not isinstance(ref, str) or not _IMAGE_REF.match(ref)}
+    if bad:
+        listed = ", ".join(f"{step} ({ref!r})" for step, ref in sorted(bad.items()))
+        raise ComposeError(
+            f"no image has been built yet for: {listed}. The platform builds a step's image after you push; "
+            "wait for the app's build to finish (or see why it failed), then run again"
+        )
+
+
 def data_lock(resolved: dict, required: list, offline: bool = False, datasets=None, lock=None) -> str:
     """The run's data lock (JSON text): the commit of every data input a step reads.
 
@@ -320,6 +349,7 @@ def main(argv=None) -> None:
     args = parser.parse_args(argv)
 
     try:
+        check_step_images(os.environ.get(STEP_IMAGES_ENV))
         text = compose_and_validate(
             args.overrides, args.advanced, args.require, json.loads(args.render_defaults)
         )

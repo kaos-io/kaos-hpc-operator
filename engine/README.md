@@ -20,7 +20,7 @@ It is released by the same build as the controller, at the same version (D-58/D-
 | `kaos_pipeline_engine/known-vendored.json` | every historical blob of `derive_tree.py` / `authoring.py` -> profile + template commits |
 | `kaos_pipeline_engine/authoring-schema.json` | `step()` options for the pipeline linter |
 | `kaos_pipeline_engine/compat-surface.json` | every module-level name `authoring` / `derive_tree` ever had |
-| `Dockerfile.engine`, `pyproject.toml`, `setup.py`, `requirements*.txt` | image and wheel |
+| `Dockerfile.engine`, `pyproject.toml`, `setup.py`, `requirements*.txt` | image and wheel  The image keeps the pinned set at `/etc/kaos-engine/constraints.txt` for images built on top of it |
 | `tools/` | generators for the three JSON files, the corpus |
 | `tests/` | `template/` = the template's own kubecore tests, moved in; `app/` = the fixture app they render; the rest are the engine's tests |
 | `CORPUS_REPORT.md` | the last corpus run (generated) |
