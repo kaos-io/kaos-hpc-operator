@@ -39,11 +39,11 @@ type Config struct {
 	Class            string
 	ResumableLead    int32 // HPC_RESUMABLE_LEAD, 0 = not resumable
 	MaxContinuations int32
-	ResumableOptOut  bool     // HPC_RESUMABLE=0|false (resumable=False in pipeline.py): never continued from a checkpoint
-	Outputs          []string // STEP_OUTPUTS, comma separated
+	ResumableOptOut  bool                    // HPC_RESUMABLE=0|false (resumable=False in pipeline.py): never continued from a checkpoint
+	Outputs          []string                // STEP_OUTPUTS, comma separated
 	Dataset          *hpcv1alpha1.DatasetPin // DATASET (the run's choice) looked up in DATA_LOCK (the run's data lock)
-	Scope            string // HPC_SCOPE: set means node sharing
-	IdleTimeout      *int32 // HPC_IDLE_TIMEOUT_MINUTES: nil = the platform's 20, 0 = off (step idle_timeout=)
+	Scope            string                  // HPC_SCOPE: set means node sharing
+	IdleTimeout      *int32                  // HPC_IDLE_TIMEOUT_MINUTES: nil = the platform's 20, 0 = off (step idle_timeout=)
 	Env              []hpcv1alpha1.NameValue
 }
 
