@@ -179,7 +179,7 @@ def test_caches_are_cleaned_by_last_use(tmp_path):
 
     assert sorted(p.name for p in (scr / "sif-cache").iterdir()) == ["inuse.sif", "live.sif.part-3-4", "recent.sif"]
     assert sorted(p.name for p in (scr / "data-cache" / "repo").iterdir()) == ["c2", "c3"]
-    assert (scr / "apptainer-args").read_text().split() == ["cache", "clean", "--force", "--days", "14"]
+    assert (scr / "apptainer-args").read_text().split() == ["cache", "clean", "--force", "--days", "1"]
 
 
 def test_this_jobs_image_and_download_are_touched_before_the_cleanup():

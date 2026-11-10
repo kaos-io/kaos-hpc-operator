@@ -232,8 +232,9 @@ class Runner:
         lease = []
         if commit:
             lease.append('kaos-commit=' + commit)
-        if image_staged:
-            lease.append('kaos-image=' + imagemod.image_key(cfg.image))
+        # AC-65: always. The SIF has the tar's key, so the lease also keeps the SIF (staged or not) from the
+        # stager's cleanup while this job queues or runs.
+        lease.append('kaos-image=' + imagemod.image_key(cfg.image))
         lease.append('kaos-ckpt-lease=%s/%s' % (cfg.wf_uid, cfg.step))   # a queued continuation keeps its copies (D-75)
         body['job']['comment'] = ' '.join(lease)
         if cfg.sharing and int(hpc.get('gpus') or 0) > 0:
@@ -509,6 +510,7 @@ class Runner:
         try:
             jid, offset, adopted = self.adopt_or_submit(job)
         except staging.InsufficientQuota as e:
+            imagemod.cleanup_images(self.stager)   # AC-65: free what no job names before the next attempt
             return self.end_no_quota(e)
         if adopted:
             print('adopting existing job', jid, flush=True)
@@ -521,6 +523,7 @@ class Runner:
             return rc
         finally:
             self.logs.close()
+            imagemod.cleanup_images(self.stager)   # AC-65: the job is over: its tar and a superseded SIF go now
 
     def end_no_quota(self, err):
         """Staging does not fit the project's scratch quota (AC-33): no site job was submitted. The one terminal

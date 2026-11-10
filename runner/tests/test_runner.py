@@ -310,10 +310,19 @@ def test_the_leases_ride_in_the_job_comment(rig, monkeypatch):
     env = dict(e.split("=", 1) for e in slurm.submitted[0]["job"]["environment"])
     assert env["IMAGE_STAGED"] == "/scr/kaos/images/k.tar" and env["KAOS_COMMIT"] == "c0ffee12"
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    rig.make(slurm)           # no pin, nothing staged: only the checkpoint lease
+    rig.make(slurm)           # no pin, nothing staged (the SIF may be resident): the image lease is still there (AC-65)
     monkeypatch.setattr(runmod.imagemod, "stage_image", lambda img, tok, st, **kw: "")
     rig.runner.run()
-    assert slurm.submitted[0]["job"]["comment"] == "kaos-ckpt-lease=%s/model-training" % WF
+    assert slurm.submitted[0]["job"]["comment"] == "kaos-image=%s kaos-ckpt-lease=%s/model-training" % (key, WF)
+
+
+def test_the_image_cleanup_runs_when_the_attempt_is_over_and_never_fails_it(rig, monkeypatch):
+    """AC-65: after the job ends the runner asks the stager for its cleanup (tars of ended jobs, superseded
+    SIFs); image.cleanup_images itself never raises (test_image.py)."""
+    asked = []
+    monkeypatch.setattr(runmod.imagemod, "cleanup_images", lambda stager: asked.append(stager))
+    rig.make(FakeSlurm({"5001": [acc("COMPLETED")]}))
+    assert rig.runner.run() == 0 and asked == [rig.runner.stager]
 
 
 # ---------------------------------------------------------------- re-attach: never a second submission

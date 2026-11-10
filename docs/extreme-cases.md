@@ -170,6 +170,33 @@ Tier 1 needs no checkpoint and no scratch space; tier 2 keeps at most two copies
 | 10.15 | The wall-time copy and the exit-85 final copy of one unchanged folder (live: `copy 000001 ... epoch=1111; 1 kept`, then `copy 000002 ... epoch=1111; 1 kept`) | `final` runs in a new process with no memory of the periodic copy, so it packed the folder again, then dropped the duplicate: wasted I/O, a misleading log line, and with two copies held the older one was dropped first (one fallback lost). The folder digest is now compared with the newest copy before anything is dropped or packed: `no new copy: the folder is the same as copy NNNNNN` | `runner/tests/test_ckpt.py::test_a_final_copy_of_the_folder_the_wall_time_copy_took_is_skipped...`, `::test_a_duplicate_final_copy_never_costs_the_older_copy_its_place` | ADDED |
 | 10.16 | Budget period on a `source: site` HPCSite (live: `status.periodStart` showed the observation time, 2026-11-08T00:51:46Z, and `used` only the 32 minutes after it) | By design the share is what the site reported left at `observedAt`, which already counts the 12 minutes that ended before it and all of Nov 1-7; adding them again would double-count. `status.periodStart` is now always the first of the calendar month (UTC); the new `status.countedFrom` is where the used figures start (the observation for `source: site`, else the month start). The ledger keeps no state: a restart recomputes both from the jobs | `ledger_test.go::TestASiteBudgetCountsOnlyWhatTheSiteHasNotSeenYet`, `::TestPoolBudgetCountsEveryAttemptSettledInTheMonthWhateverTheRestart` | ADDED |
 
+## 11. Image storage (AC-65)
+
+The project's scratch quota is shared with every user of the subscription; the images category (SIFs, staged tars,
+the Apptainer layer cache) held 162 GB of a 163 GB total on one project (2026-11-10). The lifecycle is the stager's
+`gc` (login node, deletion only, run every 10 minutes by the snapshot job and after every runner end) plus the job
+script's half (label the SIF, delete the tar). Go specs: none (the controller does not touch scratch).
+Python: `runner/tests/test_jobscript_phase1.py`, `test_image.py`, `test_runner.py`; the stager's own tests
+(`ImageGcTest` in the platform repository that ships the stager (`images/meluxina-tokenmint/stager/test_stager.py`)) run the real `gc` against a fake
+`lfs` and `squeue`.
+
+| # | Situation | What happens | Test | State |
+|---|---|---|---|---|
+| 11.1 | A job runs a new digest of an app/step: the old digest's SIF is superseded | The job writes `<key>.sif.lineage` (`repository<TAB>step`) when it builds. The stager keeps the newest SIF of each lineage and deletes older ones as soon as no job names them and 30 minutes have passed since their last use (`superseded`) | R `test_a_built_sif_is_labelled...`, `test_the_label_drops_a_tag_but_keeps_a_registry_port`, `test_a_pulled_sif_is_labelled_too`; S `test_a_superseded_sif_goes_at_once_per_lineage...` | covered |
+| 11.2 | A queued or running job names an old digest (retry, pinned rerun, a lane still on the old image) | Its comment carries `kaos-image=<key>` (always, staged or not); the SIF and tar of that key are never deleted, newest or not | S `test_a_leased_newest_and_a_leased_old_sif_both_survive...`, `test_a_queued_job_naming_an_old_digest...`; R `test_the_leases_ride_in_the_job_comment` | covered |
+| 11.3 | Another job is building the same or another image right now (`<key>.sif.part-<job>-<pid>`, `.part-<key>-<pid>` stream) | A part younger than 12 h is never touched; an older one is deleted | S `test_a_concurrent_build_part_file_is_never_touched...` | covered |
+| 11.4 | `squeue` fails (login node trouble) | `gc` deletes nothing and exits 75: an unknown queue never means safe to delete | S `test_an_unreadable_queue_deletes_nothing` | covered |
+| 11.5 | A job starts on a SIF between the stager's listing and its delete | The SIF's last-use time is re-read before every delete; a touched file is skipped. A SIF used in the last 30 minutes is never a candidate | S `test_a_sif_touched_after_the_inventory_wins_the_race`, `test_a_sif_used_in_the_last_half_hour...` | covered |
+| 11.6 | The SIF already existed when the job started (every re-run of a digest) | The job script deletes the staged tar whatever way the SIF came to exist (it used to delete it only after its own build); `image-status` reports `sif: true` and the runner stages no tar at all | R `test_the_staged_tar_goes_even_when_the_sif_was_already_cached`, `test_a_resident_sif_means_no_tar_is_staged`, `test_many_builds_leave_no_tar_behind...` | covered |
+| 11.7 | The job ended, failed or was cancelled before it built | Its tar is unleased: the runner asks for `gc` when the attempt is over and the snapshot job does every 10 minutes: the tar goes after a 3 h grace (the gap between staging and submit) | S `test_a_tar_goes_when_its_sif_exists_or_its_job_is_gone...`; R `test_the_image_cleanup_runs_when_the_attempt_is_over...` | covered |
+| 11.8 | A SIF with no label (built before AC-65) | Unleased and unused for 3 days: deleted (`orphan`). The newest of a lineage unused for 14 days: deleted (`unused`) | S `test_a_sif_without_a_lineage_is_an_orphan...`, `test_the_newest_sif_of_a_lineage_survives_until...` | covered |
+| 11.9 | The layer cache grows | Files older than a day are deleted by the job (`apptainer cache clean --days 1`) and by `gc` (one bounded walk an hour); a younger one may belong to a build on another node | R `test_caches_are_cleaned_by_last_use`; S `test_the_layer_cache_loses_files_older_than_a_day...` | covered |
+| 11.10 | Over the images budget (default 60 GB) | The least recently used SIFs no job names go; leased ones never. When leases alone keep it over, `status.storage.images.overBudget` says so | S `test_over_the_budget_the_least_recently_used...`, `test_a_lease_can_keep_the_project_over_budget...` | covered |
+| 11.11 | 400 builds over 8 lineages with in-flight leases | Held SIF bytes stay at the newest per lineage plus what is leased, at every build; no leased SIF is ever lost | S `test_storage_stays_bounded_across_many_builds...` | covered |
+| 11.12 | An older stager (no `gc`, no `sif` flag, no `images`) with a newer runner or snapshot job | Every new call is best effort: staging goes on as before, the snapshot posts without `images`, nothing fails | R `test_the_cleanup_asks_the_stager_once...` | covered |
+
+R = runner pytest in this repository, S = the stager's tests in the platform repository that ships the stager.
+
 ## Findings
 
 | ID | Severity | State |

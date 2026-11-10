@@ -204,6 +204,25 @@ def image_key(img):
     return hashlib.sha256(img.encode()).hexdigest()[:16]
 
 
+def cleanup_images(stager):
+    """Ask the stager for its image cleanup (PRD-HPC-1461 AC-65): superseded SIFs, tars of jobs that
+    ended or were cancelled, the layer cache; over the images budget the least recently used SIFs no
+    queued or running job names. Deletion on the login node, never what a job leases. The snapshot job runs
+    it every ten minutes anyway; this is the prompt one, after this attempt's job is over. Never raises:
+    an older stager has no `gc`, and a refused or failed call only means the next periodic run does it."""
+    try:
+        if not stager.have_key() or not ssh_present():
+            return
+        rc, ev = stager(['gc'], quiet=True)
+        done = next((e for e in reversed(ev) if e.get('event') == 'gc'), None)
+        if rc == 0 and done and done.get('freed_bytes'):
+            print('image: cleanup freed %s (%s)' % (human_bytes(done['freed_bytes']), ', '.join(
+                '%s x%d' % (k, v.get('count', 0)) for k, v in sorted((done.get('by_reason') or {}).items()))),
+                flush=True)
+    except Exception as e:
+        print('image: cleanup skipped (%s)' % e, flush=True)
+
+
 def stage_image(img, reg_token, stager, strict=False):
     # The staged tar's path on MeluXina, or '' (the job pulls). Never raises, except InsufficientQuota
     # when strict: the layers do not fit the project's scratch quota (AC-33), and the job's own pull
@@ -224,6 +243,11 @@ def stage_image(img, reg_token, stager, strict=False):
         if st.get('ready'):
             print('image: already staged', st['path'], flush=True)
             return st['path']
+        if st.get('sif'):
+            # AC-65: the job script builds nothing and would only delete a tar, so none is staged. The
+            # job's kaos-image= lease keeps this SIF from the stager's cleanup while the job queues.
+            print('image: the SIF is already on scratch - nothing to stage', flush=True)
+            return ''
         host, repo, ref = parse_image(img)
         reg = Registry(host, reg_token)
         entries, total = image_plan(reg, repo, image_manifest(reg, repo, ref))

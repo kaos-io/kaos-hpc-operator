@@ -93,3 +93,98 @@ def test_the_staged_tar_is_deleted_only_after_a_successful_build(tmp_path):
 
     assert not run(True).exists(), "D-62: the SIF has the same key, so the tar is never needed again"
     assert run(False).exists(), "a failed build keeps the tar for the next try"
+
+
+# ---------------------------------------------------------------- AC-65: image lifecycle, the job's half
+
+def _image_block():
+    """From the label function to the first cleanup line: SIF label, build/pull, tar deletion."""
+    a = next(i for i, l in enumerate(LINES) if l.startswith("kaos_sif_label(){"))
+    b = next(i for i, l in enumerate(LINES) if l.startswith("find $SCR/sif-cache"))
+    return LINES[a:a + 1] + LINES[LINES.index('if [ ! -f "$SIF" ]; then'):b]
+
+
+def _run_image_block(tmp_path, name, *, sif_cached=False, tar=True, build_ok=True, pull_ok=True,
+                     image_ref="reg.example/proj/app:v1@sha256:" + "a" * 64, step="train"):
+    scr = tmp_path / name
+    (scr / "sif-cache").mkdir(parents=True)
+    sif = scr / "sif-cache" / "k.sif"
+    if sif_cached:
+        sif.write_bytes(b"old sif")
+    staged = scr / "images" / "k.tar"
+    staged.parent.mkdir()
+    staged.write_bytes(b"tar")
+    bindir = scr / "bin"
+    bindir.mkdir()
+    (bindir / "apptainer").write_text(
+        '#!/bin/bash\necho "$@" >> "$SCR/calls"\n'
+        'if [ "$1" = build ]; then [ "%d" = 1 ] || exit 1; fi\n'
+        'if [ "$1" = pull ]; then [ "%d" = 1 ] || exit 1; fi\nprintf sif > "$2"\n' % (build_ok, pull_ok))
+    (bindir / "apptainer").chmod(0o755)
+    env = dict(os.environ, SCR=str(scr), SIF=str(sif), IMAGE_REF=image_ref, STEP_NAME=step, SLURM_JOB_ID="1",
+               PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+    if tar:
+        env["IMAGE_STAGED"] = str(staged)
+    script = "\n".join(['fail(){ exit "$1"; }'] + _image_block())
+    subprocess.run(["bash", "-c", script], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    calls = (scr / "calls").read_text() if (scr / "calls").exists() else ""
+    return sif, staged, calls
+
+
+def test_a_built_sif_is_labelled_with_its_image_repository_and_step(tmp_path):
+    sif, staged, calls = _run_image_block(tmp_path, "built")
+    assert (sif.parent / "k.sif.lineage").read_text() == "reg.example/proj/app\ttrain\n"
+    assert not staged.exists()
+    assert not list(sif.parent.glob("*tmp*")), "the label is renamed into place, no temp file is left"
+
+
+def test_the_label_drops_a_tag_but_keeps_a_registry_port(tmp_path):
+    sif, _, _ = _run_image_block(tmp_path, "port", image_ref="localhost:5000/proj/app@sha256:" + "b" * 64)
+    assert (sif.parent / "k.sif.lineage").read_text() == "localhost:5000/proj/app\ttrain\n"
+    sif, _, _ = _run_image_block(tmp_path, "tag", image_ref="localhost:5000/proj/app:v7")
+    assert (sif.parent / "k.sif.lineage").read_text() == "localhost:5000/proj/app\ttrain\n"
+
+
+def test_a_pulled_sif_is_labelled_too(tmp_path):
+    sif, _, calls = _run_image_block(tmp_path, "pulled", tar=False)
+    assert calls.startswith("pull ") and (sif.parent / "k.sif.lineage").exists()
+
+
+def test_the_staged_tar_goes_even_when_the_sif_was_already_cached(tmp_path):
+    """Live 2026-11-10: a job that found the SIF built never reached the old deletion, so every re-staged tar stayed."""
+    sif, staged, calls = _run_image_block(tmp_path, "cached", sif_cached=True)
+    assert calls == "", "no build, no pull"
+    assert not staged.exists() and sif.read_bytes() == b"old sif"
+    assert not (sif.parent / "k.sif.lineage").exists(), "an existing SIF keeps its label (or the lack of one)"
+
+
+def test_with_no_sif_after_a_failed_build_and_pull_the_tar_stays_for_the_next_try(tmp_path):
+    sif, staged, _ = _run_image_block(tmp_path, "failed", build_ok=False, pull_ok=False)
+    assert staged.exists() and not sif.exists() and not (sif.parent / "k.sif.lineage").exists()
+
+
+def test_many_builds_leave_no_tar_behind_and_every_new_sif_a_label(tmp_path):
+    """AC-65 at scale, the job's half: 120 submits of 12 images (each digest staged again by every submit that
+    finds no SIF, as the runner does), then every one of them again with the SIF cached. No tar is left on
+    scratch afterwards and every SIF built has its label. (The stager's half, the bounded size of the SIF cache
+    across 400 builds, is test_stager.py::ImageGcTest in the stager's repository: the stager is not here.)"""
+    scr = tmp_path / "scr"
+    (scr / "sif-cache").mkdir(parents=True)
+    (scr / "images").mkdir()
+    bindir = scr / "bin"
+    bindir.mkdir()
+    (bindir / "apptainer").write_text('#!/bin/bash\nif [ "$1" = build ] || [ "$1" = pull ]; then printf sif > "$2"; fi\n')
+    (bindir / "apptainer").chmod(0o755)
+    block = "\n".join(['fail(){ exit "$1"; }'] + _image_block())
+    for rnd in range(10):
+        for n in range(12):
+            key = "%016x" % (n + 1)
+            tar = scr / "images" / (key + ".tar")
+            tar.write_bytes(b"t" * 1000)
+            env = dict(os.environ, SCR=str(scr), SIF=str(scr / "sif-cache" / (key + ".sif")), SLURM_JOB_ID=str(rnd),
+                       IMAGE_REF="reg.example/proj/app%d@sha256:%s" % (n % 4, "%064x" % n), STEP_NAME="train",
+                       IMAGE_STAGED=str(tar), PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+            subprocess.run(["bash", "-c", block], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    assert list((scr / "images").iterdir()) == [], "no tar survives a job that found or built the SIF"
+    sifs = sorted(p.name for p in (scr / "sif-cache").glob("*.sif"))
+    assert len(sifs) == 12 and all((scr / "sif-cache" / (s + ".lineage")).exists() for s in sifs)

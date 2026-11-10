@@ -168,7 +168,7 @@ def test_the_anonymous_registry_gets_no_token():
 class FakeStager:
     def __init__(self, status=None, image_rc=0, status_rc=0, key=True):
         self.status, self.image_rc, self.status_rc, self.calls, self.received = status, image_rc, status_rc, [], b""
-        self.key = key
+        self.key, self.gc_rc = key, 0
 
     def have_key(self):
         return self.key
@@ -178,6 +178,8 @@ class FakeStager:
         if words[0] == "image-status":
             ev = [dict(self.status, event="image_status")] if self.status is not None else []
             return self.status_rc, ev
+        if words[0] == "gc":
+            return self.gc_rc, [{"event": "gc", "freed_bytes": 3_000_000_000, "by_reason": {"superseded": {"count": 2}}}]
         self.received = b"".join(feed)
         return self.image_rc, ([{"event": "done", "path": "/scr/kaos/p/images/k.tar"}] if self.image_rc == 0 else [])
 
@@ -268,3 +270,34 @@ def test_the_stager_call_passes_tar_bytes_through_ssh_unchanged(monkeypatch, tmp
                     iter([payload[:1000], payload[1000:], b"%s\n" % b"ab"]))
     assert rc == 0 and ev[-1]["event"] == "done"
     assert out.read_bytes() == payload + b"ab\n"
+
+
+def test_a_resident_sif_means_no_tar_is_staged(monkeypatch):
+    """AC-65: the job script would only delete the tar, so the image is not even fetched from the registry."""
+    reg = FakeRegistry()
+    try:
+        stager = FakeStager(status={"ready": False, "sif": True})
+        img = _stage(monkeypatch, stager, reg)
+        assert image.stage_image(img, "gcp-tok", stager) == ""
+        assert [w[0] for w in stager.calls] == ["image-status"] and reg.log == []
+        stager = FakeStager(status={"ready": True, "sif": True, "path": "/scr/kaos/p/images/k.tar"})
+        assert image.stage_image(img, "gcp-tok", stager) == "/scr/kaos/p/images/k.tar", "a tar that exists is still used"
+        stager = FakeStager(status={"ready": False})       # an older stager does not say: staged as before
+        assert image.stage_image(img, "gcp-tok", stager) == "/scr/kaos/p/images/k.tar"
+    finally:
+        reg.close()
+
+
+def test_the_cleanup_asks_the_stager_once_says_what_it_freed_and_never_raises(monkeypatch, capsys):
+    monkeypatch.setattr(image, "ssh_present", lambda: True)
+    stager = FakeStager()
+    image.cleanup_images(stager)
+    assert stager.calls == [["gc"]]
+    assert "3.0 GB" in capsys.readouterr().out
+    for broken in (FakeStager(key=False), FakeStager()):
+        broken.gc_rc = 75                                    # queue unreadable: refused, silently
+        image.cleanup_images(broken)
+    boom = FakeStager()
+    boom.__class__ = type("Boom", (FakeStager,), {"__call__": lambda self, *a, **k: (_ for _ in ()).throw(OSError("ssh"))})
+    image.cleanup_images(boom)                               # an old stager, a dead link: no exception
+    assert "cleanup skipped" in capsys.readouterr().out

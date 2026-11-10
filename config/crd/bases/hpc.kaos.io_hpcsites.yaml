@@ -858,6 +858,200 @@ spec:
                       limit file counts (0 limit: none set).'
                     format: int64
                     type: integer
+                  images:
+                    description: |-
+                      Images breaks the images category down (PRD-HPC-1461 AC-65): SIFs, staged tars, the layer
+                      cache, what a queued or running job leases, the largest (app, step) lineages, the images
+                      budget and the last cleanup. Bounded: at most ImageLineagesMax lineages are named.
+                    properties:
+                      budgetBytes:
+                        description: |-
+                          BudgetBytes is the cap on SIFs, tars and layer cache (default 60 GB). Over it, the cleanup
+                          removes the least recently used SIFs no job leases; OverBudget is true when leased files alone
+                          keep the images above it.
+                        format: int64
+                        type: integer
+                      cache:
+                        description: ImageCache is the Apptainer layer cache.
+                        properties:
+                          files:
+                            format: int64
+                            type: integer
+                          partial:
+                            description: Partial is true when the measurement hit
+                              its time bound (a lower bound).
+                            type: boolean
+                          space:
+                            format: int64
+                            type: integer
+                        type: object
+                      lastCleanup:
+                        description: ImageCleanup is the summary of the stager's last
+                          image cleanup.
+                        properties:
+                          at:
+                            format: date-time
+                            type: string
+                          byReason:
+                            items:
+                              description: ImageCleanupReason is what one kind of
+                                deletion removed in the last cleanup.
+                              properties:
+                                count:
+                                  format: int64
+                                  type: integer
+                                reason:
+                                  description: Reason is superseded, orphan, unused,
+                                    tar_built, tar_unleased, stale_part, orphan_meta
+                                    or over_budget.
+                                  maxLength: 64
+                                  type: string
+                                space:
+                                  format: int64
+                                  type: integer
+                              required:
+                              - reason
+                              type: object
+                            maxItems: 16
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          cacheFilesRemoved:
+                            format: int64
+                            type: integer
+                          freedBytes:
+                            description: FreedBytes is the allocated bytes the cleanup
+                              released (files and layer cache).
+                            format: int64
+                            type: integer
+                          overBudget:
+                            description: OverBudget is true when leased files alone
+                              kept the images over the budget.
+                            type: boolean
+                        type: object
+                      leased:
+                        description: |-
+                          Leased is what a queued or running job names (never deleted). Absent when the queue could not
+                          be read.
+                        properties:
+                          count:
+                            format: int64
+                            type: integer
+                          oldestAgeSeconds:
+                            format: int64
+                            type: integer
+                          space:
+                            description: Space is allocated bytes, as the site's quota
+                              counts them.
+                            format: int64
+                            type: integer
+                        type: object
+                      lineages:
+                        description: Lineages are the largest (app, step) groups,
+                          at most ImageLineagesMax; LineagesTotal counts all.
+                        items:
+                          description: |-
+                            ImageLineage is the SIFs of one (app, step): the last path segment of the step's image repository
+                            and the DAG step's name. Normally one SIF (the newest) plus those a queued or running job still uses.
+                          properties:
+                            app:
+                              maxLength: 253
+                              type: string
+                            newestAgeSeconds:
+                              description: NewestAgeSeconds and OldestAgeSeconds are
+                                the age of the newest and oldest build of the lineage.
+                              format: int64
+                              type: integer
+                            oldestAgeSeconds:
+                              format: int64
+                              type: integer
+                            sifs:
+                              format: int64
+                              type: integer
+                            space:
+                              format: int64
+                              type: integer
+                            step:
+                              maxLength: 253
+                              type: string
+                          required:
+                          - app
+                          - step
+                          type: object
+                        maxItems: 20
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      lineagesTotal:
+                        format: int64
+                        type: integer
+                      overBudget:
+                        type: boolean
+                      parts:
+                        description: ImageGroup is a count, the allocated bytes and
+                          the age of the oldest member (by last use).
+                        properties:
+                          count:
+                            format: int64
+                            type: integer
+                          oldestAgeSeconds:
+                            format: int64
+                            type: integer
+                          space:
+                            description: Space is allocated bytes, as the site's quota
+                              counts them.
+                            format: int64
+                            type: integer
+                        type: object
+                      sifs:
+                        description: |-
+                          SIFs are the built images in the SIF cache, Tars the staged docker-archives waiting for a
+                          build, Parts half-written files of builds and streams in flight, UnlabeledSIFs the SIFs with
+                          no (app, step) label (built before the lifecycle existed; they go after three days).
+                        properties:
+                          count:
+                            format: int64
+                            type: integer
+                          oldestAgeSeconds:
+                            format: int64
+                            type: integer
+                          space:
+                            description: Space is allocated bytes, as the site's quota
+                              counts them.
+                            format: int64
+                            type: integer
+                        type: object
+                      tars:
+                        description: ImageGroup is a count, the allocated bytes and
+                          the age of the oldest member (by last use).
+                        properties:
+                          count:
+                            format: int64
+                            type: integer
+                          oldestAgeSeconds:
+                            format: int64
+                            type: integer
+                          space:
+                            description: Space is allocated bytes, as the site's quota
+                              counts them.
+                            format: int64
+                            type: integer
+                        type: object
+                      unlabeledSifs:
+                        description: ImageGroup is a count, the allocated bytes and
+                          the age of the oldest member (by last use).
+                        properties:
+                          count:
+                            format: int64
+                            type: integer
+                          oldestAgeSeconds:
+                            format: int64
+                            type: integer
+                          space:
+                            description: Space is allocated bytes, as the site's quota
+                              counts them.
+                            format: int64
+                            type: integer
+                        type: object
+                    type: object
                   measuredAt:
                     format: date-time
                     type: string

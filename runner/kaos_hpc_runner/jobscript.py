@@ -133,6 +133,12 @@ def batch_lines(scope, scratch):
         'BIND="$BIND -B $KAOS_WORK:/work"',
         # Last use of a cached SIF, before the cleanup below can see it.
         'touch -c "$SIF"',
+        # PRD-HPC-1461 AC-65: the label that tells the stager's cleanup which SIFs are one lineage (the same
+        # image repository and step): written once, when a job builds the SIF, so the newest SIF of a
+        # lineage is kept and the superseded ones go. repo = IMAGE_REF without the digest and the tag.
+        'kaos_sif_label(){ local r=${IMAGE_REF%%@*}; case "${r##*/}" in *:*) r=${r%:*};; esac;'
+        ' printf "%s\\t%s\\n" "$r" "$STEP_NAME" > "$SIF.lineage.tmp-$$" 2>/dev/null'
+        ' && mv -f "$SIF.lineage.tmp-$$" "$SIF.lineage" 2>/dev/null; rm -f "$SIF.lineage.tmp-$$"; return 0; }',
         'if [ ! -f "$SIF" ]; then',
         # PRD-1609 F-02: build/pull to a name only this job writes, then rename it into
         # the shared cache (atomic on Lustre). Jobs, and steps sharing a node,
@@ -145,7 +151,7 @@ def batch_lines(scope, scratch):
         '    echo "image: building the SIF from the staged layers $IMAGE_STAGED"',
         '    touch -c "$IMAGE_STAGED"',
         # D-62: the SIF has the same key as the tar, so once it is built the tar is never needed again.
-        '    if apptainer build "$SIF_TMP" "docker-archive://$IMAGE_STAGED"; then mv -n "$SIF_TMP" "$SIF"; rm -f "$IMAGE_STAGED"; fi',
+        '    if apptainer build "$SIF_TMP" "docker-archive://$IMAGE_STAGED"; then mv -n "$SIF_TMP" "$SIF"; kaos_sif_label; rm -f "$IMAGE_STAGED"; fi',
         '    rm -f "$SIF_TMP"',
         '  fi',
         '  if [ ! -f "$SIF" ]; then',
@@ -158,9 +164,13 @@ def batch_lines(scope, scratch):
         ' APPTAINER_DOCKER_USERNAME=oauth2accesstoken'
         ' APPTAINER_DOCKER_PASSWORD=$REG_TOKEN;; esac',
         '    apptainer pull "$SIF_TMP" docker://$IMAGE_REF || { rm -f "$SIF_TMP"; fail 231; }',
-        '    mv -n "$SIF_TMP" "$SIF"; rm -f "$SIF_TMP"',
+        '    mv -n "$SIF_TMP" "$SIF"; kaos_sif_label; rm -f "$SIF_TMP"',
         '  fi',
         'fi',
+        # PRD-HPC-1461 AC-65: whatever way the SIF came to exist (built here, built by another job first,
+        # already cached) the staged tar is useless now, so it goes in every case, not only after this
+        # job's own build (live 2026-11-10: tars of jobs that found the SIF cached piled up).
+        '[ -n "$IMAGE_STAGED" ] && [ -f "$SIF" ] && rm -f "$IMAGE_STAGED"',
         # PRD-1541: the image and download caches share the allocation's scratch
         # quota with the dataset cache and only ever grew. This user's entries
         # unused for 14 days go: SIFs, Apptainer's layer cache, in-job
@@ -172,7 +182,10 @@ def batch_lines(scope, scratch):
         '[ -n "$IMAGE_STAGED" ] && find "${IMAGE_STAGED%/*}" -maxdepth 1 -name "*.tar" -user "$USER" -mtime +2 -delete 2>/dev/null',
         'find $SCR/data-cache -mindepth 3 -maxdepth 3 -name .complete -user "$USER" -mtime +14'
         ' -printf "%h\\n" 2>/dev/null | xargs -r rm -rf',
-        'apptainer cache clean --force --days 14 >/dev/null 2>&1',
+        # AC-65: the layer cache is only a by-product of a pull (the SIF is the cache that counts). Files older
+        # than a day go every time (younger ones may belong to a build on another node); the stager's cleanup
+        # does the same from the login node when no job runs.
+        'apptainer cache clean --force --days 1 >/dev/null 2>&1',
         # Start in the image's WORKDIR (Apptainer ignores it; Docker does not).
         'PWD_OPT=""; [ -n "$STEP_WORKDIR" ] && PWD_OPT="--pwd $STEP_WORKDIR"',
         # --nv only on GPU classes: on the cpu/largemem partitions there is
