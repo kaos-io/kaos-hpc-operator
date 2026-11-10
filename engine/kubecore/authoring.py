@@ -29,7 +29,7 @@ This is a render-time helper, not a runtime SDK.
 import json
 import re
 
-from hera.workflows import DAG, Container, Parameter, Resources, WorkflowTemplate
+from hera.workflows import DAG, Container, Env, Parameter, Resources, WorkflowTemplate
 from hera.workflows.models import ValueFrom
 
 from kubecore import derive_tree
@@ -47,9 +47,16 @@ class AuthoringError(Exception):
     pass
 COMPOSE_STEP = "compose-and-validate"
 PARAMS_PATH = "/work/params.yaml"
+# The run's data lock: every data input a step reads, at the commit the compose step resolved it to
+# (kaos-lib's lock format). Every step receives it as $KAOS_LIB_LOCK, so kaos-lib reads those commits.
+DATA_LOCK_PARAM = "data-lock"
+DATA_LOCK_PATH = "/work/data-lock.json"
+DATA_LOCK_ENV = "KAOS_LIB_LOCK"
+STEP_LABEL = "platform.kubecore.io/step"
+STEP_KIND_LABEL = "platform.kubecore.io/step-kind"
 # The compose step runs `python -m kubecore.compose` inside its own image;
 # every other step runs `python -m app.entry` (the app's console-script).
-COMPOSE_COMMAND = ["python", "-m", "kubecore.compose"]
+COMPOSE_COMMAND = ["python", "-I", "-m", "kaos_engine.compose"]
 STEP_COMMAND = ["python", "-m", "app.entry"]
 
 _current = None
@@ -217,12 +224,14 @@ class pipeline:
                 + ["--render-defaults", json.dumps(form.render_defaults, separators=(",", ":"))]
                 + ["--advanced", "{{workflow.parameters.config}}"]
                 + [f"--require={sec}" for sec in required]
-                + ["--output", PARAMS_PATH],
-                outputs=[Parameter(name="params", value_from=ValueFrom(path=PARAMS_PATH))],
+                + ["--output", PARAMS_PATH, "--lock-output", DATA_LOCK_PATH],
+                labels={STEP_LABEL: COMPOSE_STEP, STEP_KIND_LABEL: "control"},
+                outputs=[Parameter(name="params", value_from=ValueFrom(path=PARAMS_PATH)),
+                         Parameter(name=DATA_LOCK_PARAM, value_from=ValueFrom(path=DATA_LOCK_PATH))],
             )
             containers = {}
             for s in self.steps:
-                inputs = [Parameter(name="params")]
+                inputs = [Parameter(name="params"), Parameter(name=DATA_LOCK_PARAM)]
                 args = ["--params", "{{inputs.parameters.params}}"]
                 for need in s.needs:
                     for out in need.outputs:
@@ -231,6 +240,8 @@ class pipeline:
                 containers[s.name] = Container(
                     name=s.name, image=IMAGE,
                     command=STEP_COMMAND, args=args,
+                    env=[Env(name=DATA_LOCK_ENV, value="{{inputs.parameters.%s}}" % DATA_LOCK_PARAM)],
+                    labels={STEP_LABEL: s.name, STEP_KIND_LABEL: "unspecified"},
                     # Request-only for disk: the request is the eviction shield
                     # and scheduling signal; a limit would OOM-kill spiky export
                     # scratch instead (#892). The enhancer reads this as the
@@ -263,7 +274,8 @@ class pipeline:
                 compose_task = compose()
                 tasks = {}
                 for s in self.steps:
-                    arguments = {"params": compose_task.get_parameter("params")}
+                    arguments = {"params": compose_task.get_parameter("params"),
+                                 DATA_LOCK_PARAM: compose_task.get_parameter(DATA_LOCK_PARAM)}
                     for need in s.needs:
                         for out in need.outputs:
                             arguments[out] = tasks[need.name].get_parameter(out)

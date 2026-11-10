@@ -31,6 +31,9 @@ var engineGoldenArgoValues = map[string]string{
 	"inputs.parameters.resumable":      "auto",
 	"inputs.parameters.idle-timeout":   "40",
 	"inputs.parameters.step-outputs":   "model,metrics",
+	// The run's data lock as the compose step writes it (kaos-lib's lock format, version 1).
+	"inputs.parameters.data-lock": `{"version":1,"reads":[{"repo":"dataset-default","owner":null,"ref":"latest",` +
+		`"commit":"c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}]}`,
 }
 
 type goldenEnvVar struct {
@@ -103,7 +106,8 @@ func TestEngineGoldenIsAValidFollowerEnvironment(t *testing.T) {
 	if cfg.IdleTimeout == nil || *cfg.IdleTimeout != 40 {
 		t.Errorf("HPC_IDLE_TIMEOUT_MINUTES did not come through: %v", cfg.IdleTimeout)
 	}
-	if len(cfg.Outputs) != 2 || len(cfg.Command) != 3 || cfg.Dataset == nil || cfg.Dataset.Repo != "dataset-default" || cfg.Dataset.Version != "latest" {
+	if len(cfg.Outputs) != 2 || len(cfg.Command) != 3 || cfg.Dataset == nil || cfg.Dataset.Repo != "dataset-default" || cfg.Dataset.Version != "latest" ||
+		len(cfg.Dataset.Commit) != 64 {
 		t.Errorf("outputs, command or dataset did not come through: %+v", cfg)
 	}
 }

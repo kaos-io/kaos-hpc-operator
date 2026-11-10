@@ -32,6 +32,16 @@ Failure modes concentrated here, all before any GPU time:
 - ADVANCED override with unknown keys -> struct-mode merge rejects it
 - ADVANCED override touching platform.* -> hard error (below)
 - params.yaml too large         -> explicit size check (>200KB)
+- a data input a step reads does not resolve (no such dataset or version, lakeFS
+  unreachable, no credentials)  -> hard error naming the form field (below)
+
+The run's data lock: every data input a step reads (today the `dataset` leaf, when a
+step declares reads=["dataset"]) is resolved ONCE here, with kaos-lib, to a commit,
+and written as --lock-output in kaos-lib's lock format. Every step receives it as
+$KAOS_LIB_LOCK, an HPC step as its job's dataset commit, so the whole run reads one
+commit whatever happens to the dataset meanwhile. Nothing is skipped: a reference
+that cannot be resolved fails the run here. --offline (a laptop, set by kaosctl
+only, never in a rendered pipeline) resolves nothing and writes an empty lock.
 """
 
 import argparse
@@ -48,6 +58,9 @@ from omegaconf.nodes import BooleanNode, EnumNode, FloatNode, IntegerNode, Strin
 from kubecore import derive_tree
 
 MAX_PARAMS_BYTES = 200 * 1024
+MAX_LOCK_BYTES = 16 * 1024
+DATASET_FIELD = "dataset"          # the top-level config leaf and form field that names the run's dataset
+EMPTY_LOCK = '{"version":1,"reads":[]}'
 
 HERE = Path(__file__).parent  # kubecore/
 DEFAULT_OUTPUT = HERE.parent / "out" / "params.yaml"
@@ -260,6 +273,37 @@ def compose_and_validate(overrides: list, advanced: str = "", required: list = N
     return text
 
 
+def data_lock(resolved: dict, required: list, offline: bool = False, datasets=None, lock=None) -> str:
+    """The run's data lock (JSON text): the commit of every data input a step reads.
+
+    `resolved` is the composed config, `required` the sections steps declared with reads=. Only a data
+    input some step reads is resolved: a config that carries a `dataset` no step reads costs nothing and
+    cannot fail the run. `datasets`/`lock` default to kaos-lib's modules (tests pass their own).
+    """
+    wanted = resolved.get(DATASET_FIELD) if DATASET_FIELD in (required or []) else None
+    if offline or wanted in (None, ""):
+        return EMPTY_LOCK
+    if not isinstance(wanted, str):
+        raise ComposeError(f"{DATASET_FIELD}: expected <dataset>@<version> (for example dataset-default@latest), "
+                           f"got {wanted!r}")
+    if datasets is None or lock is None:
+        try:
+            from kaos_lib import datasets as _datasets
+            from kaos_lib import lock as _lock
+        except ImportError as exc:
+            raise ComposeError(f"{DATASET_FIELD}: cannot resolve {wanted!r}: kaos-lib is not installed in the "
+                               f"compose image ({exc}). The platform's compose image installs it.") from None
+        datasets, lock = datasets or _datasets, lock or _lock
+    try:
+        datasets.resolve(datasets.DatasetRef.parse(wanted))
+    except Exception as exc:   # no such dataset or version, lakeFS unreachable, no credentials: all end the run
+        raise ComposeError(f"{DATASET_FIELD}: cannot use {wanted!r}: {exc}") from None
+    text = lock.current().to_json()
+    if len(text.encode()) > MAX_LOCK_BYTES:
+        raise ComposeError(f"the run's data lock is {len(text.encode())} bytes, above the {MAX_LOCK_BYTES}-byte limit")
+    return text
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="Compose and validate the experiment config.")
     parser.add_argument("--advanced", default="", help="ADVANCED override YAML, merged last.")
@@ -268,6 +312,10 @@ def main(argv=None) -> None:
     parser.add_argument("--render-defaults", default="{}",
                         help="JSON manifest {override_key: render-time default} for elision.")
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
+    parser.add_argument("--lock-output", default="",
+                        help="Where to write the run's data lock (JSON). Without it nothing is resolved.")
+    parser.add_argument("--offline", action="store_true",
+                        help="Resolve nothing and write an empty data lock (a laptop without the platform).")
     parser.add_argument("overrides", nargs="*", help="Hydra override tokens (key=value).")
     args = parser.parse_args(argv)
 
@@ -275,6 +323,12 @@ def main(argv=None) -> None:
         text = compose_and_validate(
             args.overrides, args.advanced, args.require, json.loads(args.render_defaults)
         )
+        lock_text = ""
+        if args.lock_output:
+            if args.offline:
+                print("compose-and-validate: OFFLINE - no data input was resolved; the data lock is empty",
+                      file=sys.stderr)
+            lock_text = data_lock(yaml.safe_load(text) or {}, args.require, args.offline)
     except Exception as exc:  # any composition failure = hard error, pre-GPU
         message = str(exc)
         if exc.__cause__ is not None:  # e.g. enum ValidationError inside Hydra's wrapper
@@ -286,6 +340,11 @@ def main(argv=None) -> None:
     out.parent.mkdir(exist_ok=True)
     out.write_text(text)
     print(f"wrote {out} ({len(text.encode())} bytes)")
+    if args.lock_output:
+        lock_out = Path(args.lock_output)
+        lock_out.parent.mkdir(exist_ok=True)
+        lock_out.write_text(lock_text)
+        print(f"wrote {lock_out} ({lock_text})")
 
 
 if __name__ == "__main__":

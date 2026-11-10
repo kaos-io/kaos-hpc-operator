@@ -40,7 +40,7 @@ def _dag_tasks():
 
 def test_example_pipeline_has_hpc_twins():
     # Guard: the order test below is only meaningful when twins are rendered.
-    assert any(t["name"].endswith("-meluxina") for t in _dag_tasks())
+    assert any(t["name"].endswith("-hpc") for t in _dag_tasks())
 
 
 def test_every_dependency_is_listed_before_its_dependent():
@@ -55,5 +55,5 @@ def test_every_dependency_is_listed_before_its_dependent():
 def test_twin_follows_its_in_cluster_task():
     names = [t["name"] for t in _dag_tasks()]
     for i, name in enumerate(names):
-        if name.endswith("-meluxina"):
-            assert names[i - 1] == name[: -len("-meluxina")]
+        if name.endswith("-hpc"):
+            assert names[i - 1] == name[: -len("-hpc")]

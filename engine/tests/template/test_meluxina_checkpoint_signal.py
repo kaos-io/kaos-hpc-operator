@@ -28,7 +28,7 @@ def _render(**kw):
     wft = enhance.enhance(yaml.safe_load(p.wt.to_yaml()), ctx)
     for t in wft["spec"]["templates"]:
         for task in (t.get("dag") or {}).get("tasks") or []:
-            if task["name"] == "train-meluxina":
+            if task["name"] == "train-hpc":
                 return {a["name"]: a["value"] for a in task["arguments"]["parameters"]}
     raise AssertionError("no HPC twin rendered")
 

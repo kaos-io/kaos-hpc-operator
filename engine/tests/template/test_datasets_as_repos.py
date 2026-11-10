@@ -43,9 +43,54 @@ def test_results_go_to_the_apps_outputs_repository():
     assert env["KUBECORE_WORKFLOW_NAME"] == "{{workflow.name}}", "names the MLflow run"
     mr = next(t for t in out["spec"]["templates"] if t["name"] == "hpc-follower")
     menv = {e["name"]: e.get("value") for e in mr["container"]["env"]}
-    assert menv["DATASET"] == "{{workflow.parameters.dataset}}"
+    assert menv["DATASET"] == "", "no compose step pinned the dataset: the HPC step asks for none"
     assert menv["OUTPUTS_REPO"] == "outputs-myapp" and menv["OUTPUTS_REF"] == "main"
     assert "DATASET_REPO" not in menv and "OUTPUTS_BRANCH" not in menv
+
+
+def _with_compose(reads_dataset: bool) -> dict:
+    """_raw() plus the platform's compose step as authoring renders it (data-lock output; --require per reads=)."""
+    raw = _raw()
+    raw["spec"]["templates"].append({
+        "name": "compose-and-validate",
+        "container": {"image": "i", "args": ["--require=dataset"] if reads_dataset else ["--require=train"]},
+        "outputs": {"parameters": [{"name": "params"}, {"name": "data-lock"}]}})
+    tasks = raw["spec"]["templates"][0]["dag"]["tasks"]
+    tasks.insert(0, {"name": "compose-and-validate", "template": "compose-and-validate"})
+    tasks[1]["depends"] = "compose-and-validate"
+    return raw
+
+
+def test_the_follower_gets_the_dataset_and_the_runs_data_lock_only_when_a_step_reads_the_dataset():
+    ctx = yaml.safe_load(CTX_PATH.read_text())
+    out = enhance(_with_compose(reads_dataset=True), ctx)
+    follower = next(t for t in out["spec"]["templates"] if t["name"] == "hpc-follower")
+    env = {e["name"]: e.get("value") for e in follower["container"]["env"]}
+    assert env["DATASET"] == "{{workflow.parameters.dataset}}"
+    assert env["DATA_LOCK"] == "{{inputs.parameters.data-lock}}"
+    twin = next(t for t in out["spec"]["templates"][0]["dag"]["tasks"] if t["name"] == "model-training-hpc")
+    args = {p["name"]: p["value"] for p in twin["arguments"]["parameters"]}
+    assert args["data-lock"] == "{{tasks.compose-and-validate.outputs.parameters.data-lock}}"
+    assert "compose-and-validate" in twin["depends"], "Argo exposes a task's outputs only to tasks that depend on it"
+
+    out = enhance(_with_compose(reads_dataset=False), ctx)
+    follower = next(t for t in out["spec"]["templates"] if t["name"] == "hpc-follower")
+    env = {e["name"]: e.get("value") for e in follower["container"]["env"]}
+    assert env["DATASET"] == "", "a dataset in the config that no step reads is not asked of the HPC step"
+
+
+def test_the_compose_step_has_no_hpc_twin_and_its_class_choice_offers_no_hpc_class():
+    ctx = yaml.safe_load(CTX_PATH.read_text())
+    out = enhance(_with_compose(reads_dataset=True), ctx)
+    names = [t["name"] for t in out["spec"]["templates"][0]["dag"]["tasks"]]
+    assert "compose-and-validate-hpc" not in names and "model-training-hpc" in names
+    assert not any(n.endswith("-meluxina") for n in names)
+    compose_task = next(t for t in out["spec"]["templates"][0]["dag"]["tasks"] if t["name"] == "compose-and-validate")
+    assert "when" not in compose_task, "the compose step always runs on the cluster"
+    params = {p["name"]: p for p in out["spec"]["arguments"]["parameters"]}
+    hpc = [c for c in params["model-training-class"]["enum"] if c.startswith("meluxina-")]
+    assert hpc, "the fixture context has HPC classes"
+    assert not [c for c in params["compose-and-validate-class"]["enum"] if c.startswith("meluxina-")]
 
 
 def test_compose_gets_the_outputs_repository_as_platform_checkpoints():
