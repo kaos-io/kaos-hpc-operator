@@ -58,7 +58,9 @@ DATASET_PIN_PARAM = "dataset-pin"
 DATASET_PIN_PATH = "/work/dataset-pin.json"
 # Names the platform uses itself: a step's output with one of them would replace the platform's value in the
 # steps that need it.
-RESERVED_OUTPUTS = ("params", DATA_LOCK_PARAM, DATASET_PIN_PARAM)
+RESERVED_OUTPUTS = ("params", DATA_LOCK_PARAM, DATASET_PIN_PARAM, "slurm-job-id")
+# Template names the platform renders itself: the DAG, and the HPC follower.
+RESERVED_STEP_NAMES = (COMPOSE_STEP, "main", "hpc-follower")
 # A step's HPC variant is the task `<step>-hpc` (kubecore/meluxina.py); a step may not take such a name.
 RESERVED_STEP_SUFFIX = "-hpc"
 STEP_LABEL = "platform.kubecore.io/step"
@@ -148,16 +150,23 @@ def step(name, reads=None, gpu=False, needs=None, outputs=None, when=None, disk=
             f"(e.g. 'model-evaluation'). The name becomes the Argo template, the "
             f"steps/<dir> folder, and the image-<step> parameter."
         )
-    if name.endswith(RESERVED_STEP_SUFFIX) or name == COMPOSE_STEP:
+    if name.endswith(RESERVED_STEP_SUFFIX) or name in RESERVED_STEP_NAMES:
         raise AuthoringError(
             f"step name {name!r} is reserved — the platform names a step's HPC variant '<step>{RESERVED_STEP_SUFFIX}' "
-            f"and its own first step '{COMPOSE_STEP}'. Choose another name."
+            f"and keeps {', '.join(RESERVED_STEP_NAMES)} for itself. Choose another name."
         )
     taken = sorted(set(outputs or []) & set(RESERVED_OUTPUTS))
     if taken:
         raise AuthoringError(
             f"step {name!r}: output name(s) {', '.join(taken)} are reserved — the platform passes its own "
             f"'{', '.join(RESERVED_OUTPUTS)}' to every step. Rename the output."
+        )
+    produced = [out for need in (needs or []) for out in need.outputs]
+    twice = sorted({out for out in produced if produced.count(out) > 1})
+    if twice:
+        raise AuthoringError(
+            f"step {name!r}: the steps it needs produce the output(s) {', '.join(twice)} more than once — an "
+            f"output reaches this step as --<name>, so each name can come from one step only. Rename one."
         )
     if any(s.name == name for s in _current.steps):
         raise AuthoringError(

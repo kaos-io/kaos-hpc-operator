@@ -121,4 +121,4 @@ def test_a_pipeline_without_a_dataset_parameter_runs_data_less_on_hpc():
     out = enhance(raw, ctx)
     twin = next(t for t in out["spec"]["templates"][0]["dag"]["tasks"] if t["name"] == "model-training-hpc")
     args = {p["name"]: p["value"] for p in twin["arguments"]["parameters"]}
-    assert args["dataset-pin"] == "", "no compose step, no pin: the follower creates a job without a dataset"
+    assert args["dataset-pin"] == "{}", "no compose step, no pin: the follower creates a job without a dataset"

@@ -444,7 +444,7 @@ func TestTheJobsDatasetIsExactlyWhatTheComposeStepPinned(t *testing.T) {
 	if cfg, err = ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": branch})); err != nil || cfg.Dataset.Version != "feature/x" {
 		t.Errorf("a branch as version is fine: %+v, %v", cfg.Dataset, err)
 	}
-	for _, none := range []string{"", "  \n"} {
+	for _, none := range []string{"", "  \n", "{}", " {}\n"} {
 		if cfg, err = ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": none})); err != nil || cfg.Job().Spec.Dataset != nil {
 			t.Errorf("no dataset: no pin and no error, got %+v, %v", cfg.Dataset, err)
 		}

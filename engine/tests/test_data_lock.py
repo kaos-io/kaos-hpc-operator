@@ -111,7 +111,7 @@ def test_a_dataset_no_step_reads_is_never_resolved_and_cannot_fail_the_run():
     for resolved, required in (({"dataset": "dataset-a@latest"}, ["train"]), ({}, ["dataset"]),
                                ({"dataset": ""}, ["dataset"]), ({"dataset": "  "}, ["dataset"]),
                                ({"dataset": None}, ["dataset"])):
-        assert compose.data_lock(resolved, required, datasets=ds, lock=lock) == (compose.EMPTY_LOCK, "", "")
+        assert compose.data_lock(resolved, required, datasets=ds, lock=lock) == (compose.EMPTY_LOCK, compose.NO_PIN, "")
 
 
 @pytest.mark.parametrize("value", [{"name": "dataset-a", "version": "latest"}, ["dataset-a@v1"], 123, True])
@@ -120,7 +120,7 @@ def test_a_dataset_section_that_is_not_a_reference_string_is_left_alone(value, c
     platform can pin, and it composed before the pin existed, so it still does. It is said in the log."""
     lock = FakeLock()
     ds = FakeDatasets(lock, error=RuntimeError("must not be called"))
-    assert compose.data_lock({"dataset": value}, ["dataset"], datasets=ds, lock=lock) == (compose.EMPTY_LOCK, "", "")
+    assert compose.data_lock({"dataset": value}, ["dataset"], datasets=ds, lock=lock) == (compose.EMPTY_LOCK, compose.NO_PIN, "")
     assert "nothing is pinned for this run" in capsys.readouterr().err
 
 
@@ -179,7 +179,7 @@ def test_offline_resolves_nothing_and_writes_an_empty_lock():
     lock = FakeLock()
     ds = FakeDatasets(lock, error=RuntimeError("must not be called"))
     assert compose.data_lock({"dataset": "dataset-a@latest"}, ["dataset"], offline=True, datasets=ds, lock=lock) \
-        == (compose.EMPTY_LOCK, "", "")
+        == (compose.EMPTY_LOCK, compose.NO_PIN, "")
     assert json.loads(compose.EMPTY_LOCK) == {"version": 1, "reads": []}
 
 
@@ -270,7 +270,7 @@ def test_the_compose_entry_point_runs_the_engines_compose_isolated_and_writes_pa
     assert done.returncode == 0, done.stderr[-2000:]
     assert "experiment" in yaml.safe_load(out.read_text())
     assert json.loads(lock.read_text()) == {"version": 1, "reads": []}, "no step reads the dataset here"
-    assert pin.read_text() == "", "and the run has no dataset pin"
+    assert pin.read_text() == "{}", "and the run has no dataset: the pin is {} and never an empty value"
     assert "kaos-engine: version=" in done.stderr
 
 
@@ -279,7 +279,9 @@ def test_the_compose_entry_point_runs_the_engines_compose_isolated_and_writes_pa
 GOOD = "zot.example:5000/proj/app:train-0a1b2c3"
 
 
-@pytest.mark.parametrize("ref", [GOOD, "registry.example/p/a/b:v1", "r.example/p/a@sha256:" + "a" * 64])
+@pytest.mark.parametrize("ref", [GOOD, "registry.example/p/a/b:v1", "r.example/p/a@sha256:" + "a" * 64,
+                                 "r.example/p/a:v1@sha256:" + "a" * 64, "localhost:5000/x:y", "10.0.0.1:5000/x/y:1",
+                                 "r.example/a_b/c.d:V1.2-rc_3", "r.example/p/a:" + "t" * 128, GOOD + "\n"])
 def test_real_image_references_pass(ref):
     compose.check_step_images(json.dumps({"train": ref}))
     compose.check_step_images(None)
@@ -287,7 +289,8 @@ def test_real_image_references_pass(ref):
 
 
 @pytest.mark.parametrize("ref", [":probe-learn-latest", "", "probe-learn-latest", "/proj/app:tag", "zot.example/proj/app",
-                                 "zot.example/:tag", "zot.example/proj/app:", "{{workflow.parameters.image-x}}", None, 7])
+                                 "zot.example/:tag", "zot.example/proj/app:", "{{workflow.parameters.image-x}}", None, 7,
+                                 "r.example/p/a:" + "t" * 129, "r.example/p/a:v1\nextra"])
 def test_a_reference_without_registry_repository_or_tag_stops_the_run_naming_the_step(ref):
     with pytest.raises(compose.ComposeError) as exc:
         compose.check_step_images(json.dumps({"train": GOOD, "probe-learn": ref}))
@@ -328,7 +331,7 @@ def test_the_enhancer_hands_the_compose_step_every_other_steps_image():
 
 # ------------------------------------------------------------------ names the platform keeps for itself
 
-@pytest.mark.parametrize("name", ["x-hpc", "hpc-hpc", "compose-and-validate", "train-hpc"])
+@pytest.mark.parametrize("name", ["x-hpc", "hpc-hpc", "compose-and-validate", "train-hpc", "main", "hpc-follower"])
 def test_a_step_may_not_take_the_name_of_an_hpc_variant_or_of_the_compose_step(name):
     from kubecore import authoring
     with pytest.raises(authoring.AuthoringError, match="is reserved"):
@@ -336,7 +339,7 @@ def test_a_step_may_not_take_the_name_of_an_hpc_variant_or_of_the_compose_step(n
             authoring.step(name)
 
 
-@pytest.mark.parametrize("output", ["params", "data-lock", "dataset-pin"])
+@pytest.mark.parametrize("output", ["params", "data-lock", "dataset-pin", "slurm-job-id"])
 def test_a_step_output_may_not_take_a_name_the_platform_passes_to_every_step(output):
     from kubecore import authoring
     with pytest.raises(authoring.AuthoringError, match="reserved"):
@@ -368,3 +371,17 @@ def test_the_engine_image_carries_what_kaos_lib_needs_so_the_compose_image_adds_
     pinned = {line.split("==")[0].strip().lower() for line in (ENGINE / "requirements.txt").read_text().splitlines()
               if "==" in line and not line.startswith("#")}
     assert {"requests", "pyyaml", "packaging", "pyjwt", "cryptography"} <= pinned
+
+
+def test_two_needed_steps_may_not_hand_over_an_output_of_the_same_name():
+    from kubecore import authoring
+    with pytest.raises(authoring.AuthoringError, match="more than once"):
+        with authoring.pipeline("p"):
+            a = authoring.step("one", outputs=["m"])
+            b = authoring.step("two", outputs=["m"])
+            authoring.step("three", needs=[a, b])
+    with authoring.pipeline("p") as p:           # the same name from steps this one does not both need is fine
+        a = authoring.step("one", outputs=["m"])
+        authoring.step("two", outputs=["m"])
+        authoring.step("three", needs=[a])
+    assert len(p.steps) == 3

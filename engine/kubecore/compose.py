@@ -61,10 +61,14 @@ from kubecore import derive_tree
 MAX_PARAMS_BYTES = 200 * 1024
 DATASET_FIELD = "dataset"          # the top-level config leaf and form field that names the run's dataset
 EMPTY_LOCK = '{"version":1,"reads":[]}'
+NO_PIN = "{}"   # the dataset pin of a run without a dataset: never an empty value (an empty output parameter is
+                # the one thing a workflow engine may treat as "not set")
 STEP_IMAGES_ENV = "KAOS_STEP_IMAGES"   # {"<step>": "<the image the run resolved for it>"}, set by the enhancer
 # registry[:port]/repository[/...] then :tag or @digest. A reference without a registry and a repository is what
 # the image record holds for a step whose image was never built (":<step>-latest").
-_IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?(/[A-Za-z0-9][A-Za-z0-9._-]*)+(:[A-Za-z0-9_][A-Za-z0-9._-]*|@sha256:[0-9a-f]{64})$")
+# A tag, a digest, or both (a tag with its digest is a valid reference).
+_IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?(/[A-Za-z0-9][A-Za-z0-9._-]*)+"
+                        r"(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}(@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})\Z")
 
 HERE = Path(__file__).parent  # kubecore/
 DEFAULT_OUTPUT = HERE.parent / "out" / "params.yaml"
@@ -292,7 +296,10 @@ def check_step_images(raw) -> None:
             raise ValueError("not a JSON object")
     except ValueError as exc:
         raise ComposeError(f"cannot read the steps' images ({STEP_IMAGES_ENV}: {exc})") from None
-    bad = {step: ref for step, ref in images.items() if not isinstance(ref, str) or not _IMAGE_REF.match(ref)}
+    # Every step is checked, also one a `when=` would skip in this run: whether it is skipped is not known
+    # here, and a pipeline whose step has never been built is not a pipeline to start.
+    bad = {step: ref for step, ref in images.items()
+           if not isinstance(ref, str) or not _IMAGE_REF.match(ref.strip())}
     if bad:
         listed = ", ".join(f"{step} ({ref!r})" for step, ref in sorted(bad.items()))
         raise ComposeError(
@@ -332,7 +339,7 @@ def data_lock(resolved: dict, required: list, offline: bool = False, datasets=No
 
     The lock (kaos-lib's format) holds the commit of every data input a step reads; every step gets it as
     $KAOS_LIB_LOCK. The pin is the same fact for the run's dataset as one object,
-    `{"repo", "version", "commit", "owner"}` ("" when the run has none): an HPC step's job is created from it,
+    `{"repo", "version", "commit", "owner"}` (`{}` when the run has none): an HPC step's job is created from it,
     so a cluster step and an HPC step can never disagree about what the run reads. The reference is what the
     caller writes into the params every step reads, so a step always asks the lock in the form the lock holds.
 
@@ -343,11 +350,11 @@ def data_lock(resolved: dict, required: list, offline: bool = False, datasets=No
     """
     wanted = resolved.get(DATASET_FIELD) if DATASET_FIELD in (required or []) else None
     if offline or wanted is None or (isinstance(wanted, str) and not wanted.strip()):
-        return EMPTY_LOCK, "", ""
+        return EMPTY_LOCK, NO_PIN, ""
     if not isinstance(wanted, str):
         print(f"compose-and-validate: `{DATASET_FIELD}` is not a <dataset>@<version> string: nothing is pinned for "
               "this run", file=sys.stderr)
-        return EMPTY_LOCK, "", ""
+        return EMPTY_LOCK, NO_PIN, ""
     if datasets is None or lock is None:
         datasets, lock, client = _kaos_lib()
     try:
@@ -396,7 +403,7 @@ def main(argv=None) -> None:
         text = compose_and_validate(
             args.overrides, args.advanced, args.require, json.loads(args.render_defaults)
         )
-        lock_text = pin_text = ""
+        lock_text, pin_text = EMPTY_LOCK, NO_PIN
         if args.lock_output or args.pin_output:
             if args.offline:
                 print("compose-and-validate: OFFLINE - no data input was resolved; the data lock is empty",
@@ -426,7 +433,7 @@ def main(argv=None) -> None:
         if target:
             Path(target).parent.mkdir(exist_ok=True)
             Path(target).write_text(body)
-            print(f"wrote {target} ({body or 'empty'})")
+            print(f"wrote {target} ({body})")
 
 
 if __name__ == "__main__":

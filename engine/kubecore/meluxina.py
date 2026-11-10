@@ -130,7 +130,7 @@ HPC_TWIN_SUFFIX = "hpc"
 # The platform's own first step. It composes the config and pins the run's data: it never runs on HPC.
 COMPOSE_STEP = "compose-and-validate"
 # The compose step's output that holds the run's dataset as one object, {"repo","version","commit","owner"}, or
-# "" when the run reads none (kubecore/authoring.py, kubecore/compose.py). The follower creates the job from it.
+# `{}` when the run reads none (kubecore/authoring.py, kubecore/compose.py). The follower creates the job from it.
 DATASET_PIN_PARAM = "dataset-pin"
 HPC_ANNOTATION = "platform.kubecore.io/hpc"
 # step(resumable=...): how long before its wall time the step is told to save (D-44 as amended
@@ -349,7 +349,7 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
     compose_outputs = {o.get("name") for o in ((compose.get("outputs") or {}).get("parameters") or [])}
     has_compose_task = any(t.get("name") == COMPOSE_STEP for t in tasks)
     dataset_pin = ("{{tasks.%s.outputs.parameters.%s}}" % (COMPOSE_STEP, DATASET_PIN_PARAM)
-                   if has_compose_task and DATASET_PIN_PARAM in compose_outputs else "")
+                   if has_compose_task and DATASET_PIN_PARAM in compose_outputs else "{}")
     # The compose step is placed on the cluster only: its class choice offers no HPC class.
     for p in parameters:
         if p.get("name") == COMPOSE_STEP + "-class" and p.get("enum"):
@@ -445,7 +445,7 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
     # Status-qualified references (step.Succeeded || step.Skipped
     # || step.Omitted) must name the twin too: Argo exposes tasks.X to
     # a task's expressions ONLY for X in its depends, so a consumer whose
-    # args pick tasks['X-meluxina'] hangs forever with "tasks.X-meluxina is
+    # args pick tasks['X-hpc'] hangs forever with "tasks.X-hpc is
     # missing" (observed at run time, argo v4.0.6). Pair semantics:
     # Succeeded/Failed/Errored/Daemoned = either twin; Skipped/Omitted = both.
     def _status_pair(r):
@@ -478,7 +478,7 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
             {"name": "step-outputs", "value": ""}, {"name": "hpc-class"},
             {"name": "resumable-lead", "value": "0"}, {"name": "resumable", "value": "auto"},
             {"name": "idle-timeout", "value": ""},
-            {"name": DATASET_PIN_PARAM, "value": ""}]},
+            {"name": DATASET_PIN_PARAM, "value": "{}"}]},
         # Per-step: Slurm time limit + queue/prep allowance (see
         # QUEUE_ALLOWANCE_MINUTES). Argo resolves the parameter here.
         "activeDeadlineSeconds": "{{inputs.parameters.deadline-seconds}}",

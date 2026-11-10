@@ -16,7 +16,7 @@ inputs:
   - name: idle-timeout
     value: ''
   - name: dataset-pin
-    value: ''
+    value: '{}'
 activeDeadlineSeconds: '{{inputs.parameters.deadline-seconds}}'
 retryStrategy:
   limit: '2'

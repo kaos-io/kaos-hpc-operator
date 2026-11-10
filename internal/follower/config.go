@@ -147,7 +147,7 @@ var (
 // what every other step of the run reads. Anything else in the value is an error, never a job without data.
 func datasetPin(raw string) (*hpcv1alpha1.DatasetPin, error) {
 	raw = strings.TrimSpace(raw)
-	if raw == "" {
+	if raw == "" || raw == "{}" { // {} is what the compose step writes for a run without a dataset
 		return nil, nil
 	}
 	var pin struct {
