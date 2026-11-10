@@ -111,7 +111,7 @@ running now. After a runner restart the highest value starts over.
 
 Status for the console (`HPCSite.status.recentJobs`, PRD-HPC-1461 AC-26, AC-46, AC-76, AC-84): every active job of
 the project on the site, plus the jobs that ended in the last 7 days, newest first (active first), at most 300
-entries and at most 256 KiB of JSON (the oldest ended jobs are dropped first). Each entry carries the job's
+entries and at most 256 KiB of JSON (the end of the list, the oldest ended jobs, is dropped first). Each entry carries the job's
 phase, reason and `message` (its `status.message`, cut to 512 characters). A typical entry is about 0.6 KiB, so
 300 of them take about 170 KiB, well under the etcd object limit.
 
