@@ -1,0 +1,115 @@
+{
+ "schema": 1,
+ "function": "kubecore.authoring.step",
+ "doc": "Seeded, PLATFORM-OWNED render-time helpers. DO NOT EDIT.",
+ "params": [
+  {
+   "name": "name",
+   "required": true,
+   "default": null,
+   "type": "string",
+   "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+   "doc": "DNS-label step name: the Argo template, the steps/<dir> folder and the image-<step> parameter."
+  },
+  {
+   "name": "reads",
+   "required": false,
+   "default": null,
+   "type": "array",
+   "items": "string",
+   "doc": "Config sections (top-level keys of the config/ tree) the step reads; checked at render."
+  },
+  {
+   "name": "gpu",
+   "required": false,
+   "default": false,
+   "type": "boolean",
+   "doc": "The step needs one GPU; only GPU steps run on the HPC target."
+  },
+  {
+   "name": "needs",
+   "required": false,
+   "default": null,
+   "type": "array",
+   "items": "step",
+   "doc": "Steps this one depends on; their declared outputs become inputs of this step."
+  },
+  {
+   "name": "outputs",
+   "required": false,
+   "default": null,
+   "type": "array",
+   "items": "string",
+   "doc": "Names of small result files the step writes to /work/output/<name>.json."
+  },
+  {
+   "name": "when",
+   "required": false,
+   "default": null,
+   "type": "string",
+   "doc": "An Argo `when` expression; the step is skipped when it is false."
+  },
+  {
+   "name": "disk",
+   "required": false,
+   "default": null,
+   "type": "string",
+   "pattern": "^[0-9]+(Ki|Mi|Gi|Ti|K|M|G|T)?$",
+   "doc": "Ephemeral-storage request as a Kubernetes quantity, e.g. '20Gi'."
+  },
+  {
+   "name": "hpc_time_limit",
+   "required": false,
+   "default": null,
+   "type": "string",
+   "pattern": "^[0-9]+[mh]?$",
+   "doc": "Slurm wall-clock limit of a gpu=True step on the HPC target: '90m', '12h' or '720' (minutes)."
+  },
+  {
+   "name": "resumable",
+   "required": false,
+   "default": null,
+   "type": [
+    "boolean",
+    "string"
+   ],
+   "pattern": "^[0-9]+[mh]?$",
+   "doc": "gpu=True only. True or a lead time ('20m', '1h'): how long before the HPC wall time the step is told to save its checkpoint; False opts out.",
+   "true_means": "10m"
+  },
+  {
+   "name": "checkpoint_every",
+   "required": false,
+   "default": null,
+   "type": [
+    "boolean",
+    "integer",
+    "string"
+   ],
+   "pattern": "^([0-9]+)([mh]?)$",
+   "doc": "How often the platform copies the step's checkpoint folder: minutes ('20m', '1h', 20); False = no copies; unset = the platform default."
+  },
+  {
+   "name": "idle_timeout",
+   "required": false,
+   "default": null,
+   "type": [
+    "boolean",
+    "integer",
+    "string"
+   ],
+   "pattern": "^([0-9]+)([mh]?)$",
+   "doc": "How long a step may show no GPU use and no new log line before it is ended as Idle: minutes ('40m', '1h', 40); 0 or False = never; unset = the platform rule."
+  }
+ ],
+ "annotations": {
+  "hpc_time_limit": "platform.kubecore.io/hpc",
+  "resumable": "platform.kubecore.io/hpc-resumable",
+  "checkpoint_every": "platform.kubecore.io/checkpoint-every",
+  "idle_timeout": "platform.kubecore.io/idle-timeout"
+ },
+ "constants": {
+  "compose_step": "compose-and-validate",
+  "params_path": "/work/params.yaml"
+ }
+}

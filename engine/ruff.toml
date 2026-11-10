@@ -1,0 +1,11 @@
+# Lint for the engine's own Python. engine/kubecore/ is a byte copy of the template's package (and
+# tests/template/ its tests): they are checked by the upstream repo, not here.
+line-length = 130
+target-version = "py311"
+extend-exclude = ["kubecore", "upstream", "tests/template", "tests/app"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[lint.isort]
+known-first-party = ["kaos_engine", "paths", "helpers", "corpus", "gitutil"]

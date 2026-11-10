@@ -266,12 +266,18 @@ inside KAOS:
 ```sh
 make test       # unit tests and envtest (a real API server)
 make lint       # golangci-lint
+make test-engine lint-engine  # the pipeline engine's Python tests and ruff (also run by building engine/Dockerfile.engine)
+make engine-corpus  # render every historical template state and the lab apps with the engine (needs network)
 make manifests  # CRDs and RBAC from the Go types
 make build      # the manager binary
 make scale-test # load test of the real controller against fake Slurm sites (about 10 minutes, test/scale/README.md)
 ```
 
-Requires Go 1.24+.
+Requires Go 1.24+ (`make test-engine` also needs Python 3.12 and network).
+
+`engine/` is the platform pipeline engine (D-79): the template `kubecore/` package CI renders every ML app's
+pipeline.py with, so a platform change never needs a client commit. It is released at this operator's version;
+see engine/README.md.
 
 ## Licence
 

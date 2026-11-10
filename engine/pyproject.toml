@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kaos-pipeline-engine"
+dynamic = ["version"]  # setup.py: PEP 440 form of the build tag ($KAOS_ENGINE_TAG, else ../VERSION)
+description = "KAOS platform pipeline engine: renders, enhances and composes ML pipelines (D-79)"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+# The render/compose-time dependencies, pinned to what the CI render resolves today
+# (requirements.txt holds the full resolved set used by the image and the tests).
+dependencies = [
+    "hera>=5.16,<6",
+    "hydra-core>=1.3,<1.4",
+    "omegaconf>=2.3,<2.4",
+    "PyYAML>=6,<7",
+]
+
+# Layout of the wheel (never a top-level `kubecore`: kaos-lib 0.4 ships a `kubecore` alias):
+#   kaos_engine/                      the runner (python -m kaos_engine.render)
+#   kaos_pipeline_engine/kubecore/    the engine (a byte copy of the template's kubecore/ + two patches)
+#   kaos_pipeline_engine/*.json       known-vendored, authoring-schema, compat-surface
+[tool.setuptools]
+packages = ["kaos_engine", "kaos_pipeline_engine", "kaos_pipeline_engine.kubecore"]
+
+[tool.setuptools.package-dir]
+kaos_engine = "kaos_engine"
+kaos_pipeline_engine = "kaos_pipeline_engine"
+"kaos_pipeline_engine.kubecore" = "kubecore"
+
+[tool.setuptools.package-data]
+kaos_pipeline_engine = ["*.json"]
+"kaos_pipeline_engine.kubecore" = ["config/**/*", "local-dev/*", "README.md"]

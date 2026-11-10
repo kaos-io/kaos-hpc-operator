@@ -1,0 +1,23 @@
+{
+ "commit": "b61f049e19c5fdb90c46deecde08b60f19bb1aeb",
+ "files": {
+  "README.md": "6d40eb0570ebe49955ee02fe621e675de66ce580",
+  "__init__.py": "deafac9f25d31ac7a89fa95ca4385005924fe101",
+  "authoring.py": "b107b7cc6d201af4e938b01ad603d74b80e7a586",
+  "checkpoint_helper.py": "5705719c52c5b77f6fdf3ed9916dde56320c732b",
+  "compose.py": "f286d1e4b154dc67c7d4b4b243c4626dbd000d54",
+  "config/platform/live.yaml": "48f03b49344fe2aed28b7f32b53ec3994f73a913",
+  "derive_tree.py": "5e88509fd4229f2f5b64936c1f3f3c3378137685",
+  "enhance.py": "1e42f44cb8dc9eed8e1dde78a2e4abba7bf66cba",
+  "kaos_lib_support.py": "7526dc9141f08a40238d5ff998f88e49940398ad",
+  "local-dev/README.md": "91f568d031598cf28b98b46bc3b5508a61369dfd",
+  "local-dev/pipeline-context.yaml": "63c39592f9916e82a6c3cd29a40036ca367742e1",
+  "meluxina.py": "48da835ddce030ea2487267e54d1cb3f263d8c7d",
+  "outputs_repo.py": "cedcd36223b85e697142e0a0ef29b5b654461add",
+  "resilience.py": "ee09b1e65d6e391a6399c0aad9c1a18456dfe919"
+ },
+ "patched": [
+  "derive_tree.py"
+ ],
+ "repo": "novelcore/hera-pipeline-template"
+}

@@ -1,0 +1,63 @@
+# The pipeline engine image (D-79): what CI renders an app's pipeline.py with, and the base of the
+# compose-and-validate step. Build from the REPOSITORY ROOT:
+#   docker build -f engine/Dockerfile.engine --build-arg ENGINE_TAG=v0.4.7 -t kaos-pipeline-engine:v0.4.7 .
+# The version is the operator's build tag (the same tag as kaos-hpc-operator, D-58/D-63).
+#
+# Layout:
+#   /work/kubecore              the engine (python -m kubecore.compose runs from /work, as the old compose image did)
+#   /work/*.json                known-vendored.json, authoring-schema.json, compat-surface.json
+#   site-packages/kaos_engine   the runner:  python -I -m kaos_engine.render pipeline.py --repo ... --profile ...
+#   site-packages/kaos_pipeline_engine   the same engine as the wheel ships it (never a top-level kubecore)
+#
+# Python and the libraries are pinned: the base image by digest (bump the digest and re-scan to take a fix) and
+# the libraries in engine/requirements.txt (hera 5.27.0, hydra-core 1.3.8, omegaconf 2.3.1, PyYAML 6.0.3 as the
+# CI render resolved them on 2026-11-10).
+ARG PYTHON_IMAGE=python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
+
+# Stage 1: the engine's own checks (ruff + every engine test except the opt-in corpus). The final image copies a
+# marker from here, so a build (CI validates and releases by building this file) cannot succeed with failing
+# tests, whatever the builder (BuildKit skips unreferenced stages). Needs network for pip, like the stage below.
+FROM ${PYTHON_IMAGE} AS engine-tests
+ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONDONTWRITEBYTECODE=1
+COPY engine/requirements.txt engine/requirements-dev.txt /src/engine/
+RUN pip install -r /src/engine/requirements-dev.txt
+COPY VERSION /src/VERSION
+COPY engine /src/engine
+# files the follower-contract test reads from the Go side
+COPY Dockerfile /src/Dockerfile
+COPY internal/follower/config.go /src/internal/follower/config.go
+COPY api/v1alpha1/hpcargoworkflowjob_types.go /src/api/v1alpha1/hpcargoworkflowjob_types.go
+WORKDIR /src
+RUN cd engine && ruff check --config ruff.toml . \
+ && cd /src && python -m pytest -c engine/pytest.ini engine/tests -q \
+ && touch /engine-tests-passed
+
+# Stage 2: the image.
+FROM ${PYTHON_IMAGE}
+
+ARG ENGINE_TAG=
+ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+
+COPY engine/requirements.txt /tmp/requirements.txt
+RUN pip install -r /tmp/requirements.txt
+
+# The wheel (runner + versioned metadata); --no-deps because the line above resolved them.
+COPY VERSION /src/VERSION
+COPY engine/pyproject.toml engine/setup.py /src/engine/
+COPY engine/kaos_engine /src/engine/kaos_engine
+COPY engine/kaos_pipeline_engine /src/engine/kaos_pipeline_engine
+COPY engine/kubecore /src/engine/kubecore
+RUN KAOS_ENGINE_TAG="${ENGINE_TAG}" pip install --no-deps /src/engine && rm -rf /src
+
+WORKDIR /work
+COPY engine/kubecore /work/kubecore
+COPY engine/kaos_pipeline_engine/*.json /work/
+ENV KAOS_ENGINE_DIR=/work
+# The compose step writes /work/params.yaml and /work/output/*.json as the non-root user; the engine
+# files themselves stay root-owned and read-only.
+RUN mkdir -p /work/output && chown 65532:65532 /work /work/output
+
+COPY --from=engine-tests /engine-tests-passed /usr/share/kaos-engine-tests-passed
+LABEL io.kaos.engine="${ENGINE_TAG}"
+USER 65532:65532
+ENV HOME=/tmp
