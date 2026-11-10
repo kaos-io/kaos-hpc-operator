@@ -134,7 +134,7 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if job.Status.Phase.Terminal() {
 		r.forget(string(job.UID))
 		r.publishAfterEnd(ctx, &job)
-		return ctrl.Result{}, r.resettleHostEnd(ctx, &job)
+		return r.resettleHostEnd(ctx, &job)
 	}
 
 	if serve && job.Status.Sweep != nil && job.Status.Booking != nil {
@@ -344,15 +344,16 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 	attempt := max(job.Status.Attempt, 1)
 	tier := hpcv1alpha1.TierGPU
 	var admittedAt *metav1.Time
-	if job.Status.Booking != nil {
-		tier = job.Status.Booking.Tier
-		admittedAt = &job.Status.Booking.At
+	booking := job.Status.Booking
+	if booking != nil {
+		tier = booking.Tier
+		admittedAt = &booking.At
 	}
 	job.Status.Attempts = append(job.Status.Attempts, hpcv1alpha1.AttemptRecord{Attempt: attempt,
 		SiteJobID: run.SiteJobID, ExitCode: run.ExitCode, Outcome: reason, Tier: tier,
 		SettledNodeMinutes: used, EndTime: end})
 	job.Status.Booking = nil
-	msg := "attempt " + strconv.Itoa(int(attempt)) + " settled " + strconv.FormatInt(used, 10) + " node-minutes"
+	msg := settledWords(attempt, used)
 	if reason == hpcv1alpha1.ReasonIdle {
 		// D-72: the on-node watchdog ended a hung step; name it, count it, record what it spared.
 		saved := nodeMinutesSaved(job, run, end)
@@ -390,6 +391,14 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 	if stopped {
 		// The step ran its whole declared limit: say so in plain words (settled minutes are in attempts).
 		msg = timelimit.StopMessage(job.EffectiveWallMinutes(), capsOf(job, site).Max(), job.Spec.Resumable != nil)
+	}
+	if run.HostJobOpen && run.HostSiteJobID == "" && phase.Terminal() && booking != nil {
+		// D-26: the step ended but the host's Slurm job still holds the node for its guests, and the site
+		// charges it until that job ends. The booking stays held (the guests hold none of their own) until the
+		// runner reports the job's end (resettleHostEnd); the step's result does not wait for it.
+		job.Status.Booking = booking
+		job.Status.Attempts[len(job.Status.Attempts)-1].HostJobOpen = true
+		msg += hostOpenNote
 	}
 	job.Status.Phase, job.Status.Reason, job.Status.Message = phase, reason, msg
 	if phase.Terminal() {

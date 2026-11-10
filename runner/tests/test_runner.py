@@ -5,6 +5,7 @@ checkpoint check, on_term cancel) and the phase-1 contract: one attempt per runn
 re-attach by key, never submit a continuation.
 """
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -819,8 +820,11 @@ def test_a_host_reports_its_step_at_once_and_its_job_end_when_the_job_ends(rig):
     first, last = terminal_reports(rig)[0], terminal_reports(rig)[-1]
     assert len(terminal_reports(rig)) == 2
     assert first["state"] == "COMPLETED" and first.get("hostSiteJobID") is None
+    assert first["hostJobOpen"] is True, "D-26: the controller holds the host's booking until the job's end"
     assert last["endTime"] == "2025-11-05T00:03:00Z", "the host job's own end, not the step's"
-    assert {k: v for k, v in last.items() if k != "endTime"} == {k: v for k, v in first.items() if k != "endTime"}
+    assert last["hostJobOpen"] is None and "hostJobOpen" not in rig.kube.run, "the job's end closes the host"
+    same = ("endTime", "hostJobOpen")
+    assert {k: v for k, v in last.items() if k not in same} == {k: v for k, v in first.items() if k not in same}
     outputs_patches = [c for c in rig.kube.patches() if "outputs" in c[2]["status"]]
     assert len(outputs_patches) <= 1, "outputs ride with the step's report only"
     assert "outputs" not in rig.kube.patches()[-1][2]["status"]
@@ -872,7 +876,37 @@ def test_a_host_job_that_never_ends_is_given_up_after_its_limit_plus_margin(rig,
     monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
     rig.runner.sleep = lambda s: clock.__setitem__(0, clock[0] + 600)
     assert rig.runner.run() == 0
-    assert len(terminal_reports(rig)) == 1, "settled from the step; no end report without a job end"
+    first, last = terminal_reports(rig)
+    assert first["hostJobOpen"] is True and last["hostJobOpen"] is None, "the host is closed all the same"
+    limit_s = rig.runner.job_limit_min * 60
+    assert last["endTime"] == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(1762300800 + limit_s)), \
+        "the latest end Slurm allows the job: its start plus its time limit"
+
+
+def test_a_restarted_host_runner_follows_its_host_job_to_its_end_without_submitting(rig):
+    """The runner pod was replaced after the step's report (hostJobOpen): only the host job's end is left."""
+    opened = {"attempt": 1, "siteJobID": "5001", "state": "COMPLETED", "exitCode": 0, "terminal": True,
+              "startTime": "2025-11-05T00:00:00Z", "endTime": "2025-11-05T00:01:00Z", "hostJobOpen": True}
+    slurm = FakeSlurm({"5001": [acc("RUNNING", comment=HOST_DONE, end=0), acc("COMPLETED", comment=HOST_DONE, end=1762302060)]})
+    rig.make(slurm, status={"run": dict(opened)}, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    assert rig.runner.run() == 0
+    assert slurm.submitted == [] and slurm.cancelled == []
+    assert rig.kube.run["endTime"] == "2025-11-05T00:21:00Z" and "hostJobOpen" not in rig.kube.run
+    assert rig.kube.run["state"] == "COMPLETED" and rig.kube.run["exitCode"] == 0 and rig.kube.run["terminal"]
+
+
+def test_a_guest_stopped_by_its_own_time_limit_reports_a_timeout_and_any_other_kill_a_failure(rig):
+    """AC-72 / D-67 (live 2026-11-10, guest 5439976): the slot manager says reason=TIMEOUT when srun --time stopped
+    the step; the attempt then ends like a TIMEOUT alone, so the controller retries a learned limit."""
+    for comment, state in (("kaos-state=done rc=143 host=5439966 reason=TIMEOUT", "TIMEOUT"),
+                           ("kaos-state=done rc=143 host=5439966", "FAILED")):
+        taken = acc("PENDING", comment="kaos-state=taken host=5439966 slot=0 attempt=1")
+        done = acc("CANCELLED", comment=comment, start=4294967294, end=0)
+        rig.make(FakeSlurm({"5001": [taken, done], "5439966": [acc("RUNNING")]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+        rig.runner.run()
+        run = rig.kube.run
+        assert (run["state"], run["exitCode"], run["hostSiteJobID"], run["slot"]) == (state, 143, "5439966", 0), comment
+        assert "hostJobOpen" not in run, "a guest never holds a node of its own"
 
 # ---------------------------------------------------------------- the controller's batched reading (D-36)
 

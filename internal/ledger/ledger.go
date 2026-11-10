@@ -8,6 +8,8 @@ import (
 	"math"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 )
 
@@ -137,8 +139,35 @@ func PeriodStart(now time.Time) time.Time {
 	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 }
 
-// Holds reports whether a job currently holds its booking.
+// OpenHost reports whether the job ended as a host whose Slurm job still holds the node for guests
+// (D-26): its last attempt is provisional and its booking is still held until the job's end is reported.
+func OpenHost(j *hpcv1alpha1.HPCArgoWorkflowJob) bool {
+	n := len(j.Status.Attempts)
+	return j.Status.Booking != nil && j.Status.Phase.Terminal() && n > 0 && j.Status.Attempts[n-1].HostJobOpen
+}
+
+// heldMinutes is what a held booking counts for. An open host's node is charged by the site until its
+// Slurm job ends, which guests can make longer than the booking: it holds the larger of the booking, its
+// provisional settlement and its node time so far (live 2026-11-10, host 5439966: a 1-minute step, a
+// node held 21 minutes for a guest).
+func heldMinutes(j *hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) int64 {
+	b := j.Status.Booking.NodeMinutes
+	if !OpenHost(j) {
+		return b
+	}
+	b = max(b, j.Status.Attempts[len(j.Status.Attempts)-1].SettledNodeMinutes)
+	if r := j.Status.Run; r != nil && r.StartTime != nil && r.StartTime.Before(&metav1.Time{Time: now}) {
+		b = max(b, int64(max(j.Spec.Nodes, 1))*int64(math.Ceil(now.Sub(r.StartTime.Time).Minutes())))
+	}
+	return b
+}
+
+// Holds reports whether a job currently holds its booking: an active job (a guest excepted), or a host
+// whose Slurm job still holds the node after its step ended (D-26).
 func Holds(j *hpcv1alpha1.HPCArgoWorkflowJob) bool {
+	if OpenHost(j) {
+		return true
+	}
 	if j.Status.Booking == nil || j.Status.Phase.Terminal() {
 		return false
 	}
@@ -194,7 +223,8 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 		}
 		// Every finished attempt counts in the period it ended (a continued job spends per attempt).
 		for _, a := range j.Status.Attempts {
-			if a.EndTime.Time.Before(start) {
+			// An open host's settlement is provisional: its held booking counts instead (heldMinutes).
+			if a.HostJobOpen || a.EndTime.Time.Before(start) {
 				continue
 			}
 			t := l.Tiers[a.Tier]
@@ -210,7 +240,7 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 			if Holds(j) {
 				l.SiteJobs++
 				t := l.Tiers[b.Tier]
-				t.Booked += b.NodeMinutes
+				t.Booked += heldMinutes(j, now)
 				l.Tiers[b.Tier] = t
 			}
 			// A guest holds no booking of its own (its host's covers the node) but is still active.

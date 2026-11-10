@@ -41,6 +41,9 @@ const (
 	// RunnerReportGrace is how long a finished runner Job may wait for its terminal report to show
 	// in the cache before the attempt counts as failed.
 	RunnerReportGrace = 15 * time.Second
+	// OpenHostPoll is how often an ended host whose Slurm job still holds the node (D-26) is looked at,
+	// in case its runner ends without reporting the job's end.
+	OpenHostPoll = time.Minute
 
 	blockedWaitingReason = "CreateContainerConfigError"
 	maxMessage           = 1000

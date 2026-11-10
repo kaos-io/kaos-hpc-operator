@@ -244,6 +244,12 @@ spec:
                     exitCode:
                       format: int32
                       type: integer
+                    hostJobOpen:
+                      description: |-
+                        HostJobOpen: this attempt was a host whose Slurm job still held the node for guests when its step
+                        ended (D-26). Its settlement is provisional and its booking stays held until the runner reports the
+                        job's own end; the attempt is then settled from the job's start to that end.
+                      type: boolean
                     nodeMinutesSaved:
                       description: |-
                         NodeMinutesSaved is set for an attempt the idle watchdog ended (reason Idle): the step's
@@ -641,6 +647,12 @@ spec:
                     x-kubernetes-list-map-keys:
                     - gpu
                     x-kubernetes-list-type: map
+                  hostJobOpen:
+                    description: |-
+                      HostJobOpen is set on a host's terminal report when its step ended but its Slurm job still holds the
+                      node for guests (node sharing, D-26): the site charges the node until that job ends. The runner
+                      reports the job's own end with HostJobOpen unset; until then the host's booking stays held.
+                    type: boolean
                   hostSiteJobID:
                     description: |-
                       HostSiteJobID is set when a host job of the same project took this job onto its node

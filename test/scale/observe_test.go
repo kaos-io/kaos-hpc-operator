@@ -246,6 +246,16 @@ func onSite(j *hpcv1alpha1.HPCArgoWorkflowJob, s *hpcv1alpha1.HPCSite) bool {
 	return j.Status.Site != nil && j.Status.Site.Name == s.Name && j.Status.Site.Namespace == s.Namespace
 }
 
+// coverageOf is the project of an HPCSite namespace whose scenario checks coverage, or nil.
+func (w *world) coverageOf(hpcNS string) *project {
+	for _, p := range w.projects {
+		if p.hpcNS == hpcNS && p.coverage {
+			return p
+		}
+	}
+	return nil
+}
+
 // tally is one site's spend by tier, computed independently of the controller's ledger package.
 type tally struct{ used, booked [2]int64 } // index 0 GPU, 1 CPU
 
@@ -266,7 +276,13 @@ func tallyOf(s *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob) (t t
 		if !onSite(j, s) {
 			continue
 		}
+		n := len(j.Status.Attempts)
+		// D-26: an ended host whose Slurm job still holds the node keeps its booking; its settlement is provisional.
+		openHost := n > 0 && j.Status.Attempts[n-1].HostJobOpen && j.Status.Phase.Terminal()
 		for _, a := range j.Status.Attempts {
+			if a.HostJobOpen {
+				continue
+			}
 			t.used[tierIdx(a.Tier)] += max(a.SettledNodeMinutes, 0)
 			if !a.EndTime.Time.Before(observed) {
 				siteUsed[tierIdx(a.Tier)] += max(a.SettledNodeMinutes, 0)
@@ -276,6 +292,9 @@ func tallyOf(s *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob) (t t
 			(j.Status.Phase == hpcv1alpha1.PhaseAdmitted || j.Status.Phase == hpcv1alpha1.PhaseRunning) {
 			t.booked[tierIdx(b.Tier)] += b.NodeMinutes
 			active++
+		}
+		if b := j.Status.Booking; b != nil && openHost {
+			t.booked[tierIdx(b.Tier)] += b.NodeMinutes
 		}
 	}
 	return t, siteUsed, active
@@ -323,6 +342,14 @@ func (m *monitor) check(ctx context.Context) {
 		m.maxSiteB = max(m.maxSiteB, len(raw))
 		m.maxActive = max(m.maxActive, active)
 		m.mu.Unlock()
+		// D-26: the ledger covers what the site charges at every moment (a node a host keeps for guests included).
+		// Checked where a scenario asks for it; read after the jobs, so the site figure is never older.
+		if p := m.w.coverageOf(s.Namespace); p != nil {
+			if charged := p.site.Charged(p.account); float64(t.used[0]+t.used[1]+t.booked[0]+t.booked[1]) < charged-0.5 {
+				m.violate("%s: used %d + booked %d node-minutes cover less than the site charged (%.1f)", s.Namespace,
+					t.used[0]+t.used[1], t.booked[0]+t.booked[1], charged)
+			}
+		}
 		if len(s.Status.RecentJobs) > hpcv1alpha1.RecentJobsMax {
 			m.violate("%s recentJobs has %d entries (> %d)", s.Namespace, len(s.Status.RecentJobs), hpcv1alpha1.RecentJobsMax)
 		}

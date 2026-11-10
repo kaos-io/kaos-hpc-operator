@@ -50,7 +50,10 @@ Behaviour knobs: latency and jitter, 5xx rate, hanging requests, a full outage (
 runner asks again), a seeded random end per run (`NODE_FAIL`, `PREEMPTED`, `FAILED`), a run that outlasts its limit
 (`TIMEOUT`), and per-job hints that the harness puts in the submit environment (`FAKE_RUN_MINUTES`,
 `FAKE_FORCE_END`, `FAKE_SEGMENTS`: a checkpointing step that exits 85 with a checkpoint marker in the job
-comment until its last segment). A run is planned from the job name, the attempt and the seed, so a repeated
+comment until its last segment; `FAKE_HOST_TAIL_MINUTES`: a node-sharing host whose Slurm job keeps the node that
+long after its step, its step's result written into the job comment as the slot manager writes it, all of it
+charged; `FAKE_GUEST`: a guest that never starts on its own, is taken by a running host of its account whose job
+outlasts it and is cancelled with its result, charged nothing). A run is planned from the job name, the attempt and the seed, so a repeated
 submission plans the same run.
 
 **Time dilation.** Real seconds are cheap, node-minutes are the budget unit. The site reports job times with
@@ -71,13 +74,16 @@ one terminal report with exit code, times and checkpoint reference), read the st
 or an end, or for itself when the observation is stale (the real runner's `STALE_*` rules, scaled to the
 test's poll interval). A refused submit (4xx) restarts the "pod" after 10, 20, 40, 80 s and fails the batch Job after
 the fifth try, like `backoffLimit: 4`; a site that does not answer is waited for, up to 30 minutes. Not modelled: staging of dataset and image, the job script, logs,
-outputs, node sharing, the cancel-on-SIGTERM path (a cancel-only runner for the orphan sweep is).
+outputs, the cancel-on-SIGTERM path (a cancel-only runner for the orphan sweep is). Node sharing is modelled as the
+runner sees it (D-26): a host reports its step's end with `hostJobOpen` and follows its Slurm job to its end; a guest
+reports its host while taken and ends with the result its host wrote. GPU slots are not modelled.
 
 ## Scenarios
 
 | scenario | what it proves |
 |---|---|
 | **S** | one job end to end: admitted, booked, runner Job, submit, observed, settled; one submission |
+| **S-shared** | node sharing (D-26): 8 hosts whose Slurm job keeps the node 6-14 minutes after the step, 16 guests taken by them: on every snapshot the ledger's `used + booked` covers what the site has charged; every host settled to its job's end, every guest 0; the settled total equals the site's charge (whole minutes, rounded up); the published ledger is current 10 s after the last end. Against the controller before the fix the coverage check fails (`used 8 + booked 0` for 70 charged node-minutes) |
 | **M** | 50 jobs, two classes, a share and siteLeft that admit only part: the rest wait `WaitingForBudget` and are admitted as bookings settle; on every snapshot `used + booked <= min(share, siteLeft)`; the fake site's own charge never exceeds it; every job terminal; no duplicate submission; the published ledger ends with nothing booked |
 | **L** | 1,000 jobs, 3 projects on 2 sites (two projects share one site profile and so one token bucket), lanes `test` and `dev` on with one-job-per-user limits at the site: reconcile throughput, `jobs/state` calls per poll cycle (batched, O(sites)), the shared rate-limit bucket, controller RSS and heap over time, `recentJobs` <= 50 and bounded object size, HPCSite write rate, no lane refusal (the controller never submits a second job into a one-job lane) |
 | **L-chaos** | L plus: controller killed and restarted mid-run (bookings unchanged, no re-submission), a 10-minute outage of the shared site (all 5xx: jobs wait `Waiting/SiteUnavailable`, no runner Job is created for it while it lasts, none fails, all finish afterwards; `SiteReachable` false, then true), lost submit replies that finish before the retry (found in accounting by name: 0 duplicates), a 422 storm on the other site, 10 % `NODE_FAIL`, jobs that always lose their node (`RerunLimit` after exactly 2 re-runs), checkpointing steps (continue at most 5 times; a cohort needing 8 segments ends `ContinuationLimit`) |

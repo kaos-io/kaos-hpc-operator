@@ -26,6 +26,7 @@ import (
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 	"github.com/kaos-io/kaos-hpc-operator/internal/runnerjob"
+	"github.com/kaos-io/kaos-hpc-operator/test/scale/fakeslurm"
 )
 
 // The fake kubelet plays the runner pods. In production the controller creates one batch Job per
@@ -43,7 +44,9 @@ import (
 //   - read the job's state from status.siteObservation while it is fresh and call the site only for
 //     the accounting record of a state change or an end, or itself when the observation is stale.
 //
-// What is NOT modelled: dataset/image staging, the job script, logs, outputs, node sharing. Submit
+// Node sharing (D-26) is modelled as the runner sees it: a host reports its step's end from its job comment
+// with hostJobOpen and follows its Slurm job to its end; a guest reports its host while taken and ends with
+// the result its host wrote. What is NOT modelled: dataset/image staging, the job script, logs, outputs. Submit
 // refusals (4xx) follow the real pod behaviour: the pod exits, Kubernetes restarts it after 10, 20, 40, 80 s
 // (backoffLimit 4), and the batch Job fails after the fifth try.
 //
@@ -56,6 +59,8 @@ const (
 	annRunMinutes = "fake.kaos.io/run-minutes"
 	annForceEnd   = "fake.kaos.io/force-end"
 	annSegments   = "fake.kaos.io/segments"
+	annHostTail   = "fake.kaos.io/host-tail-minutes"
+	annGuest      = "fake.kaos.io/guest"
 )
 
 // siteWiring tells the kubelet which fake site serves an HPCSite namespace.
@@ -104,6 +109,7 @@ type frunner struct {
 	done      bool
 	watchSeen time.Time
 	lastRest  time.Time
+	hostOpen  *hpcv1alpha1.RunStatus // a host's step-end report while its Slurm job still holds the node
 }
 
 func newKubelet(c client.Client, sites []*siteWiring, poll, obsTTL time.Duration) *kubelet {
@@ -212,7 +218,7 @@ func (k *kubelet) step(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCArgoWo
 		k.finish(r) // the job is gone or moved to a later attempt
 		return
 	}
-	if run := j.Status.Run; !r.cancel && run != nil && run.Attempt == r.attempt && run.Terminal {
+	if run := j.Status.Run; !r.cancel && run != nil && run.Attempt == r.attempt && run.Terminal && !run.HostJobOpen {
 		k.finish(r)
 		return
 	}
@@ -349,7 +355,8 @@ func (k *kubelet) submit(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCArgo
 	if rs := j.Status.Resume; rs != nil && rs.CheckpointRef != "" {
 		env = append(env, "KAOS_RESUME_REF="+rs.CheckpointRef)
 	}
-	for ann, key := range map[string]string{annRunMinutes: "FAKE_RUN_MINUTES", annForceEnd: "FAKE_FORCE_END", annSegments: "FAKE_SEGMENTS"} {
+	for ann, key := range map[string]string{annRunMinutes: "FAKE_RUN_MINUTES", annForceEnd: "FAKE_FORCE_END", annSegments: "FAKE_SEGMENTS",
+		annHostTail: fakeslurm.EnvHostTailMinutes, annGuest: fakeslurm.EnvGuest} {
 		if v := j.Annotations[ann]; v != "" {
 			env = append(env, key+"="+v)
 		}
@@ -514,6 +521,10 @@ func (k *kubelet) accounting(ctx context.Context, s *siteWiring, id string) (acc
 // stepFollow reads the site job's state like runner.view(): the controller's observation while it is
 // fresh, the site itself only when it is not, and the accounting record when the state changed or ended.
 func (k *kubelet) stepFollow(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCArgoWorkflowJob) {
+	if r.hostOpen != nil {
+		k.followHostEnd(ctx, r, j)
+		return
+	}
 	obs := j.Status.SiteObservation
 	fresh := obs != nil && obs.JobID == r.siteJobID &&
 		time.Since(obs.ObservedAt.Time) <= 3*time.Duration(obs.IntervalSeconds)*time.Second+time.Second
@@ -538,16 +549,37 @@ func (k *kubelet) stepFollow(ctx context.Context, r *frunner, j *hpcv1alpha1.HPC
 		state = "?"
 	}
 	first := strings.Split(state, ",")[0]
+	// A sharing job's comment changes without a state change (a host's step ends, a guest is taken): the
+	// runner reads it every tick (runner.live_of).
+	sharing := j.Annotations[annHostTail] != "" || j.Annotations[annGuest] != ""
 	if state != "?" && !terminalStates[first] {
-		if state != r.reported {
-			if rec, err := k.accounting(ctx, r.site, r.siteJobID); err == nil {
-				r.reported = state
-				k.report(ctx, r, j, func(rs *hpcv1alpha1.RunStatus) {
-					rs.SiteJobID, rs.State = r.siteJobID, state
-					rs.StartTime = siteTime(rec.Time.Start.Set, rec.Time.Start.Number)
-				})
-			}
+		if state == r.reported && !sharing {
+			return
 		}
+		rec, err := k.accounting(ctx, r.site, r.siteJobID)
+		if err != nil {
+			return
+		}
+		share := shareOf(rec.Comment.Job)
+		if sharing && first == "RUNNING" && share["kaos-state"] == "done" && share["host"] == "" {
+			k.reportStepEnd(ctx, r, j, rec, share)
+			return
+		}
+		key := state
+		if sharing {
+			key += "|" + share["kaos-state"] + "|" + share["host"]
+		}
+		if key == r.reported {
+			return
+		}
+		r.reported = key
+		k.report(ctx, r, j, func(rs *hpcv1alpha1.RunStatus) {
+			rs.SiteJobID, rs.State = r.siteJobID, state
+			rs.StartTime = siteTime(rec.Time.Start.Set, rec.Time.Start.Number)
+			if share["kaos-state"] == "taken" {
+				rs.HostSiteJobID = share["host"]
+			}
+		})
 		return
 	}
 	rec, err := k.accounting(ctx, r.site, r.siteJobID)
@@ -569,6 +601,15 @@ func siteTime(set bool, n int64) *metav1.Time {
 func (k *kubelet) reportEnd(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCArgoWorkflowJob, rec acctRecord) {
 	st := rec.State.Current[0]
 	rc := int32(rec.ExitCode.ReturnCode.Number)
+	share := shareOf(rec.Comment.Job)
+	if share["kaos-state"] == "done" && share["host"] != "" {
+		// A guest: its host ran the step and cancelled its job; the result is in the comment (runner.poll_loop).
+		n, _ := strconv.Atoi(share["rc"])
+		st, rc = "COMPLETED", int32(n)
+		if n != 0 {
+			st = "FAILED"
+		}
+	}
 	seq := 0
 	if _, after, ok := strings.Cut(rec.Comment.Job, "kaos-ckpt-seq="); ok {
 		seq, _ = strconv.Atoi(strings.Fields(after)[0])
@@ -584,6 +625,9 @@ func (k *kubelet) reportEnd(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCA
 		}
 		rs.EndTime = end
 		rs.QOS, rs.Reservation = r.rj.Annotations["fake.qos"], r.rj.Annotations["fake.reservation"]
+		if share["kaos-state"] == "done" {
+			rs.HostSiteJobID = share["host"]
+		}
 		if recoverable && seq > 0 {
 			path := fmt.Sprintf("scratch://ckpt/%s/%d.tar", j.UID, seq)
 			sum := sha256.Sum256([]byte(path))
@@ -593,6 +637,50 @@ func (k *kubelet) reportEnd(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCA
 		}
 	})
 	if ok {
+		k.finish(r)
+	}
+}
+
+// shareOf reads what a host wrote into a job comment (slurm.share_state).
+func shareOf(comment string) map[string]string {
+	out := map[string]string{}
+	for _, w := range strings.Fields(comment) {
+		if k, v, ok := strings.Cut(w, "="); ok && (k == "kaos-state" || k == "host" || k == "slot" || k == "rc") {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// reportStepEnd is a host's report of its step's end while its Slurm job still holds the node for guests
+// (runner.end with hostJobOpen): the controller keeps the booking held until followHostEnd reports the job's end.
+func (k *kubelet) reportStepEnd(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCArgoWorkflowJob, rec acctRecord, share map[string]string) {
+	n, _ := strconv.Atoi(share["rc"])
+	rc, now := int32(n), metav1.Now()
+	run := hpcv1alpha1.RunStatus{Attempt: r.attempt, SiteJobID: r.siteJobID, State: "COMPLETED", ExitCode: &rc, Terminal: true,
+		StartTime: siteTime(rec.Time.Start.Set, rec.Time.Start.Number), EndTime: &now, HostJobOpen: true,
+		QOS: r.rj.Annotations["fake.qos"], Reservation: r.rj.Annotations["fake.reservation"]}
+	if n != 0 {
+		run.State = "FAILED"
+	}
+	if k.report(ctx, r, j, func(rs *hpcv1alpha1.RunStatus) { *rs = run }) {
+		r.hostOpen = &run
+	}
+}
+
+// followHostEnd follows a host's Slurm job to its end and resends the step's report with the job's own end
+// and hostJobOpen cleared (runner.follow_host_job_end).
+func (k *kubelet) followHostEnd(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCArgoWorkflowJob) {
+	rec, err := k.accounting(ctx, r.site, r.siteJobID)
+	if err != nil || len(rec.State.Current) == 0 || !terminalStates[rec.State.Current[0]] {
+		return
+	}
+	closing := *r.hostOpen
+	closing.HostJobOpen = false
+	if end := siteTime(rec.Time.End.Set, rec.Time.End.Number); end != nil {
+		closing.EndTime = end
+	}
+	if k.report(ctx, r, j, func(rs *hpcv1alpha1.RunStatus) { *rs = closing }) {
 		k.finish(r)
 	}
 }

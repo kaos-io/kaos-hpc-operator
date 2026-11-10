@@ -45,6 +45,7 @@ type project struct {
 	siteName           string // the site profile name: projects of one profile share a token bucket
 	budget             budget
 	maxConcurrent      int32
+	coverage           bool // the monitor checks that used+booked never falls below what the site charged
 	wiring             *siteWiring
 	jobs               []string // names of the jobs created for it
 }
@@ -230,6 +231,8 @@ type jobSpec struct {
 	forceEnd    string
 	segments    int
 	resumable   bool
+	hostTail    string // a node-sharing host: dilated minutes its Slurm job keeps the node after its step
+	guest       bool   // a node-sharing guest: taken by a running host, never started on its own
 }
 
 // createJobs creates the jobs of a project with a bounded number of parallel writers.
@@ -260,6 +263,13 @@ func (w *world) createJobs(p *project, specs []jobSpec) {
 			}
 			if s.resumable {
 				j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 5, MaxContinuations: 5}
+			}
+			if s.hostTail != "" || s.guest {
+				j.Spec.Sharing = &hpcv1alpha1.Sharing{Scope: "scalescope1"}
+				j.Annotations[annHostTail] = s.hostTail
+				if s.guest {
+					j.Annotations[annGuest] = "1"
+				}
 			}
 			w.must(w.c.Create(w.ctx, j))
 		}(names[i], s)

@@ -327,6 +327,11 @@ type RunStatus struct {
 	// Slot is the GPU slot the host gave this job.
 	// +optional
 	Slot *int32 `json:"slot,omitempty"`
+	// HostJobOpen is set on a host's terminal report when its step ended but its Slurm job still holds the
+	// node for guests (node sharing, D-26): the site charges the node until that job ends. The runner
+	// reports the job's own end with HostJobOpen unset; until then the host's booking stays held.
+	// +optional
+	HostJobOpen bool `json:"hostJobOpen,omitempty"`
 	// CheckpointRef names the newest verified checkpoint copy the job left on the site's scratch, as
 	// scratch://<tar path>#<sha256> (T-19). It is reported with every recoverable end (exit 85, wall time, node
 	// failure, pre-emption, idle kill). Without it a step is not continued from a checkpoint.
@@ -455,6 +460,11 @@ type AttemptRecord struct {
 	NodeMinutesSaved *int64 `json:"nodeMinutesSaved,omitempty"`
 	// EndTime decides the budget period the spend counts in.
 	EndTime metav1.Time `json:"endTime"`
+	// HostJobOpen: this attempt was a host whose Slurm job still held the node for guests when its step
+	// ended (D-26). Its settlement is provisional and its booking stays held until the runner reports the
+	// job's own end; the attempt is then settled from the job's start to that end.
+	// +optional
+	HostJobOpen bool `json:"hostJobOpen,omitempty"`
 }
 
 // PlacementSource says where a Placement's time limit came from.

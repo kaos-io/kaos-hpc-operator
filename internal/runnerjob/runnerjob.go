@@ -175,7 +175,13 @@ func Build(cfg Config, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HP
 		LabelAttempt:                   strconv.Itoa(int(attempt)),
 		LabelRunnerJob:                 name,
 	}
-	deadline := (int64(job.EffectiveWallMinutes())+queueAllowanceMinutes+teardownMarginMinutes)*60 + int64(cfg.SiteWaitMax/time.Second)
+	wall := int64(job.EffectiveWallMinutes())
+	if job.Spec.Sharing != nil && site.Spec.Sharing && job.EffectiveResumable() == nil {
+		// A host's Slurm job may run up to twice its step's limit for guests, and its runner follows it to its
+		// end so the node is settled to what the site charges (D-26). A resumable step never hosts.
+		wall *= 2
+	}
+	deadline := (wall+queueAllowanceMinutes+teardownMarginMinutes)*60 + int64(cfg.SiteWaitMax/time.Second)
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: site.Namespace, Labels: labels,
