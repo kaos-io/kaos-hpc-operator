@@ -26,6 +26,18 @@ It is released by the same build as the controller, at the same version (D-58/D-
 | `tests/` | `template/` = the template's own kubecore tests, moved in; `app/` = the fixture app they render; the rest are the engine's tests |
 | `CORPUS_REPORT.md` | the last corpus run (generated) |
 
+## GPU driver prelude
+
+`kubecore/enhance.py` (`enhance_gpu_driver`) wraps the container command of every `gpu=True` step that runs on a KAOS GPU
+node (GKE, EKS) in a POSIX `sh -c` prelude: the NVIDIA driver folders (`/usr/local/nvidia/lib64`, `/usr/local/nvidia/lib`,
+`/usr/local/nvidia/bin`) are PREPENDED to the image's own `LD_LIBRARY_PATH` / `PATH`, a ctypes `cuInit(0)` check
+fails the step in its first second with a `KAOS: this GPU step cannot reach the NVIDIA driver (...)` line (skipped
+with a notice when the image has no python3, and when the step was given 0 GPUs, a cpu class), then `exec "$@"`
+runs the original command unchanged. It runs after the HPC twin is built, so a Slurm step (follower + Apptainer
+`--nv`) is never wrapped. The same change is in hera-pipeline-template `kubecore/enhance.py` (#100); the engine copy
+is that change applied to the engine's template commit, so `UPSTREAM.json` records its blob and the next
+`sync_upstream.py` converges on the template. Tests: `tests/template/test_gpu_driver_prelude.py`.
+
 ## Versioning
 
 * Source of truth: the operator build tag. `v0.4.7` -> wheel `0.4.7`; a dev build
