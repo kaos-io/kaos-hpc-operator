@@ -143,7 +143,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		wf := newWorkflow()
 		j := newServeJob(wf, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
 			j.Spec.Sharing = &hpcv1alpha1.Sharing{Scope: "abcdef12"}
-			j.Spec.Dataset = &hpcv1alpha1.DatasetPin{Repo: "ds", Version: "v1", Commit: "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}
+			j.Spec.Dataset = &hpcv1alpha1.DatasetPin{Repo: "dataset-ds", Version: "v1", Commit: "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}
 		})
 		res, got := reconcileOnce(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))

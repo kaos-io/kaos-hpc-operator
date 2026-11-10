@@ -440,9 +440,9 @@ func TestTheJobsDatasetIsExactlyWhatTheComposeStepPinned(t *testing.T) {
 	if cfg.Job().Spec.DatasetRef != "" {
 		t.Error("the deprecated datasetRef is never written")
 	}
-	branch := `{"repo":"my-repo","version":"feature/x","commit":"` + commit + `","owner":""}`
+	branch := `{"repo":"dataset-a","version":"feature/x","commit":"` + commit + `","owner":""}`
 	if cfg, err = ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": branch})); err != nil || cfg.Dataset.Version != "feature/x" {
-		t.Errorf("any repository of the project and a branch as version are fine: %+v, %v", cfg.Dataset, err)
+		t.Errorf("a branch as version is fine: %+v, %v", cfg.Dataset, err)
 	}
 	for _, none := range []string{"", "  \n"} {
 		if cfg, err = ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": none})); err != nil || cfg.Job().Spec.Dataset != nil {
@@ -465,6 +465,9 @@ func TestAPinThatIsNotCompleteAndOwnIsRefused(t *testing.T) {
 		"upper commit":     `{"repo":"dataset-a","version":"v1","commit":"` + strings.ToUpper(commit) + `"}`,
 		"no repo":          `{"version":"v1","commit":"` + commit + `"}`,
 		"one-letter repo":  `{"repo":"x","version":"v1","commit":"` + commit + `"}`,
+		"not a dataset":    `{"repo":"models-v2","version":"v1","commit":"` + commit + `"}`,
+		"outputs repo":     `{"repo":"outputs-app","version":"main","commit":"` + commit + `"}`,
+		"bare prefix":      `{"repo":"dataset-","version":"v1","commit":"` + commit + `"}`,
 		"repo with slash":  `{"repo":"a/b","version":"v1","commit":"` + commit + `"}`,
 		"repo upper case":  `{"repo":"Dataset-A","version":"v1","commit":"` + commit + `"}`,
 		"no version":       `{"repo":"dataset-a","commit":"` + commit + `"}`,

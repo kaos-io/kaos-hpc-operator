@@ -252,8 +252,8 @@ type HPCArgoWorkflowJobSpec struct {
 
 // DatasetPin is one dataset at one commit: what the run's data lock recorded for the step's dataset.
 type DatasetPin struct {
-	// Repo is the lakeFS repository of the dataset.
-	// +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9-]{1,62}$`
+	// Repo is the dataset's repository: a platform Dataset is a repository named dataset-<name>.
+	// +kubebuilder:validation:Pattern=`^dataset-[a-z0-9][a-z0-9-]{0,54}$`
 	Repo string `json:"repo"`
 	// Version is what the run asked for (latest, v3, a branch or a tag). It is a label: the commit decides
 	// what is read.

@@ -16,7 +16,7 @@ func fixtures() (*hpcv1alpha1.HPCArgoWorkflowJob, *hpcv1alpha1.HPCSite) {
 	job := &hpcv1alpha1.HPCArgoWorkflowJob{
 		ObjectMeta: metav1.ObjectMeta{Name: "hpc-abc", Namespace: "env-ns", UID: "11111111-2222"},
 		Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg/app:v1", Command: []string{"python", "t.py"},
-			WallTimeMinutes: 120, Dataset: &hpcv1alpha1.DatasetPin{Repo: "ds", Version: "v1", Commit: "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}, Outputs: []string{"model", "m"}, StepName: "train",
+			WallTimeMinutes: 120, Dataset: &hpcv1alpha1.DatasetPin{Repo: "dataset-ds", Version: "v1", Commit: "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}, Outputs: []string{"model", "m"}, StepName: "train",
 			Workflow:  &hpcv1alpha1.WorkflowRef{Name: "wf-1", UID: "wf-uid"},
 			Resumable: &hpcv1alpha1.Resumable{LeadMinutes: 20, MaxContinuations: 5},
 			Sharing:   &hpcv1alpha1.Sharing{Scope: "abcdef12"},
@@ -105,7 +105,7 @@ func TestShouldSetTheRunnerEnvironmentFromSpecAndSite(t *testing.T) {
 		"KAOS_RESUME_REF": "ckpt-1", "KAOS_RESUME_FROM_ATTEMPT": "1",
 		"IMAGE_REF": "reg/app:v1", "STEP_COMMAND": `["python","t.py"]`, "SLURM_TIME_LIMIT": "120",
 		"HPC_RESUMABLE_LEAD": "20", "STEP_OUTPUTS": "model,m", "HPC_CLASS": "meluxina-gpu", "STEP_NAME": "train",
-		"WF_UID": "wf-uid", "KUBECORE_WORKFLOW_NAME": "wf-1", "KUBECORE_RUN_ID": "wf-1", "DATASET_REPO": "ds", "DATASET_VERSION": "v1", "DATASET_COMMIT": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2", "DATASET_OWNER": "", "DATASET_UNPINNED": "",
+		"WF_UID": "wf-uid", "KUBECORE_WORKFLOW_NAME": "wf-1", "KUBECORE_RUN_ID": "wf-1", "DATASET_REPO": "dataset-ds", "DATASET_VERSION": "v1", "DATASET_COMMIT": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2", "DATASET_OWNER": "", "DATASET_UNPINNED": "",
 		"HPC_SHARING": "1", "HPC_SCOPE": "abcdef12", "OUTPUTS_REPO": "outputs-app",
 		"HPC_SITE": "meluxina", "HPC_ACCOUNT": "p1", "HPC_USER": "u1", "HPC_SCRATCH": "/project/scratch/p1",
 		"HPC_HOME": "/home/users/u1", "HPC_ENDPOINT": "https://slurm-api.example", "HPC_REST_VERSION": "v0.0.44",

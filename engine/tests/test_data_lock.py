@@ -111,6 +111,17 @@ def test_a_reference_that_does_not_resolve_ends_the_run_naming_the_form_field(er
     assert str(exc.value).startswith("dataset: cannot use 'dataset-a@v9'") and str(error) in str(exc.value)
 
 
+@pytest.mark.parametrize("value", ["models-v2@v1", "outputs-app@main", "my-repo@latest", "other/models@v1"])
+def test_only_a_dataset_repository_can_be_the_runs_dataset(value):
+    """A platform Dataset is a repository named dataset-<name>. The rule is checked here, once, so a run never
+    works on a cluster class and then fails on an HPC class."""
+    lock = FakeLock()
+    ds = FakeDatasets(lock, error=RuntimeError("must not be resolved"))
+    with pytest.raises(compose.ComposeError, match="is not a dataset: a dataset is a repository named dataset-"):
+        compose.data_lock({"dataset": value}, ["dataset"], datasets=ds, lock=lock)
+    assert lock.reads == []
+
+
 def test_a_malformed_reference_is_refused():
     lock = FakeLock()
     with pytest.raises(compose.ComposeError, match="dataset: cannot use 'dataset-a'"):

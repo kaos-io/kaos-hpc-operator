@@ -302,6 +302,7 @@ def check_step_images(raw) -> None:
 
 
 _COMMIT = re.compile(r"^[0-9a-f]{64}$")
+DATASET_PREFIX = "dataset-"   # a platform Dataset is a repository named dataset-<name>
 LAKEFS_TIMEOUT_S = 30     # per request; kaos-lib retries a failing GET a few times, so a dead lakeFS ends the run in minutes
 
 
@@ -349,6 +350,9 @@ def data_lock(resolved: dict, required: list, offline: bool = False, datasets=No
         datasets, lock, client = _kaos_lib()
     try:
         ref = datasets.DatasetRef.parse(wanted)
+        if not str(ref.repo).startswith(DATASET_PREFIX):
+            raise ValueError(f"{ref.repo} is not a dataset: a dataset is a repository named {DATASET_PREFIX}<name> "
+                             f"(for example {DATASET_PREFIX}default@latest)")
         commit = datasets.resolve(ref, client)
     except Exception as exc:   # no such dataset or version, lakeFS unreachable, no credentials: all end the run
         raise ComposeError(f"{DATASET_FIELD}: cannot use {wanted!r}: {exc}") from None

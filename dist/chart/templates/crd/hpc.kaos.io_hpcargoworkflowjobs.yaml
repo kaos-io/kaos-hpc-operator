@@ -96,8 +96,9 @@ spec:
                     pattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
                     type: string
                   repo:
-                    description: Repo is the lakeFS repository of the dataset.
-                    pattern: ^[a-z0-9][a-z0-9-]{1,62}$
+                    description: 'Repo is the dataset''s repository: a platform Dataset
+                      is a repository named dataset-<name>.'
+                    pattern: ^dataset-[a-z0-9][a-z0-9-]{0,54}$
                     type: string
                   version:
                     description: |-
