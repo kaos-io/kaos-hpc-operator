@@ -129,9 +129,14 @@ PART = q(ME, '%P')
 HOST_END = end_epoch()
 SHARE = mem_share_bytes()
 PAGE = os.sysconf('SC_PAGE_SIZE')
-slots = {}      # slot -> {'job', 'proc', 'claim', 'name', 'memkill', 'gpukill'}
+slots = {}      # slot -> {'job', 'proc', 'claim', 'name', 'memkill', 'gpukill', 'start', 'limit'}
 own_rc = None
 skip = set()    # jobs looked at and not ours to take
+
+
+def given_limit(limit):
+    # The time limit srun gets for a step, in seconds: whole minutes, rounded up (None: no limit).
+    return max(1, (limit + 59) // 60) * 60 if limit else None
 
 
 def launch(slot, job, script, log_to, limit=None):
@@ -141,7 +146,7 @@ def launch(slot, job, script, log_to, limit=None):
     cmd = ['srun', '--export=ALL', '--exact', '-N1', '-n1', '--gpus=1', '-c', str(CPUS),
            '--job-name', 'kaos-' + job]
     if limit:
-        cmd.append('--time=%d' % max(1, (limit + 59) // 60))
+        cmd.append('--time=%d' % (given_limit(limit) // 60))
     cmd += ['python3', sys.argv[0], '--step', script, job] + ([log_to] if log_to else [])
     out = open(log_to, 'a') if log_to else None
     # PRD-1609 F-05: the step's share of the node, for kaos_lib.runtime (context().slot,
@@ -302,6 +307,7 @@ def take(slot, job, name, job_limit):
             return False
         set_comment(job, '%skaos-state=taken host=%s slot=%d attempt=%d' % (lease(c), ME, slot, k))
         slots[slot] = {'job': job, 'claim': claim, 'name': name, 'memkill': False, 'attempt': k,
+                       'start': time.time(), 'limit': given_limit(limit),
                        'proc': launch(slot, job, script, os.path.join(HOME, 'slurm-%s.out' % job), limit)}
         keep = True
         log('took', job, name, 'on slot', slot)
@@ -335,11 +341,21 @@ def requeue(s):
     unlock(s.get('claim'))
 
 
+def timed_out(s, rc):
+    # PRD-HPC-1461 D-67, AC-72: the step's own limit (srun --time) stopped it. Slurm stops a step only once it
+    # ran its whole limit, with TERM and then KILL, so a step that died of one of them after its limit was
+    # stopped by it. Its job then ends as a TIMEOUT, as a job alone does, not as a failure (live 2026-11-10,
+    # guest 5439976 on host 5439966: "step 5439966.1 CANCELLED DUE TO TIME LIMIT", rc 143, recorded SiteFAILED).
+    killed = rc < 0 or rc in (128 + signal.SIGTERM, 128 + signal.SIGKILL)
+    return bool(s.get('limit')) and killed and time.time() - s['start'] >= s['limit']
+
+
 def finish(slot, rc):
     global own_rc
     s = slots.pop(slot)
     job = s['job']
-    reason = ' reason=memkill' if s['memkill'] else ' reason=GPUViolation' if s.get('gpukill') else ''
+    reason = (' reason=memkill' if s['memkill'] else ' reason=GPUViolation' if s.get('gpukill')
+              else ' reason=TIMEOUT' if timed_out(s, rc) else '')
     if job == ME:
         own_rc = rc
         c = comment(ME)
@@ -357,7 +373,9 @@ def finish(slot, rc):
         requeue(s)
         return
     c = comment(job)
-    set_comment(job, '%skaos-state=done rc=%d host=%s%s%s' % (lease(c), rc, ME, reason, err_part(c)))
+    # start=: when the guest's step began. Its own job never starts, so this is the only start Slurm's records
+    # give it: a learned limit comes from the step's own run time (D-67).
+    set_comment(job, '%skaos-state=done rc=%d host=%s start=%d%s%s' % (lease(c), rc, ME, int(s['start']), reason, err_part(c)))
     run('scancel', job)
     unlock(s.get('claim'))
     log('guest', job, 'done rc=%d%s' % (rc, reason))
@@ -373,8 +391,9 @@ def requeue_all(signum, frame):
 
 
 signal.signal(signal.SIGTERM, requeue_all)
+OWN_LIMIT = int(os.environ.get('KAOS_STEP_LIMIT_MIN') or 0) * 60 or None
 slots[0] = {'job': ME, 'claim': None, 'name': 'own', 'memkill': False, 'attempt': 1,
-            'proc': launch(0, ME, OWN_SCRIPT, None, int(os.environ.get('KAOS_STEP_LIMIT_MIN') or 0) * 60 or None)}
+            'start': time.time(), 'limit': given_limit(OWN_LIMIT), 'proc': launch(0, ME, OWN_SCRIPT, None, OWN_LIMIT)}
 log('host', ME, 'partition', PART, 'slots', GPUS, 'cpus/slot', CPUS, 'mem/slot %d MiB' % (SHARE >> 20))
 idle_since, tick = None, 0
 while True:

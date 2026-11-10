@@ -155,7 +155,8 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(rj.Labels).To(HaveKeyWithValue(runnerjob.LabelJobUID, string(got.UID)))
 		Expect(rj.Labels).To(HaveKeyWithValue(runnerjob.LabelAttempt, "1"))
 		Expect(*rj.Spec.BackoffLimit).To(Equal(int32(4)))
-		Expect(*rj.Spec.ActiveDeadlineSeconds).To(Equal(int64((60+480+30)*60 + 30*60))) // + the 30-minute site wait
+		// A sharing host's runner follows its Slurm job up to twice the step's limit (D-26), + the 30-minute site wait.
+		Expect(*rj.Spec.ActiveDeadlineSeconds).To(Equal(int64((2*60+480+30)*60 + 30*60)))
 		pod := rj.Spec.Template.Spec
 		Expect(pod.ServiceAccountName).To(Equal("hpc-runner"))
 		Expect(pod.NodeSelector).To(HaveKeyWithValue("pool", "system"))
@@ -518,6 +519,126 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		}
 		return got
 	}
+
+	// AC-72 / D-67 (live 2026-11-10, guest 5439976 on host 5439966): srun --time stopped the guest's step at its
+	// learned 15 minutes; the slot manager says reason=TIMEOUT and the runner reports state TIMEOUT.
+	It("retries a guest that its own learned limit stopped on a shared node once at the declared limit", func() {
+		for range 3 {
+			seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
+		}
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage; j.Spec.WallTimeMinutes = 240 })
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Placement.Source).To(Equal(hpcv1alpha1.PlacementLearned))
+		end, rc, slot := metav1.NewTime(time.Now()), int32(143), int32(0)
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5439976", State: "TIMEOUT", ExitCode: &rc, EndTime: &end,
+			Terminal: true, HostSiteJobID: "5439966", Slot: &slot})
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonTimeLimitRetry))
+		Expect(got.Status.Attempt).To(Equal(int32(2)))
+		Expect(got.Status.Attempts[0].Outcome).To(Equal(hpcv1alpha1.ReasonWallTimeReached))
+		Expect(got.Status.Attempts[0].SettledNodeMinutes).To(BeZero(), "the host's booking covered the node (D-26)")
+		got = settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		Expect(got.Status.Placement).To(Equal(&hpcv1alpha1.Placement{TimeLimitMinutes: 240, Source: hpcv1alpha1.PlacementTimeoutRetry, Samples: 3}))
+	})
+
+	It("does not retry a guest killed on a shared node for any other reason", func() {
+		for range 3 {
+			seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
+		}
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage; j.Spec.WallTimeMinutes = 240 })
+		reconcileOnce(j)
+		end, rc := metav1.NewTime(time.Now()), int32(143)
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5439976", State: "FAILED", ExitCode: &rc, EndTime: &end,
+			Terminal: true, HostSiteJobID: "5439966"})
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal("SiteFAILED"))
+		Expect(got.Status.Attempt).To(Equal(int32(1)))
+	})
+
+	theSite := func() *hpcv1alpha1.HPCSite {
+		site := &hpcv1alpha1.HPCSite{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: hpcNS, Name: "meluxina"}, site)).To(Succeed())
+		return site
+	}
+
+	// D-26 (live 2026-11-10, host 5439966): the host's 1-minute step ended at 04:26, its Slurm job held the node
+	// for guest 5439976 until 04:45 and the site charged it all; the ledger had released the booking at 04:26.
+	hostOpen := func() (*hpcv1alpha1.HPCArgoWorkflowJob, metav1.Time) {
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Sharing = &hpcv1alpha1.Sharing{Scope: "abcdef12"} })
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Booking).NotTo(BeNil())
+		before, err := r.ledgerOf(ctx, theSite())
+		Expect(err).NotTo(HaveOccurred())
+		start := metav1.NewTime(time.Now().Add(-20 * time.Minute).Truncate(time.Second))
+		stepEnd, rc := metav1.NewTime(start.Add(2*time.Minute)), int32(0)
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5439966", State: "COMPLETED", ExitCode: &rc,
+			StartTime: &start, EndTime: &stepEnd, Terminal: true, HostJobOpen: true})
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseSucceeded), "the step's result does not wait for the host job")
+		Expect(got.Status.Booking).NotTo(BeNil(), "the booking covers the node until the host job ends")
+		Expect(got.Status.Attempts[0].HostJobOpen).To(BeTrue())
+		Expect(got.Status.Message).To(Equal("attempt 1 settled 2 node-minutes" + hostOpenNote))
+		l, err := r.ledgerOf(ctx, theSite())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(l.Tiers[hpcv1alpha1.TierGPU].Booked).To(Equal(before.Tiers[hpcv1alpha1.TierGPU].Booked), "the open host holds its booking (60)")
+		Expect(l.Tiers[hpcv1alpha1.TierGPU].Used).To(Equal(before.Tiers[hpcv1alpha1.TierGPU].Used), "its provisional settlement is not counted twice")
+		res, _ := reconcileOnce(j)
+		Expect(res.RequeueAfter).To(Equal(OpenHostPoll), "looked at again while its runner runs")
+		return j, start
+	}
+
+	It("holds an ended host's booking while its Slurm job keeps the node, then settles it to that job's end (D-26)", func() {
+		j, start := hostOpen()
+		jobEnd, rc := metav1.NewTime(start.Add(21*time.Minute)), int32(0)
+		stepEnd := metav1.NewTime(start.Add(2 * time.Minute))
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5439966", State: "COMPLETED", ExitCode: &rc,
+			StartTime: &start, EndTime: &stepEnd, HostJobEndTime: &jobEnd, Terminal: true})
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Run.EndTime.Time).To(BeTemporally("==", stepEnd.Time), "the step's own end is kept for learning")
+		Expect(got.Status.Booking).To(BeNil(), "released once the host job ended")
+		Expect(got.Status.Attempts[0].HostJobOpen).To(BeFalse())
+		Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(21)), "what the site charged for the node")
+		Expect(*got.Status.SettledNodeMinutes).To(Equal(int64(21)))
+		Expect(got.Status.Message).To(Equal("attempt 1 settled 21 node-minutes (its Slurm job held the node until " +
+			jobEnd.UTC().Format(time.RFC3339) + ")"))
+		l, err := r.ledgerOf(ctx, theSite())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(l.Tiers[hpcv1alpha1.TierGPU].Used).To(Equal(int64(21)))
+		Expect(l.Tiers[hpcv1alpha1.TierGPU].Booked).To(BeZero())
+	})
+
+	It("learns a host's limit from its own step time, not from the time its job kept the node for a guest (D-67)", func() {
+		for range 3 {
+			j, start := hostOpen() // a 2-minute step
+			jobEnd, stepEnd, rc := metav1.NewTime(start.Add(50*time.Minute)), metav1.NewTime(start.Add(2*time.Minute)), int32(0)
+			report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5439966", State: "COMPLETED", ExitCode: &rc,
+				StartTime: &start, EndTime: &stepEnd, HostJobEndTime: &jobEnd, Terminal: true})
+			_, got := reconcileOnce(j)
+			Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(50)), "settled to the node the site charged")
+		}
+		next := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Sharing = &hpcv1alpha1.Sharing{Scope: "abcdef12"} })
+		_, got := reconcileOnce(next)
+		Expect(got.Status.Placement).To(Equal(&hpcv1alpha1.Placement{TimeLimitMinutes: 15, Source: hpcv1alpha1.PlacementLearned, Samples: 3}),
+			"3 samples of 2 minutes give the 15-minute floor; the 50-minute jobs would have given the declared 60")
+	})
+
+	It("closes an open host whose runner ended without its job's end, settled up to now", func() {
+		j, _ := hostOpen()
+		rj := runnerJob(j, 1)
+		now := metav1.Now()
+		rj.Status.StartTime = &now
+		rj.Status.Failed = 5
+		rj.Status.Conditions = []batchv1.JobCondition{
+			{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, Reason: "DeadlineExceeded"},
+			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "DeadlineExceeded"}}
+		Expect(k8sClient.Status().Update(ctx, rj)).To(Succeed())
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Booking).To(BeNil())
+		Expect(got.Status.Attempts[0].HostJobOpen).To(BeFalse())
+		Expect(got.Status.Attempts[0].SettledNodeMinutes).To(BeNumerically(">=", 20), "up to now: conservative, never the step's 2")
+		Expect(got.Status.Message).To(ContainSubstring("its runner ended before the host Slurm job's end was known"))
+	})
 
 	It("books and submits the learned limit: p95 x 1.5 of the same app's runs, never another app's or an invalid one", func() {
 		for range 3 {

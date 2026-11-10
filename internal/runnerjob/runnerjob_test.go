@@ -217,6 +217,28 @@ func TestNameIsDeterministicPerUIDAndAttempt(t *testing.T) {
 	}
 }
 
+func TestShouldGiveASharingRunnerTimeToFollowItsHostJobToItsEnd(t *testing.T) {
+	// D-26 (live 2026-11-10, host 5439966): a host's Slurm job outlives its step while guests run, up to twice the
+	// step's limit, and its runner follows it to its end; the runner Job's deadline leaves room for that.
+	job, site := fixtures()
+	job.Status.Placement = &hpcv1alpha1.Placement{TimeLimitMinutes: 30, Source: hpcv1alpha1.PlacementDeclared}
+	job.Spec.Resumable = nil // a resumable step never hosts
+	if job.Spec.Sharing == nil || !site.Spec.Sharing {
+		t.Fatal("the fixtures share nodes")
+	}
+	rj, err := Build(Config{Image: "kaos/op:1"}, job, site, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *rj.Spec.ActiveDeadlineSeconds; got != (2*30+480+30)*60 {
+		t.Errorf("deadline %d, want twice the step's 30 min for the host job's tail", got)
+	}
+	site.Spec.Sharing = false
+	if rj, _ = Build(Config{Image: "kaos/op:1"}, job, site, 1); *rj.Spec.ActiveDeadlineSeconds != (30+480+30)*60 {
+		t.Errorf("deadline %d, want the step's limit when the site does not share nodes", *rj.Spec.ActiveDeadlineSeconds)
+	}
+}
+
 func TestShouldUseThePlacementLimitForTheEnvAndTheDeadline(t *testing.T) {
 	job, site := fixtures()
 	job.Status.Placement = &hpcv1alpha1.Placement{TimeLimitMinutes: 30, Source: hpcv1alpha1.PlacementLearned, Samples: 5}

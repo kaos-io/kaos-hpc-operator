@@ -256,8 +256,11 @@ func (w *world) siteStatusRows(r *result, dur time.Duration, maxPerSec int) {
 	if w.mon.maxRecent > hpcv1alpha1.RecentJobsMax {
 		r.fail("recentJobs reached %d entries (bound %d)", w.mon.maxRecent, hpcv1alpha1.RecentJobsMax)
 	}
-	if w.mon.maxSiteB > 128<<10 {
-		r.fail("HPCSite object grew to %d bytes", w.mon.maxSiteB)
+	// #52 (c5d1cd8) caps recentJobs on purpose at RecentJobsMax entries / RecentJobsMaxBytes (256 KiB) of JSON;
+	// the rest of the object (spec, ledgers, conditions, resumableSteps) is small, so the bound is that design
+	// cap plus a 32 KiB margin. The old 128 KiB bound predated #52.
+	if bound := hpcv1alpha1.RecentJobsMaxBytes + 32<<10; w.mon.maxSiteB > bound {
+		r.fail("HPCSite object grew to %d bytes (bound %d)", w.mon.maxSiteB, bound)
 	}
 }
 

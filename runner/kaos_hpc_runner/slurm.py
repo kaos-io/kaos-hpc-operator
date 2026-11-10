@@ -221,8 +221,8 @@ def comment_of(job):
 
 def share_state(comment):
     """D-04: what a host wrote into this job's comment, as a dict ({} when no host took it):
-    kaos-state (taken|done|requeued), host, slot, attempt, rc, reason."""
-    return dict(re.findall(r'(?:^|\s)(kaos-state|host|slot|attempt|rc|reason)=(\S+)', comment))
+    kaos-state (taken|done|requeued), host, slot, attempt, rc, reason, start (a guest's step start, epoch)."""
+    return dict(re.findall(r'(?:^|\s)(kaos-state|host|slot|attempt|rc|reason|start)=(\S+)', comment))
 
 
 # Slurm's "no value" sentinels: NO_VAL (0xFFFFFFFE) and INFINITE (0xFFFFFFFF) seconds. A job that

@@ -336,3 +336,52 @@ func TestComputeSourceSiteOmittedAllocationIsUnboundedButStillSettled(t *testing
 		t.Fatalf("cpu omitted stays 0 as before: %+v", c)
 	}
 }
+
+// openHost ends the job as a host whose Slurm job still holds the node (D-26): its step settled m
+// node-minutes, its booking is still held, and its run started at start.
+func openHost(m int64, start time.Time) func(*hpcv1alpha1.HPCArgoWorkflowJob) {
+	return func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+		j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5439966", State: "COMPLETED", Terminal: true,
+			HostJobOpen: true, StartTime: &metav1.Time{Time: start}}
+		j.Status.Attempts = []hpcv1alpha1.AttemptRecord{{Attempt: 1, Tier: hpcv1alpha1.TierGPU, SettledNodeMinutes: m,
+			EndTime: metav1.NewTime(start.Add(time.Duration(m) * time.Minute)), Outcome: "Completed", HostJobOpen: true}}
+	}
+}
+
+// Live 2026-11-10: host 5439966 (booking 30) ended its 1-minute step and settled 2; its node stayed allocated
+// while guest 5439976 ran on it (the guest holds no booking: its host covers the node) until 04:45, 21
+// node-minutes of the site's accounting. The ledger counted 2 used, 0 booked all along. The open host now
+// holds the larger of its booking and its node time so far, its provisional settlement is not used twice,
+// and its Slurm job still counts against the site's job cap.
+func TestAnOpenHostHoldsTheNodeForItsGuestsUntilItsJobEnds(t *testing.T) {
+	guest := booked("g", hpcv1alpha1.PhaseRunning, 15, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+		j.Status.Run = &hpcv1alpha1.RunStatus{HostSiteJobID: "5439966", State: "PENDING"}
+	})
+	for _, c := range []struct {
+		name    string
+		started time.Duration
+		booked  int64
+	}{
+		{"should_hold_the_booking_while_the_node_time_is_below_it", 12 * time.Minute, 30},
+		{"should_hold_the_node_time_so_far_once_guests_kept_the_node_longer_than_the_booking", 41*time.Minute + 30*time.Second, 42},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			host := booked("h", hpcv1alpha1.PhaseSucceeded, 30, openHost(2, now.Add(-c.started)))
+			l := Compute(theSite(), []hpcv1alpha1.HPCArgoWorkflowJob{host, guest}, nil, now)
+			gpu := l.Tiers[hpcv1alpha1.TierGPU]
+			if gpu.Used != 0 || gpu.Booked != c.booked || l.SiteJobs != 1 {
+				t.Fatalf("used %d booked %d site jobs %d; want 0 %d 1", gpu.Used, gpu.Booked, l.SiteJobs, c.booked)
+			}
+			if !Holds(&host) || !OpenHost(&host) || Holds(&guest) {
+				t.Fatal("the open host holds the node, the guest holds nothing")
+			}
+		})
+	}
+	t.Run("should_count_the_settlement_once_the_job_end_closed_the_host", func(t *testing.T) {
+		host := booked("h", hpcv1alpha1.PhaseSucceeded, 30, settled(21, now.Add(-time.Minute)))
+		l := Compute(theSite(), []hpcv1alpha1.HPCArgoWorkflowJob{host}, nil, now)
+		if gpu := l.Tiers[hpcv1alpha1.TierGPU]; gpu.Used != 21 || gpu.Booked != 0 || l.SiteJobs != 0 {
+			t.Fatalf("used %d booked %d site jobs %d; want 21 0 0", gpu.Used, gpu.Booked, l.SiteJobs)
+		}
+	})
+}

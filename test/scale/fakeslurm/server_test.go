@@ -160,3 +160,35 @@ func TestShouldAnswerPingAndFailItWhileTheSiteIsDown(t *testing.T) {
 		t.Fatalf("ping while down: %d", code)
 	}
 }
+
+// D-26 (live 2026-11-10, host 5439966 and guest 5439976): a host's job keeps its node after its step while a
+// guest runs on it, and the site charges the host for all of it; the guest's own job never starts and costs nothing.
+func TestShouldKeepAHostRunningForItsGuestAndChargeOnlyTheHost(t *testing.T) {
+	s := New(Options{Token: "t", Dilation: 600}) // 1 real second = 10 minutes
+	defer s.Close()
+	host := submit(t, s, "h", "default", 60, "FAKE_RUN_MINUTES=2", "FAKE_HOST_TAIL_MINUTES=18")
+	guest := submit(t, s, "g", "default", 60, "FAKE_RUN_MINUTES=15", "FAKE_GUEST=1")
+	job := func(id int) Job { s.mu.Lock(); defer s.mu.Unlock(); return *s.jobs[id] }
+	time.Sleep(400 * time.Millisecond) // 4 minutes: the host's step is over, its job runs on
+	h, g := job(host), job(guest)
+	if h.State != Running || !strings.Contains(h.Cm, "kaos-state=done rc=0") {
+		t.Fatalf("host after its step: %s %q, want RUNNING with its step's result in the comment", h.State, h.Cm)
+	}
+	if g.State != Pending || g.Reason != "JobHeldUser" || !strings.Contains(g.Cm, fmt.Sprintf("kaos-state=taken host=%d slot=1", host)) {
+		t.Fatalf("guest: %s %s %q, want held and taken by the host", g.State, g.Reason, g.Cm)
+	}
+	time.Sleep(2 * time.Second) // 24 minutes: both are over
+	h, g = job(host), job(guest)
+	if h.State != Completed || g.State != Cancelled || !strings.Contains(g.Cm, fmt.Sprintf("kaos-state=done rc=0 host=%d start=%d", host, g.takenAt.Unix())) {
+		t.Fatalf("host %s, guest %s %q", h.State, g.State, g.Cm)
+	}
+	if ran := h.EndAt.Sub(h.StartAt).Minutes(); ran < 19.9 || ran > 20.1 {
+		t.Fatalf("the host job ran %.1f minutes, want its step plus its tail (20)", ran)
+	}
+	if !g.StartAt.IsZero() {
+		t.Fatal("a guest's own job never starts")
+	}
+	if c := s.Charged("a"); c < 19.9 || c > 20.1 {
+		t.Fatalf("charged %.1f node-minutes, want the host's 20 and nothing for the guest", c)
+	}
+}

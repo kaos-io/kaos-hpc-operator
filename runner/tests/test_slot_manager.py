@@ -8,6 +8,7 @@ Run:  python -m pytest tests/ -v
 """
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -80,8 +81,15 @@ class Node:
         self.proc = subprocess.Popen([sys.executable, str(slots), str(own)], env=self.env,
                                      stdout=open(self.log, "w"), stderr=subprocess.STDOUT)
 
-    def jobs(self):
-        return json.loads(self.state.read_text())["jobs"]
+    def jobs(self, raw=False):
+        # A guest's done comment carries its step's start (start=<epoch>, varies per run): it is dropped here so
+        # the comments compare exactly; test_a_guests_done_comment_carries_its_steps_start reads it raw.
+        jobs = json.loads(self.state.read_text())["jobs"]
+        if not raw:
+            for j in jobs.values():
+                if j.get("comment"):
+                    j["comment"] = re.sub(r" start=\d+", "", j["comment"])
+        return jobs
 
     def wait_for(self, cond, timeout=30):
         end = time.time() + timeout
@@ -181,6 +189,36 @@ def test_a_step_over_its_memory_share_is_stopped_alone(tmp_path):
     assert "kaos-state=done" in jobs["101"]["comment"] and "reason=memkill" in jobs["101"]["comment"], log
     assert "rc=0" not in jobs["101"]["comment"]
     assert jobs["102"]["comment"] == "kaos-commit=bbbbbbb3 kaos-state=done rc=0 host=100", "the neighbour finished"
+
+
+def test_a_step_stopped_by_its_own_time_limit_is_reported_as_a_timeout_and_no_other_kill_is(tmp_path):
+    # PRD-HPC-1461 AC-72 / D-67 (live 2026-11-10, guest 5439976 on host 5439966): srun --time stops a step at its
+    # learned limit with TERM (rc 143). That is a TIMEOUT, so the controller retries it at the declared limit; a
+    # step TERMed before its limit is an ordinary failure. Real time: srun limits are whole minutes.
+    limited = "export KAOS_STEP_LIMIT_MIN=1\n"
+    guests = {"101": _job("kaos-%s-wf1-train" % SCOPE, limited + "sleep 120\n", comment="kaos-commit=bbbbbbb2"),
+              "102": _job("kaos-%s-wf2-train" % SCOPE, limited + "kill -TERM $$\n", comment="kaos-commit=bbbbbbb3")}
+    node = Node(tmp_path, guests, own_body="sleep 120\n", extra_env={"KAOS_STEP_LIMIT_MIN": "1"})
+    rc, log = node.finish(timeout=150)
+    jobs = node.jobs()
+    assert jobs["101"]["comment"] == "kaos-commit=bbbbbbb2 kaos-state=done rc=143 host=100 reason=TIMEOUT", log
+    assert jobs["102"]["comment"] == "kaos-commit=bbbbbbb3 kaos-state=done rc=143 host=100", "TERM before the limit: no TIMEOUT"
+    assert jobs["100"]["comment"] == "kaos-commit=aaaaaaa1 kaos-state=done rc=143 reason=TIMEOUT", "the host's own step too"
+    assert rc == 143, log
+    assert "--time=1" in " ".join(" ".join(c) for c in json.loads(node.state.read_text())["calls"] if c[0] == "srun")
+
+
+def test_a_guests_done_comment_carries_its_steps_start(tmp_path):
+    # D-67: a guest's own job never starts, so the start its host writes is the only one its records give; the
+    # learned limit comes from that step's own run time. A host's own comment needs none (its job's start is it).
+    guests = {"101": _job("kaos-%s-wf1-train" % SCOPE, "sleep 1\nexit 0\n", comment="kaos-commit=bbbbbbb2")}
+    before = int(time.time())
+    node = Node(tmp_path, guests)
+    rc, log = node.finish()
+    jobs = node.jobs(raw=True)
+    m = re.fullmatch(r"kaos-commit=bbbbbbb2 kaos-state=done rc=0 host=100 start=(\d+)", jobs["101"]["comment"])
+    assert m and before <= int(m.group(1)) <= int(time.time()), jobs["101"]["comment"]
+    assert "start=" not in jobs["100"]["comment"]
 
 
 def test_a_terminated_host_hands_its_guests_back_to_the_queue(tmp_path):

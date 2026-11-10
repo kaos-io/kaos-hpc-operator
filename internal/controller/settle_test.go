@@ -83,6 +83,16 @@ func TestLateEnd(t *testing.T) {
 	}
 	guest := host(ts("2026-11-07T09:53:00Z"))
 	guest.HostSiteJobID = "1"
+	open := func(run hpcv1alpha1.RunStatus, stillOpen bool) *hpcv1alpha1.HPCArgoWorkflowJob {
+		// The step ended at 09:51; the report of the job's end carries it in hostJobEndTime (D-26, D-67).
+		run.HostJobOpen = stillOpen
+		if !stillOpen {
+			run.HostJobEndTime, run.EndTime = run.EndTime, ts("2026-11-07T09:51:00Z")
+		}
+		j := mk(run, 1, "2026-11-07T09:51:00Z")
+		j.Status.Attempts[0].HostJobOpen = true
+		return j
+	}
 	cases := []struct {
 		name    string
 		job     *hpcv1alpha1.HPCArgoWorkflowJob
@@ -104,6 +114,13 @@ func TestLateEnd(t *testing.T) {
 			j.Status.Phase = hpcv1alpha1.PhaseRunning
 			return j
 		}(), 0, false},
+		// D-26 (live 2026-11-10, host 5439966): an open host is closed by the report of its job's end.
+		{"should_keep_an_open_host_open_while_its_job_still_runs", open(host(ts("2026-11-07T09:51:00Z")), true), 0, false},
+		{"should_close_an_open_host_at_its_job_end", open(host(ts("2026-11-07T09:58:00Z")), false), 8, true},
+		{"should_close_an_open_host_at_its_provisional_settlement_when_the_job_ended_with_its_step",
+			open(host(ts("2026-11-07T09:51:00Z")), false), 1, true},
+		{"should_close_an_open_host_up_to_now_when_the_site_gave_no_usable_end",
+			open(host(ts("2106-02-07T06:28:14Z")), false), 10, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

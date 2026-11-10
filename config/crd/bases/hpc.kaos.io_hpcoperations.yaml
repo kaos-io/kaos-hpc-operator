@@ -265,6 +265,19 @@ spec:
                     x-kubernetes-list-map-keys:
                     - gpu
                     x-kubernetes-list-type: map
+                  hostJobEndTime:
+                    description: |-
+                      HostJobEndTime is the end of a host's Slurm job when it ended after the step (D-26): the attempt is
+                      settled to it. EndTime stays the step's own end, so a learned limit comes from the step's run time,
+                      never from the time the node was kept for guests (D-67).
+                    format: date-time
+                    type: string
+                  hostJobOpen:
+                    description: |-
+                      HostJobOpen is set on a host's terminal report when its step ended but its Slurm job still holds the
+                      node for guests (node sharing, D-26): the site charges the node until that job ends. The runner
+                      reports the job's own end with HostJobOpen unset; until then the host's booking stays held.
+                    type: boolean
                   hostSiteJobID:
                     description: |-
                       HostSiteJobID is set when a host job of the same project took this job onto its node

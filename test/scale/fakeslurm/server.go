@@ -62,6 +62,14 @@ const (
 	// EnvSegments makes the job a checkpointing step of that many segments: every run but the last
 	// ends with exit 85 and leaves a checkpoint copy, the run that restores the last one completes.
 	EnvSegments = "FAKE_SEGMENTS"
+	// EnvHostTailMinutes makes the job a node-sharing host (PRD-HPC-1461 D-26): when its step ends the job
+	// comment says so as the slot manager writes it ("kaos-state=done rc=N"), and the Slurm job keeps the node
+	// this many more (dilated) minutes for its guests, never past its time limit. The site charges all of it.
+	EnvHostTailMinutes = "FAKE_HOST_TAIL_MINUTES"
+	// EnvGuest makes the job a guest: it never starts on its own. A running host of its account whose job
+	// outlasts the guest's run takes it ("kaos-state=taken host=H slot=1", held), runs it, and cancels it
+	// ("kaos-state=done rc=0 host=H start=<step start>"): the guest's own job is charged nothing.
+	EnvGuest = "FAKE_GUEST"
 	// EnvResumeRef is the checkpoint reference of the attempt (set by the controller via the runner).
 	EnvResumeRef = "KAOS_RESUME_REF"
 	// EnvAttempt is the controller's attempt number of the submission.
@@ -138,6 +146,11 @@ type Job struct {
 	quick                                bool      // a lost-reply job that starts at once and ends within a second
 	forgotten                            bool      // slurmctld no longer knows it
 	ckptSeq                              int
+	tailReal                             time.Duration // a host keeps its node this long after its step (D-26)
+	stepDone                             bool          // a host's step is over, its job still runs
+	guest                                bool
+	host                                 int       // the host that took this guest
+	takenAt                              time.Time // when the host took it
 }
 
 // Stats are the counters a test reads after a run.
@@ -684,6 +697,37 @@ func (s *Site) planLocked(j *Job) {
 	}
 	j.endState, j.endExit = end, exit
 	j.runReal = time.Duration(runMin * 60 / s.Opts.Dilation * float64(time.Second))
+	j.guest = j.Env[EnvGuest] != ""
+	if tail, err := strconv.ParseFloat(j.Env[EnvHostTailMinutes], 64); err == nil && tail > 0 && !j.guest && (end == Completed || end == Failed) {
+		if j.LimitMin > 0 {
+			tail = math.Max(0, math.Min(tail, float64(j.LimitMin)-runMin)) // the job ends by its time limit
+		}
+		j.tailReal = time.Duration(tail * 60 / s.Opts.Dilation * float64(time.Second))
+	}
+}
+
+// guestLocked plays the slot manager for a waiting guest: a running host of its account whose job outlasts
+// the guest's run takes it, and once the run is over the guest's job is cancelled with the step's result.
+func (s *Site) guestLocked(j *Job, now time.Time) {
+	if j.host == 0 {
+		if now.Before(j.EligibleAt) {
+			return
+		}
+		for _, id := range s.order {
+			h := s.jobs[id]
+			if h.State == Running && h.Account == j.Account && h.tailReal > 0 && !now.Add(j.runReal).After(h.StartAt.Add(h.runReal+h.tailReal)) {
+				j.host, j.takenAt, j.Reason = h.ID, now, "JobHeldUser"
+				j.Cm += fmt.Sprintf(" kaos-state=taken host=%d slot=1", h.ID)
+				return
+			}
+		}
+		return
+	}
+	if now.Sub(j.takenAt) >= j.runReal {
+		j.Cm = strings.Replace(j.Cm, fmt.Sprintf("kaos-state=taken host=%d slot=1", j.host),
+			fmt.Sprintf("kaos-state=done rc=0 host=%d start=%d", j.host, j.takenAt.Unix()), 1)
+		s.endLocked(j, Cancelled, 0, now)
+	}
 }
 
 func atoi(s string) int { n, _ := strconv.Atoi(s); return n }
@@ -723,15 +767,27 @@ func (s *Site) advanceLocked(now time.Time) {
 	for _, id := range s.order {
 		j := s.jobs[id]
 		if j.State == Running {
-			if now.Sub(j.StartAt) >= j.runReal {
-				s.endLocked(j, j.endState, j.endExit, j.StartAt.Add(j.runReal))
-			} else {
+			stepEnd := j.StartAt.Add(j.runReal)
+			switch {
+			case now.Before(stepEnd):
 				running++
+			case now.Before(stepEnd.Add(j.tailReal)): // a host's job holds the node for guests after its step
+				if !j.stepDone {
+					j.stepDone = true
+					j.Cm += fmt.Sprintf(" kaos-state=done rc=%d", j.endExit)
+				}
+				running++
+			default:
+				s.endLocked(j, j.endState, j.endExit, stepEnd.Add(j.tailReal))
 			}
 		}
 	}
 	for _, id := range s.order {
 		j := s.jobs[id]
+		if j.State == Pending && j.guest {
+			s.guestLocked(j, now)
+			continue
+		}
 		if j.State == Pending && (running < s.Opts.Capacity || j.quick) && !now.Before(j.EligibleAt) {
 			j.State, j.Reason, j.StartAt = Running, "None", now
 			running++

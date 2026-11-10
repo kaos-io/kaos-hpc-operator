@@ -50,8 +50,8 @@ Phases: `Pending` (not judged yet, or the next attempt is about to be judged), `
 | `Timeout` | Failed | Historical name of "checkpoint missing": exit 85 but no verified checkpoint copy exists to continue from. Nothing is ever continued from scratch. | Message: "checkpoint not saved: no verified copy of the checkpoint folder to continue from". |
 | `RerunNodeFailure`, `RerunPreempted` | Pending | A step with no checkpoint was interrupted by a node failure (`NODE_FAIL`, `BOOT_FAIL`, `REVOKED`, maintenance) or by pre-emption and is re-run from the start, at most twice (`status.reruns`). Never after the step's own error, an out-of-memory kill, a cancel or a wall-time kill. | Follower: "re-running from the start (n/2)". |
 | `RerunLimit` | Failed | The step was interrupted again after two re-runs. | Follower: "stopped: the step was interrupted again after 2 re-runs". |
-| `WallTimeReached` | Failed | The step ran to its time limit (Slurm `TIMEOUT`) and was not continued. | Message in plain words (the limit, and what to do), and a `WallTimeReached` Warning event. |
-| `TimeLimitRetry` | Pending | The attempt hit a learned time limit (below the declared cap); it runs once more at twice the limit, up to the declared cap. | Follower: "hit its learned time limit; retrying once with the full limit". |
+| `WallTimeReached` | Failed | The step ran to its time limit (Slurm `TIMEOUT`) and was not continued. On a shared node a step's own limit stops it with `srun --time`, not as a Slurm job `TIMEOUT`: the slot manager then writes `reason=TIMEOUT` into the job comment and the runner reports the attempt as `TIMEOUT`, the same as for a job alone (AC-72; live 2026-11-10, guest 5439976). | Message in plain words (the limit, and what to do), and a `WallTimeReached` Warning event. |
+| `TimeLimitRetry` | Pending | The attempt hit a learned time limit (below the declared cap); it runs once more at the declared limit (D-67). A guest on a shared node stopped by its own learned limit is retried the same way. | Follower: "hit its learned time limit; retrying once with the full limit". |
 | `Idle` | Failed | The on-node idle watchdog ended the step: GPU (CPU on a CPU class) use below 5 % and no log growth for `spec.idleTimeoutMinutes` (default 20; 0 = off). Exit 236. The node-minutes it saved are recorded. | Follower: "stopped: no GPU use and no output for N min", then the step's last lines. `Idle` Warning event, `kaos_hpc_idle_kills_total`. |
 | `InsufficientQuota` | Failed | Staging the dataset or image would exceed the project's scratch quota (space or files) even after evicting everything unused. The runner stops before any copy and submits nothing (exit 237, no site job). | Message: what did not fit, "nothing was copied and nothing in use was deleted", free space or raise the quota. `InsufficientQuota` Warning event. |
 | `SubmitLimit` | Failed | The site itself refused a submit for its per-user cap (`QOSMaxSubmitJobPerUserLimit`, `AssocMaxSubmitJobLimit`, ...). The runner reports exit 238 with the cap and the count it read from the site. See the Refused form above. | Message with the cap and the count, "resubmit when the count is below the cap". `SubmitLimit` Warning event. |
@@ -59,6 +59,15 @@ Phases: `Pending` (not judged yet, or the next attempt is about to be judged), `
 Other final states in `status.reason`: `Completed` (Succeeded), `Cancelled` (Cancelled), `Continued` (attempt record
 outcome only), `Ended` (the site reported no state), and `Site<STATE>` (the site's own state of an attempt that ended
 without one of the reasons above, for example `SiteFAILED` for the step's own non-zero exit or `SiteOUT_OF_MEMORY`).
+A guest on a shared node stopped by anything other than its own time limit (exit 143 before its limit, a memory or
+GPU kill) stays `SiteFAILED` and is not retried.
+
+A host on a shared node (D-26) is `Succeeded` or `Failed` when its step ends, but while its Slurm job still holds the
+node for guests the message ends "its Slurm job still holds the node for guests: the booking is held until that job
+ends" and the booking stays in the ledger. When the runner reports the job's end (`status.run.hostJobEndTime`) the
+attempt is settled to it and the message reads "attempt N settled M node-minutes (its Slurm job held the node until
+<time>)". `status.run.endTime` stays the step's own end: a learned time limit comes from the step's run time, never
+from the time the node was kept for guests (D-67).
 
 ## Cancelling
 
@@ -79,11 +88,16 @@ may still run). See [extreme-cases.md](extreme-cases.md) 2.13 and 2.17.
 
 ## Not a `status.reason`
 
+- `TIMEOUT` in a host's Slurm comment (`kaos-state=done rc=143 reason=TIMEOUT`): the slot manager's word that a step
+  on a shared node was stopped by its own time limit (it ended by TERM or KILL after running its whole `srun --time`).
+  The runner turns it into the attempt state `TIMEOUT` (see `WallTimeReached`).
 - `GPUViolation`: on a shared node, a step computed on a GPU outside its own set and the slot manager stopped that
   step alone (AC-57 / D-29). It is written into the host job's Slurm comment (`kaos-state=done rc=N
   reason=GPUViolation`) and the job log (`gpu: step ... outside its set: stopping it`), not into the status of an
   HPC job. Neighbouring steps keep running. Prevention first: where `nvidia-container-cli` works the step cannot see
   the other GPUs (`gpu fence: nvccli` in the job log).
 - Events not tied to a reason constant: `LaneRefused` (the site refused the lane; the attempt ran on the class
-  default), `HostSettledToJobEnd`, `ReportedTimeDiscarded` (implausible site times were ignored in settlement),
+  default), `HostSettledToJobEnd` (a host's attempt settled to its Slurm job's end, booking released), `HostEndUnknown`
+  (a Warning: the host's runner ended before the job's end was reported; settled up to now, booking released),
+  `ReportedTimeDiscarded` (implausible site times were ignored in settlement),
   `RunnerStartBlocked` (the runner Job cannot start, with the cause).

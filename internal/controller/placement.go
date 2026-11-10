@@ -13,6 +13,7 @@ import (
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 	"github.com/kaos-io/kaos-hpc-operator/internal/admission"
 	"github.com/kaos-io/kaos-hpc-operator/internal/lanes"
+	"github.com/kaos-io/kaos-hpc-operator/internal/ledger"
 	"github.com/kaos-io/kaos-hpc-operator/internal/metrics"
 	"github.com/kaos-io/kaos-hpc-operator/internal/timelimit"
 )
@@ -248,7 +249,8 @@ func (r *HPCArgoWorkflowJobReconciler) laneUse(ctx context.Context, job *hpcv1al
 	}
 	for i := range jobs.Items {
 		o := &jobs.Items[i]
-		if o.UID != job.UID && o.Status.Booking != nil && !o.Status.Phase.Terminal() {
+		// A host whose Slurm job still holds the node after its step (D-26) still occupies its lane.
+		if o.UID != job.UID && o.Status.Booking != nil && (!o.Status.Phase.Terminal() || ledger.OpenHost(o)) {
 			hold(string(o.UID), o.Status.Booking, heldQOS(o))
 		}
 	}

@@ -493,6 +493,13 @@ class Runner:
                   flush=True)
             return 0
         run = (job.get('status') or {}).get('run') or {}
+        if int(run.get('attempt') or 0) == cfg.attempt and run.get('terminal') and run.get('hostJobOpen'):
+            # A restarted host runner: the step was reported, the host job's end not yet (D-26). Only that is left.
+            print('attempt %d reported its step; following its host job to its end' % cfg.attempt, flush=True)
+            self.jid, self.host_job_open = str(run['siteJobID']), True
+            self.reporter.last_run = run
+            self.follow_host_job_end()
+            return 0
         if int(run.get('attempt') or 0) == cfg.attempt and run.get('terminal'):
             print('attempt %d already reported its end (%s): nothing to do' % (cfg.attempt, run.get('state')),
                   flush=True)
@@ -678,8 +685,12 @@ class Runner:
                         # job; the step's result is in the comment.
                         rc = int(share['rc']) if share.get('rc', '').isdigit() else 1
                         print('ran on a shared node: host job', share.get('host'),
-                              'exit:', share.get('rc'), flush=True)
+                              'exit:', share.get('rc'), 'reason:', share.get('reason'), flush=True)
                         st = ['COMPLETED'] if rc == 0 else ['FAILED']
+                        if rc != 0 and share.get('reason') == 'TIMEOUT':
+                            # AC-72 / D-67: the step's own time limit stopped it on the shared node (the slot
+                            # manager says so): a TIMEOUT like a job alone, so a learned limit is retried.
+                            st = ['TIMEOUT']
                     if 'FAILED' in st and rc == 231 and self.resubmits < PULL_RESUBMITS:
                         # A cache-missing pull after a LONG queue wait runs with the registry token
                         # minted at submit time - GCP tokens live 1h, so it can be stale (live job
@@ -698,15 +709,19 @@ class Runner:
     def follow_host_job_end(self):
         """A shared-node host settles from its Slurm job, not its step: the site charges the whole node
         until the job ends, ~2 minutes after the last step (it waits for guests). The step's result and
-        outputs were reported at its end (nothing waits for them); this follows the job until it is
-        terminal, bounded by its time limit plus a margin, and resends the same terminal report with the
-        job's own end time. The controller only ever raises the settlement from it (idempotent)."""
+        outputs were reported at its end with hostJobOpen (nothing waits for them; the controller keeps the
+        host's booking held, D-26); this follows the job until it is terminal, bounded by its time limit plus
+        a margin, and resends the same terminal report with hostJobEndTime, the job's own end, and hostJobOpen
+        cleared. endTime stays the step's end: a learned limit is the step's run time, not the node's (D-67).
+        A job whose end cannot be read in that time is closed at the latest end Slurm allows it: its start
+        plus its time limit, else now (conservative, never below what the site charged)."""
         if not self.host_job_open or not self.reporter.last_run:
             return
         limit_s = (self.job_limit_min or self.cfg.time_limit * 2) * 60
         deadline = time.time() + limit_s + HOST_END_MARGIN_S
         print('following host job', self.jid, 'until it ends (settlement counts the whole node)', flush=True)
-        while time.time() < deadline:
+        end_time = None
+        while time.time() < deadline and end_time is None:
             self.sleep(POLL_S)
             try:
                 job = self.slurm.accounting(self.jid)
@@ -714,14 +729,17 @@ class Runner:
                 print('host job end: poll error (transient):', e, flush=True)
                 continue
             if any(x in TERMINAL for x in (job.get('state') or {}).get('current') or []):
-                end_time = site_time(job, 'end')
-                if end_time:
-                    run = {k: v for k, v in self.reporter.last_run.items() if k not in ('attempt', 'logOffset', 'gpuUtilization')}
-                    run['endTime'] = end_time
-                    self.reporter.report(must=True, **run)
-                    print('host job ended at', end_time, flush=True)
-                return
-        print('host job did not end within its time limit + margin: settled from its step', flush=True)
+                end_time = site_time(job, 'end') or time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                print('host job ended at', end_time, flush=True)
+        run = {k: v for k, v in self.reporter.last_run.items() if k not in ('attempt', 'logOffset', 'gpuUtilization')}
+        if end_time is None:
+            start = parse_time(run.get('startTime'))
+            latest = start + limit_s if start is not None else time.time()
+            end_time = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(min(latest, time.time())))
+            print('host job did not end within its time limit + margin: closed at', end_time,
+                  '(its start plus its time limit)', flush=True)
+        run.update(hostJobEndTime=end_time, hostJobOpen=None)
+        self.reporter.report(must=True, **run)
 
     def view(self):
         """This tick's reading of the site job, or None to skip the tick (D-36).
@@ -811,12 +829,19 @@ class Runner:
         # The end is Slurm's, else when this runner saw the job over: the controller settles the
         # attempt from it and must never be left to guess.
         end_time = site_time(job, 'end') or time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time()))
+        start = self.start_of(job)
+        if not start and share.get('host') and (share.get('start') or '').isdigit():
+            # A guest's own job never starts: its step's start is the one its host wrote (D-67 samples).
+            start = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(int(share['start'])))
         fields = dict(siteJobID=str(jid), state=','.join(st), exitCode=rc,
-                      startTime=self.start_of(job), endTime=end_time, terminal=True,
+                      startTime=start, endTime=end_time, terminal=True,
                       # A guest names its host (parsed from the job comment) so the controller
                       # knows the host's booking covers it.
                       hostSiteJobID=share.get('host'),
-                      slot=int(share['slot']) if (share.get('slot') or '').isdigit() else None)
+                      slot=int(share['slot']) if (share.get('slot') or '').isdigit() else None,
+                      # D-26: a host's step is over but its Slurm job still holds the node for guests; the
+                      # controller keeps the booking held until follow_host_job_end reports the job's end.
+                      hostJobOpen=True if self.host_job_open else None)
         if rc == IDLE_EXIT and 'COMPLETED' not in st:
             # D-72: the job ended a hung step; the controller records Failed/Idle and, in its event, the
             # last lines the step wrote (printed above from the same log).

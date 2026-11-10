@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -103,6 +104,113 @@ func TestScaleS(t *testing.T) {
 	w.verifySubmits(r, jobs)
 	w.budgetRows(r, jobs)
 	w.reconcileRows(r, start, dur)
+}
+
+// TestScaleShared: node sharing (PRD-HPC-1461 D-26). Hosts whose Slurm job keeps the node after their step while
+// guests run on it, and guests that never start on their own. Live 2026-11-10 (host 5439966, guest 5439976): the
+// host's step ended at 04:26 and its booking was released while the site charged the node until 04:45. The
+// ledger must cover what the site charges at every moment and equal it once every job has ended.
+func TestScaleShared(t *testing.T) {
+	r := newResult(t, "S-shared (node sharing)", "8 hosts whose Slurm job keeps the node 6-14 minutes after the step for "+
+		"16 guests that never start on their own: the ledger covers the site's charge at every snapshot and equals it at the end.")
+	w := newWorld(t, ctrlOpts{pollInterval: 2 * time.Second, restRate: 4, restBurst: 10})
+	site := fakeslurm.New(siteOptions("meluxina", 7))
+	p := w.addProject("psh", "meluxina", "u1", "acct1", site, budget{gpuShare: 100, cpuShare: 10, gpuSiteLeft: 90, cpuSiteLeft: 8}, 0)
+	p.coverage = true
+	w.startController()
+	w.startKubelet()
+	w.startSampler()
+	w.startMonitor()
+	start := time.Now()
+	rng := rand.New(rand.NewSource(7))
+	hosts := make([]jobSpec, 8)
+	for i := range hosts {
+		hosts[i] = jobSpec{class: "hpc-gpu", wallMinutes: 30, run: fmt.Sprintf("%.1f", 3+2*rng.Float64()),
+			hostTail: fmt.Sprintf("%.1f", 6+8*rng.Float64())}
+	}
+	w.createJobs(p, hosts)
+	time.Sleep(3 * time.Second) // the hosts start first, as a host must be running to take a guest
+	guests := make([]jobSpec, 16)
+	for i := range guests {
+		guests[i] = jobSpec{class: "hpc-gpu", wallMinutes: 30, run: fmt.Sprintf("%.1f", 2+2*rng.Float64()), guest: true}
+	}
+	w.createJobs(p, guests)
+	// Every job ended and every host closed: a host is Succeeded at its step's end, its booking goes with its job.
+	deadline := time.Now().Add(4 * time.Minute)
+	var jobs []hpcv1alpha1.HPCArgoWorkflowJob
+	for time.Now().Before(deadline) {
+		jobs = w.allJobs()
+		open := 0
+		for i := range jobs {
+			if !jobs[i].Status.Phase.Terminal() || jobs[i].Status.Booking != nil {
+				open++
+			}
+		}
+		if len(jobs) == 24 && open == 0 {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	dur := time.Since(start)
+	r.row("duration", dur.Round(time.Second))
+	r.row("final phases", histogram(jobs))
+	var used int64
+	hostsClosed, guestsZero, guestSamples := 0, 0, 0
+	for i := range jobs {
+		j := &jobs[i]
+		if j.Status.Phase != hpcv1alpha1.PhaseSucceeded || j.Status.Booking != nil || len(j.Status.Attempts) != 1 {
+			r.fail("%s ended %s/%s booking %v attempts %d: %s", j.Name, j.Status.Phase, j.Status.Reason,
+				j.Status.Booking, len(j.Status.Attempts), j.Status.Message)
+			continue
+		}
+		a := j.Status.Attempts[0]
+		used += a.SettledNodeMinutes
+		switch {
+		case j.Annotations[annGuest] != "":
+			if j.Status.Run.HostSiteJobID == "" || a.SettledNodeMinutes != 0 {
+				r.fail("guest %s: host %q settled %d, want a host and 0", j.Name, j.Status.Run.HostSiteJobID, a.SettledNodeMinutes)
+			} else {
+				guestsZero++
+			}
+			if _, ok := runSample(j); ok {
+				guestSamples++ // its step start from its host's comment: a learned-limit sample (D-67)
+			}
+		case a.HostJobOpen || !strings.Contains(j.Status.Message, "its Slurm job held the node until"):
+			r.fail("host %s not settled to its job's end: open %v, %q", j.Name, a.HostJobOpen, j.Status.Message)
+		default:
+			hostsClosed++
+			// D-67: the learned-limit sample is the step's run time; the node kept for guests is hostJobEndTime.
+			run := j.Status.Run
+			if d, ok := runSample(j); !ok || run.HostJobEndTime == nil || !run.HostJobEndTime.After(run.EndTime.Time) ||
+				float64(a.SettledNodeMinutes) < d.Minutes() {
+				r.fail("host %s: step %v, job end %v, settled %d: want the step's own time below the job's", j.Name, d, run.HostJobEndTime, a.SettledNodeMinutes)
+			}
+		}
+	}
+	charged := site.Charged(p.account)
+	r.row("hosts settled to their job's end / guests settled 0", fmt.Sprintf("%d of 8 / %d of 16", hostsClosed, guestsZero))
+	r.row("guests with a step-time sample (start from the host)", fmt.Sprintf("%d of 16", guestSamples))
+	if guestSamples != 16 {
+		r.fail("%d of 16 guests carry their step's start", guestSamples)
+	}
+	r.row("controller settled node-min / site charged", fmt.Sprintf("%d / %.1f", used, charged))
+	// Each attempt is settled in whole minutes, rounded up: at most one minute above the site's figure per host.
+	if float64(used) < charged-0.5 || float64(used) > charged+8 {
+		r.fail("the ledger settled %d node-minutes for what the site charged %.1f", used, charged)
+	}
+	w.verifySubmits(r, jobs)
+	w.budgetRows(r, jobs)
+	w.verifyPublishedLedger(r, jobs)
+	w.reconcileRows(r, start, dur)
+}
+
+// runSample is the step's own run time, start to end of the final report: what a learned limit is made of (D-67).
+func runSample(j *hpcv1alpha1.HPCArgoWorkflowJob) (time.Duration, bool) {
+	run := j.Status.Run
+	if run == nil || run.StartTime == nil || run.EndTime == nil || !run.EndTime.After(run.StartTime.Time) {
+		return 0, false
+	}
+	return run.EndTime.Sub(run.StartTime.Time), true
 }
 
 // TestScaleM: 50 jobs of mixed classes against a share that admits only part of them.
