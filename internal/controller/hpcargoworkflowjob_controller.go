@@ -467,6 +467,8 @@ func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonInvalidImage
 	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeSubmitLimit && failed:
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonSubmitLimit
+	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeGPUViolation && failed:
+		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonGPUViolation
 	case state == "COMPLETED" && (run.ExitCode == nil || *run.ExitCode == 0):
 		return hpcv1alpha1.PhaseSucceeded, "Completed"
 	case state == "TIMEOUT":

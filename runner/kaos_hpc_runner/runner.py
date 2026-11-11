@@ -23,7 +23,7 @@ from .reporter import OutputsTooLarge, Reporter, checkpoint_uri
 from .sharing import inputs_in_script
 from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_site_down, lane_refusal,
                     share_state, site_time, submit_limit_refusal)
-from .settings import (CHECKPOINT_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT, INVALID_IMAGE_EXIT, OFFER_S, ROLE_POLL_S,
+from .settings import (CHECKPOINT_EXIT, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT, INVALID_IMAGE_EXIT, OFFER_S, ROLE_POLL_S,
                        SUBMIT_LIMIT_EXIT, Settings, image_problem)
 
 POLL_S = 30
@@ -741,6 +741,8 @@ class Runner:
                         rc = int(share['rc']) if share.get('rc', '').isdigit() else 1
                         if rc == 0 and share.get('reason') in ('memkill', 'GPUViolation'):
                             rc = 1      # a step the slot manager stopped did not succeed, whatever exit code it left
+                        if share.get('reason') == 'GPUViolation':
+                            rc = GPU_VIOLATION_EXIT   # its own exit code, so the controller says why (not SiteFAILED)
                         print('ran on a shared node: host job', share.get('host'),
                               'exit:', share.get('rc'), 'reason:', share.get('reason'), flush=True)
                         st = ['COMPLETED'] if rc == 0 else ['FAILED']
