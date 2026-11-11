@@ -65,6 +65,8 @@ type world struct {
 
 	// outageStart and outageEnd are when L-chaos took the shared site down and up.
 	outageStart, outageEnd time.Time
+	// outageNoticed is when the HPCSite's SiteReachable condition turned False.
+	outageNoticed time.Time
 
 	projects []*project
 	sampler  *sampler
@@ -106,7 +108,9 @@ func scratchDir(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(d) })
+	if os.Getenv("SCALE_KEEP") == "" {
+		t.Cleanup(func() { _ = os.RemoveAll(d) })
+	}
 	return d
 }
 
@@ -216,6 +220,20 @@ func (w *world) addProject(name, siteName, user, account string, site *fakeslurm
 	return p
 }
 
+// enableSharing turns node sharing on for the project's HPCSite (spec.sharing): its steps that name a sharing scope
+// are then planned as hosts or guests by the controller.
+func (w *world) enableSharing(p *project) {
+	w.t.Helper()
+	var hs hpcv1alpha1.HPCSite
+	if err := w.c.Get(w.ctx, client.ObjectKey{Namespace: p.hpcNS, Name: "site"}, &hs); err != nil {
+		w.t.Fatal(err)
+	}
+	hs.Spec.Sharing = true
+	if err := w.c.Update(w.ctx, &hs); err != nil {
+		w.t.Fatal(err)
+	}
+}
+
 func (w *world) must(err error) {
 	w.t.Helper()
 	if err != nil && !apierrors.IsAlreadyExists(err) {
@@ -234,6 +252,7 @@ type jobSpec struct {
 	maxCont     int32  // continuations a resumable job may make (0: 5)
 	hostTail    string // a node-sharing host: dilated minutes its Slurm job keeps the node after its step
 	guest       bool   // a node-sharing guest: taken by a running host, never started on its own
+	shareable   bool   // a step of the project's sharing scope; the controller plans it as a host or a guest (D-70)
 }
 
 // createJobs creates the jobs of a project with a bounded number of parallel writers.
@@ -251,7 +270,7 @@ func (w *world) createJobs(p *project, specs []jobSpec) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.envNS, Annotations: map[string]string{}},
-				Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: s.class, Image: "reg/app:v1", WallTimeMinutes: s.wallMinutes,
+				Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: s.class, Image: "reg.example/app:v1", WallTimeMinutes: s.wallMinutes,
 					Command: []string{"python", "train.py"}, StepName: "step-" + name}}
 			if s.run != "" {
 				j.Annotations[annRunMinutes] = s.run
@@ -265,7 +284,7 @@ func (w *world) createJobs(p *project, specs []jobSpec) {
 			if s.resumable {
 				j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 5, MaxContinuations: max(s.maxCont, 5)}
 			}
-			if s.hostTail != "" || s.guest {
+			if s.hostTail != "" || s.guest || s.shareable {
 				j.Spec.Sharing = &hpcv1alpha1.Sharing{Scope: "scalescope1"}
 				j.Annotations[annHostTail] = s.hostTail
 				if s.guest {

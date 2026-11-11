@@ -68,7 +68,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		seq++
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("hpc-%d", seq), Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg/app:v1", WallTimeMinutes: 60,
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/app:v1", WallTimeMinutes: 60,
 				Command: []string{"python", "train.py"}, StepName: "train", Outputs: []string{"model"},
 				Env: []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "outputs-app"}}},
 		}
@@ -201,7 +201,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 	It("refuses a spec.env outside the allowlist: the CRD rejects it", func() {
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: "evil", Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "i", WallTimeMinutes: 10, StepName: "s",
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: 10, StepName: "s",
 				Env: []hpcv1alpha1.NameValue{{Name: "HPC_ENDPOINT", Value: "https://evil.example"}}},
 		}
 		err := k8sClient.Create(ctx, j)
@@ -245,7 +245,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 
 		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runner-pod", Namespace: hpcNS,
 			Labels: map[string]string{runnerjob.LabelRunnerJob: rj.Name}},
-			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runner", Image: "x"}}}}
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runner", Image: "reg.example/img:1"}}}}
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "runner", State: corev1.ContainerState{
 			Terminated: &corev1.ContainerStateTerminated{ExitCode: 2, Message: "HPC identity missing"}}}}
@@ -346,7 +346,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		rj := runnerJob(got, 1)
 		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "evicted", Namespace: hpcNS,
 			Labels: map[string]string{runnerjob.LabelRunnerJob: rj.Name}},
-			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runner", Image: "x"}}}}
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runner", Image: "reg.example/img:1"}}}}
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, pod)).To(Succeed())
 
@@ -463,7 +463,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 	It("leaves a phase-0 job (no stepName) exactly as before: no runner Job, no finalizer, no polling", func() {
 		seq++
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("p0-%d", seq), Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "img", WallTimeMinutes: 60}}
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: 60}}
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		res, got := reconcileOnce(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
@@ -483,7 +483,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 	})
 
 	// Learned time limit (PRD-HPC-1461 F-41, D-67).
-	const appImage = "reg/lab/app:v1"
+	const appImage = "reg.example/lab/app:v1"
 	// seedRun plays an earlier job of a step: terminal in the given phase with a run of the given minutes.
 	seedRun := func(image string, phase hpcv1alpha1.Phase, runMinutes int, mod func(*hpcv1alpha1.HPCArgoWorkflowJob)) {
 		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = image })
@@ -524,7 +524,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 	// learned 15 minutes; the slot manager says reason=TIMEOUT and the runner reports state TIMEOUT.
 	It("retries a guest that its own learned limit stopped on a shared node once at the declared limit", func() {
 		for range 3 {
-			seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
+			seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
 		}
 		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage; j.Spec.WallTimeMinutes = 240 })
 		_, got := reconcileOnce(j)
@@ -543,7 +543,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 
 	It("does not retry a guest killed on a shared node for any other reason", func() {
 		for range 3 {
-			seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
+			seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
 		}
 		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage; j.Spec.WallTimeMinutes = 240 })
 		reconcileOnce(j)
@@ -619,6 +619,8 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		}
 		next := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Sharing = &hpcv1alpha1.Sharing{Scope: "abcdef12"} })
 		_, got := reconcileOnce(next)
+		Expect(got.Status.Placement.Share).To(HaveField("Role", hpcv1alpha1.ShareHost), "no open host of the scope has a free slot: it is a host (D-70)")
+		got.Status.Placement.Share = nil
 		Expect(got.Status.Placement).To(Equal(&hpcv1alpha1.Placement{TimeLimitMinutes: 15, Source: hpcv1alpha1.PlacementLearned, Samples: 3}),
 			"3 samples of 2 minutes give the 15-minute floor; the 50-minute jobs would have given the declared 60")
 	})
@@ -642,19 +644,22 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 
 	It("books and submits the learned limit: p95 x 1.5 of the same app's runs, never another app's or an invalid one", func() {
 		for range 3 {
-			seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil) // earlier builds of the same app
+			seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil) // earlier builds of the same app
 		}
 		for range 5 {
-			seedRun("reg/lab/other:v1", hpcv1alpha1.PhaseSucceeded, 200, nil) // another app, same namespace
+			seedRun("reg.example/lab/other:v1", hpcv1alpha1.PhaseSucceeded, 200, nil) // another app, same namespace
 		}
-		seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseFailed, 200, nil) // not successful
-		seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 200, func(g *hpcv1alpha1.HPCArgoWorkflowJob) {
+		seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseFailed, 200, nil) // not successful
+		seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 200, func(g *hpcv1alpha1.HPCArgoWorkflowJob) {
 			g.Status.Run.StartTime, g.Status.Run.EndTime = g.Status.Run.EndTime, g.Status.Run.StartTime // end < start
 		})
-		seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 200, func(g *hpcv1alpha1.HPCArgoWorkflowJob) {
+		seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 200, func(g *hpcv1alpha1.HPCArgoWorkflowJob) {
 			g.Status.Continuations = 1 // a continued job's last segment is not the step's run time
 		})
-		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg/lab/app:v9"; j.Spec.WallTimeMinutes = 240 })
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+			j.Spec.Image = "reg.example/lab/app:v9"
+			j.Spec.WallTimeMinutes = 240
+		})
 
 		_, got := reconcileOnce(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
@@ -666,10 +671,10 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 	})
 
 	It("keeps the declared limit with fewer than three samples of its own app", func() {
-		seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 5, nil)
-		seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 5, nil)
+		seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 5, nil)
+		seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 5, nil)
 		for range 4 {
-			seedRun("reg/lab/yolo:v1", hpcv1alpha1.PhaseSucceeded, 5, nil)
+			seedRun("reg.example/lab/yolo:v1", hpcv1alpha1.PhaseSucceeded, 5, nil)
 		}
 		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
 		_, got := reconcileOnce(j)
@@ -680,7 +685,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 
 	It("never learns for a resumable step: its checkpoint signal is timed from the declared limit", func() {
 		for range 4 {
-			seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 5, nil)
+			seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 5, nil)
 		}
 		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
 			j.Spec.Image = appImage
@@ -693,7 +698,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 
 	It("retries once at the declared limit when a learned limit times out, then fails as today on a second TIMEOUT", func() {
 		for range 3 {
-			seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
+			seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
 		}
 		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage; j.Spec.WallTimeMinutes = 240 })
 		_, got := reconcileOnce(j)
@@ -725,7 +730,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 
 	It("caps the timeout retry at the spec's wall time and does not retry a declared limit", func() {
 		for range 3 {
-			seedRun("reg/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
+			seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
 		}
 		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage; j.Spec.WallTimeMinutes = 40 })
 		_, got := reconcileOnce(j)
@@ -735,7 +740,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		got = settleTo(j, hpcv1alpha1.PhaseAdmitted)
 		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(40)), "the declared cap")
 
-		declared := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg/lab/fresh:v1" })
+		declared := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg.example/lab/fresh:v1" })
 		reconcileOnce(declared)
 		timeout(declared, 1, 60)
 		_, got = reconcileOnce(declared)
@@ -806,7 +811,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 			seedRun(appImage, hpcv1alpha1.PhaseSucceeded, 10, ended(nil))
 		}
 		seedRun(appImage, hpcv1alpha1.PhaseFailed, 120, ended(stoppedRun(120))) // another declared limit
-		seedRun("reg/lab/other:v1", hpcv1alpha1.PhaseFailed, 60, ended(stoppedRun(60)))
+		seedRun("reg.example/lab/other:v1", hpcv1alpha1.PhaseFailed, 60, ended(stoppedRun(60)))
 		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
 		_, got := reconcileOnce(j)
 		Expect(got.Status.Placement.Warning).To(BeEmpty())
@@ -1007,7 +1012,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.ResumeEvidence.Verified).To(BeTrue())
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
 
-		next := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg/lab/app:v2" }) // a new build of the same app
+		next := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg.example/lab/app:v2" }) // a new build of the same app
 		_, got = reconcileOnce(next)
 		Expect(got.Status.Placement.Resumable).NotTo(BeNil())
 		Expect(got.Status.Placement.Resumable.Verified).To(BeTrue())
@@ -1018,7 +1023,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(env).To(HaveKeyWithValue("HPC_CKPT_BUDGET_PERCENT", "10"))
 
 		optOut := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
-			j.Spec.Image = "reg/lab/app:v3"
+			j.Spec.Image = "reg.example/lab/app:v3"
 			j.Spec.ResumableOptOut = true
 		})
 		_, got = reconcileOnce(optOut)
@@ -1035,7 +1040,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 			settleTo(old, hpcv1alpha1.PhaseAdmitted)
 		}
 		time.Sleep(1100 * time.Millisecond) // evidence times have one-second resolution
-		bad := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg/lab/app:v2" })
+		bad := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg.example/lab/app:v2" })
 		reconcileOnce(bad)
 		ended(bad, 1, "TIMEOUT", nil, "scratch://ckpt/p", progress(9))
 		reconcileOnce(bad)
@@ -1043,7 +1048,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		ended(bad, 2, "TIMEOUT", nil, "scratch://ckpt/q", progress(9))
 		reconcileOnce(bad)
 
-		fresh := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg/lab/app:v3" })
+		fresh := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg.example/lab/app:v3" })
 		_, got := reconcileOnce(fresh)
 		Expect(got.Status.Placement.Resumable).NotTo(BeNil())
 		Expect(got.Status.Placement.Resumable.Verified).To(BeFalse())

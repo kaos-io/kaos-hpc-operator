@@ -96,6 +96,10 @@ func (r *HPCArgoWorkflowJobReconciler) serveGate(ctx context.Context, job *hpcv1
 		if err := runnerjob.ValidateEnv(job.Spec.Env); err != nil {
 			return ctrl.Result{}, true, r.setPhase(ctx, job, hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonInvalidSpec, err.Error(), nil)
 		}
+		if err := runnerjob.ValidateImage(job.Spec.Image); err != nil {
+			// Nothing is booked and no runner starts: no site job, no node time, for a reference no credential fixes.
+			return ctrl.Result{}, true, r.setPhase(ctx, job, hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonInvalidImage, err.Error(), nil)
+		}
 	}
 	if !has {
 		if err := r.setFinalizer(ctx, job, true); err != nil {

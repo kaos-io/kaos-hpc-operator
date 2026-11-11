@@ -199,6 +199,13 @@ func retryMessage(from, to, attempt int32) string {
 // is eligible. It never changes pl in place: a timeout retry hands in the job's own placement.
 func (r *HPCArgoWorkflowJobReconciler) withLane(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
 	site *hpcv1alpha1.HPCSite, pl *hpcv1alpha1.Placement) (*hpcv1alpha1.Placement, error) {
+	return r.laneFor(ctx, job, site, pl, pl.TimeLimitMinutes)
+}
+
+// laneFor is withLane for a lane that must admit limit minutes: the step's own limit, or more where the job
+// asks for room beside it (a shared-node host, share.go).
+func (r *HPCArgoWorkflowJobReconciler) laneFor(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
+	site *hpcv1alpha1.HPCSite, pl *hpcv1alpha1.Placement, limit int32) (*hpcv1alpha1.Placement, error) {
 	out := *pl
 	out.QOS, out.Reservation = "", ""
 	class, ok := admission.ClassOf(site, job.Spec.Class)
@@ -210,7 +217,7 @@ func (r *HPCArgoWorkflowJobReconciler) withLane(ctx context.Context, job *hpcv1a
 		return nil, err
 	}
 	lane, found := lanes.Choose(r.LaneCandidates, lanes.Request{Class: class, Profile: site.Spec.Profile,
-		LimitMinutes: pl.TimeLimitMinutes, Now: r.now(), InUse: inUse})
+		LimitMinutes: limit, Now: r.now(), InUse: inUse})
 	if found {
 		out.QOS, out.Reservation = lane.QOS, lane.Reservation
 	}

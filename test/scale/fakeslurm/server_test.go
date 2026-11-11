@@ -174,7 +174,7 @@ func TestShouldKeepAHostRunningForItsGuestAndChargeOnlyTheHost(t *testing.T) {
 	if h.State != Running || !strings.Contains(h.Cm, "kaos-state=done rc=0") {
 		t.Fatalf("host after its step: %s %q, want RUNNING with its step's result in the comment", h.State, h.Cm)
 	}
-	if g.State != Pending || g.Reason != "JobHeldUser" || !strings.Contains(g.Cm, fmt.Sprintf("kaos-state=taken host=%d slot=1", host)) {
+	if g.State != Pending || g.Reason != ReasonHeld || !strings.Contains(g.Cm, fmt.Sprintf("kaos-state=taken host=%d slot=1", host)) {
 		t.Fatalf("guest: %s %s %q, want held and taken by the host", g.State, g.Reason, g.Cm)
 	}
 	time.Sleep(2 * time.Second) // 24 minutes: both are over
@@ -190,5 +190,56 @@ func TestShouldKeepAHostRunningForItsGuestAndChargeOnlyTheHost(t *testing.T) {
 	}
 	if c := s.Charged("a"); c < 19.9 || c > 20.1 {
 		t.Fatalf("charged %.1f node-minutes, want the host's 20 and nothing for the guest", c)
+	}
+}
+
+func submitBegin(t *testing.T, s *Site, name string, begin int64, env ...string) int {
+	const limit = 60
+	t.Helper()
+	b, _ := json.Marshal(map[string]any{"job": map[string]any{"name": name, "qos": "default", "account": "a", "partition": "gpu",
+		"time_limit": limit, "environment": env, "begin_time": map[string]any{"set": true, "number": begin}}})
+	code, out := do(t, s, http.MethodPost, "/slurm/v0.0.44/job/submit", string(b))
+	if code != 200 {
+		t.Fatalf("submit %s: %d %s", name, code, out)
+	}
+	var r struct {
+		JobID int `json:"job_id"`
+	}
+	_ = json.Unmarshal([]byte(out), &r)
+	return r.JobID
+}
+
+// PRD-HPC-1461 D-70: a job that waits for its BeginTime never starts before it, and a running sharing job takes it
+// into a free slot (as the real slot manager takes a job in its offer window); the guest costs nothing and the host
+// keeps its node until its last guest is done. Without a host, the same job starts when its BeginTime arrives.
+func TestShouldLetARunningSharingJobTakeAJobWaitingForItsBeginTimeAndNeverStartItEarly(t *testing.T) {
+	s := New(Options{Token: "t", Dilation: 600, Capacity: 10}) // 1 real second = 10 minutes
+	defer s.Close()
+	share := []string{"FAKE_SHARE_SCOPE=sc", "FAKE_SHARE_SLOTS=2"}
+	soon, later := time.Now().Add(time.Hour).Unix(), time.Now().Add(2*time.Hour).Unix()
+	host := submitBegin(t, s, "h", 0, append(share, "FAKE_RUN_MINUTES=5")...)
+	g1 := submitBegin(t, s, "g1", soon, append(share, "FAKE_RUN_MINUTES=20")...)
+	g2 := submitBegin(t, s, "g2", later, append(share, "FAKE_RUN_MINUTES=20")...)
+	other := submitBegin(t, s, "o", soon, "FAKE_SHARE_SCOPE=other", "FAKE_SHARE_SLOTS=2", "FAKE_RUN_MINUTES=20")
+	job := func(id int) Job { s.mu.Lock(); defer s.mu.Unlock(); return *s.jobs[id] }
+	time.Sleep(250 * time.Millisecond) // 2.5 minutes: the host's own step still holds one of its two slots
+	if !strings.Contains(job(g1).Cm, fmt.Sprintf("kaos-state=taken host=%d slot=", job(host).ID)) || job(g2).host != 0 {
+		t.Fatalf("g1 %q g2 host %d: one slot is free, so only the first waiting job is taken", job(g1).Cm, job(g2).host)
+	}
+	time.Sleep(450 * time.Millisecond) // 7 minutes: the host's own step is over, its slot is free
+	if job(g2).host != job(host).ID {
+		t.Fatalf("g2 not taken once the host's own slot was free")
+	}
+	if job(other).host != 0 || job(other).State != Pending {
+		t.Fatalf("a job of another scope is not taken: host %d state %s", job(other).host, job(other).State)
+	}
+	time.Sleep(3 * time.Second) // 37 minutes: all done
+	if st := s.Snapshot(); st.Started != 1 {
+		t.Fatalf("%d jobs ran on a node, want only the host (guests never start; the other scope's job waits for its BeginTime)", st.Started)
+	}
+	for _, id := range []int{g1, g2} {
+		if g := job(id); g.State != Cancelled || !g.StartAt.IsZero() {
+			t.Fatalf("guest %d: %s", id, g.State)
+		}
 	}
 }

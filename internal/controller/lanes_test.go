@@ -63,7 +63,7 @@ var _ = Describe("HPCArgoWorkflowJob lane placement", func() {
 		seq++
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("lane-%d", seq), Namespace: ns},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: fmt.Sprintf("reg/lane/app%d:v1", seq),
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: fmt.Sprintf("reg.example/lane/app%d:v1", seq),
 				WallTimeMinutes: wall, Command: []string{"python", "train.py"}, StepName: "train",
 				Env: []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "outputs-app"}}},
 		}

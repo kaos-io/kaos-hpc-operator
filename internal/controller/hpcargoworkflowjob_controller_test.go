@@ -81,7 +81,7 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		seq++
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("job-%d", seq), Namespace: ns},
-			Spec:       hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "img", WallTimeMinutes: wall},
+			Spec:       hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: wall},
 		}
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		return j
@@ -107,7 +107,7 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		seq++
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("job-%d", seq), Namespace: ns},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "img", WallTimeMinutes: wall,
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: wall,
 				Resumable: &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: maxCont}},
 		}
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
@@ -651,7 +651,7 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		seq++
 		off := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("job-%d", seq), Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "img", WallTimeMinutes: 60,
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: 60,
 				IdleTimeoutMinutes: ptr.To(int32(0))},
 		}
 		Expect(k8sClient.Create(ctx, off)).To(Succeed())

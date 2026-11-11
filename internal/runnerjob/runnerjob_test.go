@@ -15,7 +15,7 @@ import (
 func fixtures() (*hpcv1alpha1.HPCArgoWorkflowJob, *hpcv1alpha1.HPCSite) {
 	job := &hpcv1alpha1.HPCArgoWorkflowJob{
 		ObjectMeta: metav1.ObjectMeta{Name: "hpc-abc", Namespace: "env-ns", UID: "11111111-2222"},
-		Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg/app:v1", Command: []string{"python", "t.py"},
+		Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/app:v1", Command: []string{"python", "t.py"},
 			WallTimeMinutes: 120, Dataset: &hpcv1alpha1.DatasetPin{Repo: "dataset-ds", Version: "v1", Commit: "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}, Outputs: []string{"model", "m"}, StepName: "train",
 			Workflow:  &hpcv1alpha1.WorkflowRef{Name: "wf-1", UID: "wf-uid"},
 			Resumable: &hpcv1alpha1.Resumable{LeadMinutes: 20, MaxContinuations: 5},
@@ -103,7 +103,7 @@ func TestShouldSetTheRunnerEnvironmentFromSpecAndSite(t *testing.T) {
 	want := map[string]string{
 		"HPC_JOB_NAMESPACE": "env-ns", "HPC_JOB_NAME": "hpc-abc", "KAOS_ATTEMPT": "2",
 		"KAOS_RESUME_REF": "ckpt-1", "KAOS_RESUME_FROM_ATTEMPT": "1",
-		"IMAGE_REF": "reg/app:v1", "STEP_COMMAND": `["python","t.py"]`, "SLURM_TIME_LIMIT": "120",
+		"IMAGE_REF": "reg.example/app:v1", "STEP_COMMAND": `["python","t.py"]`, "SLURM_TIME_LIMIT": "120",
 		"HPC_RESUMABLE_LEAD": "20", "STEP_OUTPUTS": "model,m", "HPC_CLASS": "meluxina-gpu", "STEP_NAME": "train",
 		"WF_UID": "wf-uid", "KUBECORE_WORKFLOW_NAME": "wf-1", "KUBECORE_RUN_ID": "wf-1", "DATASET_REPO": "dataset-ds", "DATASET_VERSION": "v1", "DATASET_COMMIT": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2", "DATASET_OWNER": "", "DATASET_UNPINNED": "",
 		"HPC_SHARING": "1", "HPC_SCOPE": "abcdef12", "OUTPUTS_REPO": "outputs-app",
@@ -399,5 +399,32 @@ func TestAJobThatNamesADatasetWithoutACommitNeverLooksDataless(t *testing.T) {
 	pinned, _ := fixtures()
 	if err := ValidateDataset(&pinned.Spec); err != nil {
 		t.Errorf("a pinned dataset is fine: %v", err)
+	}
+}
+
+// Live 2026-11-10: an image ref of ":probe-learn-latest" (a half-rendered template) was staged, submitted and
+// retried with fresh credentials three times. It is refused before anything is booked or submitted.
+func TestValidateImage(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	for _, c := range []struct {
+		name, ref string
+		ok        bool
+	}{
+		{"should_accept_registry_repository_and_tag", "zot.example/proj/app:v1", true},
+		{"should_accept_a_registry_with_a_port", "zot.example:5000/app:v1", true},
+		{"should_accept_a_digest_without_a_tag", "zot.example/proj/app@" + digest, true},
+		{"should_accept_tag_and_digest", "zot.example/proj/app:v1@" + digest, true},
+		{"should_refuse_the_half_rendered_reference_of_the_live_run", ":probe-learn-latest", false},
+		{"should_refuse_a_name_without_a_registry_host", "app:v1", false},
+		{"should_refuse_a_repository_without_a_tag_or_digest", "zot.example/proj/app", false},
+		{"should_refuse_an_empty_tag", "zot.example/proj/app:", false},
+		{"should_refuse_a_short_digest", "zot.example/proj/app@sha256:abc", false},
+		{"should_refuse_the_empty_reference", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if err := ValidateImage(c.ref); (err == nil) != c.ok {
+				t.Fatalf("ValidateImage(%q) = %v, want ok=%v", c.ref, err, c.ok)
+			}
+		})
 	}
 }

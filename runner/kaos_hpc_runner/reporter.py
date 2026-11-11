@@ -96,6 +96,15 @@ class Reporter:
             print('site observation: job not readable (%s)' % e, flush=True)
             return None
 
+    def placement(self):
+        """status.placement: the controller's plan for the attempt (lane, time limit, share role). None when the
+        job is unreadable or carries none; a waiting guest then keeps waiting."""
+        try:
+            return ((self.kube('GET', self.path(), timeout=10).get('status') or {}).get('placement')) or None
+        except Exception as e:
+            print('placement: job not readable (%s)' % e, flush=True)
+            return None
+
     def cancel_requested(self):
         """Did the controller ask for a real cancel (annotation hpc.kaos.io/cancel-requested, set before it
         deletes the runner Job)? A fresh read with a short timeout and 2 retries. None when it cannot be

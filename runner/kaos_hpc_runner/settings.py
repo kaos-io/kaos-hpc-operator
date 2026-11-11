@@ -28,10 +28,17 @@ IDLE_EXIT = 236
 INSUFFICIENT_QUOTA_EXIT = 237   # the runner reports it (FAILED, no site job) when staging does not fit the quota (AC-33)
 # AC-39: the runner reports it (FAILED, no site job) when the site refused the submit for its submit cap.
 SUBMIT_LIMIT_EXIT = 238
+# The runner reports it (FAILED, no site job) when the step's image reference is not registry/repository:tag-or-digest.
+INVALID_IMAGE_EXIT = 239
 DEFAULT_IDLE_TIMEOUT_MIN = 20
 # AC-28: a site that does not answer is waited for this long (the controller passes its --site-outage-max).
 DEFAULT_SITE_WAIT_MAX_S = 30 * 60
 OFFER_S = 60   # PRD-1609: a sharing job waits this long for a host of its scope to take it
+# PRD-HPC-1461 D-70: a guest the controller planned onto a host's node is submitted to begin this far ahead. It is
+# eligible only then, so no free node can start it on its own; the host's slot manager takes it like a job in its
+# offer window. The controller plans it again (and the runner submits it as a host) long before this passes.
+GUEST_HOLD_S = 12 * 3600
+ROLE_POLL_S = 30   # how often a waiting guest reads the controller's plan for it
 
 
 def fail_start(msg, code=2):
@@ -43,6 +50,27 @@ def fail_start(msg, code=2):
     except OSError:
         pass
     sys.exit(code)
+
+
+def image_problem(ref):
+    """Why an image reference cannot be pulled, or '' when it is registry-host/repository with a tag or digest.
+    Checked before anything is staged or submitted: a half-rendered reference such as ':probe-learn-latest' would
+    otherwise cost a site job and three credential resubmits for a failure no credential fixes."""
+    ref = normalize_image(ref or '')
+    name, _, digest = ref.partition('@')
+    if digest:
+        if not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
+            return 'the digest %r is not sha256:<64 hex digits>' % digest
+    else:
+        head, _, last = name.rpartition('/')
+        if ':' not in last or not last.partition(':')[2]:
+            return 'it has no tag or digest'
+        name = head + '/' + last.partition(':')[0]
+    host, _, repo = name.partition('/')
+    if not (host and repo and not repo.startswith('/') and not repo.endswith('/')) or \
+            not ('.' in host or ':' in host or host == 'localhost'):
+        return 'it has no registry host and repository (want <registry>/<repository>:<tag>)'
+    return ''
 
 
 def normalize_image(img):
@@ -119,6 +147,10 @@ class Settings:
         if sharing and not self.sharing:
             print('node sharing: scope %r is not 8-16 lowercase letters or digits - running alone'
                   % self.scope, flush=True)
+        # PRD-HPC-1461 D-70: the controller's place for this step in a shared node, "guest" or "host" ("" = no plan:
+        # the job is a host, as before the plan existed). A waiting guest reads the plan again (apply_plan).
+        self.share_role = (g('HPC_SHARE_ROLE') or '') if self.sharing else ''
+        self.share_job_limit = 0   # the host's job limit the plan gave after a re-plan (0: computed from the lane maximum)
         # The site job's NAME is its immutable key (a job script rewrites the comment, never the name). It carries
         # the HPC job's identity and the attempt, so the finished job of a submit whose answer was lost is found
         # again by name (Runner.adopt) and is never taken for another attempt's or another Argo retry's job.
@@ -147,6 +179,15 @@ class Settings:
         self.mlflow_url = g('MLFLOW_EXTERNAL_URL') or ''
         self.outputs_repo = g('OUTPUTS_REPO') or ''
         self.outputs_ref = g('OUTPUTS_REF') or ''
+
+    def apply_plan(self, placement):
+        """A guest that was planned again as a host: take the lane and job limit the controller chose. The
+        placement is status.placement of the job."""
+        share = (placement or {}).get('share') or {}
+        self.share_role = share.get('role') or ''
+        self.qos = placement.get('qos') or ''
+        self.reservation = placement.get('reservation') or ''
+        self.share_job_limit = int(share.get('jobLimitMinutes') or 0)
 
     # ---- identity and class (never literals: one project must not submit as another)
 

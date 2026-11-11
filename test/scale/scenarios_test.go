@@ -3,6 +3,7 @@
 package scale
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -315,6 +316,120 @@ func TestScaleSharedResumable(t *testing.T) {
 	w.budgetRows(r, jobs)
 	w.verifyPublishedLedger(r, jobs)
 	w.reconcileRows(r, start, dur)
+}
+
+// TestScalePacking: deterministic node sharing (PRD-HPC-1461 D-26, D-70). N shareable 1-GPU steps of one scope and
+// class that arrive at once on a site with ample free nodes use ceil(N / 4) nodes, whatever the site's capacity.
+// Live 2026-11-10: four such steps of one run started on four nodes in the same second (nobody was running to take
+// a guest) and held them idle for 8, 9, 9 and 4 minutes, 30 node-minutes for about 8. Against the controller before
+// the plan the site starts N jobs: the node count and the charge assertions fail.
+func TestScalePacking(t *testing.T) {
+	r := newResult(t, "S-pack (deterministic node sharing)", "4, 8 and 10 shareable 1-GPU steps arrive at once on sites with ample free "+
+		"nodes (4 GPUs per node): each run uses ceil(N/4) nodes, the rest ride as guests; every step succeeds; the site's charge is "+
+		"about one node's time per host, not one per step.")
+	w := newWorld(t, ctrlOpts{pollInterval: 2 * time.Second, restRate: 4, restBurst: 10, lanes: laneCandidates})
+	type run struct {
+		n    int
+		p    *project
+		site *fakeslurm.Site
+	}
+	var runs []run
+	for i, n := range []int{4, 8, 10} {
+		site := fakeslurm.New(siteOptions("meluxina", int64(20+i)))
+		p := w.addProject(fmt.Sprintf("ppk%d", n), "meluxina", fmt.Sprintf("u%d", i+1), fmt.Sprintf("acct%d", i+1), site,
+			budget{gpuShare: 100, cpuShare: 10, gpuSiteLeft: 90, cpuSiteLeft: 8}, 0)
+		w.enableSharing(p)
+		p.coverage = true
+		runs = append(runs, run{n, p, site})
+	}
+	w.startController()
+	w.startKubelet()
+	w.startSampler()
+	w.startMonitor()
+	start := time.Now()
+	rng := rand.New(rand.NewSource(11))
+	for _, ru := range runs {
+		steps := make([]jobSpec, ru.n)
+		for i := range steps {
+			// The live run's shape: one class, one scope, the same 30-minute limit, a few minutes of work.
+			steps[i] = jobSpec{class: "hpc-gpu", wallMinutes: 30, run: fmt.Sprintf("%.1f", 4+2*rng.Float64()), shareable: true}
+		}
+		w.createJobs(ru.p, steps)
+	}
+	deadline := time.Now().Add(4 * time.Minute)
+	var jobs []hpcv1alpha1.HPCArgoWorkflowJob
+	for time.Now().Before(deadline) {
+		jobs = w.allJobs()
+		open := 0
+		for i := range jobs {
+			if !jobs[i].Status.Phase.Terminal() || jobs[i].Status.Booking != nil {
+				open++
+			}
+		}
+		if len(jobs) == 22 && open == 0 {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	r.row("duration", time.Since(start).Round(time.Second))
+	r.row("final phases", histogram(jobs))
+	for _, ru := range runs {
+		verifyPacking(r, ru.p, ru.site, ru.n, jobs)
+	}
+	w.verifySubmits(r, jobs)
+	w.budgetRows(r, jobs)
+	w.verifyPublishedLedger(r, jobs)
+	w.reconcileRows(r, start, time.Since(start))
+}
+
+// verifyPacking asserts the node count of one run of n shareable steps: the site started ceil(n/4) jobs, those are
+// the steps without a host, the others are guests that settled to zero, and the charge is about one node per host.
+func verifyPacking(r *result, p *project, site *fakeslurm.Site, n int, all []hpcv1alpha1.HPCArgoWorkflowJob) {
+	want := (n + 3) / 4
+	hosts, guests, settled := 0, 0, int64(0)
+	for i := range all {
+		j := &all[i]
+		if j.Namespace != p.envNS {
+			continue
+		}
+		if j.Status.Phase != hpcv1alpha1.PhaseSucceeded || j.Status.Booking != nil || len(j.Status.Attempts) != 1 {
+			r.fail("%s ended %s/%s booking %v attempts %d: %s", j.Name, j.Status.Phase, j.Status.Reason, j.Status.Booking,
+				len(j.Status.Attempts), j.Status.Message)
+			continue
+		}
+		settled += j.Status.Attempts[0].SettledNodeMinutes
+		if j.Status.Run.HostSiteJobID != "" {
+			guests++
+			if j.Status.Attempts[0].SettledNodeMinutes != 0 {
+				r.fail("guest %s settled %d node-minutes, want 0", j.Name, j.Status.Attempts[0].SettledNodeMinutes)
+			}
+		} else {
+			hosts++
+		}
+	}
+	started := site.Snapshot().Started
+	charged := site.Charged(p.account)
+	plan := ""
+	for i := range all {
+		if j := &all[i]; j.Namespace == p.envNS && j.Status.Placement != nil {
+			role, host := "none", ""
+			if sh := plannedShare(j.Status.Placement); sh != "" {
+				role = sh
+			}
+			plan += fmt.Sprintf(" %s:%s@%s/qos=%s/host=%s", j.Name, role, j.Status.Run.SiteJobID, j.Status.Placement.QOS, host)
+		}
+	}
+	r.row(fmt.Sprintf("%d steps: plan", n), plan)
+	r.row(fmt.Sprintf("%d steps: nodes started at the site / hosts / guests (want %d nodes)", n, want), fmt.Sprintf("%d / %d / %d", started, hosts, guests))
+	r.row(fmt.Sprintf("%d steps: site charge, node-minutes (settled %d)", n, settled), fmt.Sprintf("%.1f", charged))
+	if started != want || hosts != want || guests != n-want {
+		r.fail("%d shareable steps used %d nodes (%d hosts, %d guests); want ceil(%d/4) = %d nodes", n, started, hosts, guests, n, want)
+	}
+	// A host's job lasts its longest step (6 minutes) plus the slot manager's 2-minute idle release: far below one
+	// node per step. A step per node would charge at least 6 node-minutes each.
+	if limit := float64(want) * 10; charged > limit {
+		r.fail("%d shareable steps were charged %.1f node-minutes; want at most %.0f for %d nodes", n, charged, limit, want)
+	}
 }
 
 // runSample is the step's own run time, start to end of the final report: what a learned limit is made of (D-67).
@@ -688,6 +803,10 @@ func (w *world) checkReachableCondition(r *result, p *project, want bool) {
 	}
 	c := meta.FindStatusCondition(hs.Status.Conditions, hpcv1alpha1.ConditionSiteReachable)
 	got := c != nil && c.Status == metav1.ConditionTrue
+	if c != nil && !got && !want {
+		// When the controller itself noticed the outage: what "no runner Job after noticing" is measured from.
+		w.outageNoticed = c.LastTransitionTime.Time
+	}
 	r.row(fmt.Sprintf("HPCSite %s SiteReachable (want %v)", p.hpcNS, want), got)
 	if c == nil || got != want {
 		r.fail("HPCSite %s: SiteReachable is %v, want %v", p.hpcNS, c, want)
@@ -706,8 +825,14 @@ func (w *world) verifyOutage(r *result, down []*project, peakWaiting int, jobs [
 	for _, p := range down {
 		ns[p.hpcNS] = true
 	}
-	// 20 s after the start the poller has probed the site twice (3 s interval); the end is left alone for the same reason.
-	spawned := w.kube.spawnedBetween(ns, w.outageStart.Add(20*time.Second), w.outageEnd)
+	// From the moment the controller marked the site unreachable (SiteReachable turned False), not from a fixed time
+	// after the outage began: how soon it notices depends on the machine's load, "no spawn after noticing" does not.
+	from := w.outageNoticed
+	if from.IsZero() {
+		r.fail("the HPCSite never showed SiteReachable False: the controller did not notice the outage")
+		from = w.outageStart.Add(130 * time.Second)
+	}
+	spawned := w.kube.spawnedBetween(ns, from.Add(5*time.Second), w.outageEnd)
 	r.row("outage: runner Jobs created for the down site while it was down", spawned)
 	if spawned > 0 {
 		r.fail("%d runner Jobs were created for the down site during the outage: the controller must stop spawning attempts", spawned)
@@ -825,4 +950,20 @@ func describe(j *hpcv1alpha1.HPCArgoWorkflowJob) string {
 	}
 	return fmt.Sprintf("%s/%s reruns=%d continuations=%d attempts=%d: %s", j.Status.Phase, j.Status.Reason, j.Status.Reruns,
 		j.Status.Continuations, len(j.Status.Attempts), j.Status.Message)
+}
+
+// plannedShare is the planned role of a placement read from its JSON (status.placement.share), "" when there is none: the
+// harness does not depend on the field, so it also runs against a controller that has no share plan.
+func plannedShare(p *hpcv1alpha1.Placement) string {
+	b, _ := json.Marshal(p)
+	var v struct {
+		Share *struct {
+			Role string `json:"role"`
+			Host string `json:"host"`
+		} `json:"share"`
+	}
+	if json.Unmarshal(b, &v) != nil || v.Share == nil {
+		return ""
+	}
+	return v.Share.Role + ">" + v.Share.Host
 }

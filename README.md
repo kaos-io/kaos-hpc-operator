@@ -49,11 +49,34 @@ the job's class. Every `Reason` the operator writes, what it means and what the 
 | `Failed` / `InsufficientQuota` | Staging the dataset or image would exceed the project's scratch quota (space or files) even after evicting everything unused: the runner stops before any copy and submits nothing |
 | `Refused` / `TooLongNotResumable` | The declared limit is above the longest run the class or site allows (2 days on MeluXina `default`) and the step is not resumable (declared or verified, D-74), so it would be cut. The message gives the declared limit, the maximum and the two fixes: make it resumable or shorten it. Never cut silently |
 | `Refused` / `TooLongBeyondContinuations` | The step is resumable, but its declared limit needs more runs than the continuation cap allows (cap 5: 6 runs, 12 days on MeluXina `default`) |
+| `Refused` / `InvalidImage` | The step's image is not `<registry-host>/<repository>:<tag>` (or `@sha256:` digest), so it can never be pulled (a half-rendered `:app-latest`). Nothing is booked, no runner starts, no site job is submitted. The runner checks the same before it stages or submits and reports exit 239 (`Failed` / `InvalidImage`); a bad reference never triggers the fresh-credentials resubmit |
 | `Refused` / `MultiNodeUnsupported`, `WallTimeOverLimit` (the class's limit is unknown), `ClassNotAllowed`, `NoProject`, `NoSite`, `InvalidSpec` (an `env` name outside the allowlist) | It can never run as asked |
 
 The ledger is derived from the jobs themselves every time, never kept as a counter, and admission
 runs one job at a time, so concurrent jobs never overbook. A job running as a guest on a node
 another job of the same project holds is covered by that job's booking.
+
+### Node sharing is planned, not raced (D-26, D-70)
+
+A host can only take a guest that is still queued at the site, so steps that all start at once on free nodes
+never pack. The controller therefore plans the packing at admission, one job at a time. A shareable step (the
+project's site has `spec.sharing`, the step names a `sharing.scope`, its class has GPUs; resumable steps share too, AC-73) is
+given `status.placement.share`:
+
+- **guest** of the open host (running, or queued for less than `HostStartWait`) of its own site, scope and class
+  that has a free slot and enough time left (the step plus 6 minutes). The fullest host wins, so N steps use
+  `ceil(N / gpusPerNode)` hosts whatever the site's free capacity. A guest has no lane (it never takes a one-job
+  lane a host needs). The runner submits it deferred: BeginTime 12 h ahead, so it can never start on a node of its
+  own, and the host's slot manager takes it as it takes a job in its offer window.
+- **host** when no open host fits. It is placed in a lane that leaves room for a guest of its own size (else the
+  class's own QoS if that does, else as before) and its Slurm job limit (`share.jobLimitMinutes`; a resumable host's job is not padded) is recorded.
+
+A guest no host took is planned again (`ShareReplanned` event, `kaos_hpc_share_replans_total`): its host ended, did
+not start within `HostStartWait` (20 min), no longer has the time, or runs and did not take it within
+`GuestTakeWait` (10 min). It joins another open host or becomes a host; the runner, which reads the plan while it
+waits, replaces the deferred job by one that starts at once in the lane the plan names. A guest a host already took
+is left to the runner (a lost host resubmits it). Every guest is a Slurm job at the site until its host cancels it
+with the result, so it counts toward the site's submit cap.
 
 ### Budget sources (`HPCSite.spec.budget.source`)
 

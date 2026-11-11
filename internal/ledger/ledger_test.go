@@ -233,7 +233,7 @@ func TestPoolBudgetCountsEveryAttemptSettledInTheMonthWhateverTheRestart(t *test
 	}
 }
 
-func TestComputeCountsSiteJobsWithoutGuests(t *testing.T) {
+func TestComputeCountsAGuestsHeldSlurmJobTowardTheSubmitCap(t *testing.T) {
 	site := &hpcv1alpha1.HPCSite{Spec: hpcv1alpha1.HPCSiteSpec{Site: "m"}}
 	site.Name, site.Namespace = "s", "ns"
 	mk := func(uid string, host string) hpcv1alpha1.HPCArgoWorkflowJob {
@@ -247,8 +247,8 @@ func TestComputeCountsSiteJobsWithoutGuests(t *testing.T) {
 	jobs := []hpcv1alpha1.HPCArgoWorkflowJob{mk("a", ""), mk("b", ""), mk("g", "99")}
 	l := Compute(site, jobs, map[string]hpcv1alpha1.Booking{
 		"p": {SiteName: "s", SiteNamespace: "ns", Tier: hpcv1alpha1.TierGPU, NodeMinutes: 10}}, time.Now())
-	if l.Active != 4 || l.SiteJobs != 3 {
-		t.Fatalf("active %d site jobs %d, want 4 and 3 (the guest holds no Slurm job)", l.Active, l.SiteJobs)
+	if l.Active != 4 || l.SiteJobs != 4 {
+		t.Fatalf("active %d site jobs %d, want 4 and 4 (a guest's own job stays queued, held, until its host cancels it)", l.Active, l.SiteJobs)
 	}
 }
 
@@ -369,8 +369,8 @@ func TestAnOpenHostHoldsTheNodeForItsGuestsUntilItsJobEnds(t *testing.T) {
 			host := booked("h", hpcv1alpha1.PhaseSucceeded, 30, openHost(2, now.Add(-c.started)))
 			l := Compute(theSite(), []hpcv1alpha1.HPCArgoWorkflowJob{host, guest}, nil, now)
 			gpu := l.Tiers[hpcv1alpha1.TierGPU]
-			if gpu.Used != 0 || gpu.Booked != c.booked || l.SiteJobs != 1 {
-				t.Fatalf("used %d booked %d site jobs %d; want 0 %d 1", gpu.Used, gpu.Booked, l.SiteJobs, c.booked)
+			if gpu.Used != 0 || gpu.Booked != c.booked || l.SiteJobs != 2 {
+				t.Fatalf("used %d booked %d site jobs %d; want 0 %d 2 (the host's job and the guest's held job)", gpu.Used, gpu.Booked, l.SiteJobs, c.booked)
 			}
 			if !Holds(&host) || !OpenHost(&host) || Holds(&guest) {
 				t.Fatal("the open host holds the node, the guest holds nothing")

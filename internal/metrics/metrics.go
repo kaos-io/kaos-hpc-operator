@@ -22,6 +22,8 @@ const (
 	LabelQOS         = "qos"
 	LabelReservation = "reservation"
 	LabelFallback    = "fallback"
+	LabelRole        = "role"
+	LabelReason      = "reason"
 
 	LabelWorkflow = "workflow"
 	LabelStep     = "step"
@@ -114,6 +116,19 @@ var (
 		Help: "Attempts by the lane they were placed in; fallback=true counts lanes the site refused.",
 	}, []string{LabelQOS, LabelReservation, LabelFallback})
 
+	// SharePlacements counts shareable attempts by the role the controller planned (PRD-HPC-1461 D-26, D-70):
+	// host (a node of its own) or guest (onto an open host's node). A guest planned again is counted again.
+	SharePlacements = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kaos_hpc_share_placements_total",
+		Help: "Shareable attempts by planned role (host or guest).",
+	}, []string{LabelRole})
+
+	// ShareReplans counts guests that were not taken and were planned again, by why.
+	ShareReplans = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kaos_hpc_share_replans_total",
+		Help: "Guests planned again before a host took them, by reason (host_ended, host_not_started, no_longer_fits, not_taken).",
+	}, []string{LabelReason})
+
 	// IdleKills counts steps the on-node idle watchdog ended (PRD-HPC-1461 D-72, F-46).
 	IdleKills = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "kaos_hpc_idle_kills_total",
@@ -156,7 +171,7 @@ var (
 
 func init() {
 	ctrlmetrics.Registry.MustRegister(JobPhase, JobQueueSeconds, JobRunSeconds, NodeMinutesBooked,
-		NodeMinutesSettled, SiteNodeMinutes, ActiveJobs, RunnerRestarts, LanePlacements, IdleKills,
+		NodeMinutesSettled, SiteNodeMinutes, ActiveJobs, RunnerRestarts, LanePlacements, SharePlacements, ShareReplans, IdleKills,
 		K8sIdleKills, K8sIdleErrors, BudgetWarning, BudgetPercent, SiteUp, JobGPUUtilization, JobGPUUtilizationMax)
 }
 

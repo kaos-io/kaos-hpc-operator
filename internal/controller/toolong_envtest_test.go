@@ -35,7 +35,7 @@ var _ = Describe("a step longer than the longest lane", func() {
 		seq++
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("long-%d", seq), Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: fmt.Sprintf("reg/lab/long%d:v1", seq),
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: fmt.Sprintf("reg.example/lab/long%d:v1", seq),
 				WallTimeMinutes: wall, Command: []string{"python", "train.py"}, StepName: "train"},
 		}
 		if mod != nil {

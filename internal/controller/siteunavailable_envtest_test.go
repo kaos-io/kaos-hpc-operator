@@ -44,7 +44,7 @@ var _ = Describe("HPCArgoWorkflowJob waits for an unreachable site", func() {
 		seq++
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("hpc-su-%d", seq), Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg/app:v1", WallTimeMinutes: 60,
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/app:v1", WallTimeMinutes: 60,
 				Command: []string{"python", "train.py"}, StepName: "train", Outputs: []string{"model"},
 				Env: []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "outputs-app"}}},
 		}
@@ -204,7 +204,7 @@ var _ = Describe("HPCArgoWorkflowJob waits for an unreachable site", func() {
 		rj := runnerJobs(got)[0]
 		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "su-runner-pod", Namespace: hpcNS,
 			Labels: map[string]string{runnerjob.LabelRunnerJob: rj.Name}},
-			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runner", Image: "x"}}}}
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runner", Image: "reg.example/img:1"}}}}
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "runner", State: corev1.ContainerState{
 			Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Message: "SiteUnavailable: the site did not answer for 30 min (last error: HTTP 503)"}}}}
