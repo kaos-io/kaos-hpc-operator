@@ -44,8 +44,8 @@ release-gate rule):
                                       the ConfigMap indirection
   platform.kubecore.io/shm            /dev/shm emptyDir sizeLimit (e.g. "4Gi")
   platform.kubecore.io/workspace      per-run RWO PVC at /workspace (e.g. "50Gi")
-  platform.kubecore.io/hpc            future MeluXina leg (accepted,
-                                      not acted on)
+  platform.kubecore.io/hpc            the step's run limit on an HPC class
+                                      (authoring: walltime=)
   platform.kubecore.io/checkpoint-every  minutes between checkpoint copies of
                                       the step's KAOS_CHECKPOINT_DIR; "off"
                                       removes the persistence helper (see
@@ -78,9 +78,10 @@ import yaml
 
 from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
-from kubecore.meluxina import HPC_TWIN_TEMPLATE, enhance_hpc, hpc_classes
+from kubecore.meluxina import HPC_TWIN_TEMPLATE, enhance_hpc, hpc_classes, runs_on_hpc
 from kubecore.outputs_repo import checkpoint_prefix, outputs_repo
 from kubecore.resilience import enhance_resilience, shared_templates, write_helper_configmap
+from kubecore.step_contract import CONTEXT_PARAM, TEMPLATE_CAP, template_bytes
 
 ANNOTATION_PREFIX = "platform.kubecore.io/"
 KNOWN_ANNOTATIONS = {"compute-class", "inject", "source", "image", "shm", "workspace", "hpc", "hpc-resumable",
@@ -492,10 +493,11 @@ def enhance_class_param(spec: dict, step: dict, ctx: dict, annots: dict) -> None
     options = [c["name"] for c in ctx["computeClasses"]["all"]]
     if default not in options:
         options.insert(0, default)
-    # HPC classes: every step can be placed on the
+    # HPC classes: a step can be placed on the
     # HPC provider per run — the class is provider-prefixed (meluxina-gpu),
     # and kubecore/meluxina.py gates the in-cluster/Slurm twin pair on it.
-    hpc_names = [c["name"] for c in hpc_classes(ctx)]
+    # A step whose kind never runs on HPC (ingest, publish, control) is offered none.
+    hpc_names = [c["name"] for c in hpc_classes(ctx)] if runs_on_hpc(step) else []
     options += [n for n in hpc_names if n not in options]
     param = {
         "name": param_name,
@@ -978,6 +980,41 @@ def enhance_platform_group(steps: list, ctx: dict) -> None:
     compose["container"]["args"] = tokens + args
 
 
+def enhance_compose_identity(steps: list, ctx: dict) -> None:
+    """Tell the compose step whose run it composes: the app and the project of every step's context."""
+    compose = next((s for s in steps if s["name"] == "compose-and-validate"), None)
+    if compose is None:
+        return
+    args = compose["container"].setdefault("args", [])
+    for flag, value in (("--app", ctx["app"]), ("--project", ctx["project"])):
+        if flag not in args:
+            args += [flag, value]
+
+
+def refuse_large_templates(spec: dict) -> None:
+    """Refuse a step whose rendered definition is too large to start with a full context.
+
+    A step's whole definition reaches its pod as one environment string of at most 128 KiB, the step's
+    context inside it. The context may take 96 KiB of that; the rest of the definition gets 24 KiB
+    (docs/step-contract.md, "Size caps"). Over it the step could error before it runs, so the render
+    fails instead, naming the step. The HPC follower's template is measured for the steps that have an
+    HPC variant.
+    """
+    by_name = {t["name"]: t for t in spec["templates"]}
+    for template in spec["templates"]:
+        for task in (template.get("dag") or {}).get("tasks", []):
+            called = by_name.get(task.get("template")) or {}
+            if not any(p.get("name") == CONTEXT_PARAM for p in (called.get("inputs") or {}).get("parameters") or []):
+                continue
+            size = template_bytes(called)
+            if size > TEMPLATE_CAP:
+                raise EnhanceError(
+                    f"step '{task['name']}': its rendered definition is {size} bytes; the limit is "
+                    f"{TEMPLATE_CAP}. A step's definition and its context reach the step together and share "
+                    f"one size limit. Remove what makes the definition large (long command lines, many "
+                    f"environment values or volumes).")
+
+
 STEP_IMAGES_ENV = "KAOS_STEP_IMAGES"
 
 
@@ -1028,7 +1065,7 @@ def enhance_pipeline_info(spec: dict, ctx: dict, steps: list) -> None:
             "that step runs as a Slurm job on MeluXina"
             + (f" (account {account})" if account else "")
             + " — queue time applies; the pipeline waits, stages the dataset in and the "
-            "step's outputs back; hpc_time_limit in pipeline.py caps the job. Classes:")
+            "step's result back; walltime= in pipeline.py caps the job. Classes:")
         for c in hpc:
             lines.append(f"  - {c['name']} ({c.get('tier', 'cpu')}) — partition {c.get('partition')}"
                          f"{', ' + str(c.get('gpus')) + ' GPUs' if c.get('gpus') else ''}"
@@ -1130,6 +1167,7 @@ def enhance(wft: dict, ctx: dict) -> dict:
     enhance_image_guard(steps)
     enhance_workspace_pvc(spec, steps)
     enhance_platform_group(steps, ctx)
+    enhance_compose_identity(steps, ctx)
     enhance_pipeline_info(spec, ctx, steps)
     # PRD-1016: the MeluXina leg — must run LAST (twin tasks copy each routed
     # step's FINAL container image/command, and the depends rewrite needs the
@@ -1140,6 +1178,7 @@ def enhance(wft: dict, ctx: dict) -> dict:
     for step in steps:
         if step["name"] in gpu_step_names:
             enhance_gpu_driver(step)
+    refuse_large_templates(spec)  # last: it measures the templates as they are released
     return wft
 
 

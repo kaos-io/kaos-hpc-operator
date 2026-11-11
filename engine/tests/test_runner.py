@@ -69,7 +69,7 @@ def test_should_import_extra_client_modules_under_kubecore_but_never_let_them_wi
         assert "engine" in authoring.__file__, authoring.__file__
         from kubecore.authoring import pipeline, step
         with pipeline("x") as p:
-            step("hello-world", reads=["experiment"])
+            step("hello-world", kind="transform", reads=["experiment"])
         p.write(Path(__file__).parent / "out" / "raw-workflow-template.yaml")
     """))
     res = run_render(repo)

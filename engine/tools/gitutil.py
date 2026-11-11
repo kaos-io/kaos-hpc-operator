@@ -1,26 +1,11 @@
-"""Small git helpers shared by the engine's history tools (corpus, known-vendored, compat surface)."""
+"""Small git helpers of the engine's history tool (known-vendored)."""
 
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
 TEMPLATES = {"hera": "hera-pipeline-template", "yolo": "yolo-pipelines-template"}
-# Private apps for the corpus are never named in this (public) repository: KAOS_ENGINE_CORPUS_LAB lists them as
-# comma-separated `org/repo:profile` entries (profile = the template lineage, hera or yolo). The clone of each
-# lives in the corpus dir under its repo name; reports call them app-1, app-2, ... in list order.
-LAB_ENV = "KAOS_ENGINE_CORPUS_LAB"
-
-
-def lab_repos() -> list[tuple[str, str]]:
-    """[(clone dir name, template profile)] from $KAOS_ENGINE_CORPUS_LAB; empty when it is not set."""
-    out = []
-    for entry in filter(None, (e.strip() for e in os.environ.get(LAB_ENV, "").split(","))):
-        repo, _, profile = entry.rpartition(":")
-        out.append((repo.rsplit("/", 1)[-1], profile))
-    return out
-
 
 ENGINE_MODULES = ("authoring", "derive_tree")
 # The oldest layout shipped the same two modules as kaos_pipeline/ before the package was renamed.

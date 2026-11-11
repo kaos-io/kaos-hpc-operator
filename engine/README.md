@@ -15,15 +15,76 @@ It is released by the same build as the controller, at the same version (D-58/D-
 |---|---|
 | `kubecore/` | the engine. **This is its source** (PRD-HPC-1461 D-80, 2026-11-10): apps carry no copy and there is no upstream to stay equal to. Edit it here |
 | `kaos_engine/render.py` | the runner, `python -I -m kaos_engine.render` |
-| `kaos_engine/compose.py` | what the compose-and-validate step runs, `python -I -m kaos_engine.compose`: the engine's compose with the engine first on the path. Writes `params.yaml` and the run's data lock (D-81) |
+| `kubecore/step_contract.py` | the step contract as the engine writes it: names, caps, the wire form, the expression that assembles a step's context (see "The step contract" below) |
+| `kaos_engine/compose.py` | what the compose-and-validate step runs, `python -I -m kaos_engine.compose`: the engine's compose with the engine first on the path. Pins every declared input and writes each step's context and the run's ledger |
 | `kaos_engine/version.py` | build tag -> PEP 440 |
 | `kaos_pipeline_engine/known-vendored.json` | every historical blob of `derive_tree.py` / `authoring.py` -> profile + template commits |
-| `kaos_pipeline_engine/authoring-schema.json` | `step()` options for the pipeline linter |
-| `kaos_pipeline_engine/compat-surface.json` | every module-level name `authoring` / `derive_tree` ever had |
+| `kaos_pipeline_engine/authoring-schema.json` | `step()` options for the pipeline linter, the removed keywords with what to write instead, and the migration guide's address |
 | `Dockerfile.engine`, `pyproject.toml`, `setup.py`, `requirements*.txt` | image and wheel  The image keeps the pinned set at `/etc/kaos-engine/constraints.txt` for images built on top of it |
-| `tools/` | generators for the three JSON files, the corpus |
-| `tests/` | `template/` = the template's own kubecore tests, moved in; `app/` = the fixture app they render; the rest are the engine's tests |
-| `CORPUS_REPORT.md` | the last corpus run (generated) |
+| `tools/` | generators for the two JSON files |
+| `tests/` | `template/` = the kubecore tests that came with the template; `app/` = the fixture app they render; the rest are the engine's tests |
+
+## The step contract
+
+The engine builds every pipeline to [`docs/step-contract.md`](../docs/step-contract.md) (PRD kaos#1911). There
+is one contract and no older one beside it: a pipeline written for the earlier keywords fails the render.
+
+**Authoring** (`kubecore/authoring.py`):
+
+```python
+from kubecore.authoring import artifact, dataset, model, pipeline, step
+
+step(name, *, kind=, reads=, inputs=, needs=, produces=, gpu=, disk=, when=, walltime=,
+     resumable=, checkpoint_every=, idle_timeout=)
+```
+
+| Keyword | Rule the engine enforces at render |
+|---|---|
+| `kind=` | Required: `ingest`, `transform`, `train`, `evaluate`, `publish` or `control`. It becomes the label `platform.kubecore.io/step-kind` on the step's pod, on its HPC follower pod, and (set by the follower) on its HPC job |
+| `inputs=` | Names of top-level config values that hold a dataset reference. Each must exist in the config tree and be text |
+| `needs=` | At most ten steps. A name in `inputs=` and a name a needed step produces must differ; two needed steps must not produce the same name |
+| `produces=` | `model("name")`, `artifact("name")`, `dataset("name")`. A dataset has one producing step in the pipeline. `dataset(name, of=...)` is refused until that form ships |
+| `walltime=` | `'90m'`, `'12h'` or `'720'`: the run limit on an HPC class |
+
+Per kind: `ingest`, `publish` and `control` steps are offered no HPC class and get no HPC variant; a `control`
+step takes no `inputs=` and no `produces=`.
+
+Refused at render, each with a message that names the step and what to write: a missing or unknown `kind=`;
+`outputs=` and `hpc_time_limit=` (removed; the message says what replaces them and points at
+`authoring.MIGRATION_GUIDE_URL`, a placeholder until the guide has an address); a step or produced name that
+starts with `kaos-`; a config tree that defines `plan` or `pipeline-version`, or a leaf whose form field would
+get one of those names; a step whose rendered definition is over 24 KiB.
+
+**What a step gets and hands back.** Every step container runs `python -m app.entry` with no arguments. Its one
+input parameter is `kaos-context`, which the container reads as `KAOS_STEP_CONTEXT`; its one output parameter is
+`kaos-result`, read from `/work/output/kaos-result.json`, with the sentinel `{"version":1,"status":"absent"}` as
+the default when the step wrote none. The DAG task argument joins the step's base context (the compose step's
+output `kaos-context-<step>`) with the result of every step in `needs=`, as text, each through `sprig.default`
+with the sentinel: a skipped or omitted step has an empty output. Section 10 of the contract has the expression;
+`step_contract.context_expression` writes it.
+
+**Compose** (`kubecore/compose.py`), before any other step starts:
+
+- pins every input any step declares to one commit, once per name (`<dataset>@<version>`; no version means
+  `latest`, the head of the dataset's `main` now), and refuses an empty value, a value that names no dataset, a
+  version that does not exist and a store that does not answer, naming the input and the steps that declare it;
+- writes each step's base context in wire form (`/work/context/<step>.json`): `params` is the resolved config
+  without the `platform` section (the context never holds an endpoint), `ledger` holds the step's own inputs,
+  `experiment` is config `experiment.name` or else the app's name, `produces` names each repository;
+- writes the run's ledger at version 2, every pinned input, as the output `kaos-ledger`;
+- reads the run's own key in the ADVANCED override: `plan.promote.<dataset>: true` puts `promote: true` on that
+  produced dataset in the producing step's context. `plan.use`, `plan.target` and `pipeline-version` are
+  reserved and refused until they ship, so a run never silently ignores one;
+- refuses a step whose base context costs more than 96 KiB less 8 KiB for each step it needs (cost: the bytes
+  plus one for each quote and backslash, what the value takes inside a step's definition).
+
+The enhancer gives compose the run's identity (`--app`, `--project`); authoring gives it the run's name and the
+step table (`--run`, `--steps`).
+
+**The HPC variant** (`kubecore/meluxina.py`). The `<step>-hpc` task gets the same `kaos-context` argument as the
+step's own task, and the follower receives it as `KAOS_STEP_CONTEXT`. The follower template has two outputs:
+`slurm-job-id` and `kaos-result` (`/tmp/outputs/kaos-result.json`, no default: the follower always writes it).
+A step that needs a step with an HPC variant reads the result from the pair: exactly one of the two tasks ran.
 
 ## GPU driver prelude
 
@@ -104,19 +165,21 @@ and counted in the fleet.
 ## Tests
 
 `make test-engine` (a pinned venv under `bin/engine-venv`) and `make lint-engine` (ruff) on a workstation; CI runs both in
-the `engine-tests` stage of `Dockerfile.engine` (the Go CI container has no Python), so building the image runs them. They cover the template's kubecore tests, the runner contract incl. the booby-trap (a vendored
-`authoring.py` that raises still renders), the wheel (build, contents, `python -I` from an installed wheel), the
-compat surface, the run's data lock (`tests/test_data_lock.py`), the authoring schema, known-vendored and the follower contract
-(`tests/test_follower_contract.py` and the Go side `internal/follower/engine_contract_test.go`, which feeds the
-golden follower template to `ConfigFromEnv`).
+the `engine-tests` stage of `Dockerfile.engine` (the Go CI container has no Python), so building the image runs them.
 
-`make engine-corpus` clones both public templates and the private apps named in `$KAOS_ENGINE_CORPUS_LAB`
-(comma-separated `org/repo:profile`, supplied privately and never committed; needs network) and renders every historical state
-twice: with the repo's own vendored `kubecore` (`python pipeline.py`, what CI did) and with the runner; the parsed
-YAML must be equal. It rewrites `CORPUS_REPORT.md`, where private apps appear only as `app-N`. Without `KAOS_ENGINE_CORPUS_DIR` the corpus test is skipped.
+| Tests | What they hold |
+|---|---|
+| `tests/test_step_contract.py` | Loads `docs/step-contract/fixtures/`: the wire writer equals every `.wire` file; a context assembled from compose's base and upstream results equals the context fixtures byte for byte, a skipped upstream included; the ledger; the follower's side of the `hpc-job` fixture |
+| `tests/test_authoring_contract.py` | Every keyword and every render refusal, with its message |
+| `tests/test_compose_inputs.py` | Pinned inputs, contexts, `plan`, the size cap, every compose refusal with its message, the compose entry point |
+| `tests/template/test_step_contract_enhance.py` | The per-kind HPC rules, the result pair of a step with an HPC variant, the size of a rendered step |
+| `tests/test_follower_contract.py`, Go `internal/follower/engine_contract_test.go` | The golden follower template against what the follower reads |
+| the rest | The enhancer, resilience, the runner contract incl. the booby-trap (a vendored `authoring.py` that raises still renders), the wheel, the authoring schema, known-vendored |
+
+Golden files (`tests/template/golden/`) are regenerated with `UPDATE_GOLDEN=1 make test-engine`; read the diff.
 
 ## Updating the engine
 
-Edit `engine/kubecore/` directly, regenerate `compat-surface.json` and `authoring-schema.json` with their
-`tools/build_*.py` when the authoring surface changed, run `make test-engine`, and commit. Skew rule: compose gains flags in release N,
-authoring may emit them from N+1.
+Edit `engine/kubecore/` directly, regenerate `authoring-schema.json` with `tools/build_authoring_schema.py` when
+`step()` changed, run `make test-engine`, and commit. A change to what a step is given or hands back starts in
+`docs/step-contract.md` and its fixtures, never here.

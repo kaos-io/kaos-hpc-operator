@@ -26,9 +26,17 @@ def _env() -> dict:
     return {e["name"]: e for e in _template()["container"]["env"]}
 
 
+# The step contract's one value (docs/step-contract.md, sections 2 and 8): the follower receives the step's
+# context under the name the step's pod gets it, and puts it in the job as spec.context.
+CONTRACT_ENV = {"KAOS_STEP_CONTEXT"}
+# What the contract removed from the job (section 8): the engine must not hand them to the follower.
+REMOVED_ENV = {"DATASET_PIN", "STEP_OUTPUTS", "DATASET"}
+
+
 def _read_by_follower() -> set:
     allowed = re.search(r"AllowedEnvNames = \[\]string\{([^}]*)\}", TYPES_GO).group(1)
-    return set(re.findall(r'get\("([A-Z_]+)"\)', CONFIG_GO)) | set(re.findall(r'"([A-Z_]+)"', allowed))
+    read = set(re.findall(r'get\("([A-Z_]+)"\)', CONFIG_GO)) | set(re.findall(r'"([A-Z_]+)"', allowed))
+    return (read | CONTRACT_ENV) - REMOVED_ENV
 
 
 def test_should_run_the_follower_binary_this_repo_ships():
@@ -45,6 +53,14 @@ def test_should_set_every_variable_the_follower_requires():
 def test_should_set_only_variables_the_follower_reads():
     unknown = set(_env()) - _read_by_follower()
     assert not unknown, f"the engine sets {unknown}, which the follower ignores (contract skew)"
+
+
+def test_should_hand_the_follower_the_step_context_and_nothing_the_contract_removed():
+    env = _env()
+    assert env["KAOS_STEP_CONTEXT"]["value"] == "{{inputs.parameters.kaos-context}}"
+    assert not REMOVED_ENV & set(env)
+    outputs = {o["name"]: o["valueFrom"] for o in _template()["outputs"]["parameters"]}
+    assert outputs["kaos-result"] == {"path": "/tmp/outputs/kaos-result.json"}, "one result, and no default"
 
 
 def test_should_run_the_step_as_the_submitter_service_account_only_in_this_template():

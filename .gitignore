@@ -25,7 +25,6 @@ go.work
 *.swp
 *.swo
 *~
-.corpus/
 engine/build/
 engine/*.egg-info/
 __pycache__/

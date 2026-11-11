@@ -17,8 +17,11 @@ def test_should_match_the_generator_output():
 
 def test_should_list_every_step_option_in_signature_order_with_its_default():
     from kubecore import authoring
-    sig = inspect.signature(authoring.step).parameters
+    sig = {n: p for n, p in inspect.signature(authoring.step).parameters.items()
+           if p.kind is not inspect.Parameter.VAR_KEYWORD}
     assert [p["name"] for p in SCHEMA["params"]] == list(sig)
+    assert list(sig) == ["name", "kind", "reads", "inputs", "needs", "produces", "gpu", "disk", "when", "walltime",
+                         "resumable", "checkpoint_every", "idle_timeout"], "the keywords of the step contract"
     for entry in SCHEMA["params"]:
         param = sig[entry["name"]]
         assert entry["required"] == (param.default is inspect.Parameter.empty)
@@ -36,5 +39,13 @@ def test_should_publish_patterns_that_agree_with_the_validators():
     from kubecore import authoring
     by_name = {p["name"]: p for p in SCHEMA["params"]}
     assert re.match(by_name["disk"]["pattern"], "20Gi") and not re.match(by_name["disk"]["pattern"], "20 Gi")
-    assert re.match(by_name["hpc_time_limit"]["pattern"], "90m") and not re.match(by_name["hpc_time_limit"]["pattern"], "1d")
+    assert re.match(by_name["walltime"]["pattern"], "90m") and not re.match(by_name["walltime"]["pattern"], "1d")
+    assert by_name["kind"]["enum"] == ["ingest", "transform", "train", "evaluate", "publish", "control"]
     assert by_name["resumable"]["true_means"] == authoring.DEFAULT_RESUMABLE_LEAD
+
+
+def test_should_tell_the_linter_what_was_removed_and_what_to_write_instead():
+    assert set(SCHEMA["removed"]) == {"outputs", "hpc_time_limit"}
+    assert "walltime=" in SCHEMA["removed"]["hpc_time_limit"] and "produces=" in SCHEMA["removed"]["outputs"]
+    assert not {"outputs", "hpc_time_limit"} & {p["name"] for p in SCHEMA["params"]}
+    assert SCHEMA["migration_guide"].startswith("https://")

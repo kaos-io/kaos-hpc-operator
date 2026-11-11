@@ -77,10 +77,11 @@ def test_serve_env_is_the_follower_interface(serve):
             "HPC_RESUMABLE": "{{inputs.parameters.resumable}}",
             "HPC_IDLE_TIMEOUT_MINUTES": "{{inputs.parameters.idle-timeout}}",
             "HPC_MAX_CONTINUATIONS": str(meluxina.HPC_MAX_CONTINUATIONS),
-            "STEP_OUTPUTS": "{{inputs.parameters.step-outputs}}"}
+            # the step contract: the follower gets the step's context exactly as the step's pod would
+            "KAOS_STEP_CONTEXT": "{{inputs.parameters.kaos-context}}"}
     for k, v in want.items():
         assert env[k]["value"] == v, k
-    assert env["DATASET_PIN"]["value"] == "{{inputs.parameters.dataset-pin}}"
+    assert "DATASET_PIN" not in env and "STEP_OUTPUTS" not in env, "the context replaced both"
     for k in ("OUTPUTS_REPO", "OUTPUTS_REF", "CHECKPOINT_BUCKET", "CHECKPOINT_PREFIX"):
         assert k in env, k
 
@@ -88,8 +89,7 @@ def test_serve_env_is_the_follower_interface(serve):
 def test_serve_env_is_only_the_allowlist_and_interface(serve):
     allowed = {"HPC_JOB_NAMESPACE", "WF_NAME", "WF_UID", "STEP_NAME", "NODE_KEY", "IMAGE_REF", "STEP_COMMAND",
                "SLURM_TIME_LIMIT", "HPC_CLASS", "HPC_RESUMABLE_LEAD", "HPC_RESUMABLE", "HPC_IDLE_TIMEOUT_MINUTES", "HPC_MAX_CONTINUATIONS",
-               "STEP_OUTPUTS",
-               "DATASET_PIN", "HPC_SHARING", "HPC_SCOPE", "OUTPUTS_REPO", "OUTPUTS_REF", "CHECKPOINT_BUCKET",
+               "KAOS_STEP_CONTEXT", "HPC_SHARING", "HPC_SCOPE", "OUTPUTS_REPO", "OUTPUTS_REF", "CHECKPOINT_BUCKET",
                "CHECKPOINT_PREFIX", meluxina.KAOS_LIB_SUPPORT_ENV}
     assert set(_env(_tpl(serve))) <= allowed
 
@@ -107,13 +107,17 @@ def test_serve_has_no_secret_volume_env_or_endpoint(serve):
 def test_serve_keeps_inputs_outputs_deadline_retry_labels(serve):
     new = _tpl(serve)
     assert {p["name"] for p in new["inputs"]["parameters"]} == {
-        "step-name", "image", "step-command", "time-limit", "deadline-seconds", "step-outputs", "hpc-class",
-        "resumable-lead", "resumable", "idle-timeout", "dataset-pin"}
+        "step-name", "image", "step-command", "step-kind", "time-limit", "deadline-seconds", "hpc-class",
+        "resumable-lead", "resumable", "idle-timeout", "kaos-context"}
     assert new["activeDeadlineSeconds"] == "{{inputs.parameters.deadline-seconds}}"
     assert new["retryStrategy"]["retryPolicy"] == "Always" and new["retryStrategy"]["limit"] == "2"
     assert new["retryStrategy"]["expression"] == meluxina.POD_LOSS_RETRY
     assert new["metadata"]["labels"]["platform.kubecore.io/compute-type"] == "hpc"
-    assert {"slurm-job-id"} <= {p["name"] for p in new["outputs"]["parameters"]}
+    assert new["metadata"]["labels"]["platform.kubecore.io/step-kind"] == "{{inputs.parameters.step-kind}}"
+    # one result, the same output the step's pod has; the follower always writes it, so it has no default
+    assert new["outputs"]["parameters"] == [
+        {"name": "slurm-job-id", "valueFrom": {"path": "/tmp/slurm-job-id"}},
+        {"name": "kaos-result", "valueFrom": {"path": "/tmp/outputs/kaos-result.json"}}]
 
 
 def test_serve_dag_is_unchanged_apart_from_the_template(serve):

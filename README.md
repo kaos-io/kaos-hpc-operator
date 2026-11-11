@@ -309,7 +309,6 @@ inside KAOS:
 make test       # unit tests and envtest (a real API server)
 make lint       # golangci-lint
 make test-engine lint-engine  # the pipeline engine's Python tests and ruff (also run by building engine/Dockerfile.engine)
-make engine-corpus  # render every historical template state and the lab apps with the engine (needs network)
 make manifests  # CRDs and RBAC from the Go types
 make build      # the manager binary
 make scale-test # load test of the real controller against fake Slurm sites (about 10 minutes, test/scale/README.md)

@@ -5,7 +5,7 @@
 #
 # Layout:
 #   /work/kubecore              the engine (python -m kubecore.compose runs from /work, as the old compose image did)
-#   /work/*.json                known-vendored.json, authoring-schema.json, compat-surface.json
+#   /work/*.json                known-vendored.json, authoring-schema.json
 #   site-packages/kaos_engine   the runner:  python -I -m kaos_engine.render pipeline.py --repo ... --profile ...
 #   site-packages/kaos_pipeline_engine   the same engine as the wheel ships it (never a top-level kubecore)
 #
@@ -14,7 +14,7 @@
 # CI render resolved them on 2026-11-10).
 ARG PYTHON_IMAGE=python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
 
-# Stage 1: the engine's own checks (ruff + every engine test except the opt-in corpus). The final image copies a
+# Stage 1: the engine's own checks (ruff + every engine test). The final image copies a
 # marker from here, so a build (CI validates and releases by building this file) cannot succeed with failing
 # tests, whatever the builder (BuildKit skips unreferenced stages). Needs network for pip, like the stage below.
 FROM ${PYTHON_IMAGE} AS engine-tests
@@ -25,6 +25,8 @@ COPY VERSION /src/VERSION
 COPY engine /src/engine
 # files the follower-contract test reads from the Go side
 COPY Dockerfile /src/Dockerfile
+# the step contract's fixtures, which the engine tests load
+COPY docs/step-contract /src/docs/step-contract
 COPY internal/follower/config.go /src/internal/follower/config.go
 COPY api/v1alpha1/hpcargoworkflowjob_types.go /src/api/v1alpha1/hpcargoworkflowjob_types.go
 WORKDIR /src

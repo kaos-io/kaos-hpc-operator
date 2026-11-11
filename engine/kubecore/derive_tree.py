@@ -51,6 +51,8 @@ from hydra import compose, initialize_config_dir
 from hydra.core.config_store import ConfigStore
 from omegaconf import OmegaConf
 
+from kubecore.step_contract import RESERVED_CONFIG_KEYS
+
 # Hera is a RENDER-TIME dependency (form derivation only). The compose step
 # runs at RUN time in a lean image without Hera, and only calls compose_tree()
 # — so Hera is imported lazily inside derive(), never at module load.
@@ -254,6 +256,7 @@ class DerivedForm:
     tokens: list = field(default_factory=list)  # hydra override tokens for compose args
     sections: list = field(default_factory=list)  # top-level config sections (excl platform)
     render_defaults: dict = field(default_factory=dict)  # {override_key: rendered default}
+    tree: dict = field(default_factory=dict)  # the composed config tree (excl platform)
 
 
 def searchpath_override() -> str:
@@ -341,10 +344,16 @@ def derive() -> DerivedForm:
     for section in PLATFORM_SECTIONS:
         tree.pop(section, None)
 
-    form = DerivedForm(sections=list(tree.keys()))
+    refuse_reserved_keys(tree)
+    form = DerivedForm(sections=list(tree.keys()), tree=tree)
     seen = {}
 
     def claim(name: str, origin: str) -> None:
+        if name in RESERVED_CONFIG_KEYS:
+            raise DeriveError(
+                f"{origin} becomes the form field '{name}', a name the platform reserves "
+                f"({', '.join(RESERVED_CONFIG_KEYS)}); rename the config key"
+            )
         if name in seen:
             raise DeriveError(
                 f"form-name collision: '{name}' derived from both {seen[name]} "
@@ -383,6 +392,36 @@ def derive() -> DerivedForm:
 
     form.parameters.append(Parameter(**ADVANCED_PARAM_KWARGS))
     return form
+
+
+def refuse_reserved_keys(tree: dict) -> None:
+    """The platform keeps a few top-level config keys for the run itself (which data a run promotes, which
+    pipeline version it runs). An app's config tree may not define them."""
+    for key in RESERVED_CONFIG_KEYS:
+        if key in tree:
+            raise DeriveError(
+                f"the config key '{key}' is reserved for the platform (reserved: "
+                f"{', '.join(RESERVED_CONFIG_KEYS)}); rename '{key}' in your config/ tree"
+            )
+
+
+def validate_inputs(step_inputs: dict, tree: dict) -> None:
+    """Render gate: every name a step declares via inputs= must be a top-level config value that can hold
+    a dataset reference (text), so the run has something to pin."""
+    for step_name, inputs in step_inputs.items():
+        for name in inputs:
+            if name not in tree:
+                raise DeriveError(
+                    f"step '{step_name}' declares the input '{name}', but the config tree has no top-level "
+                    f"value '{name}' (top-level keys: {', '.join(tree)}). Add `{name}: <dataset>@<version>` "
+                    f"to config/, for example `{name}: dataset-default@latest`."
+                )
+            if tree[name] is not None and not isinstance(tree[name], str):
+                raise DeriveError(
+                    f"step '{step_name}' declares the input '{name}', but the config value '{name}' is "
+                    f"{'a section' if isinstance(tree[name], dict) else 'not text'}. An input is one value "
+                    f"that holds a dataset reference, for example `{name}: dataset-default@latest`."
+                )
 
 
 def _has_config_source(section: str) -> bool:

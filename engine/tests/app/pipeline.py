@@ -1,20 +1,19 @@
 """Your pipeline: the DAG. Structure and nothing else.
 
-Each step declares its name, the config sections it reads (reads=), whether it
-needs a GPU (gpu=True), what it depends on (needs=), any small result files it
-writes (outputs=), and an optional condition (when=). Every tunable parameter
-lives in the config/ tree and reaches the submit form automatically — there is
-no parameter wiring here.
+Each step declares its name, its kind (kind=), the config sections it reads
+(reads=), the datasets it takes in (inputs=), whether it needs a GPU (gpu=True),
+what it depends on (needs=), what it writes (produces=), and an optional
+condition (when=). Every tunable parameter lives in the config/ tree and reaches
+the submit form automatically — there is no parameter wiring here.
 
-This template ships two example steps: dataset-loading pins the run's dataset
-(the `dataset` parameter, <dataset-repo>@<version>) to one commit, and hello-world
-reads that commit and writes a result to the app's outputs repository. Add your own
-steps under steps/<name>/ and wire them here. See README.md / DEVELOPER.md.
+This fixture has two example steps: dataset-loading takes the run's dataset (the
+`dataset` config value, <dataset>@<version>, pinned to one commit when the run
+starts) and hello-world needs its result and writes a report.
 """
 
 from pathlib import Path
 
-from kubecore.authoring import pipeline, step  # platform-owned, do not edit
+from kubecore.authoring import artifact, pipeline, step  # platform-owned, do not edit
 
 HERE = Path(__file__).parent
 
@@ -23,8 +22,9 @@ HERE = Path(__file__).parent
 # each app gets its own uniquely-named WFT (no collisions across apps in a
 # shared namespace). You don't need to change it per app.
 with pipeline("ml-pipeline") as p:
-    load = step("dataset-loading", reads=["dataset"], outputs=["dataset-info"])
-    hello = step("hello-world", reads=["experiment", "dataset"], needs=[load])
+    load = step("dataset-loading", kind="ingest", inputs=["dataset"])
+    hello = step("hello-world", kind="transform", reads=["experiment"], inputs=["dataset"], needs=[load],
+                 produces=[artifact("report")])
 
 if __name__ == "__main__":
     p.write(HERE / "out" / "raw-workflow-template.yaml")
