@@ -399,6 +399,16 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		}
 	}
 
+	if reason == hpcv1alpha1.ReasonStagingMismatch {
+		msg = strings.TrimSpace(run.Message)
+		if msg == "" {
+			msg = "the site's staging tool and the runner speak different staging contracts; nothing was staged or submitted"
+		}
+		if r.Recorder != nil {
+			r.Recorder.Event(job, corev1.EventTypeWarning, hpcv1alpha1.ReasonStagingMismatch, msg)
+		}
+	}
+
 	if reason == hpcv1alpha1.ReasonSubmitLimit {
 		msg = submitLimitMessage(run, site)
 		if r.Recorder != nil {
@@ -465,6 +475,8 @@ func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonInsufficientQuota
 	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeInvalidImage && failed:
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonInvalidImage
+	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeStagingMismatch && failed:
+		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonStagingMismatch
 	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeSubmitLimit && failed:
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonSubmitLimit
 	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeGPUViolation && failed:

@@ -12,7 +12,9 @@ base = EP + '/api/v1/repositories/' + urllib.parse.quote(REPO, safe='')
 commit = os.environ['DATASET_COMMIT']
 dest = pathlib.Path(os.environ['DATASET_CACHE']) / REPO / commit
 open(os.environ['DATASET_DIRFILE'], 'w').write(str(dest))
-if (dest / '.complete').exists():
+# The marker says what the copy holds: 'full' is the whole tree of the commit. A copy with an empty marker
+# was made when stage-in kept only data.yaml, images/ and labels/: it is completed below, never served as it is.
+if (dest / '.complete').exists() and (dest / '.complete').read_text().strip() == 'full':
     (dest / '.complete').touch()            # last use, for the job's cache cleanup
     (dest / '.kaos-commit').write_text(commit)  # the kubecore consumer checks it
     print('stage-in: cache hit', dest, flush=True)
@@ -30,10 +32,8 @@ def ls(prefix):
         if not pg.get('has_more'):
             return objs
         after = pg.get('next_offset') or ''
-# Only the dataset: the repository root may also hold other files (README,
-# notes) the steps never read.
-objs = [o for o in ls('') if o['path'] == 'data.yaml'
-        or o['path'].split('/', 1)[0] in ('images', 'labels')]
+# The whole tree of the commit, whatever the dataset's shape.
+objs = ls('')
 print('stage-in:', len(objs), 'objects @', commit[:12], flush=True)
 def fetch(o):
     p = dest / o['path']
@@ -59,6 +59,6 @@ def fetch(o):
     return 1
 with concurrent.futures.ThreadPoolExecutor(8) as ex:
     n = sum(ex.map(fetch, objs))
-(dest / '.complete').touch()
+(dest / '.complete').write_text('full\n')
 (dest / '.kaos-commit').write_text(commit)   # the kubecore consumer checks it
 print('stage-in: downloaded', n, 'of', len(objs), '->', dest, flush=True)

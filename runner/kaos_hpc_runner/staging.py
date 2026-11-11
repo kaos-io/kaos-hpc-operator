@@ -5,9 +5,16 @@ before the GPU job is submitted, so the job reads a resident copy instead of dow
 time. It talks to the stager the platform installed (~/.kaos/stager.py) through a forced-command key
 that can run nothing else (Secret meluxina-staging: key + verified host pin). The stager names a
 base (its newest ready commit of the repo); the runner lists only the lakeFS diff base..commit, or
-the whole dataset for a first copy, and streams one JSON line per file. Unchanged files are hard
-links of the base. Bytes come from the lakeFS API with the wallet bearer (sent once on stdin, held in
-memory only). Any failure returns '' and the job stages in-job as before, saying so (F-06).
+the whole commit for a first copy, and streams one JSON line per file: every object of the commit,
+whatever the dataset's shape (PRD kaos#1911 F-04). Unchanged files are hard links of the base. Bytes
+come from the lakeFS API with the wallet bearer (sent once on stdin, held in memory only). Any failure
+returns '' and the job stages in-job as before, saying so (F-06), with two exceptions that end the run
+before anything is submitted: no room in the quota (InsufficientQuota) and a staging tool that speaks
+another staging contract (StagingMismatch).
+
+The staging contract (CONTRACT) is what `status` and `stage` mean to the runner and to the staging tool,
+which ship separately. The runner asks the tool for its number (`version`) and sends its own with every
+`status` and `stage`; each side refuses the other on any difference.
 
 `Stager` is also what image staging, log streaming and the tar lease go through.
 """
@@ -27,13 +34,27 @@ import urllib.request
 from . import settings
 
 STAGE_BUDGET_S = 4 * 3600
-EX_RETRY, EX_NOSPACE, EX_USAGE = 75, 76, 2
+EX_RETRY, EX_NOSPACE, EX_USAGE, EX_CONTRACT = 75, 76, 2, 78
+CONTRACT = 2   # 2 = the whole tree of the commit; the staging tool's CONTRACT must be the same number
 
 
 class InsufficientQuota(Exception):
     """Staging stopped for want of scratch quota (space or files), after the stager evicted everything
     unused (PRD-HPC-1461 AC-33). The message is a plain sentence for the job's status and the pipeline
     log; the run ends InsufficientQuota instead of the job failing mid-copy on a full quota."""
+
+
+class StagingMismatch(Exception):
+    """The site's staging tool speaks another staging contract than this runner (one of the two was updated
+    first). Nothing is staged with it and the job does not stage in-job either: the run ends StagingMismatch
+    before anything is submitted. The message is a plain sentence for the job's status and the pipeline log."""
+
+
+def mismatch_message(theirs):
+    return ('the site\'s staging tool and this runner speak different staging contracts (staging tool: %s, '
+            'runner: %d). Nothing was staged and nothing was submitted to the site. The platform is being updated: '
+            'run again when the update is complete.'
+            % ('an older one that does not report it' if theirs is None else theirs, CONTRACT))
 
 
 def human_bytes(n):
@@ -67,12 +88,6 @@ def lakefs_pages(url, wallet, params):
         after = pg.get('next_offset') or ''
 
 
-def is_dataset_path(path):
-    # The YOLO layout the steps read: data.yaml, images/, labels/ at the
-    # root of the dataset repository. README and notes are not staged.
-    return path == 'data.yaml' or path.split('/', 1)[0] in ('images', 'labels')
-
-
 def stage_plan(api, commit, base, prefix, wallet):
     # (kind, path, size) per file the stager applies: the two-dot diff against
     # the base (three-dot would be wrong when the base is not an ancestor), or
@@ -82,12 +97,10 @@ def stage_plan(api, commit, base, prefix, wallet):
                               {'prefix': prefix, 'type': 'two_dot'}):
             if d['type'] not in ('added', 'changed', 'removed'):
                 raise ValueError('unexpected diff entry %s for %s' % (d['type'], d['path']))
-            if is_dataset_path(d['path']):
-                yield d['type'], d['path'], int(d.get('size_bytes') or 0)
+            yield d['type'], d['path'], int(d.get('size_bytes') or 0)
     else:
         for o in lakefs_pages(api + '/refs/%s/objects/ls' % commit, wallet, {'prefix': prefix}):
-            if is_dataset_path(o['path']):
-                yield 'added', o['path'], int(o.get('size_bytes') or 0)
+            yield 'added', o['path'], int(o.get('size_bytes') or 0)
 
 
 class Stager:
@@ -229,10 +242,24 @@ def staging_record(repo, commit, kind, files=0, nbytes=0, seconds=0):
             'seconds': int(seconds)}
 
 
+def refused(rc, ev):
+    # The staging tool refused this runner's contract (it was replaced after it answered `version`).
+    if rc == EX_CONTRACT:
+        raise StagingMismatch(mismatch_message(
+            next((e.get('contract') for e in reversed(ev) if e.get('event') == 'contract'), None)))
+
+
 def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
     # One staging attempt. Returns (path, retry): the ready path, or '' with
     # whether a later attempt can help. info (a dict) receives the staging record when the copy is ready.
-    rc, ev = stager(['status', '--repo', repo, '--commit', commit, '--ref', ref])
+    rc, ev = stager(['version'])
+    theirs = next((e.get('contract') for e in reversed(ev) if e.get('event') == 'version'), None)
+    if rc == EX_USAGE or (rc == 0 and theirs != CONTRACT):   # usage error: a staging tool from before `version`
+        raise StagingMismatch(mismatch_message(theirs))
+    if rc != 0:
+        return '', rc in (EX_RETRY, 255)
+    rc, ev = stager(['status', '--contract', CONTRACT, '--repo', repo, '--commit', commit, '--ref', ref])
+    refused(rc, ev)
     st = next((e for e in reversed(ev) if e.get('event') == 'status'), None)
     if rc != 0 or st is None:
         return '', rc in (EX_RETRY, 255)
@@ -242,7 +269,7 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
             info.update(staging_record(repo, commit, 'cached'))
         return st['path'], False
     api = lakefs + '/api/v1/repositories/' + urllib.parse.quote(repo, safe='')
-    # The dataset sits at the repository root; is_dataset_path() keeps the rest out.
+    # The whole tree of the commit, from the repository root.
     prefix = ''
     base = st.get('base') if st.get('base') and st.get('base_prefix') == prefix else None
     need_bytes = need_files = added = removed = 0
@@ -268,11 +295,12 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
                        'url': api + '/refs/' + commit + '/objects?'
                        + urllib.parse.urlencode({'path': path})}
         yield {'op': 'end', 'files': files, 'bytes': need_bytes, 'ref': ref, 'prefix': prefix}
-    words = ['stage', '--repo', repo, '--commit', commit, '--ref', ref,
+    words = ['stage', '--contract', CONTRACT, '--repo', repo, '--commit', commit, '--ref', ref,
              '--need-bytes', need_bytes, '--need-files', need_files]
     if base:
         words += ['--base', base]
     rc, ev = stager(words, feed())
+    refused(rc, ev)
     done = next((e for e in reversed(ev) if e.get('event') == 'done'), None)
     if rc == 0 and done:
         if info is not None:
@@ -297,8 +325,9 @@ def ssh_present():
 
 def stage_dataset(cfg, stager, mint_wallet, info=None):
     """The resident path of the dataset's pinned commit, or '' (the job then stages in-job). The commit is
-    the one the pipeline pinned (spec.dataset); nothing is resolved here. Raises InsufficientQuota when
-    the dataset does not fit the project's scratch quota (AC-33): the one failure that is not a fallback.
+    the one the pipeline pinned (spec.dataset); nothing is resolved here. Two failures are not a fallback:
+    InsufficientQuota when the dataset does not fit the project's scratch quota (AC-33), and StagingMismatch
+    when the site's staging tool speaks another staging contract.
     info (a dict), when given, receives the staging record (staging_record) once the copy is resident; it stays
     empty when the job stages in-job."""
     repo, ref, commit = cfg.dataset_repo, cfg.dataset_ref, cfg.dataset_commit
@@ -319,7 +348,7 @@ def stage_dataset(cfg, stager, mint_wallet, info=None):
         attempt += 1
         try:
             path, retry = stage_once(stager, repo, ref, commit, lakefs, wallet, info)
-        except InsufficientQuota:
+        except (InsufficientQuota, StagingMismatch):
             raise
         except Exception as e:
             print('stage: attempt', attempt, 'failed:', e, flush=True)

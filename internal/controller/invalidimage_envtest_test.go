@@ -73,6 +73,22 @@ var _ = Describe("HPC invalid image", func() {
 		Expect(reconcileOnce(newJob("good-ref", "zot.example/proj/app:v1")).Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
 	})
 
+	// PRD kaos#1911 F-04: the runner and the site's staging tool ship separately; when their staging contracts
+	// differ the runner stops before it stages or submits, and the job says why.
+	It("should_end_a_job_whose_runner_met_another_staging_contract_as_failed_staging_mismatch_and_settle_nothing", func() {
+		j := reconcileOnce(newJob("contract", "zot.example/proj/app:v1"))
+		orig := j.DeepCopy()
+		code := hpcv1alpha1.ExitCodeStagingMismatch
+		j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, State: "FAILED", ExitCode: &code, Terminal: true,
+			Message: "the site's staging tool and this runner speak different staging contracts (staging tool: 1, runner: 2)"}
+		Expect(k8sClient.Status().Patch(ctx, j, client.MergeFrom(orig))).To(Succeed())
+		got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonStagingMismatch))
+		Expect(got.Status.Message).To(ContainSubstring("different staging contracts"))
+		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(0))))
+	})
+
 	It("should_end_a_job_the_runner_found_invalid_as_failed_invalid_image_and_settle_nothing", func() {
 		j := reconcileOnce(newJob("runner-found", "zot.example/proj/app:v1"))
 		orig := j.DeepCopy()

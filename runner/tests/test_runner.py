@@ -265,6 +265,22 @@ def test_staging_that_does_not_fit_the_quota_ends_the_attempt_insufficient_quota
     assert "InsufficientQuota" in capsys.readouterr().out
 
 
+def test_a_staging_tool_of_another_contract_ends_the_attempt_staging_mismatch_without_submitting(rig, capsys):
+    """PRD kaos#1911 F-04: no site job, one terminal report (FAILED, exit 241, a plain message); not a fallback."""
+    slurm = FakeSlurm()
+    rig.make(slurm)
+
+    def mismatch(cfg, stager, mint, **kw):
+        raise staging_mod.StagingMismatch("the site's staging tool and this runner speak different staging contracts")
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", mismatch)
+    assert rig.runner.run() == 0
+    assert slurm.submitted == []
+    run = rig.kube.run
+    assert run["state"] == "FAILED" and run["exitCode"] == 241 and run["terminal"] is True
+    assert run["message"].startswith("the site's staging tool") and not run.get("siteJobID")
+    assert "StagingMismatch" in capsys.readouterr().out
+
+
 def test_an_image_that_does_not_fit_the_quota_also_ends_insufficient_quota(rig):
     slurm = FakeSlurm()
     rig.make(slurm)

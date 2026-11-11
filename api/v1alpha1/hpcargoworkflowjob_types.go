@@ -55,7 +55,12 @@ const (
 	// ReasonInvalidImage: the step's image reference is not registry-host/repository with a tag or digest, so it
 	// can never be pulled. Refused at admission (nothing booked), or Failed when the runner finds it (exit
 	// ExitCodeInvalidImage, no site job). Terminal; no credential retry can fix it.
-	ReasonInvalidImage         = "InvalidImage"
+	ReasonInvalidImage = "InvalidImage"
+	// ReasonStagingMismatch: the site's staging tool and the runner speak different staging contracts (the two
+	// ship separately and one was updated first), so no copy of the dataset can be trusted to be whole
+	// (PRD kaos#1911 F-04). Failed before anything is staged or submitted; the runner reports it with
+	// ExitCodeStagingMismatch. Terminal: it ends when the other side is updated.
+	ReasonStagingMismatch      = "StagingMismatch"
 	ReasonMultiNodeUnsupported = "MultiNodeUnsupported"
 	ReasonWallTimeOverLimit    = "WallTimeOverLimit"
 	// ReasonTooLongNotResumable: the declared limit is above the longest lane and the step is not
@@ -102,6 +107,9 @@ const (
 	// ExitCodeGPUViolation is the exit code the runner reports for a step stopped for GPUViolation. Next to
 	// ExitCodeInvalidImage, in the same reserved range.
 	ExitCodeGPUViolation = int32(240)
+	// ExitCodeStagingMismatch is the exit code the runner reports (state FAILED, no site job) when the site's
+	// staging tool speaks another staging contract.
+	ExitCodeStagingMismatch = int32(241)
 	// DefaultIdleTimeoutMinutes is the idle window of a step that does not set one (D-72).
 	DefaultIdleTimeoutMinutes = int32(20)
 	// ReasonSiteUnavailable: the site does not answer (connection errors, 5xx, timeouts, slurmctld down). The job

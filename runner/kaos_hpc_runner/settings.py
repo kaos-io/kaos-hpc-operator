@@ -32,6 +32,8 @@ SUBMIT_LIMIT_EXIT = 238
 INVALID_IMAGE_EXIT = 239
 # The runner reports it for a step the slot manager stopped for computing on a GPU outside its set (reason GPUViolation).
 GPU_VIOLATION_EXIT = 240
+# The runner reports it (FAILED, no site job) when the site's staging tool speaks another staging contract.
+STAGING_MISMATCH_EXIT = 241
 DEFAULT_IDLE_TIMEOUT_MIN = 20
 # AC-28: a site that does not answer is waited for this long (the controller passes its --site-outage-max).
 DEFAULT_SITE_WAIT_MAX_S = 30 * 60

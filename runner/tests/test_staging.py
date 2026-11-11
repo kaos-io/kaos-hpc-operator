@@ -36,10 +36,11 @@ class _LakeFS:
 
 
 class _Stager:
-    """Stand-in for the login-node stager: canned status, records stage calls."""
+    """Stand-in for the login-node stager: canned version and status, records stage calls."""
 
-    def __init__(self, status, stage_rcs=(0,), key=True):
+    def __init__(self, status, stage_rcs=(0,), key=True, version=(0, 2), status_rc=0):
         self.status, self.stage_rcs, self.calls, self.key = status, list(stage_rcs), [], key
+        self.version, self.status_rc = version, status_rc
 
     def have_key(self):
         return self.key
@@ -47,7 +48,12 @@ class _Stager:
     def __call__(self, words, feed=None, quiet=False):
         records = list(feed) if feed is not None else None
         self.calls.append((words, records))
+        if words[0] == "version":
+            rc, contract = self.version
+            return rc, ([{"event": "version", "contract": contract}] if rc == 0 else [])
         if words[0] == "status":
+            if self.status_rc:
+                return self.status_rc, [{"event": "contract", "contract": 3, "got": 2}]
             return 0, [dict(self.status, event="status", path="/scr/kaos/p/datasets/ds/" + COMMIT)]
         rc = self.stage_rcs.pop(0)
         return rc, ([{"event": "done", "path": "/scr/kaos/p/datasets/ds/" + COMMIT}] if rc == 0 else [])
@@ -80,14 +86,105 @@ def test_first_copy_streams_every_dataset_object(monkeypatch):
     assert _stage(cfg, stager).endswith(COMMIT)
     words, records = _stage_call(stager)
     assert "--base" not in words
-    assert words[words.index("--need-bytes") + 1] == 14 and words[words.index("--need-files") + 1] == 2
+    assert words[words.index("--need-bytes") + 1] == 113 and words[words.index("--need-files") + 1] == 3
     assert records[0] == {"op": "auth", "authorization": "Bearer wallet-jwt"}
     fetched = {r["path"]: r for r in records if r["op"] == "fetch"}
-    assert set(fetched) == {"data.yaml", "images/a.jpg"}, "only the dataset"
+    assert set(fetched) == {"data.yaml", "images/a.jpg", "README.md"}, "every object of the commit"
     assert fetched["images/a.jpg"]["url"] == (
         "https://lakefs.example/api/v1/repositories/dataset-poulaki/refs/%s/objects?path=images%%2Fa.jpg"
         % COMMIT)
-    assert records[-1] == {"op": "end", "files": 2, "bytes": 14, "ref": "main", "prefix": ""}
+    assert records[-1] == {"op": "end", "files": 3, "bytes": 113, "ref": "main", "prefix": ""}
+
+
+# ------------------------------------------------ any dataset shape (PRD kaos#1911 F-04, AC-05)
+
+NOT_YOLO = {"scenes/0001/points.ply": 300, "scenes/0001/poses.json": 2, "calibration/cam0.json": 9,
+            "README.md": 14, "splits.csv": 20}
+
+
+def test_a_tree_without_data_yaml_images_or_labels_is_streamed_whole(monkeypatch):
+    stager = _Stager({"ready": False, "base": None})
+    cfg = _twin(monkeypatch, _LakeFS(NOT_YOLO), stager)
+    info = {}
+    assert staging.stage_dataset(cfg, stager, lambda: "wallet-jwt", info=info).endswith(COMMIT)
+    words, records = _stage_call(stager)
+    assert {r["path"]: r["size"] for r in records if r["op"] == "fetch"} == NOT_YOLO
+    assert records[-1] == {"op": "end", "files": 5, "bytes": 345, "ref": "main", "prefix": ""}, \
+        "the stager checks the copy against the whole count before it marks it ready"
+    assert (info["kind"], info["files"], info["bytes"]) == ("first", 5, 345)
+
+
+def test_a_delta_carries_every_changed_path_whatever_its_folder(monkeypatch):
+    lakefs = _LakeFS({}, diff=[{"type": "added", "path": "scenes/0002/points.ply", "size_bytes": 5},
+                               {"type": "changed", "path": "README.md", "size_bytes": 7},
+                               {"type": "removed", "path": "notes/old.txt", "size_bytes": 3}])
+    stager = _Stager({"ready": False, "base": BASE, "base_files": 10, "base_prefix": ""})
+    cfg = _twin(monkeypatch, lakefs, stager)
+    assert _stage(cfg, stager)
+    _, records = _stage_call(stager)
+    assert [r["path"] for r in records if r["op"] == "fetch"] == ["scenes/0002/points.ply", "README.md"]
+    assert {"op": "delete", "path": "notes/old.txt"} in records and records[-1]["files"] == 10
+
+
+def test_the_filter_is_gone():
+    assert not hasattr(staging, "is_dataset_path")
+
+
+# ------------------------------------------------ the staging contract of the site's staging tool
+
+def test_the_runner_asks_the_staging_tool_for_its_contract_and_sends_its_own(monkeypatch):
+    stager = _Stager({"ready": False, "base": None})
+    cfg = _twin(monkeypatch, _LakeFS({"a/b.bin": 1}), stager)
+    assert _stage(cfg, stager)
+    calls = [w for w, _ in stager.calls]
+    assert [w[0] for w in calls] == ["version", "status", "stage"]
+    for w in calls[1:]:
+        assert w[w.index("--contract") + 1] == staging.CONTRACT == 2
+
+
+@pytest.mark.parametrize("version", [
+    (2, None),   # a staging tool from before `version`: the forced command answers a usage error
+    (0, 1),      # another contract
+    (0, 3),
+    (0, None),   # an answer without a contract
+])
+def test_a_staging_tool_of_another_contract_stops_the_run_before_anything_is_staged(monkeypatch, version):
+    """Not a fallback: the old staging tool keeps only the YOLO folders and marks that copy ready. The run ends
+    here, before a copy is made and before node time is spent in-job."""
+    lakefs = _LakeFS(NOT_YOLO)
+    stager = _Stager({"ready": True}, version=version)
+    cfg = _twin(monkeypatch, lakefs, stager)
+    with pytest.raises(staging.StagingMismatch) as e:
+        _stage(cfg, stager)
+    assert [w[0] for w, _ in stager.calls] == ["version"], "no status, no stage, no retry"
+    assert lakefs.urls == []
+    assert "Nothing was staged" in str(e.value) and "staging contract" in str(e.value)
+
+
+def test_a_staging_tool_replaced_between_two_calls_stops_the_run_too(monkeypatch):
+    stager = _Stager({"ready": False, "base": None}, status_rc=78)
+    cfg = _twin(monkeypatch, _LakeFS(NOT_YOLO), stager)
+    with pytest.raises(staging.StagingMismatch) as e:
+        _stage(cfg, stager)
+    assert "3" in str(e.value) and [w[0] for w, _ in stager.calls] == ["version", "status"]
+    stager = _Stager({"ready": False, "base": None}, stage_rcs=[78, 0])
+    cfg = _twin(monkeypatch, _LakeFS(NOT_YOLO), stager)
+    with pytest.raises(staging.StagingMismatch):
+        _stage(cfg, stager)
+    assert sum(w[0] == "stage" for w, _ in stager.calls) == 1
+
+
+def test_a_staging_tool_that_cannot_be_asked_is_retried_not_judged(monkeypatch):
+    class _Flaky(_Stager):
+        def __call__(self, words, feed=None, quiet=False):
+            if words[0] == "version" and not self.calls:
+                self.calls.append((words, None))
+                return 255, []
+            return super().__call__(words, feed, quiet)
+    stager = _Flaky({"ready": True})
+    cfg = _twin(monkeypatch, _LakeFS({}), stager)
+    assert _stage(cfg, stager).endswith(COMMIT)
+    assert [w[0] for w, _ in stager.calls] == ["version", "version", "status"]
 
 
 def test_delta_lists_only_the_two_dot_diff_against_the_base(monkeypatch):
@@ -120,7 +217,7 @@ def test_a_ready_copy_is_never_listed_again(monkeypatch):
     stager = _Stager({"ready": True})
     cfg = _twin(monkeypatch, lakefs, stager)
     assert _stage(cfg, stager).endswith(COMMIT)
-    assert lakefs.urls == [] and [w[0] for w, _ in stager.calls] == ["status"]
+    assert lakefs.urls == [] and [w[0] for w, _ in stager.calls] == ["version", "status"]
 
 
 def test_retry_resumes_and_no_space_stops_insufficient_quota(monkeypatch):
@@ -295,7 +392,7 @@ def test_a_first_copy_is_recorded_with_its_size_and_the_short_commit(monkeypatch
     stager = _Stager({"ready": False, "base": None})
     cfg = _twin(monkeypatch, lakefs, stager)
     assert _stage_info(cfg, stager) == {"repo": "dataset-poulaki", "commit": COMMIT[:12], "kind": "first",
-                                        "files": 2, "bytes": 14, "seconds": 0}
+                                        "files": 3, "bytes": 113, "seconds": 0}
 
 
 def test_a_delta_is_recorded_with_what_it_copied(monkeypatch):

@@ -24,7 +24,7 @@ from .sharing import inputs_in_script
 from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_site_down, lane_refusal,
                     share_state, site_time, submit_limit_refusal)
 from .settings import (CHECKPOINT_EXIT, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT, INVALID_IMAGE_EXIT, OFFER_S, ROLE_POLL_S,
-                       SUBMIT_LIMIT_EXIT, Settings, image_problem)
+                       STAGING_MISMATCH_EXIT, SUBMIT_LIMIT_EXIT, Settings, image_problem)
 
 POLL_S = 30
 # --cancel-only (the controller's orphan sweep, PRD AC-08): how long one such runner works before it gives up
@@ -548,6 +548,8 @@ class Runner:
         except staging.InsufficientQuota as e:
             imagemod.cleanup_images(self.stager)   # AC-65: free what no job names before the next attempt
             return self.end_no_quota(e)
+        except staging.StagingMismatch as e:
+            return self.end_staging_mismatch(e)
         if adopted:
             print('adopting existing job', jid, flush=True)
         self.jid = jid
@@ -581,6 +583,17 @@ class Runner:
         print('ERROR: InsufficientQuota:', msg, flush=True)
         self.write_termination('InsufficientQuota: ' + msg)
         self.reporter.report(must=True, state='FAILED', exitCode=INSUFFICIENT_QUOTA_EXIT, terminal=True,
+                             endTime=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), message=msg[:500])
+        return 0
+
+    def end_staging_mismatch(self, err):
+        """The site's staging tool speaks another staging contract than this runner (PRD kaos#1911 F-04): nothing
+        was staged and no site job was submitted. The one terminal report says so (exit code 241, FAILED, a plain
+        message); the controller ends the job StagingMismatch and settles nothing."""
+        msg = str(err)
+        print('ERROR: StagingMismatch:', msg, flush=True)
+        self.write_termination('StagingMismatch: ' + msg)
+        self.reporter.report(must=True, state='FAILED', exitCode=STAGING_MISMATCH_EXIT, terminal=True,
                              endTime=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), message=msg[:500])
         return 0
 
