@@ -23,6 +23,9 @@ All fixtures describe one run, `hera-demo-x7k2p`, of the app `hera-demo` in the 
 | `ledger-run-union.json` | The ledger of the whole run: the union of compose's reads and every step's result. |
 | `hpc-job.json` | An `HPCArgoWorkflowJob` for `train` with the contract's fields: `spec.app`, `spec.inputs[]`, `spec.context` (equal to `context-one-upstream.wire`) and `status.result` (equal to `result-model.wire`). |
 
+Every fixture is far below the size caps (a context may cost 96 KiB, a result 8 KiB; section 7 of the
+contract). The cases at the caps are built by the checks, not stored here.
+
 To change a fixture: edit the `.json` file, then
 
 ```bash

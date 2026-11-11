@@ -74,6 +74,12 @@ context's cost, not its bytes, and the contract counts its caps the same way (se
 An earlier version of this page said 96 KiB of context always leaves 32 KiB for the rest of the
 definition; that holds only for a context with few quotes.
 
+Last, the guarantee of the document's section 7. A step whose own definition is at the template budget
+(24 KiB), whose base is at its cap (96 KiB less 8 KiB per needed step) and whose needed steps each hand
+back a result at the result cap (8 KiB): with three needed steps and with ten, the most allowed. Both
+receive their context intact. The same three-step case with results of 32 KiB, the cap before, does not
+start. `checklib.needs_workflow` writes these Workflows.
+
 The ceiling is 131072 bytes for the step's whole definition as the engine hands it to the pod (one
 environment string, `ARGO_TEMPLATE`, on the init container; 128729 bytes in the case that passed). Over it
 the engine tries to move the definition into a ConfigMap, which the chart's controller role does not
@@ -86,7 +92,7 @@ backticks, a backslash and a semicolon in a string:
 
 | Hop | How it is checked | Real parts |
 |---|---|---|
-| 1. Follower to job object | The job the follower's code builds is created with `spec.context` and read back. One byte more is refused; the spec stays immutable; `status.result` takes 32768 bytes. | `follower.ConfigFromEnv`, `Config.Job`, the API server, the repository's job definition with the contract's fields added |
+| 1. Follower to job object | The job the follower's code builds is created with `spec.context` and read back. One byte more is refused; the spec stays immutable; `status.result` takes 8192 bytes and refuses 8193. | `follower.ConfigFromEnv`, `Config.Job`, the API server, the repository's job definition with the contract's fields added |
 | 2. Job object to runner Job | The runner Job the controller's code builds, with the context as one more env value, is created and read back. | `runnerjob.Build`, the API server |
 | 3. Runner Job to runner process | A process is started with exactly the environment of the stored Job's container and reports what it sees. | the kernel's exec |
 | 4. Runner to site | The site job is built the way `Runner.submit` builds it, alone (inputs in the Slurm environment) and for a shared node (inputs as export lines in the script), and sent with the runner's client. | `jobscript.batch_lines`, `inputs_in_script`, the payloads, `Slurm.submit`, the fake Slurm site |

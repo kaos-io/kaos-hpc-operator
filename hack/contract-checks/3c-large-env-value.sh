@@ -63,4 +63,42 @@ sys.exit(0 if c.same('KAOS_STEP_CONTEXT, $CONTEXT_CAP bytes, cost $cost', open('
     pass "a context of $CONTEXT_CAP bytes that costs $cost as a JSON string does not start: the ceiling counts the cost, not the bytes"
   fi
 done
+
+# The guarantee of section 7. A step whose own definition is at the template budget (24 KiB), whose base
+# context is at its cap (96 KiB less 8 KiB per needed step) and whose needed steps each hand back a result
+# at the result cap must start and receive its context intact: with three needed steps, and with ten, the
+# most a step may name. The same three-step case with results of 32 KiB, the cap before, must not start.
+template_of() {  # the step's definition as the engine hands it to the pod
+  kc -n "$CHECK_NAMESPACE" get pods -l "workflows.argoproj.io/workflow=$1" -o json | python3 -c '
+import json, sys
+print(max([len(e["value"]) for p in json.load(sys.stdin)["items"] for c in p["spec"].get("initContainers", [])
+           for e in c.get("env", []) if e["name"] == "ARGO_TEMPLATE"] or [0]))'
+}
+for case in "3 8192 start" "10 8192 start" "3 32768 refuse"; do
+  set -- $case; needs=$1; result=$2; expect=$3
+  file="$(mktemp --suffix=.yaml)"
+  python3 -c "import checklib as c; open('$file', 'w').write(c.needs_workflow($needs, 24200))"
+  read -r fill result_fill cost <<<"$(python3 -c "
+import checklib as c
+f, rf, t = c.needs_case($needs, $result); print(f, rf, c.wire.cost(t))")"
+  wf="$(run_workflow "$file" -p fill="$fill" -p result-fill="$result_fill")"
+  phase="$(wf_phase "$wf")"
+  say "a step that needs $needs steps, base at its cap, each result costing $result: the context costs $cost; workflow $wf $phase"
+  if [ "$expect" = start ]; then
+    [ "$phase" = Succeeded ] || fail "3(c) the step with $needs needed steps did not start: $(wf_message "$wf")"
+    step_log "$wf" step > "$log" 2>&1
+    python3 -c "
+import sys, checklib as c
+sys.exit(0 if c.same('the context of a step that needs $needs steps', open('$log').read(), c.needs_case($needs, $result)[2]) else 1)" \
+      || fail "3(c) the context of the step with $needs needed steps did not arrive intact"
+    whole="$(template_of "$wf")"
+    rest=$((whole - cost))
+    say "      the step's definition: $whole bytes, of which $rest are not the context (budget 24576); the ceiling is 131072"
+    [ "$cost" -eq "$CONTEXT_CAP" ] && [ "$rest" -ge 24576 ] && [ "$whole" -le 131072 ] \
+      || fail "3(c) the case is not at the caps: context cost $cost, rest of the definition $rest"
+  else
+    [ "$phase" = Succeeded ] && fail "3(c) a context that costs $cost started"
+    pass "with results of $result the same step does not start: the result cap is what keeps it under the ceiling"
+  fi
+done
 pass "3(c) a 96 KiB env value reaches the container intact when its cost as a JSON string fits"

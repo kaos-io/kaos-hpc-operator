@@ -35,7 +35,7 @@ import (
 // The caps of docs/step-contract.md, section 7.
 const (
 	contextCap = 96 * 1024
-	resultCap  = 32 * 1024
+	resultCap  = 8 * 1024
 )
 
 const contextEnv = "KAOS_STEP_CONTEXT"
@@ -199,15 +199,24 @@ func TestA96KiBContextSurvivesEveryHop(t *testing.T) {
 		t.Logf("PASS  spec.context cannot be changed after creation: %s", firstLine(err.Error()))
 	}
 
-	// status.result takes a result at its cap.
-	result := `{"version":1,"status":"ok","values":{"blob":"` + strings.Repeat("r", resultCap-60) + `"},"reads":[],"writes":[]}`
-	result = result[:len(result)-len(`"},"reads":[],"writes":[]}`)-(len(result)-resultCap)] + `"},"reads":[],"writes":[]}`
+	// status.result takes a result at its cap and nothing longer. The cap is counted on the result's cost,
+	// which is never less than its length, so a definition that allows resultCap characters allows every
+	// result within the cap.
+	const head, tail = `{"version":1,"status":"ok","values":{"blob":"`, `"},"reads":[],"writes":[]}`
+	result := head + strings.Repeat("r", resultCap-len(head)-len(tail)) + tail
 	withResult := stored.DeepCopy()
 	_ = unstructured.SetNestedField(withResult.Object, result, "status", "result")
 	if err := c.Status().Update(ctx, withResult); err != nil {
 		t.Fatalf("status.result of %d bytes was refused: %v", len(result), err)
 	}
 	t.Logf("PASS  status.result takes a result of %d bytes", len(result))
+	tooLong := withResult.DeepCopy()
+	_ = unstructured.SetNestedField(tooLong.Object, head+strings.Repeat("r", resultCap-len(head)-len(tail)+1)+tail, "status", "result")
+	if err := c.Status().Update(ctx, tooLong); err == nil {
+		t.Fatalf("status.result of %d bytes was accepted", len(result)+1)
+	} else {
+		t.Logf("PASS  status.result of %d bytes is refused by the job definition: %s", len(result)+1, firstLine(err.Error()))
+	}
 
 	// ---- hop 2: the controller builds the runner Job from the stored job
 	storedTyped := &hpcv1alpha1.HPCArgoWorkflowJob{}

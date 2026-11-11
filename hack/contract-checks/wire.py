@@ -21,8 +21,19 @@ import json
 import pathlib
 import sys
 
-CONTEXT_CAP = 96 * 1024   # the most a step context may cost
-RESULT_CAP = 32 * 1024    # the most a step result may cost
+CONTEXT_CAP = 96 * 1024      # the most a step context may cost
+RESULT_CAP = 8 * 1024        # the most a step result may cost
+MAX_NEEDS = 10               # the most steps one step may name in needs=
+TEMPLATE_BUDGET = 24 * 1024  # the most a step's rendered definition may be, without its context
+STEP_CEILING = 128 * 1024    # what the workflow engine can hand one step: its definition with the context in it
+
+
+def base_cap(needs):
+    """The most a step's context may cost before any upstream result is in it (every result still to
+    come counted at the full RESULT_CAP), for a step that names `needs` steps in needs=."""
+    if not 0 <= needs <= MAX_NEEDS:
+        raise ValueError("a step may need at most %d steps, got %d" % (MAX_NEEDS, needs))
+    return CONTEXT_CAP - RESULT_CAP * needs
 ABSENT = {"version": 1, "status": "absent"}
 
 FIXTURES = pathlib.Path(__file__).resolve().parents[2] / "docs" / "step-contract" / "fixtures"

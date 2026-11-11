@@ -32,7 +32,7 @@ step(name, kind=, reads=, inputs=, needs=, produces=, gpu=, disk=, when=, wallti
 | `kind=` | Required. One of `ingest`, `transform`, `train`, `evaluate`, `publish`, `control`. The engine labels every pod and HPC job with it (`platform.kubecore.io/step-kind`). |
 | `reads=` | The config sections the step reads. |
 | `inputs=` | The names of the config values that hold a dataset reference. Compose pins each to one commit when the run starts. Step code names the input, never a version. |
-| `needs=` | The steps this step runs after. Each one's result reaches this step in `upstream`. |
+| `needs=` | The steps this step runs after, at most ten. Each one's result reaches this step in `upstream`. The engine refuses an eleventh when it renders the pipeline, naming the step and the limit (section 7). |
 | `produces=` | What the step writes: `model("name")`, `artifact("name")`, `dataset("name")`. |
 | `gpu=`, `disk=`, `when=` | Unchanged. |
 | `walltime=` | The run limit on an HPC class: `'90m'`, `'12h'` or `'720'` (minutes). |
@@ -106,7 +106,7 @@ the step's one output, `kaos-result`. It holds one JSON object in [wire form](#6
 |---|---|---|
 | `version` | number | `1`. |
 | `status` | string | `ok`: the step wrote this result. `absent`: there is no result. |
-| `values` | object | Small values for the steps that need this one. The app chooses the names. |
+| `values` | object | Small values for the steps that need this one. The app chooses the names. Metrics and anything large belong in MLflow or in an artifact, not here: the whole result may cost 8 KiB (section 7). |
 | `reads` | array | A ledger read entry for each dataset the step read. |
 | `writes` | array | A ledger write entry for each model, artifact or dataset version the step wrote. |
 
@@ -179,14 +179,18 @@ its wire form beside it as `<name>.wire`.
 
 ## 7. Size caps
 
-| Value | Cap | Counted on |
-|---|---|---|
-| Step context | 96 KiB (98304) | its cost |
-| Result | 32 KiB (32768) | its cost |
+| Value | Cap, by cost |
+|---|---|
+| Result | 8 KiB (8192) |
+| Step context | 96 KiB (98304) |
+| Step context before its upstream results are in it (the base) | 96 KiB less 8 KiB for each step in `needs=` |
+| Steps in one step's `needs=` | 10 |
+| A step's rendered definition, without its context | 24 KiB (24576 bytes of JSON) |
 
 The **cost** of a value is its length as a JSON string: the bytes of the wire form, plus one for each `"`
 and one for each `\` in it. It is never less than the bytes; for the fixtures it is about 1.15 times the
-bytes. `wire.py` has it as `cost()`.
+bytes. `wire.py` has it as `cost()`, and the caps as `RESULT_CAP`, `CONTEXT_CAP`, `base_cap(needs)`,
+`MAX_NEEDS` and `TEMPLATE_BUDGET`.
 
 Why the cost and not the bytes: the workflow engine hands a step its whole definition as one environment
 string, and the kernel limits one such string to 128 KiB (131072 bytes). The context sits inside that
@@ -195,32 +199,34 @@ contexts of the same 98304 bytes: the one that costs 128368 arrives intact, the 
 not start. Over the limit the engine tries to move the definition into a ConfigMap, which its role does not
 allow, and the step errors with `configmaps is forbidden` before it runs. A value is never shortened.
 
-The budget of that one string:
-
-| Part | Budget |
-|---|---|
-| The context, by cost | 96 KiB |
-| The rest of the step's rendered definition | 24 KiB |
-| Left for what the engine adds when it starts the step | 8 KiB |
-
 Where each is enforced:
 
 | Where | Rule |
 |---|---|
-| kaos-lib, `result()` | Refuses to write a result that costs over 32 KiB. The step fails. |
-| The engine, when it renders the pipeline | Refuses a step whose rendered definition, without the context, is over 24 KiB (24576 bytes of JSON). Today's are about 3 KiB. |
-| Compose | Refuses the run when a step's context without its upstream results costs over 64 KiB (the context cap less one full result). |
-| kaos-lib, `start()` | Refuses a context that costs over 96 KiB. |
+| kaos-lib, `result()` | Refuses to write a result that costs over 8 KiB. The step fails, and the message says where large values go: MLflow or an artifact. |
+| The engine, when it renders the pipeline | Refuses a step that names more than ten steps in `needs=`, and a step whose rendered definition, without the context, is over 24 KiB. Both name the step and the limit. Today's definitions are about 3 KiB. |
+| Compose, for each step | Refuses the run when the step's base costs over 96 KiB less 8 KiB for each step in its `needs=`. The base is counted as it will travel: the whole context with every upstream result still empty, so the `upstream` keys are in the count. |
+| kaos-lib, `start()` | Refuses a context that costs over 96 KiB. With the rules above this cannot happen; it is the last line. |
 | HPC follower | Refuses to create a job whose context costs over 96 KiB. |
-| HPC job definition | `spec.context` at most 98304 characters; `status.result` at most 32768. A value within its cap is within these. |
+| HPC job definition | `spec.context` at most 98304 characters; `status.result` at most 8192. A value's length is never more than its cost, so every value within its cap fits. |
 
-With the first three rules a step that needs one other step always starts: 24 KiB + 64 KiB + 32 KiB is
-under the limit. **What they do not cover:** a step that needs several steps whose results together cost
-more than its context has left. Compose cannot see results, so it cannot refuse that run before it starts.
-Up to the limit the step starts and kaos-lib refuses the context with a clear message; over the limit the
-step ends with the engine's `configmaps is forbidden`. Closing it for good takes a rule that reserves room
-per needed step (a step with a 16 KiB base and a 32 KiB result cap could then need two steps), or a smaller
-result cap. That is a decision for the owner; this document does not make it.
+**The guarantee.** A pipeline that renders and a run that composes can never reach the engine's
+`configmaps is forbidden` error, whatever its steps hand back:
+
+| Part of the step's one string | At most |
+|---|---|
+| The base of the context | 96 KiB − 8 KiB × N, for N steps in `needs=` (compose) |
+| The N upstream results | 8 KiB × N (kaos-lib `result()`; a missing one is the 37-byte sentinel) |
+| So the context | 96 KiB |
+| The rest of the step's rendered definition | 24 KiB (render) |
+| Left for what the engine adds when it starts the step | 8 KiB |
+| Total | 128 KiB, the limit |
+
+With ten steps in `needs=` the base may still cost 16 KiB; an eleventh would leave 8 KiB, which is why ten
+is the limit. Check 3(c) runs the two hardest cases the rules allow, a step that needs three steps and one
+that needs ten, each with its definition at the template budget, its base at its cap and every result at
+the result cap: both receive their context intact (the step's string is 122904 bytes of the 131072). The
+same three-step case with results of 32 KiB does not start.
 
 The caps are per step. The run's Workflow object holds every step's context twice (as compose's output
 and as the step's input): one step at the cap makes it 208 KiB. How a run behaves when its contexts add
@@ -236,7 +242,7 @@ up to more than the object may hold (about 1 MiB before the engine compresses it
 | `spec.app` | string | The app the step belongs to. |
 | `spec.context` | string, at most 98304 | The step context, wire form, exactly as the follower received it in `KAOS_STEP_CONTEXT`. The job's environment gets it under the same name. A job without it is refused. |
 | `spec.inputs[]` | array | The datasets to stage before the step starts, each pinned: `{"name", "repo", "commit"}` and, when known, `ref` and `owner` (and `line`, reserved). |
-| `status.result` | string, at most 32768 | The step's result, wire form, as the job handed it back. Absent when the step wrote none. |
+| `status.result` | string, at most 8192 | The step's result, wire form, as the job handed it back. Absent when the step wrote none. |
 
 `spec.inputs[]` is filled by the follower from the context and from nothing else: every entry of
 `ledger.reads`, and every `dataset` entry of `upstream.*.writes`. It resolves no version.
@@ -319,7 +325,7 @@ again. Results of 2026-11-12:
 |---|---|---|
 | 3(a) | Does one expression assemble the context as one JSON value from task outputs, as a DAG task argument and as a container env value? | Pass |
 | 3(b) | Does a skipped upstream yield the sentinel inside that expression? | Pass, with `sprig.default`: the engine yields an empty string by itself |
-| 3(c) | Does a 96 KiB env value reach the container intact? | Pass when its cost fits: the ceiling is 131072 bytes for the step's whole definition, in which the context is a JSON string (section 7) |
+| 3(c) | Does a 96 KiB env value reach the container intact? | Pass when its cost fits: the ceiling is 131072 bytes for the step's whole definition, in which the context is a JSON string. The caps of section 7 keep every step under it: shown for a step that needs three steps and one that needs ten, all at their caps |
 | 4 | Does a 96 KiB value survive follower, job object, runner and job environment? | Pass on the fake site, with a control run. Needs a live site: the list below |
 | 5 | Do stored HPC jobs stay readable when fields are removed from the definition? | Pass. They read back without the removed fields, and can still be ended, released and deleted |
 
