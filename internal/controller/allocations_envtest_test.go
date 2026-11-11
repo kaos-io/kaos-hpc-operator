@@ -57,7 +57,7 @@ var _ = Describe("HPC per-allocation budgets", func() {
 	submit := func(class string, wall int32) *hpcv1alpha1.HPCArgoWorkflowJob {
 		seq++
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("step-%d", seq), Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: class, Image: "img", WallTimeMinutes: wall}}
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: class, Image: "reg.example/img:1", WallTimeMinutes: wall}}
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		return reconcileOnce(r, j)
 	}

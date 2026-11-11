@@ -25,7 +25,7 @@ var _ = Describe("SitePoller", func() {
 			Expect(k8sClient.Create(ctx, o)).To(Succeed())
 		}
 		job := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: "j", Namespace: ns},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "c", Image: "i", WallTimeMinutes: 5}}
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "c", Image: "reg.example/img:1", WallTimeMinutes: 5}}
 		Expect(k8sClient.Create(ctx, job)).To(Succeed())
 		job.Status = pollJob(ns, "j", ns, "4711").Status
 		Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())

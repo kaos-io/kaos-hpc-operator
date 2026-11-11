@@ -75,10 +75,28 @@ const (
 	// is signalled at the host job's end minus its lead: it saves and exits 85 ("kaos-state=done rc=85
 	// host=H start=<start> kaos-ckpt-seq=N") instead of running on past its host.
 	EnvLeadMinutes = "FAKE_LEAD_MINUTES"
+	// EnvShareScope and EnvShareSlots make the job a node-sharing job as the runner submits it (PRD-1609,
+	// PRD-HPC-1461 D-70): it carries a scope and its node has that many GPU slots. Once running it plays the
+	// slot manager: it takes pending jobs of the same account, partition and scope (also one still waiting for
+	// its BeginTime) into its free slots while their step ends before its own time limit, and keeps its node
+	// until its last guest is done plus ShareIdle. A job submitted without a BeginTime in the future that finds
+	// a free node simply starts: it is a host.
+	EnvShareScope = "FAKE_SHARE_SCOPE"
+	EnvShareSlots = "FAKE_SHARE_SLOTS"
 	// EnvResumeRef is the checkpoint reference of the attempt (set by the controller via the runner).
 	EnvResumeRef = "KAOS_RESUME_REF"
 	// EnvAttempt is the controller's attempt number of the submission.
 	EnvAttempt = "KAOS_ATTEMPT"
+)
+
+// ReasonHeld is the pending reason of a job a host took: held by the user (the slot manager).
+const ReasonHeld = "JobHeldUser"
+
+// ShareIdle is the dilated time a slot-manager host keeps its node after its last step (the slot manager's idle
+// release, KAOS_IDLE_S 120 s) and ShareMargin the time a guest must end before the host's own limit (MARGIN_S 300 s).
+const (
+	ShareIdle   = 2 * time.Minute
+	ShareMargin = 5 * time.Minute
 )
 
 // ExitCodeContinue is the step's "saved, continue me" exit code (PRD-HPC-1461 D-44).
@@ -158,6 +176,9 @@ type Job struct {
 	stepDone                             bool          // a host's step is over, its job still runs
 	guest                                bool
 	leadReal                             time.Duration // a resumable step's lead, real time (EnvLeadMinutes)
+	slots                                int           // a sharing job's GPU slots (FAKE_SHARE_SLOTS)
+	scope                                string        // its sharing scope
+	slotNo                               int           // the slot a host gave this guest
 	host                                 int           // the host that took this guest
 	takenAt                              time.Time     // when the host took it
 }
@@ -181,6 +202,9 @@ type Stats struct {
 	Injected, LostReplies int
 	// QuickLost counts the lost-reply submissions that finished before any retry (LostReplyQuick).
 	QuickLost int
+	// Started counts the jobs that ever ran on a node: a guest never does, so for sharing jobs this is the number of
+	// nodes used.
+	Started int
 	// PeakRunning and PeakActive are the highest number of running and of pending+running jobs.
 	PeakRunning, PeakActive int
 	// ChargedMinutes is the dilated node-minutes charged to each account so far (ended jobs).
@@ -573,6 +597,10 @@ type submitBody struct {
 		Comment     string   `json:"comment"`
 		Reservation string   `json:"reservation"`
 		Environment []string `json:"environment"`
+		BeginTime   struct {
+			Set    bool  `json:"set"`
+			Number int64 `json:"number"`
+		} `json:"begin_time"`
 	} `json:"job"`
 }
 
@@ -601,6 +629,12 @@ func (s *Site) submit(w http.ResponseWriter, r *http.Request, user string) {
 		Attempt: env[EnvAttempt], SubmitAt: now, State: Pending, Reason: "Priority"}
 	s.nextID++
 	j.EligibleAt = now.Add(s.between(s.Opts.QueueMin, s.Opts.QueueMax))
+	if b.Job.BeginTime.Set {
+		// BeginTime (real seconds): the job is not eligible before it. A sharing guest sets it far ahead.
+		if begin := time.Unix(b.Job.BeginTime.Number, 0); begin.After(j.EligibleAt) {
+			j.EligibleAt, j.Reason = begin, "BeginTime"
+		}
+	}
 	lost := s.rng.Float64() < s.Opts.LostReplyRate
 	quick := lost && s.rng.Float64() < s.Opts.LostReplyQuick
 	if lost && !quick {
@@ -713,6 +747,7 @@ func (s *Site) planLocked(j *Job) {
 	if lead, err := strconv.ParseFloat(j.Env[EnvLeadMinutes], 64); err == nil && lead > 0 {
 		j.leadReal = time.Duration(lead * 60 / s.Opts.Dilation * float64(time.Second))
 	}
+	j.scope, j.slots = j.Env[EnvShareScope], atoi(j.Env[EnvShareSlots])
 	if tail, err := strconv.ParseFloat(j.Env[EnvHostTailMinutes], 64); err == nil && tail > 0 && !j.guest && (end == Completed || end == Failed) {
 		if j.LimitMin > 0 {
 			tail = math.Max(0, math.Min(tail, float64(j.LimitMin)-runMin)) // the job ends by its time limit
@@ -738,7 +773,7 @@ func (s *Site) guestLocked(j *Job, now time.Time) {
 			}
 			end := h.StartAt.Add(h.runReal + h.tailReal)
 			if !now.Add(j.runReal).After(end) || (j.leadReal > 0 && !now.Add(j.leadReal).After(end)) {
-				j.host, j.takenAt, j.Reason = h.ID, now, "JobHeldUser"
+				j.host, j.takenAt, j.Reason, j.slotNo = h.ID, now, ReasonHeld, 1
 				j.Cm += fmt.Sprintf(" kaos-state=taken host=%d slot=1", h.ID)
 				s.stats.GuestsTaken++
 				return
@@ -777,7 +812,7 @@ func (s *Site) finishGuestLocked(j *Job, now time.Time, rc, seq int) {
 	if rc == ExitCodeContinue && seq > 0 {
 		done += fmt.Sprintf(" kaos-ckpt-seq=%d", seq)
 	}
-	j.Cm = strings.Replace(j.Cm, fmt.Sprintf("kaos-state=taken host=%d slot=1", j.host), done, 1)
+	j.Cm = strings.Replace(j.Cm, fmt.Sprintf("kaos-state=taken host=%d slot=%d", j.host, j.slotNo), done, 1)
 	s.endLocked(j, Cancelled, 0, now)
 }
 
@@ -814,12 +849,29 @@ func (s *Site) ticker(ctx context.Context) {
 // advanceLocked ends running jobs whose time is up, starts queued ones in submission order while
 // nodes are free, and makes slurmctld forget jobs that finished MinJobAge ago.
 func (s *Site) advanceLocked(now time.Time) {
+	s.slotManagersLocked(now)
 	running := 0
 	for _, id := range s.order {
 		j := s.jobs[id]
 		if j.State == Running {
 			stepEnd := j.StartAt.Add(j.runReal)
 			switch {
+			case j.slots > 0 && j.tailReal == 0 && (j.endState == Completed || j.endState == Failed):
+				// A slot-manager host keeps its node until its last guest is done (plus the idle release).
+				hold := s.holdUntilLocked(j)
+				if now.Before(stepEnd) {
+					running++
+					break
+				}
+				if now.Before(hold) {
+					if !j.stepDone {
+						j.stepDone = true
+						j.Cm += fmt.Sprintf(" kaos-state=done rc=%d", j.endExit)
+					}
+					running++
+					break
+				}
+				s.endLocked(j, j.endState, j.endExit, hold)
 			case now.Before(stepEnd):
 				running++
 			case now.Before(stepEnd.Add(j.tailReal)): // a host's job holds the node for guests after its step
@@ -845,6 +897,7 @@ func (s *Site) advanceLocked(now time.Time) {
 		}
 		if j.State == Pending && (running < s.Opts.Capacity || j.quick) && !now.Before(j.EligibleAt) {
 			j.State, j.Reason, j.StartAt = Running, "None", now
+			s.stats.Started++
 			running++
 		}
 		if !j.forgotten && !j.endedReal.IsZero() && now.Sub(j.endedReal) >= s.minAge {
@@ -852,6 +905,68 @@ func (s *Site) advanceLocked(now time.Time) {
 		}
 	}
 	s.peaksLocked()
+}
+
+// limitReal is the real time a job may run: its time limit, dilated.
+func (s *Site) limitReal(j *Job) time.Duration {
+	return time.Duration(float64(j.LimitMin) * 60 / s.Opts.Dilation * float64(time.Second))
+}
+
+// holdUntilLocked is when a slot-manager host's job ends if it takes no more guests: its own step's end or its
+// last guest's end, plus the idle release, never past its time limit.
+func (s *Site) holdUntilLocked(h *Job) time.Time {
+	hold := h.StartAt.Add(h.runReal)
+	for _, g := range s.jobs {
+		if g.host == h.ID && g.State == Pending {
+			if end := g.takenAt.Add(g.runReal); end.After(hold) {
+				hold = end
+			}
+		}
+	}
+	hold = hold.Add(time.Duration(float64(ShareIdle) / s.Opts.Dilation))
+	if limit := h.StartAt.Add(s.limitReal(h)); h.LimitMin > 0 && hold.After(limit) {
+		hold = limit
+	}
+	return hold
+}
+
+// slotManagersLocked plays the slot manager (payload/slots.py) of every running sharing job: it takes waiting
+// jobs of its scope, account and partition into its free slots, in the queue's order, while the guest's step
+// plus the margin ends before the host's own limit. A job still waiting for its BeginTime is takeable too.
+func (s *Site) slotManagersLocked(now time.Time) {
+	margin := time.Duration(float64(ShareMargin) / s.Opts.Dilation)
+	for _, hid := range s.order {
+		h := s.jobs[hid]
+		if h.State != Running || h.slots <= 0 || h.tailReal > 0 {
+			continue
+		}
+		if stepEnd := h.StartAt.Add(h.runReal); !now.Before(stepEnd) && !now.Before(s.holdUntilLocked(h)) {
+			continue // its job ends in this tick: no guest is taken onto a node that is being released
+		}
+		used := 0
+		if now.Before(h.StartAt.Add(h.runReal)) {
+			used = 1
+		}
+		for _, g := range s.jobs {
+			if g.host == h.ID && g.State == Pending {
+				used++
+			}
+		}
+		hostEnd := h.StartAt.Add(s.limitReal(h))
+		for _, id := range s.order {
+			j := s.jobs[id]
+			if used >= h.slots {
+				break
+			}
+			if j.State != Pending || j.guest || j.host != 0 || j.slots <= 0 || j.scope != h.scope || j.Account != h.Account ||
+				j.Partition != h.Partition || (h.LimitMin > 0 && now.Add(j.runReal).Add(margin).After(hostEnd)) {
+				continue
+			}
+			used++
+			j.host, j.takenAt, j.Reason, j.slotNo, j.guest = h.ID, now, ReasonHeld, used, true
+			j.Cm += fmt.Sprintf(" kaos-state=taken host=%d slot=%d", h.ID, used)
+		}
+	}
 }
 
 func (s *Site) peaksLocked() {

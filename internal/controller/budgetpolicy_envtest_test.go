@@ -54,7 +54,7 @@ var _ = Describe("HPC budget policy", func() {
 	submit := func(wall int32) *hpcv1alpha1.HPCArgoWorkflowJob {
 		seq++
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("step-%d", seq), Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "img", WallTimeMinutes: wall}}
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: wall}}
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(j)})
 		Expect(err).NotTo(HaveOccurred())

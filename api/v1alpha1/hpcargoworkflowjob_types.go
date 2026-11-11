@@ -51,7 +51,11 @@ const (
 	// ReasonInsufficientQuota: staging the dataset or the image would exceed the project's scratch
 	// quota (space or files) even after evicting everything unused; the step stops before any copy
 	// (PRD-HPC-1461 AC-33, D-06). Terminal. The runner reports it with ExitCodeInsufficientQuota.
-	ReasonInsufficientQuota    = "InsufficientQuota"
+	ReasonInsufficientQuota = "InsufficientQuota"
+	// ReasonInvalidImage: the step's image reference is not registry-host/repository with a tag or digest, so it
+	// can never be pulled. Refused at admission (nothing booked), or Failed when the runner finds it (exit
+	// ExitCodeInvalidImage, no site job). Terminal; no credential retry can fix it.
+	ReasonInvalidImage         = "InvalidImage"
 	ReasonMultiNodeUnsupported = "MultiNodeUnsupported"
 	ReasonWallTimeOverLimit    = "WallTimeOverLimit"
 	// ReasonTooLongNotResumable: the declared limit is above the longest lane and the step is not
@@ -90,6 +94,8 @@ const (
 	// ExitCodeSubmitLimit is the exit code the runner reports (state FAILED, no site job) when the site
 	// refused the submit because of its submit cap (AC-39). Next to ExitCodeInsufficientQuota.
 	ExitCodeSubmitLimit = int32(238)
+	// ExitCodeInvalidImage is the exit code the runner reports (state FAILED, no site job) for an unpullable image reference.
+	ExitCodeInvalidImage = int32(239)
 	// DefaultIdleTimeoutMinutes is the idle window of a step that does not set one (D-72).
 	DefaultIdleTimeoutMinutes = int32(20)
 	// ReasonSiteUnavailable: the site does not answer (connection errors, 5xx, timeouts, slurmctld down). The job
@@ -546,6 +552,45 @@ type Placement struct {
 	// a step with no earlier continuation evidence and no declaration.
 	// +optional
 	Resumable *ResumableStatus `json:"resumable,omitempty"`
+	// Share is the attempt's place in a shared node (PRD-HPC-1461 D-26, D-70): a host that owns a node, or a
+	// guest planned onto a host's node. Absent for a step that does not share (resumable, no scope, or the site
+	// does not share) and on jobs admitted before the field existed (then each job is its own host).
+	// +optional
+	Share *SharePlan `json:"share,omitempty"`
+}
+
+// ShareRole is what a sharing step is in the controller's plan of a shared node.
+// +kubebuilder:validation:Enum=host;guest
+type ShareRole string
+
+const (
+	// ShareHost: the step's Slurm job starts on a node of its own and its slot manager takes guests.
+	ShareHost ShareRole = "host"
+	// ShareGuest: the step is submitted deferred (it never starts on a node of its own) and is taken onto a
+	// host's node by that host's slot manager. The runner submits a host only once the plan says host.
+	ShareGuest ShareRole = "guest"
+)
+
+// SharePlan is the controller's decision, made at admission and revised while a guest is not taken (D-70).
+type SharePlan struct {
+	// Role of the attempt.
+	Role ShareRole `json:"role"`
+	// Host is the HPCArgoWorkflowJob (namespace/name) a guest is planned onto. Empty for a host.
+	// +optional
+	Host string `json:"host,omitempty"`
+	// JobLimitMinutes is the time limit of a host's Slurm job: its step's limit padded for guests (twice, capped by the
+	// class's and the lane's maximum). A guest must end 6 minutes before the host's job does. Zero for a guest.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	JobLimitMinutes int32 `json:"jobLimitMinutes,omitempty"`
+	// Since is when the role was decided; a guest's wait for its host is measured from the later of it and the
+	// host's own.
+	Since metav1.Time `json:"since"`
+	// Replans is how often a guest that was not taken was planned again (host ended, did not start in time, no
+	// longer fits, or did not take it). At the bound the guest becomes a host.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Replans int32 `json:"replans,omitempty"`
 }
 
 // ResumeInfo is what the next attempt resumes from.

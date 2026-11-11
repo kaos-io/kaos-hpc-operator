@@ -506,6 +506,46 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                  share:
+                    description: |-
+                      Share is the attempt's place in a shared node (PRD-HPC-1461 D-26, D-70): a host that owns a node, or a
+                      guest planned onto a host's node. Absent for a step that does not share (resumable, no scope, or the site
+                      does not share) and on jobs admitted before the field existed (then each job is its own host).
+                    properties:
+                      host:
+                        description: Host is the HPCArgoWorkflowJob (namespace/name)
+                          a guest is planned onto. Empty for a host.
+                        type: string
+                      jobLimitMinutes:
+                        description: |-
+                          JobLimitMinutes is the time limit of a host's Slurm job: its step's limit padded for guests (twice, capped by the
+                          class's and the lane's maximum). A guest must end 6 minutes before the host's job does. Zero for a guest.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      replans:
+                        description: |-
+                          Replans is how often a guest that was not taken was planned again (host ended, did not start in time, no
+                          longer fits, or did not take it). At the bound the guest becomes a host.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      role:
+                        description: Role of the attempt.
+                        enum:
+                        - host
+                        - guest
+                        type: string
+                      since:
+                        description: |-
+                          Since is when the role was decided; a guest's wait for its host is measured from the later of it and the
+                          host's own.
+                        format: date-time
+                        type: string
+                    required:
+                    - role
+                    - since
+                    type: object
                   source:
                     description: Source of the limit.
                     enum:

@@ -86,15 +86,20 @@ type HPCArgoWorkflowJobReconciler struct {
 	// (DefaultLedgerPublishInterval in the manager). A request inside the interval is not lost: the
 	// newest state is written once the interval has passed. Zero (tests): every request writes.
 	LedgerPublishInterval time.Duration
+	// HostStartWait is how long a guest waits for a queued host before it is planned again (DefaultHostStartWait).
+	HostStartWait time.Duration
+	// GuestTakeWait is how long a guest waits on a running host that has not taken it (DefaultGuestTakeWait).
+	GuestTakeWait time.Duration
 
-	mu          sync.Mutex
-	pending     map[string]hpcv1alpha1.Booking // by job UID
-	pendingLane map[string]string              // QoS of the pending bookings that were placed in a lane, by job UID
-	laneNoted   map[string]int32               // attempt whose refused lane was counted, by job UID
-	failed      map[string]int32               // failed runner pods seen, by runner Job UID
-	ended       map[string]struct{}            // jobs whose end this process wrote and whose ledger is not published yet, by job UID
-	published   map[client.ObjectKey]time.Time // when each HPCSite's status was last written (ledger_throttle.go)
-	trailing    map[client.ObjectKey]bool      // sites with a deferred write scheduled
+	mu           sync.Mutex
+	pending      map[string]hpcv1alpha1.Booking             // by job UID
+	pendingShare map[string]*hpcv1alpha1.HPCArgoWorkflowJob // jobs this process placed in a shared node that the cache may not show yet, by job UID
+	pendingLane  map[string]string                          // QoS of the pending bookings that were placed in a lane, by job UID
+	laneNoted    map[string]int32                           // attempt whose refused lane was counted, by job UID
+	failed       map[string]int32                           // failed runner pods seen, by runner Job UID
+	ended        map[string]struct{}                        // jobs whose end this process wrote and whose ledger is not published yet, by job UID
+	published    map[client.ObjectKey]time.Time             // when each HPCSite's status was last written (ledger_throttle.go)
+	trailing     map[client.ObjectKey]bool                  // sites with a deferred write scheduled
 }
 
 // +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcargoworkflowjobs,verbs=get;list;watch;patch
@@ -167,7 +172,7 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if job.Status.Booking == nil {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
-		next, err := r.follow(ctx, &job, site)
+		next, err := r.followAndReplan(ctx, &job, site, serve)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -263,20 +268,25 @@ func (r *HPCArgoWorkflowJobReconciler) judge(ctx context.Context, job *hpcv1alph
 	switch d.Phase {
 	case hpcv1alpha1.PhaseAdmitted:
 		// The lane is chosen with the booking, in the same serial step, so the one-job semaphore
-		// (D-69) sees every lane this process has handed out.
-		if pl, err = r.withLane(ctx, job, site, pl); err != nil {
+		// (D-69) sees every lane this process has handed out. A shareable step is also given its place in
+		// a shared node (host or guest, share.go) in the same step, so the packing never races.
+		if pl, err = r.withShare(ctx, job, site, pl); err != nil {
 			return ctrl.Result{}, err
 		}
 		b := &hpcv1alpha1.Booking{Site: site.Spec.Site, SiteName: site.Name, SiteNamespace: site.Namespace,
 			Tier: d.Tier, NodeMinutes: d.Cost, At: metav1.NewTime(r.now())}
 		r.remember(string(job.UID), *b)
 		r.rememberLane(string(job.UID), pl.QOS)
+		r.rememberShare(job, pl, b)
 		if err := r.setPhasePlaced(ctx, job, d.Phase, d.Reason, d.Message, b, pl); err != nil {
 			r.forget(string(job.UID))
 			return ctrl.Result{}, err
 		}
 		metrics.NodeMinutesBooked.WithLabelValues(string(d.Tier), projectOf(site)).Add(float64(d.Cost))
 		r.countLanePlacement(job, site, pl)
+		if pl.Share != nil {
+			metrics.SharePlacements.WithLabelValues(string(pl.Share.Role)).Inc()
+		}
 		if d.OverShare && r.Recorder != nil {
 			r.Recorder.Event(job, corev1.EventTypeWarning, "OverShare", d.Message)
 		}
@@ -291,6 +301,16 @@ func (r *HPCArgoWorkflowJobReconciler) judge(ctx context.Context, job *hpcv1alph
 	default:
 		return ctrl.Result{}, r.setPhase(ctx, job, d.Phase, d.Reason, d.Message, nil)
 	}
+}
+
+// followAndReplan follows an admitted job and, while it continues, plans a guest no host took again (no starvation, D-70).
+func (r *HPCArgoWorkflowJobReconciler) followAndReplan(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
+	site *hpcv1alpha1.HPCSite, serve bool) (bool, error) {
+	next, err := r.follow(ctx, job, site)
+	if err != nil || next || !serve {
+		return next, err
+	}
+	return false, r.replanGuest(ctx, job, site)
 }
 
 // follow moves an admitted job to Running when the site job exists, and ends the attempt when the
@@ -369,6 +389,16 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		}
 	}
 
+	if reason == hpcv1alpha1.ReasonInvalidImage {
+		msg = strings.TrimSpace(run.Message)
+		if msg == "" {
+			msg = "the step image reference cannot be pulled; nothing was submitted to the site"
+		}
+		if r.Recorder != nil {
+			r.Recorder.Event(job, corev1.EventTypeWarning, hpcv1alpha1.ReasonInvalidImage, msg)
+		}
+	}
+
 	if reason == hpcv1alpha1.ReasonSubmitLimit {
 		msg = submitLimitMessage(run, site)
 		if r.Recorder != nil {
@@ -433,6 +463,8 @@ func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonIdle
 	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeInsufficientQuota && failed:
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonInsufficientQuota
+	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeInvalidImage && failed:
+		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonInvalidImage
 	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeSubmitLimit && failed:
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonSubmitLimit
 	case state == "COMPLETED" && (run.ExitCode == nil || *run.ExitCode == 0):
@@ -564,6 +596,7 @@ func (r *HPCArgoWorkflowJobReconciler) forget(uid string) {
 	defer r.mu.Unlock()
 	delete(r.pending, uid)
 	delete(r.pendingLane, uid)
+	delete(r.pendingShare, uid)
 	delete(r.laneNoted, uid)
 }
 

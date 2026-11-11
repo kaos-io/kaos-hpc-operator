@@ -133,6 +133,46 @@ func ValidateDataset(spec *hpcv1alpha1.HPCArgoWorkflowJobSpec) error {
 	return nil
 }
 
+var (
+	imageDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	imageTagRe  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+)
+
+// ValidateImage checks that the step's image is <registry-host>/<repository> with a tag or a sha256 digest (the
+// runner checks the same, settings.image_problem): a reference that is not can never be pulled, so the job is
+// refused as InvalidImage before anything is booked or submitted.
+func ValidateImage(ref string) error {
+	bad := func(why string) error {
+		return fmt.Errorf("the step image %q cannot be pulled: %s; nothing was booked or submitted. "+
+			"Fix the image the step names (registry/repository:tag or @sha256 digest)", ref, why)
+	}
+	name, digest, hasDigest := strings.Cut(ref, "@")
+	if hasDigest {
+		if !imageDigest.MatchString(digest) {
+			return bad("the digest is not sha256:<64 hex digits>")
+		}
+		// name:tag@digest is normalised to the digest form by the runner: the tag is dropped.
+		if i := strings.LastIndex(name, "/"); i >= 0 {
+			if c := strings.LastIndex(name, ":"); c > i {
+				name = name[:c]
+			}
+		}
+	} else {
+		i := strings.LastIndex(name, "/")
+		c := strings.LastIndex(name, ":")
+		if c <= i || !imageTagRe.MatchString(name[c+1:]) {
+			return bad("it has no tag or digest")
+		}
+		name = name[:c]
+	}
+	host, repo, ok := strings.Cut(name, "/")
+	isRegistry := strings.ContainsAny(host, ".:") || host == "localhost"
+	if !ok || host == "" || repo == "" || strings.HasPrefix(repo, "/") || strings.HasSuffix(repo, "/") || !isRegistry {
+		return bad("it has no registry host and repository (want <registry>/<repository>:<tag>)")
+	}
+	return nil
+}
+
 // ValidateEnv enforces the allowlist on spec.env (the CRD enforces it too; this is the second lock).
 func ValidateEnv(env []hpcv1alpha1.NameValue) error {
 	if len(env) > maxEnvItems {
@@ -315,6 +355,11 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 		}
 		if p.Reservation != "" {
 			kv = append(kv, [2]string{"HPC_RESERVATION", p.Reservation})
+		}
+		// D-70: the controller's place for the step in a shared node. A guest is submitted deferred and a host
+		// at once; the runner reads the plan again while a guest waits, so a later change reaches it.
+		if p.Share != nil {
+			kv = append(kv, [2]string{"HPC_SHARE_ROLE", string(p.Share.Role)})
 		}
 		// A shared-node host pads its limit up to the class cap: in a lane, up to the lane's.
 		if m := qosMaxMinutes(site, p.QOS); m > 0 {

@@ -23,7 +23,8 @@ from .reporter import OutputsTooLarge, Reporter, checkpoint_uri
 from .sharing import inputs_in_script
 from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_site_down, lane_refusal,
                     share_state, site_time, submit_limit_refusal)
-from .settings import CHECKPOINT_EXIT, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT, OFFER_S, SUBMIT_LIMIT_EXIT, Settings
+from .settings import (CHECKPOINT_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT, INVALID_IMAGE_EXIT, OFFER_S, ROLE_POLL_S,
+                       SUBMIT_LIMIT_EXIT, Settings, image_problem)
 
 POLL_S = 30
 # --cancel-only (the controller's orphan sweep, PRD AC-08): how long one such runner works before it gives up
@@ -128,6 +129,7 @@ class Runner:
         self.hosted = None
         self.job_limit_min = None    # the time limit this runner submitted the site job with
         self.saved_host_noted = False   # printed once: a resumable host waits for its job's end (AC-73)
+        self.last_role = 0.0         # when a waiting guest last read the controller's plan for it
         self.host_job_open = False   # the terminal report was made while the host's Slurm job still ran
 
     # ------------------------------------------------------------------ submit
@@ -221,6 +223,8 @@ class Runner:
             # and the job must end soon after its own step (it is reported when its job ends).
             if cap and not cfg.resumable_lead:
                 job_limit = max(step_limit, min(2 * step_limit, cap))
+            if cfg.share_job_limit:
+                job_limit = cfg.share_job_limit      # a guest planned again as a host: the controller's figure
             if self.wallet_exp:
                 env.append('KAOS_TOKEN_EXP=%d' % self.wallet_exp)   # the host's fit rule (D-07)
         if cfg.sharing:
@@ -247,7 +251,11 @@ class Runner:
             # PRD-1609 offer window (PRD-HPC-1461 N-12): a sharing job starts OFFER_S late, so a
             # running host of the same scope can take it even when free nodes would start it at once.
             # Slurm makes it eligible by itself afterwards: nothing has to release it.
-            body['job']['begin_time'] = {'set': True, 'number': int(time.time()) + OFFER_S}
+            # D-70: a guest the controller planned onto a host's node is not offered but deferred, far enough
+            # ahead that it never starts on a node of its own; its host takes it, or the controller plans it
+            # again and this runner submits it as a host (poll_loop, replan_guest).
+            window = GUEST_HOLD_S if cfg.share_role == 'guest' else OFFER_S
+            body['job']['begin_time'] = {'set': True, 'number': int(time.time()) + window}
         if not hosting:
             # PRD-HPC-1461 D-37: requeue lets the site put a pre-empted job back in the queue with
             # its ID and place (users cannot requeue their own jobs on MeluXina).
@@ -514,6 +522,9 @@ class Runner:
                   flush=True)
             return 0
         print('HPC job %s/%s: attempt %d' % (cfg.namespace, cfg.job_name, cfg.attempt), flush=True)
+        problem = image_problem(cfg.image)
+        if problem:
+            return self.end_invalid_image(problem)
         signal.signal(signal.SIGTERM, self.on_term)
         try:
             jid, offset, adopted = self.adopt_or_submit(job)
@@ -532,6 +543,18 @@ class Runner:
         finally:
             self.logs.close()
             imagemod.cleanup_images(self.stager)   # AC-65: the job is over: its tar and a superseded SIF go now
+
+    def end_invalid_image(self, problem):
+        """The step's image reference cannot be pulled (no registry host, repository, tag or digest): nothing is
+        staged and no site job is submitted. The one terminal report says so (exit 239, FAILED); the controller ends
+        the job InvalidImage and settles nothing. No credential resubmit can fix a reference."""
+        msg = ('the step image %r cannot be pulled: %s. Nothing was submitted to the site. Fix the image the step '
+               'names (registry/repository:tag or @sha256 digest)' % (self.cfg.image, problem))
+        print('ERROR: InvalidImage:', msg, flush=True)
+        self.write_termination('InvalidImage: ' + msg)
+        self.reporter.report(must=True, state='FAILED', exitCode=INVALID_IMAGE_EXIT, terminal=True,
+                             endTime=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), message=msg[:500])
+        return 0
 
     def end_no_quota(self, err):
         """Staging does not fit the project's scratch quota (AC-33): no site job was submitted. The one terminal
@@ -666,6 +689,8 @@ class Runner:
                 # while its step runs on the host's node).
                 if 'RUNNING' in st or share.get('kaos-state') == 'taken':
                     self.logs.active.set()
+                if 'PENDING' in st and share.get('kaos-state') != 'taken' and self.replan_guest():
+                    continue
                 if ('PENDING' in st and share.get('kaos-state') == 'taken' and share.get('host')
                         and self.lost_hosts < LOST_HOST_RESUBMITS and host_gone(slurm, share['host'])):
                     # PRD-1609: the host died without handing this job back (node failure, crash): it
@@ -734,6 +759,23 @@ class Runner:
             print('the step saved (exit 85) on a shared node: reporting when its Slurm job ends, so the node time '
                   'it held for guests is settled', flush=True)
         return waits
+    def replan_guest(self):
+        """D-70: a deferred guest that no host took asks the controller's plan every ROLE_POLL_S. The controller plans
+        it again when its host ended, did not start, no longer fits or did not take it; when the plan now says host,
+        this job is replaced by one that starts at once in the lane the plan names (the same cancel and submit as the
+        wallet resubmit). True when it did. Nothing is read, nothing changes, while the job is not a waiting guest."""
+        cfg = self.cfg
+        if cfg.share_role != 'guest' or self.clock() - self.last_role < ROLE_POLL_S:
+            return False
+        self.last_role = self.clock()
+        plan = self.reporter.placement()
+        if (((plan or {}).get('share') or {}).get('role')) != 'host':
+            return False
+        cfg.apply_plan(plan)
+        self.logs.active.clear()
+        self.resubmit('the controller planned this step again as a host (lane %s) - submitting it to start on a node '
+                      'of its own' % (cfg.qos or 'standard'))
+        return True
 
     def follow_host_job_end(self):
         """A shared-node host settles from its Slurm job, not its step: the site charges the whole node

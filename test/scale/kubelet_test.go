@@ -113,6 +113,7 @@ type frunner struct {
 	watchSeen time.Time
 	lastRest  time.Time
 	hostOpen  *hpcv1alpha1.RunStatus // a host's step-end report while its Slurm job still holds the node
+	share     *sharing               // how the runner submits a node-sharing job, read once from its environment
 }
 
 func newKubelet(c client.Client, sites []*siteWiring, poll, obsTTL time.Duration) *kubelet {
@@ -367,8 +368,25 @@ func (k *kubelet) submit(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCArgo
 	if res := j.Spec.Resumable; res != nil {
 		env = append(env, fmt.Sprintf("%s=%d", envLead, res.LeadMinutes))
 	}
+	var begin *int64
+	if sh := sharingOf(r.rj, cls); sh.on {
+		// Node sharing as the runner submits it (runner.submit, PRD-1609, PRD-HPC-1461 D-70), read from the
+		// runner Job's own environment: the job is host-capable with a time limit padded for guests, and
+		// waits for its BeginTime: the offer window of a host, far ahead for a guest the controller planned
+		// onto a host's node (which then can only be taken, never start on a node of its own).
+		env = append(env, fakeslurm.EnvShareScope+"="+sh.scope, fakeslurm.EnvShareSlots+"="+strconv.Itoa(int(cls.GPUs)))
+		limit = sh.jobLimit(limit, cls)
+		b := time.Now().Add(offerWindow).Unix()
+		if sh.guest {
+			b = time.Now().Add(guestHold).Unix()
+		}
+		begin = &b
+	}
 	body := submitReq{Job: map[string]any{"name": name, "partition": cls.Partition, "account": r.site.account, "qos": qos,
 		"time_limit": limit, "comment": "kaos-ckpt-lease=" + string(j.UID) + "/" + j.Spec.StepName, "environment": env}}
+	if begin != nil {
+		body.Job["begin_time"] = map[string]any{"set": true, "number": *begin}
+	}
 	if resv != "" {
 		body.Job["reservation"] = resv
 	}
@@ -391,6 +409,49 @@ func (k *kubelet) submit(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCArgo
 	}
 	r.rj.Annotations["fake.qos"], r.rj.Annotations["fake.reservation"] = qos, resv
 	return id, false, nil
+}
+
+// offerWindow is the runner's OFFER_S (60 s) scaled to the test's clock, guestHold its GUEST_HOLD_S (12 h).
+const (
+	offerWindow = 3 * time.Second
+	guestHold   = 12 * time.Hour
+)
+
+// sharing is what the runner reads of its environment to decide how it submits a node-sharing job.
+type sharing struct {
+	on, guest     bool
+	resumable     bool
+	scope         string
+	qos           string
+	qosMaxMinutes int
+}
+
+// sharingOf reads the runner Job's environment as settings.py does: sharing is on only with HPC_SHARING=1, a scope
+// and a GPU class, and never for a resumable step; HPC_SHARE_ROLE=guest is the controller's plan (absent before it).
+func sharingOf(rj batchv1.Job, cls hpcv1alpha1.SiteClass) sharing {
+	env := map[string]string{}
+	for _, e := range rj.Spec.Template.Spec.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	qmax, _ := strconv.Atoi(env["HPC_QOS_MAX_MINUTES"])
+	return sharing{on: env["HPC_SHARING"] == "1" && env["HPC_SCOPE"] != "" && cls.GPUs > 0,
+		resumable: env["HPC_RESUMABLE_LEAD"] != "", guest: env["HPC_SHARE_ROLE"] == "guest", scope: env["HPC_SCOPE"], qos: env["HPC_QOS"], qosMaxMinutes: qmax}
+}
+
+// jobLimit is the Slurm job's time limit of a host: the step's own limit padded to twice, capped by the class's
+// maximum and, in a lane, the lane's (runner.submit); no known cap, no padding.
+func (s sharing) jobLimit(step int, cls hpcv1alpha1.SiteClass) int {
+	if s.resumable {
+		return step // a resumable host's job is not padded (AC-73)
+	}
+	limit := int(cls.MaxWallTimeMinutes)
+	if s.qos != "" && s.qosMaxMinutes > 0 && (limit == 0 || s.qosMaxMinutes < limit) {
+		limit = s.qosMaxMinutes
+	}
+	if limit <= 0 {
+		return step
+	}
+	return max(step, min(2*step, limit))
 }
 
 func laneRefusal(text string) bool {
@@ -557,7 +618,11 @@ func (k *kubelet) stepFollow(ctx context.Context, r *frunner, j *hpcv1alpha1.HPC
 	first := strings.Split(state, ",")[0]
 	// A sharing job's comment changes without a state change (a host's step ends, a guest is taken): the
 	// runner reads it every tick (runner.live_of).
-	sharing := j.Annotations[annHostTail] != "" || j.Annotations[annGuest] != ""
+	if r.share == nil {
+		sh := sharingOf(r.rj, r.site.classes[j.Spec.Class])
+		r.share = &sh
+	}
+	sharing := j.Annotations[annHostTail] != "" || j.Annotations[annGuest] != "" || r.share.on
 	if state != "?" && !terminalStates[first] {
 		if state == r.reported && !sharing {
 			return

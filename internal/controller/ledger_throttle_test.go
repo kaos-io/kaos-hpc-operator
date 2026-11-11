@@ -58,7 +58,7 @@ func TestShouldBoundHPCSiteStatusWritesAndStillPublishTheNewestState(t *testing.
 	// A job is booked, then 50 requests arrive inside the interval: none writes, one is scheduled.
 	b := metav1.NewTime(time.Now())
 	job := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: "j", Namespace: "p-train", UID: "u1"},
-		Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "gpu", Image: "i", WallTimeMinutes: 60},
+		Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "gpu", Image: "reg.example/img:1", WallTimeMinutes: 60},
 		Status: hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseAdmitted, Attempt: 1,
 			Site:    &hpcv1alpha1.SiteRef{Name: "site", Namespace: "p-ml"},
 			Booking: &hpcv1alpha1.Booking{Site: "meluxina", SiteName: "site", SiteNamespace: "p-ml", Tier: hpcv1alpha1.TierGPU, NodeMinutes: 60, At: b}}}

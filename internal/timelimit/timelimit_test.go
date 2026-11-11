@@ -101,15 +101,15 @@ func TestKeyOfIsolatesAppsOfOneNamespace(t *testing.T) {
 		return &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Namespace: ns},
 			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{StepName: step, Class: class, Image: image}}
 	}
-	base := KeyOf(mk("hpc-lab-app", "train", "gpu", "reg/lab/app:v1"))
-	if base != KeyOf(mk("hpc-lab-app", "train", "gpu", "reg/lab/app:v2")) {
+	base := KeyOf(mk("hpc-lab-app", "train", "gpu", "reg.example/lab/app:v1"))
+	if base != KeyOf(mk("hpc-lab-app", "train", "gpu", "reg.example/lab/app:v2")) {
 		t.Error("a new build of the same app must share the key")
 	}
 	for name, other := range map[string]*hpcv1alpha1.HPCArgoWorkflowJob{
-		"another app":       mk("hpc-lab-app", "train", "gpu", "reg/lab/yolo:v1"),
-		"another namespace": mk("hpc-lab-yolo", "train", "gpu", "reg/lab/app:v1"),
-		"another step":      mk("hpc-lab-app", "eval", "gpu", "reg/lab/app:v1"),
-		"another class":     mk("hpc-lab-app", "train", "cpu", "reg/lab/app:v1"),
+		"another app":       mk("hpc-lab-app", "train", "gpu", "reg.example/lab/yolo:v1"),
+		"another namespace": mk("hpc-lab-yolo", "train", "gpu", "reg.example/lab/app:v1"),
+		"another step":      mk("hpc-lab-app", "eval", "gpu", "reg.example/lab/app:v1"),
+		"another class":     mk("hpc-lab-app", "train", "cpu", "reg.example/lab/app:v1"),
 	} {
 		if KeyOf(other) == base {
 			t.Errorf("%s must not share the key", name)
