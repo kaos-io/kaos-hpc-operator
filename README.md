@@ -317,6 +317,12 @@ make scale-test # load test of the real controller against fake Slurm sites (abo
 
 Requires Go 1.24+ (`make test-engine` also needs Python 3.12 and network).
 
+`docs/step-contract.md` is the step contract (PRD kaos#1911): what a pipeline step is given and hands back, on
+a cluster and on HPC, with shared fixtures in `docs/step-contract/fixtures/`. The engine, the follower, the
+controller and the runner are being moved onto it; until that lands, the sections above describe what runs
+today. `hack/contract-checks/run-all.sh` reruns the checks the contract rests on (a local kind cluster for the
+workflow-engine ones; see `hack/contract-checks/README.md`).
+
 `engine/` is the platform pipeline engine (D-79): the template `kubecore/` package CI renders every ML app's
 pipeline.py with, so a platform change never needs a client commit. It is released at this operator's version;
 see engine/README.md.

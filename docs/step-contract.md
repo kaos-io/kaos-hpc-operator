@@ -180,8 +180,13 @@ Where each is enforced:
 Why 96 KiB: the kernel limits one environment string to 128 KiB (131072 bytes, name included), and the
 workflow engine holds the step's whole definition, context included, in one such string. Check 3(c)
 measured it: a context of 130600 bytes arrives intact in a minimal step, one of 131000 bytes does not
-start. 96 KiB leaves 32 KiB for the rest of a step's definition (3 to 4 KiB today). Over the limit the
-step errors before it runs; a value is never shortened.
+start. 96 KiB leaves 32 KiB for the rest of a step's definition (about 3 KiB in the engine's golden
+files). Over the limit the step errors before it runs; a value is never shortened.
+
+The caps are per step. The run's Workflow object holds every step's context twice (as compose's output
+and as the step's input): one step at the cap makes it 208 KiB. How a run behaves when its contexts add
+up to more than the object may hold (about 1 MiB before the engine compresses it) was not checked;
+`params` is repeated in every step's context, so it is the value to keep small.
 
 ## 8. The HPC job
 
@@ -267,5 +272,13 @@ again. Results of 2026-11-12:
 | 3(a) | Does one expression assemble the context as one JSON value from task outputs, as a DAG task argument and as a container env value? | Pass |
 | 3(b) | Does a skipped upstream yield the sentinel inside that expression? | Pass, with `sprig.default`: the engine yields an empty string by itself |
 | 3(c) | Does a 96 KiB env value reach the container intact? | Pass; the ceiling is 131072 bytes for the step's whole definition |
-| 4 | Does a 96 KiB value survive follower, job object, runner and job environment? | See `hack/contract-checks/README.md` |
-| 5 | Do stored HPC jobs stay readable when fields are removed from the definition? | See `hack/contract-checks/README.md` |
+| 4 | Does a 96 KiB value survive follower, job object, runner and job environment? | Pass on the fake site, with a control run. Not provable without a live site: the site's own limits, Apptainer passing the value on, a host reading a waiting job's script |
+| 5 | Do stored HPC jobs stay readable when fields are removed from the definition? | Pass. They read back without the removed fields, and can still be ended, released and deleted |
+
+What each check found, and what it could not prove, is in
+[`hack/contract-checks/README.md`](../hack/contract-checks/README.md). Two findings bind the cutover:
+
+- A stored job reads back without `spec.dataset` once the definition drops it. HPC jobs are drained before
+  the definition changes, and the controller refuses a job without `spec.context`.
+- An older follower creates its job with strict field validation, so after the change its job is refused
+  with `unknown field "spec.dataset"`; it never becomes a job without data.
