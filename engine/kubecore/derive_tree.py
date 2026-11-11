@@ -131,17 +131,14 @@ class QuantizationMode(Enum):
     qat = "qat"
 
 
-# ENGINE PATCH (D-79): the structured-config schemas differ between the templates and over time. The
+# ENGINE PATCH (D-79): the structured-config schemas differ between the two templates. The
 # profile is chosen by KUBECORE_SCHEMA_PROFILE before this module is imported; default hera = upstream.
 #   hera       current hera template:   DataConfig.ref, QuantizationConfig.output_prefix=""
 #   yolo       current yolo template:   neither
-#   legacy-v1  both templates before 2026-10-19: DataConfig.ref + .version, output_prefix="quantization"
-#   yolo-v1    yolo 2026-11-01 (blob 7a0f9cd): no DataConfig.ref, output_prefix=""
-# engine/kaos_pipeline_engine/known-vendored.json maps every historical derive_tree.py blob to one of these.
 SCHEMA_PROFILE = os.environ.get("KUBECORE_SCHEMA_PROFILE", "hera")
-if SCHEMA_PROFILE not in ("hera", "yolo", "legacy-v1", "yolo-v1"):
+if SCHEMA_PROFILE not in ("hera", "yolo"):
     raise ImportError(
-        f"KUBECORE_SCHEMA_PROFILE={SCHEMA_PROFILE!r} is not a known schema profile (hera | yolo | legacy-v1 | yolo-v1)"
+        f"KUBECORE_SCHEMA_PROFILE={SCHEMA_PROFILE!r} is not a known schema profile (hera | yolo)"
     )
 
 if SCHEMA_PROFILE == "hera":
@@ -181,46 +178,6 @@ elif SCHEMA_PROFILE == "yolo":
         calibration_seed: int = 42
         parity_frames: int = 100
         parity_max_abs_error: float = 0.05
-
-elif SCHEMA_PROFILE == "legacy-v1":
-
-    @dataclass
-    class DataConfig:
-        ref: str = "main"
-        source: DataSource = DataSource.lakefs
-        version: str = ""
-        path_override: str = ""
-        sample_size: str = ""
-        seed: int = 42
-
-    @dataclass
-    class QuantizationConfig:
-        mode: QuantizationMode = QuantizationMode.none
-        image_size: int = 640
-        calibration_frames: int = 512
-        calibration_seed: int = 42
-        parity_frames: int = 100
-        parity_max_abs_error: float = 0.05
-        output_prefix: str = "quantization"
-
-elif SCHEMA_PROFILE == "yolo-v1":
-
-    @dataclass
-    class DataConfig:
-        source: DataSource = DataSource.lakefs
-        path_override: str = ""
-        sample_size: str = ""
-        seed: int = 42
-
-    @dataclass
-    class QuantizationConfig:
-        mode: QuantizationMode = QuantizationMode.none
-        image_size: int = 640
-        calibration_frames: int = 512
-        calibration_seed: int = 42
-        parity_frames: int = 100
-        parity_max_abs_error: float = 0.05
-        output_prefix: str = ""
 
 
 # {config-store name registered in config.yaml's defaults list: node}

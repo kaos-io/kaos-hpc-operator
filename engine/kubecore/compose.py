@@ -298,10 +298,18 @@ def split_plan(advanced: str) -> tuple:
         raise ComposeError(f"'{PLAN_KEY}.{unknown[0]}' is reserved for the platform and is not available yet; "
                            f"this version reads {PLAN_KEY}.{PLAN_PROMOTE}.<dataset> only")
     promote = plan.get(PLAN_PROMOTE) or {}
-    if not isinstance(promote, dict) or not all(isinstance(v, bool) for v in promote.values()):
-        raise ComposeError(f"'{PLAN_KEY}.{PLAN_PROMOTE}' must map a produced dataset to true or false, for example "
+    refusal = ComposeError(f"'{PLAN_KEY}.{PLAN_PROMOTE}' must map a produced dataset to true or false, for example "
                            f"{PLAN_KEY}: {{{PLAN_PROMOTE}: {{<dataset>: true}}}}")
-    return parsed, {PLAN_PROMOTE: {str(k): v for k, v in promote.items()}}
+    if not isinstance(promote, dict):
+        raise refusal
+    flags = {}
+    for name, value in promote.items():
+        if isinstance(value, str) and value.lower() in ("true", "false"):   # any letter case
+            value = value.lower() == "true"
+        if not isinstance(value, bool):
+            raise refusal
+        flags[str(name)] = value
+    return parsed, {PLAN_PROMOTE: flags}
 
 
 def compose_config(overrides: list, advanced=None, required: list = None, render_defaults: dict = None) -> dict:
@@ -439,9 +447,17 @@ def experiment_of(resolved: dict, app: str) -> str:
     return name.strip() if isinstance(name, str) and name.strip() else app
 
 
+def step_params(step: dict, resolved: dict) -> dict:
+    """What a step gets of the run's config: the sections it names in reads=, in that order. Never the
+    platform's own section (the context holds no endpoint) and never the run's `plan`."""
+    return {section: resolved[section] for section in step["reads"]
+            if section in resolved and section not in derive_tree.PLATFORM_SECTIONS and section != PLAN_KEY}
+
+
 def base_context(step: dict, run: str, app: str, project: str, experiment: str, params: dict, reads: dict,
                  promote: dict = None) -> dict:
-    """A step's context without `upstream` (the DAG task argument adds it), in the contract's field order."""
+    """A step's context without `upstream` (the DAG task argument adds it), in the contract's field order.
+    `params` is the step's own (step_params)."""
     produces = []
     for entry in step["produces"]:
         produced = {"name": entry["name"], "type": entry["type"],
@@ -461,8 +477,8 @@ def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict,
                   plan: dict = None) -> dict:
     """{step: its base context in wire form}, each within its cap.
 
-    `params` is the resolved config without the platform's own section: the context never holds an
-    endpoint. The cap is checked on the real text, before any step starts: a step's context may cost
+    `params` holds the config sections the step names in reads=. The cap is checked on the real text,
+    before any step starts: a step's context may cost
     96 KiB less one full result (8 KiB) for each step it needs, so whatever those steps hand back, the
     step's definition stays under what a pod accepts and the step starts.
     """
@@ -472,11 +488,11 @@ def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict,
     if unknown:
         raise ComposeError(f"{PLAN_KEY}.{PLAN_PROMOTE}.{unknown[0]}: no step of this pipeline produces the dataset "
                            f"'{unknown[0]}' (it produces: {', '.join(sorted(produced)) or 'none'})")
-    params = {k: v for k, v in resolved.items() if k not in derive_tree.PLATFORM_SECTIONS}
     experiment = experiment_of(resolved, app)
     out = {}
     for step in steps:
         try:
+            params = step_params(step, resolved)
             text = wire(base_context(step, run, app, project, experiment, params, reads, promote))
         except (TypeError, ValueError) as exc:   # a value JSON cannot hold (inf, nan)
             raise ComposeError(f"the resolved config cannot be handed to the steps: {exc}") from None
@@ -484,9 +500,9 @@ def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict,
         if size > cap:
             raise ComposeError(
                 f"step '{step['name']}': its context costs {size} bytes; the limit is {cap} "
-                f"({CONTEXT_CAP} less {RESULT_CAP} for each of the {len(step['needs'])} steps it needs). The resolved "
-                f"config is {cost(wire(params))} of them and is repeated for every step. Move large values out "
-                f"of the config into a dataset or an artifact")
+                f"({CONTEXT_CAP} less {RESULT_CAP} for each of the {len(step['needs'])} steps it needs). The config "
+                f"sections it reads ({', '.join(params) or 'none'}) are {cost(wire(params))} of them. Move large "
+                f"values out of the config into a dataset or an artifact, or read fewer sections")
         out[step["name"]] = text
     return out
 
@@ -497,6 +513,7 @@ def _steps(raw: str) -> list:
         steps = json.loads(raw)
         if not isinstance(steps, list) or not all(
                 isinstance(s, dict) and isinstance(s.get("name"), str) and isinstance(s.get("kind"), str)
+                and isinstance(s.get("reads"), list)
                 and isinstance(s.get("needs"), list)
                 and isinstance(s.get("inputs"), list) and isinstance(s.get("produces"), list) for s in steps):
             raise ValueError("not a list of steps")
@@ -514,7 +531,7 @@ def main(argv=None) -> None:
                         help="JSON manifest {override_key: render-time default} for elision.")
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--steps", default="",
-                        help="The pipeline's steps (JSON): name, kind, inputs, needs, produces. With it, every step's "
+                        help="The pipeline's steps (JSON): name, kind, reads, inputs, needs, produces. With it, every step's "
                              "context is written; --run, --app, --project and --context-dir are then required.")
     parser.add_argument("--run", default="", help="The run's name.")
     parser.add_argument("--app", default="", help="The app.")

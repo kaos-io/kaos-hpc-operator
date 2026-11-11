@@ -24,14 +24,16 @@ sys.path.insert(0, str(ENGINE))
 def _described(authoring) -> dict[str, dict]:
     """The hand-written part: {option: {type, doc, ...live constraints}}."""
     return {
-        "name": {"type": "string", "pattern": authoring._STEP_NAME_RE.pattern,
+        "name": {"type": "string", "pattern": authoring._STEP_NAME_RE.pattern, "maxLength": authoring.MAX_NAME,
                  "doc": "DNS-label step name: the Argo template, the steps/<dir> folder and the image-<step> parameter."},
         "kind": {"type": "string", "enum": list(authoring.KINDS),
                  "doc": "Required. What the step does; the platform labels the step's pod and HPC job with it. "
                         "ingest, publish and control steps never run on an HPC class."},
         "reads": {"type": "array", "items": "string",
-                  "doc": "Config sections (top-level keys of the config/ tree) the step reads; checked at render."},
-        "inputs": {"type": "array", "items": "string", "pattern": authoring._INPUT_NAME_RE.pattern,
+                  "doc": "Config sections (top-level keys of the config/ tree) the step reads; checked at render. "
+                         "They are the step's params: it gets these sections and no other."},
+        "inputs": {"type": "array", "items": "string", "pattern": authoring._STEP_NAME_RE.pattern,
+                   "maxLength": authoring.MAX_NAME,
                    "doc": "Names of the top-level config values that hold a dataset reference. Each is pinned to "
                           "one commit when the run starts; step code names the input, never a version."},
         "needs": {"type": "array", "items": "step",

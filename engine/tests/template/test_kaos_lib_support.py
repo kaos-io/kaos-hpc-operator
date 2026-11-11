@@ -31,7 +31,7 @@ def test_every_step_gets_the_support_window():
     checked = 0
     for name in steps:
         env = _env(out, name)
-        if "CHECKPOINT_BUCKET" in env:  # a pipeline step (platform utility templates carry no step env)
+        if "KAOS_CHECKPOINT_DIR" in env:  # a pipeline step (platform utility templates carry no step env)
             assert json.loads(env["KAOS_LIB_SUPPORT"]) == SUPPORT, name
             checked += 1
     assert checked == len(steps) >= 1, steps

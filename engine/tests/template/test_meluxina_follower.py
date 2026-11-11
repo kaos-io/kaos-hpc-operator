@@ -82,15 +82,16 @@ def test_serve_env_is_the_follower_interface(serve):
     for k, v in want.items():
         assert env[k]["value"] == v, k
     assert "DATASET_PIN" not in env and "STEP_OUTPUTS" not in env, "the context replaced both"
-    for k in ("OUTPUTS_REPO", "OUTPUTS_REF", "CHECKPOINT_BUCKET", "CHECKPOINT_PREFIX"):
+    for k in ("OUTPUTS_REPO", "OUTPUTS_REF"):   # the runner stages the job's outputs there
         assert k in env, k
+    assert "CHECKPOINT_BUCKET" not in env and "CHECKPOINT_PREFIX" not in env, "nothing in the job reads them"
 
 
 def test_serve_env_is_only_the_allowlist_and_interface(serve):
     allowed = {"HPC_JOB_NAMESPACE", "WF_NAME", "WF_UID", "STEP_NAME", "NODE_KEY", "IMAGE_REF", "STEP_COMMAND",
                "SLURM_TIME_LIMIT", "HPC_CLASS", "HPC_RESUMABLE_LEAD", "HPC_RESUMABLE", "HPC_IDLE_TIMEOUT_MINUTES", "HPC_MAX_CONTINUATIONS",
-               "KAOS_STEP_CONTEXT", "HPC_SHARING", "HPC_SCOPE", "OUTPUTS_REPO", "OUTPUTS_REF", "CHECKPOINT_BUCKET",
-               "CHECKPOINT_PREFIX", meluxina.KAOS_LIB_SUPPORT_ENV}
+               "KAOS_STEP_CONTEXT", "HPC_SHARING", "HPC_SCOPE", "OUTPUTS_REPO", "OUTPUTS_REF",
+               meluxina.KAOS_LIB_SUPPORT_ENV}
     assert set(_env(_tpl(serve))) <= allowed
 
 

@@ -101,3 +101,79 @@ def test_a_step_whose_rendered_definition_is_over_the_limit_fails_the_render_nam
         enhance.enhance(raw, _context())
     message = str(exc.value)
     assert message.startswith("step 'train': its rendered definition is ") and "; the limit is 24576." in message
+
+
+def test_an_app_name_an_hpc_job_cannot_hold_fails_the_render():
+    ctx = _context()
+    ctx["app"] = "a" * 56
+    with pytest.raises(enhance.EnhanceError) as exc:
+        _enhanced(lambda: authoring.step("one", kind="train"), ctx)
+    assert str(exc.value) == (f"the app name '{'a' * 56}' is 56 characters; an app that runs pipelines may have at "
+                              "most 55. Create the app under a shorter name.")
+    ctx["app"] = "a" * 55
+    assert _enhanced(lambda: authoring.step("one", kind="train"), ctx)
+
+
+def test_the_definition_budget_counts_what_the_workflow_engine_writes():
+    """Its encoder writes &, < and > as six bytes each, and other characters as UTF-8."""
+    assert template_bytes({"a": "x"}) == len('{"a":"x"}')
+    assert template_bytes({"a": "a && b > c"}) == len('{"a":"a && b > c"}') + 3 * 5
+    assert template_bytes({"a": "é"}) == len('{"a":"é"}'.encode())
+
+
+def _pipeline():
+    load = authoring.step("load", kind="ingest", inputs=["dataset"])
+    prepare = authoring.step("prepare", kind="transform", needs=[load],
+                             when="{{workflow.parameters.experiment-name}} == yes")
+    authoring.step("train", kind="train", gpu=True, resumable=True, needs=[load, prepare],
+                   produces=[authoring.model("model")])
+    authoring.step("alone", kind="evaluate")
+
+
+def test_every_task_an_expression_reads_is_in_the_depends_of_the_task_that_reads_it():
+    """The workflow engine shows a task's outputs only to tasks that name it in `depends`: a pair (a step
+    and its HPC variant), a conditional step, and a step with no needs= (which still reads compose)."""
+    import re
+    tasks = _tasks(_enhanced(_pipeline))
+    assert {"prepare-hpc", "train-hpc", "alone-hpc"} <= set(tasks) and "load-hpc" not in tasks
+    for name, task in tasks.items():
+        if name == "compose-and-validate":
+            continue
+        context = next(p["value"] for p in task["arguments"]["parameters"] if p["name"] == "kaos-context")
+        read = set(re.findall(r'tasks\["([^"]+)"\]', context))
+        named = set(re.findall(r"[a-z0-9][a-z0-9-]*(?=\.[A-Z]|\b)", task["depends"]))
+        assert read and read <= named, (name, read - named)
+    assert set(re.findall(r'tasks\["([^"]+)"\]', next(
+        p["value"] for p in tasks["train-hpc"]["arguments"]["parameters"] if p["name"] == "kaos-context"))) == {
+        "compose-and-validate", "load", "prepare", "prepare-hpc"}
+
+
+# What a rendered step or follower definition refers to besides its context. Each is a short value the
+# platform or the form supplies (an image reference, a class name, a resource quantity, the run's name);
+# none is sized by a step's data. A reference that is not listed here fails the test: decide whether its
+# value is bounded before adding it.
+KNOWN_REFERENCES = {
+    "inputs.parameters.kaos-context",
+    "workflow.name", "workflow.uid",
+    "inputs.parameters.gpus", "inputs.parameters.step-name", "inputs.parameters.image",
+    "inputs.parameters.step-command", "inputs.parameters.step-kind", "inputs.parameters.time-limit",
+    "inputs.parameters.deadline-seconds", "inputs.parameters.hpc-class", "inputs.parameters.resumable-lead",
+    "inputs.parameters.resumable", "inputs.parameters.idle-timeout",
+}
+KNOWN_FORM_REFERENCES = ("image-", "-class", "-cpu", "-mem", "-disk")   # workflow.parameters.<step>... of the step
+
+
+def test_a_definition_refers_to_nothing_sized_at_run_time_but_its_context():
+    import re
+    wft = _enhanced(_pipeline)
+    found = set()
+    for template in wft["spec"]["templates"]:
+        if "container" not in template or template["name"] == "compose-and-validate":
+            continue
+        text = yaml.safe_dump(template)
+        found |= set(re.findall(r"\{\{\s*=?\s*([A-Za-z0-9_.\-\[\]']+?)\s*\}\}", text))
+    form = {r for r in found if r.startswith("workflow.parameters.")}
+    assert found - form <= KNOWN_REFERENCES, found - form - KNOWN_REFERENCES
+    for reference in form:
+        name = reference[len("workflow.parameters."):]
+        assert name.startswith("image-") or name.endswith(KNOWN_FORM_REFERENCES[1:]), reference

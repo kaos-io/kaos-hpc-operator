@@ -26,8 +26,11 @@ LEDGER_VERSION = 2
 # sits in that string as a JSON string, so the caps count a value's cost (see cost()), not its bytes.
 CONTEXT_CAP = 96 * 1024        # a whole context: the base compose writes plus one result per needed step
 RESULT_CAP = 8 * 1024          # one result (kaos-lib refuses a larger one)
-TEMPLATE_CAP = 24 * 1024       # a step's rendered definition without its context, as JSON
+TEMPLATE_CAP = 24 * 1024       # a step's rendered definition without its context, as the workflow engine encodes it
 MIN_BASE_CONTEXT_CAP = 16 * 1024   # what must be left for the base: a step may need at most ten steps
+MAX_INPUTS = 16                # what one step may read by name: its inputs= plus the datasets its needs= steps produce
+MAX_NAME = 40                  # characters of a step, input or produced name
+MAX_APP_NAME = 55              # an HPC job's app field holds no more
 
 KINDS = ("ingest", "transform", "train", "evaluate", "publish", "control")
 # Kinds that never run on an HPC class: they move data in or out of the platform, or steer the run.
@@ -37,13 +40,22 @@ DATASET_PREFIX = "dataset-"    # a dataset is the repository dataset-<name>
 OUTPUTS_PREFIX = "outputs-"    # models and artifacts live in outputs-<app>
 
 
+# Characters a string never holds as themselves: braces (the workflow engine evaluates `{{...}}` wherever
+# it meets it) and the three the workflow engine's own JSON encoder rewrites to six bytes each, which
+# would make a value larger inside a step's definition than the cost counted for it.
+_ESCAPED = {"{": "\\u007b", "}": "\\u007d", "&": "\\u0026", "<": "\\u003c", ">": "\\u003e"}
+
+
 def _string(text: str) -> str:
-    return json.dumps(text, ensure_ascii=True).replace("{", "\\u007b").replace("}", "\\u007d")
+    out = json.dumps(text, ensure_ascii=True)
+    for char, escape in _ESCAPED.items():
+        out = out.replace(char, escape)
+    return out
 
 
 def wire(value) -> str:
-    """The wire form of a JSON value: compact, ASCII, and no brace inside a string (the workflow engine
-    evaluates `{{...}}` wherever it meets it). The reference writer is hack/contract-checks/wire.py."""
+    """The wire form of a JSON value: compact, ASCII, and inside strings no brace, `&`, `<` or `>`.
+    The reference writer is hack/contract-checks/wire.py."""
     if isinstance(value, str):
         return _string(value)
     if value is None or isinstance(value, (bool, int, float)):
@@ -78,8 +90,10 @@ def base_cost(base: str, needs: list) -> int:
 
 
 def template_bytes(template: dict) -> int:
-    """The size of a step's rendered definition as JSON."""
-    return len(json.dumps(template, separators=(",", ":")))
+    """The size of a step's rendered definition as the workflow engine encodes it: compact JSON in UTF-8,
+    with `&`, `<` and `>` written as six-byte escapes (so `&&` in a shell argument costs twelve bytes)."""
+    text = json.dumps(template, separators=(",", ":"), ensure_ascii=False)
+    return len(text.encode()) + 5 * sum(text.count(c) for c in "&<>") + 3 * sum(text.count(c) for c in "\u2028\u2029")
 
 
 def produced_repo(app: str, kind: str, name: str) -> str:

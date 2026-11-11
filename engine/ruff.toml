@@ -8,4 +8,4 @@ extend-exclude = ["kubecore", "upstream", "tests/template", "tests/app"]
 select = ["E", "F", "W", "I", "B", "UP"]
 
 [lint.isort]
-known-first-party = ["kaos_engine", "paths", "helpers", "gitutil"]
+known-first-party = ["kaos_engine", "paths", "helpers"]

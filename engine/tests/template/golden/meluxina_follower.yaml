@@ -74,9 +74,5 @@ container:
     value: outputs-PLACEHOLDER-app
   - name: OUTPUTS_REF
     value: main
-  - name: CHECKPOINT_BUCKET
-    value: outputs-PLACEHOLDER-app
-  - name: CHECKPOINT_PREFIX
-    value: main/checkpoints
   terminationMessagePolicy: FallbackToLogsOnError
 serviceAccountName: hpc-submitter

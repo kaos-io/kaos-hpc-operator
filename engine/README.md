@@ -1,9 +1,9 @@
 # engine/ - the KAOS pipeline engine
 
-The platform's own copy of the pipeline authoring and compose code: the `kubecore/` package that the
-`hera-pipeline-template` and `yolo-pipelines-template` vendor into every ML app, plus the runner that renders an
-app's `pipeline.py` with it. PRD-HPC-1461 D-79: a platform change to rendering, enhancing or composing must never
-need a commit in a client's app repository, so CI runs THIS code and ignores the app's vendored copy.
+The pipeline authoring, enhancing and compose code (the `kubecore/` package an app's `pipeline.py` imports), plus
+the runner that renders an app's `pipeline.py` with it. PRD-HPC-1461 D-79: a platform change to rendering,
+enhancing or composing must never need a commit in a client's app repository, so apps carry no copy of this code
+and CI runs this one.
 
 It is released by the same build as the controller, at the same version (D-58/D-63): `kaos-hpc-operator:<v>`
 (controller, follower, runner, helper), `kaos-pipeline-engine:<v>` (image) and the wheel
@@ -18,10 +18,9 @@ It is released by the same build as the controller, at the same version (D-58/D-
 | `kubecore/step_contract.py` | the step contract as the engine writes it: names, caps, the wire form, the expression that assembles a step's context (see "The step contract" below) |
 | `kaos_engine/compose.py` | what the compose-and-validate step runs, `python -I -m kaos_engine.compose`: the engine's compose with the engine first on the path. Pins every declared input and writes each step's context and the run's ledger |
 | `kaos_engine/version.py` | build tag -> PEP 440 |
-| `kaos_pipeline_engine/known-vendored.json` | every historical blob of `derive_tree.py` / `authoring.py` -> profile + template commits |
 | `kaos_pipeline_engine/authoring-schema.json` | `step()` options for the pipeline linter, the removed keywords with what to write instead, and the migration guide's address |
 | `Dockerfile.engine`, `pyproject.toml`, `setup.py`, `requirements*.txt` | image and wheel  The image keeps the pinned set at `/etc/kaos-engine/constraints.txt` for images built on top of it |
-| `tools/` | generators for the two JSON files |
+| `tools/` | the generator of `authoring-schema.json` |
 | `tests/` | `template/` = the kubecore tests that came with the template; `app/` = the fixture app they render; the rest are the engine's tests |
 
 ## The step contract
@@ -41,19 +40,36 @@ step(name, *, kind=, reads=, inputs=, needs=, produces=, gpu=, disk=, when=, wal
 | Keyword | Rule the engine enforces at render |
 |---|---|
 | `kind=` | Required: `ingest`, `transform`, `train`, `evaluate`, `publish` or `control`. It becomes the label `platform.kubecore.io/step-kind` on the step's pod, on its HPC follower pod, and (set by the follower) on its HPC job |
-| `inputs=` | Names of top-level config values that hold a dataset reference. Each must exist in the config tree and be text |
-| `needs=` | At most ten steps. A name in `inputs=` and a name a needed step produces must differ; two needed steps must not produce the same name |
-| `produces=` | `model("name")`, `artifact("name")`, `dataset("name")`. A dataset has one producing step in the pipeline. `dataset(name, of=...)` is refused until that form ships |
+| `name` | Lowercase letters, digits and hyphens, at most 40 characters. Not `compose-and-validate`, `main`, `hpc-follower`, nothing ending in `-hpc`, nothing starting with `kaos-` |
+| `reads=` | Config sections that exist in the tree. They are the step's `params`: a step gets these sections and no other |
+| `inputs=` | Names of top-level config values that hold a dataset reference. Each must exist in the config tree and be text. Same name rule as a step; not starting with `kaos-` |
+| `needs=` | At most ten steps. A name in `inputs=` and a name a needed step produces must differ; two needed steps must not produce the same name. `inputs=` plus the datasets the needed steps produce: at most 16 |
+| `produces=` | `model("name")`, `artifact("name")`, `dataset("name")`, same name rule. A dataset has one producing step in the pipeline. `dataset(name, of=...)` is refused until that form ships |
 | `walltime=` | `'90m'`, `'12h'` or `'720'`: the run limit on an HPC class |
 
 Per kind: `ingest`, `publish` and `control` steps are offered no HPC class and get no HPC variant; a `control`
 step takes no `inputs=` and no `produces=`.
 
+A dataset reference names the dataset's repository, `dataset-<name>@<version>`, wherever one is written: on the
+form, in `config/`, in `kaosctl`. `produces=[dataset("clean")]` names the dataset whose repository is
+`dataset-clean`. A later step of the same run reads what was just written by its produced name; any other run or
+pipeline reads it like every dataset, through a config value:
+
+```python
+# pipeline A
+prepare = step("prepare", kind="transform", inputs=["raw"], produces=[dataset("clean")])
+train   = step("train", kind="train", needs=[prepare])    # in the step: step.input("clean")
+
+# pipeline B, config/data.yaml:   clean: dataset-clean@latest
+step("evaluate", kind="evaluate", inputs=["clean"])       # in the step: step.input("clean")
+```
+
 Refused at render, each with a message that names the step and what to write: a missing or unknown `kind=`;
 `outputs=` and `hpc_time_limit=` (removed; the message says what replaces them and points at
 `authoring.MIGRATION_GUIDE_URL`, a placeholder until the guide has an address); a step or produced name that
 starts with `kaos-`; a config tree that defines `plan` or `pipeline-version`, or a leaf whose form field would
-get one of those names; a step whose rendered definition is over 24 KiB.
+get one of those names; a step (or the HPC follower) whose rendered definition is over 24 KiB, counted as the
+workflow engine encodes it (`&`, `<` and `>` cost six bytes each); an app name over 55 characters.
 
 **What a step gets and hands back.** Every step container runs `python -m app.entry` with no arguments. Its one
 input parameter is `kaos-context`, which the container reads as `KAOS_STEP_CONTEXT`; its one output parameter is
@@ -68,18 +84,44 @@ with the sentinel: a skipped or omitted step has an empty output. Section 10 of 
 - pins every input any step declares to one commit, once per name (`<dataset>@<version>`; no version means
   `latest`, the head of the dataset's `main` now), and refuses an empty value, a value that names no dataset, a
   version that does not exist and a store that does not answer, naming the input and the steps that declare it;
-- writes each step's base context in wire form (`/work/context/<step>.json`): `params` is the resolved config
-  without the `platform` section (the context never holds an endpoint), `ledger` holds the step's own inputs,
+- writes each step's base context in wire form (`/work/context/<step>.json`): `params` holds the config
+  sections the step names in `reads=` (never `platform`: the context holds no endpoint), `ledger` holds the step's own inputs,
   `experiment` is config `experiment.name` or else the app's name, `produces` names each repository;
 - writes the run's ledger at version 2, every pinned input, as the output `kaos-ledger`;
-- reads the run's own key in the ADVANCED override: `plan.promote.<dataset>: true` puts `promote: true` on that
-  produced dataset in the producing step's context. `plan.use`, `plan.target` and `pipeline-version` are
+- reads the run's own key in the ADVANCED override: `plan.promote.<dataset>: true` (the name in `produces=`;
+  `true` or `false` in any letter case) puts `promote: true` on that produced dataset in the producing step's context. `plan.use`, `plan.target` and `pipeline-version` are
   reserved and refused until they ship, so a run never silently ignores one;
 - refuses a step whose base context costs more than 96 KiB less 8 KiB for each step it needs (cost: the bytes
   plus one for each quote and backslash, what the value takes inside a step's definition).
 
 The enhancer gives compose the run's identity (`--app`, `--project`); authoring gives it the run's name and the
 step table (`--run`, `--steps`).
+
+**The step table, for CI and the form.** The compose step's argument after `--steps` is one JSON array, written
+at render, with one object per step in pipeline order. It is the place to read what a pipeline declares without
+running `pipeline.py` again:
+
+```json
+[{"name":"prepare","kind":"transform","reads":[],"inputs":["raw"],"needs":[],
+  "produces":[{"name":"clean","type":"dataset"}]},
+ {"name":"train","kind":"train","reads":["train"],"inputs":["raw","labels"],"needs":["prepare"],
+  "produces":[{"name":"model","type":"model"}]}]
+```
+
+```python
+compose = next(t for t in wft["spec"]["templates"] if t["name"] == "compose-and-validate")
+args = compose["container"]["args"]
+steps = json.loads(args[args.index("--steps") + 1])
+input_names = sorted({name for step in steps for name in step["inputs"]})     # ["labels", "raw"]
+produced = [e["name"] for step in steps for e in step["produces"] if e["type"] == "dataset"]   # ["clean"]
+```
+
+Every name in `input_names` is a form field of the same name (`spec.arguments.parameters[].name`): an input is a
+top-level config value, and a top-level scalar keeps its name on the form. Those are the fields that hold a
+dataset reference, so those are the fields to fill with the catalog's choices (`dataset-<name>@<version>`). The
+field named `dataset` is no longer special: a pipeline may have none, or several under other names. `produced`
+lists the datasets the pipeline writes (repository `dataset-<name>`), for whoever sets up what the app may write.
+The value is in wire form: plain JSON to any parser.
 
 **The HPC variant** (`kubecore/meluxina.py`). The `<step>-hpc` task gets the same `kaos-context` argument as the
 step's own task, and the follower receives it as `KAOS_STEP_CONTEXT`. The follower template has two outputs:
@@ -126,13 +168,12 @@ python -I -m kaos_engine.render pipeline.py --repo /workspace/repo --profile her
 2. `KUBECORE_SCHEMA_PROFILE` (`--profile`, required) and `KUBECORE_CONFIG_DIR` (`--config-dir`, default
    `<repo>/config`) are set before the engine is imported.
 3. `kubecore` and every engine submodule are imported from the engine dir and their `__file__` asserted (else exit 4).
-4. The app's own `kubecore/` is APPENDED to `kubecore.__path__`: extra client modules still import as
-   `kubecore.<x>`, but every engine name wins. A vendored `authoring.py` that raises on import is never executed.
-5. `pipeline.py` runs with `runpy.run_path(..., run_name="__main__")` in the repo dir; it writes
+   A `kubecore/` folder in the app is never imported.
+4. `pipeline.py` runs with `runpy.run_path(..., run_name="__main__")` in the repo dir; it writes
    `out/raw-workflow-template.yaml` as before. `from kubecore.authoring import pipeline, step` is unchanged.
-6. Afterwards every engine module must still be the one in `sys.modules`; if `pipeline.py` swapped one, exit 3
+5. Afterwards every engine module must still be the one in `sys.modules`; if `pipeline.py` swapped one, exit 3
    (tampered).
-7. The app's `pyproject.toml` dependencies that the interpreter does not satisfy are printed to stderr as
+6. The app's `pyproject.toml` dependencies that the interpreter does not satisfy are printed to stderr as
    `kaos-engine: extra-dep <requirement>` (and to `--extra-deps-out`). Installing them is CI's job, under a
    constraints file; the runner never installs anything and the app is never `pip install -e`'d.
 
@@ -141,26 +182,16 @@ Exit codes: 0 rendered, 1 `pipeline.py` raised, 2 bad invocation, 3 tampered, 4 
 ## Schema profiles
 
 `KUBECORE_SCHEMA_PROFILE` selects the structured-config schemas in `derive_tree.py` (`DataConfig`,
-`QuantizationConfig`). The two current templates differ in exactly two places, and `derive_tree.py` has had two
-older schema variants, so there are four profiles (default `hera` = upstream):
+`QuantizationConfig`) that the two templates' config trees name in their defaults list. The templates differ in
+two places, so there are two profiles (default `hera`):
 
-| profile | DataConfig | QuantizationConfig.output_prefix | seen in |
-|---|---|---|---|
-| `hera` | `ref="main"` | `""` | hera template since 2026-10-19 (and yolo 2026-10-19) |
-| `yolo` | no `ref` | none | yolo template since 2026-11-01 |
-| `legacy-v1` | `ref`, `version=""` | `"quantization"` | both templates 2026-07-14 .. 2026-10-19 |
-| `yolo-v1` | no `ref` | `""` | yolo 2026-11-01 (one blob) |
+| profile | DataConfig | QuantizationConfig.output_prefix |
+|---|---|---|
+| `hera` | `ref="main"` | `""` |
+| `yolo` | no `ref` | none |
 
+CI picks the profile from the app's config tree (`yolo` when it has a `quantization` section, else `hera`).
 `derive_tree.CONFIG_DIR` is resolved lazily from `KUBECORE_CONFIG_DIR` (a monkeypatched real `Path` still wins).
-
-Choosing the profile: hash the app's vendored `kubecore/derive_tree.py` (git blob sha) and look it up in
-`known-vendored.json` -> **`engine_profile`** (this is what `decide` must use; the file's `profile` is only the template
-lineage, `ambiguous` = both templates carried the blob). An unknown blob falls back to the KubeApp's template.
-`engine_profile: null` means the app must stay legacy, with `no_profile_reason`. Today that is exactly three blobs, the
-first authoring (2026-07-13/14: ddec976, d40194a, b468ddb): it wrote the form defaults as `Parameter(default=...)`
-where every later version writes `value=` (Argo reads `value`), so the engine's render differs in
-`/spec/arguments/parameters[*]`. Rendering them "equal" would reproduce a bug, so they are left to the legacy path
-and counted in the fleet.
 
 ## Tests
 
@@ -174,7 +205,7 @@ the `engine-tests` stage of `Dockerfile.engine` (the Go CI container has no Pyth
 | `tests/test_compose_inputs.py` | Pinned inputs, contexts, `plan`, the size cap, every compose refusal with its message, the compose entry point |
 | `tests/template/test_step_contract_enhance.py` | The per-kind HPC rules, the result pair of a step with an HPC variant, the size of a rendered step |
 | `tests/test_follower_contract.py`, Go `internal/follower/engine_contract_test.go` | The golden follower template against what the follower reads |
-| the rest | The enhancer, resilience, the runner contract incl. the booby-trap (a vendored `authoring.py` that raises still renders), the wheel, the authoring schema, known-vendored |
+| the rest | The enhancer, resilience, the runner contract incl. the booby-trap (a `kubecore/authoring.py` in the app that raises still renders: it is never imported), the wheel, the authoring schema |
 
 Golden files (`tests/template/golden/`) are regenerated with `UPDATE_GOLDEN=1 make test-engine`; read the diff.
 

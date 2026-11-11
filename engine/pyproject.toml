@@ -19,8 +19,8 @@ dependencies = [
 
 # Layout of the wheel (never a top-level `kubecore`: kaos-lib 0.4 ships a `kubecore` alias):
 #   kaos_engine/                      the runner (python -m kaos_engine.render)
-#   kaos_pipeline_engine/kubecore/    the engine (a byte copy of the template's kubecore/ + two patches)
-#   kaos_pipeline_engine/*.json       known-vendored, authoring-schema
+#   kaos_pipeline_engine/kubecore/    the engine (engine/kubecore)
+#   kaos_pipeline_engine/*.json       authoring-schema
 [tool.setuptools]
 packages = ["kaos_engine", "kaos_pipeline_engine", "kaos_pipeline_engine.kubecore"]
 

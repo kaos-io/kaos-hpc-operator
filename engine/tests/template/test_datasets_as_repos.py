@@ -37,16 +37,14 @@ def _raw():
     }
 
 
-def test_results_go_to_the_apps_outputs_repository():
+def test_the_runner_is_told_the_apps_outputs_repository():
     ctx = yaml.safe_load(CTX_PATH.read_text())
     ctx["app"] = "myapp"
     out = enhance(_raw(), ctx)
     step = next(t for t in out["spec"]["templates"] if t["name"] == "model-training")
     env = {e["name"]: e.get("value") for e in step["container"]["env"]}
-    assert env["CHECKPOINT_BUCKET"] == "outputs-myapp"
-    assert env["CHECKPOINT_PREFIX"] == "main/checkpoints"
-    assert env["KUBECORE_RUN_ID"] == "{{workflow.name}}"
-    assert env["KUBECORE_WORKFLOW_NAME"] == "{{workflow.name}}", "names the MLflow run"
+    # the run, the app and the outputs repository reach a step in its context, not in variables of their own
+    assert not {"CHECKPOINT_BUCKET", "CHECKPOINT_PREFIX", "KUBECORE_RUN_ID", "KUBECORE_WORKFLOW_NAME"} & set(env)
     mr = next(t for t in out["spec"]["templates"] if t["name"] == "hpc-follower")
     menv = {e["name"]: e.get("value") for e in mr["container"]["env"]}
     assert menv["KAOS_STEP_CONTEXT"] == "{{inputs.parameters.kaos-context}}"

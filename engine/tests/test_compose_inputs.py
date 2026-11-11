@@ -46,10 +46,14 @@ class FakeDatasets:
         return COMMITS[ref.repo] if self.answer is None else self.answer[0]
 
 
+# What the steps of these tests name in reads=. `platform` is there to show it never reaches a step.
+READS = ["train", "experiment", "blob", "k", "lr", "platform", "plan"]
+
+
 def steps(*specs):
     """[(name, inputs, how many steps it needs, produces)] -> the step table authoring writes."""
-    return [{"name": n, "kind": "train", "inputs": list(i), "needs": [f"up{k}" for k in range(needs)],
-             "produces": list(p)}
+    return [{"name": n, "kind": "train", "reads": READS, "inputs": list(i),
+             "needs": [f"up{k}" for k in range(needs)], "produces": list(p)}
             for n, i, needs, p in specs]
 
 
@@ -175,7 +179,18 @@ def test_a_step_context_holds_its_own_inputs_and_never_an_endpoint():
     assert got["train"]["run"] == "run-1" and got["train"]["app"] == "demo" and got["train"]["project"] == "vision"
     assert got["train"]["experiment"] == "baseline"
     assert "platform" not in got["train"]["params"] and "lakefs.internal" not in json.dumps(got)
-    assert got["train"]["params"] == {k: v for k, v in RESOLVED.items() if k != "platform"}
+    assert got["train"]["params"] == {"train": {"epochs": 3}, "experiment": {"name": "baseline"}}, \
+        "the sections the step names in reads=, in that order; an input's own config value is not one of them"
+
+
+def test_a_step_gets_only_the_config_sections_it_reads():
+    table = [{"name": "prepare", "kind": "transform", "reads": [], "inputs": ["raw"], "needs": [], "produces": []},
+             {"name": "train", "kind": "train", "reads": ["train"], "inputs": [], "needs": ["prepare"], "produces": []}]
+    got = contexts(table)
+    assert got["prepare"]["params"] == {} and got["train"]["params"] == {"train": {"epochs": 3}}
+    assert got["prepare"]["experiment"] == "baseline", "the experiment does not depend on what the step reads"
+    assert compose.step_params({"reads": ["platform", "plan", "train"]}, {**RESOLVED, "plan": {"promote": {}}}) == {
+        "train": {"epochs": 3}}
 
 
 def test_the_experiment_is_the_configs_experiment_name_else_the_app():
@@ -213,6 +228,9 @@ def test_plan_is_taken_out_of_the_override_before_it_reaches_the_apps_config():
     advanced, plan = compose.split_plan("train:\n  epochs: 5\nplan:\n  promote:\n    embeddings: true\n")
     assert advanced == {"train": {"epochs": 5}} and plan == {"promote": {"embeddings": True}}
     assert compose.split_plan("") == (None, {}) and compose.split_plan("train: {epochs: 5}")[1] == {}
+    for text, want in (("true", True), ("True", True), ("TRUE", True), ("false", False), ("False", False),
+                       ("'true'", True), ("'FALSE'", False)):
+        assert compose.split_plan(f"plan: {{promote: {{embeddings: {text}}}}}")[1] == {"promote": {"embeddings": want}}
 
 
 @pytest.mark.parametrize("advanced, message", [
@@ -223,6 +241,8 @@ def test_plan_is_taken_out_of_the_override_before_it_reaches_the_apps_config():
     ("plan: {use: {model: abc}}", "'plan.use' is reserved for the platform and is not available yet; this version "
                                   "reads plan.promote.<dataset> only"),
     ("plan: yes", "'plan' must be a mapping, for example plan: {promote: {<dataset>: true}}"),
+    ("plan: {promote: {embeddings: 1}}", "'plan.promote' must map a produced dataset to true or false, for "
+                                         "example plan: {promote: {<dataset>: true}}"),
     ("plan: {promote: {embeddings: maybe}}", "'plan.promote' must map a produced dataset to true or false, for "
                                              "example plan: {promote: {<dataset>: true}}"),
     ("platform: {lakefs: {repository: x}}", "ADVANCED override may not modify platform.*"),
@@ -256,7 +276,8 @@ def test_a_context_over_its_cap_ends_the_run_naming_the_step_and_the_limit():
     message = str(exc.value)
     assert message.startswith("step 'train': its context costs ") and "; the limit is 90112 (98304 less 8192 for each " \
         "of the 1 steps it needs)" in message
-    assert message.endswith("Move large values out of the config into a dataset or an artifact")
+    assert "The config sections it reads (blob) are " in message
+    assert message.endswith("Move large values out of the config into a dataset or an artifact, or read fewer sections")
     alone = compose.step_contexts(table[:1], "run-1", "demo", "vision", big, {})
     assert cost(alone["prepare"]) <= 98304, "the same config fits a step that needs none"
 
@@ -299,7 +320,7 @@ def _compose(tmp_path, *args, env=None):
                           env={**base, **(env or {})}, cwd=tmp_path)
 
 
-STEP_TABLE = wire([{"name": "hello-world", "kind": "transform", "inputs": [], "needs": [],
+STEP_TABLE = wire([{"name": "hello-world", "kind": "transform", "reads": ["experiment"], "inputs": [], "needs": [],
                     "produces": [{"name": "report", "type": "artifact"}]}])
 
 
@@ -327,7 +348,7 @@ def test_the_compose_entry_point_needs_the_runs_identity_to_write_contexts(tmp_p
 
 def test_an_input_that_cannot_be_pinned_stops_the_run_and_publishes_nothing(tmp_path):
     """The engine's own test environment has no kaos-lib: the run ends, as it would without credentials."""
-    table = wire([{"name": "hello-world", "kind": "transform", "inputs": ["dataset"], "needs": [], "produces": []}])
+    table = wire([{"name": "hello-world", "kind": "transform", "reads": [], "inputs": ["dataset"], "needs": [], "produces": []}])
     done = _compose(tmp_path, "--output", str(tmp_path / "p.yaml"), "--run", "r", "--app", "a", "--project", "p",
                     "--steps", table, "--context-dir", str(tmp_path / "context"),
                     "--ledger-output", str(tmp_path / "ledger.json"))
@@ -337,7 +358,7 @@ def test_an_input_that_cannot_be_pinned_stops_the_run_and_publishes_nothing(tmp_
 
 
 def test_offline_writes_contexts_with_empty_ledgers(tmp_path):
-    table = wire([{"name": "hello-world", "kind": "transform", "inputs": ["dataset"], "needs": [], "produces": []}])
+    table = wire([{"name": "hello-world", "kind": "transform", "reads": [], "inputs": ["dataset"], "needs": [], "produces": []}])
     done = _compose(tmp_path, "--offline", "--output", str(tmp_path / "p.yaml"), "--run", "r", "--app", "a",
                     "--project", "p", "--steps", table, "--context-dir", str(tmp_path / "context"))
     assert done.returncode == 0, done.stderr[-2000:]

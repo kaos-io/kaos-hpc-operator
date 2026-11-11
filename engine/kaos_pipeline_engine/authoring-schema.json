@@ -9,6 +9,7 @@
    "default": null,
    "type": "string",
    "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+   "maxLength": 40,
    "doc": "DNS-label step name: the Argo template, the steps/<dir> folder and the image-<step> parameter."
   },
   {
@@ -32,7 +33,7 @@
    "default": null,
    "type": "array",
    "items": "string",
-   "doc": "Config sections (top-level keys of the config/ tree) the step reads; checked at render."
+   "doc": "Config sections (top-level keys of the config/ tree) the step reads; checked at render. They are the step's params: it gets these sections and no other."
   },
   {
    "name": "inputs",
@@ -40,7 +41,8 @@
    "default": null,
    "type": "array",
    "items": "string",
-   "pattern": "^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?$",
+   "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+   "maxLength": 40,
    "doc": "Names of the top-level config values that hold a dataset reference. Each is pinned to one commit when the run starts; step code names the input, never a version."
   },
   {
