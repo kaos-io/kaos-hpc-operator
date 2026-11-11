@@ -13,11 +13,14 @@ before anything is submitted: no room in the quota (InsufficientQuota), a stagin
 another staging contract (StagingMismatch), and a dataset object whose name is reserved for the
 platform (ReservedName).
 
-Reserved names: the markers of a copy on the site live at its root under `.kaos-` (.kaos-ready, .kaos-used,
-.kaos-complete, .kaos-commit, ...) and the staging tool's half-downloaded files end in `.kaos-part`. A
-dataset object with such a name would be taken for a marker, or refused by the staging tool mid-copy. It is
-refused here, by name, before anything is copied. The `.kaos/` folder is the platform's own inside a
-dataset and is staged like any other.
+Names that are not copied (name_problem). Reserved: the markers of a copy on the site live at its root under
+`.kaos-` (.kaos-ready, .kaos-used, .kaos-complete, .kaos-commit, ...) and the staging tool's half-downloaded
+files end in `.kaos-part`; a dataset object with such a name would be taken for a marker, or refused by the
+staging tool mid-copy. Unsafe: a path with a `..`, `.` or empty part, a leading `/` or a NUL byte could be
+written outside the dataset's folder. Both are refused here, by name, before anything is copied or submitted:
+a small listing of the root names under `.kaos-` first, every name of the plan when the copy is made from the
+login node, and every name of the commit when the job is about to stage in-job. The `.kaos/` folder is the
+platform's own inside a dataset and is staged like any other.
 
 The staging contract (CONTRACT) is what `status` and `stage` mean to the runner and to the staging tool,
 which ship separately. The runner asks the tool for its number (`version`) and sends its own with every
@@ -58,37 +61,46 @@ class StagingMismatch(Exception):
 
 
 class ReservedName(Exception):
-    """The dataset commit holds an object whose name is reserved for the platform on the site. Nothing is staged
-    and the job does not stage in-job either: the run ends ReservedName before anything is submitted. The
-    message names the object and the rule, for the job's status and the pipeline log."""
+    """The dataset commit holds an object whose name cannot be copied to the site: it is reserved for the
+    platform there, or its path could leave the dataset's folder. Nothing is staged and the job does not stage
+    in-job either: the run ends ReservedName before anything is submitted. The message names the dataset, the
+    object and which of the two it is, for the job's status and the pipeline log."""
 
 
 RESERVED_PREFIX, RESERVED_SUFFIX = '.kaos-', '.kaos-part'
 
 
-def is_reserved(path):
-    # The same two rules as the staging tool's safe_rel: the first part of the path, and the file name.
-    return path.startswith(RESERVED_PREFIX) or path.endswith(RESERVED_SUFFIX)
+def name_problem(path):
+    """Why an object path cannot be copied to the site, or None. The rules are the staging tool's safe_rel; the
+    in-job stage-in (payload/stagein.py) applies the same."""
+    parts = path.split('/')
+    if not path or '\x00' in path or path.startswith('/') or any(p in ('', '.', '..') for p in parts):
+        return ('a path that is empty, starts with "/", or has an empty part, a "." or ".." part or a NUL byte could '
+                'be written outside the dataset\'s folder on the site')
+    if parts[0].startswith(RESERVED_PREFIX) or parts[-1].endswith(RESERVED_SUFFIX):
+        return ('names starting with .kaos are reserved for the platform (at the root of a dataset every name '
+                'starting with %s, and anywhere a file name ending in %s)' % (RESERVED_PREFIX, RESERVED_SUFFIX))
+    return None
 
 
-def reserved_message(repo, commit, path):
-    return ('dataset %s@%s has an object named %r: names starting with .kaos are reserved for the platform (at the '
-            'root of a dataset every name starting with %s, and anywhere a file name ending in %s). Nothing was '
-            'staged and nothing was submitted to the site. Rename or remove the object and commit a new version of '
-            'the dataset.' % (repo, commit[:12], path, RESERVED_PREFIX, RESERVED_SUFFIX))
+def refuse_name(repo, commit, path):
+    why = name_problem(path)
+    if why:
+        raise ReservedName('dataset %s@%s has an object named %r: %s. Nothing was staged and nothing was submitted '
+                           'to the site. Rename or remove the object and commit a new version of the dataset.'
+                           % (repo, commit[:12], path, why))
 
 
-def refuse_reserved_root(api, repo, commit, wallet):
-    """Raise ReservedName when the commit holds a root name under `.kaos-`: one small listing, whichever way
-    the dataset is staged afterwards (from the login node or in-job). A listing that cannot be read judges
-    nothing: the stage plan and the in-job stage-in check the names again."""
+def refuse_names(api, repo, commit, wallet, prefix=''):
+    """Raise ReservedName for the first object of the commit (under prefix) that name_problem refuses. A listing
+    that cannot be read judges nothing: the stage plan and the in-job stage-in check the names again."""
     try:
-        first = next(lakefs_pages(api + '/refs/%s/objects/ls' % commit, wallet, {'prefix': RESERVED_PREFIX}), None)
+        for o in lakefs_pages(api + '/refs/%s/objects/ls' % commit, wallet, {'prefix': prefix}):
+            refuse_name(repo, commit, o['path'])
+    except ReservedName:
+        raise
     except Exception as e:
-        print('stage: reserved names not checked (%s)' % e, flush=True)
-        return
-    if first is not None:
-        raise ReservedName(reserved_message(repo, commit, first['path']))
+        print('stage: object names not checked (%s)' % e, flush=True)
 
 
 def mismatch_message(theirs):
@@ -318,8 +330,7 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
         if kind == 'removed':
             removed += 1
             continue
-        if is_reserved(path):
-            raise ReservedName(reserved_message(repo, commit, path))
+        refuse_name(repo, commit, path)
         need_bytes += size
         need_files += 1
         added += kind == 'added'
@@ -371,7 +382,7 @@ def stage_dataset(cfg, stager, mint_wallet, info=None):
     the one the pipeline pinned (spec.dataset); nothing is resolved here. Three failures are not a fallback:
     InsufficientQuota when the dataset does not fit the project's scratch quota (AC-33), StagingMismatch
     when the site's staging tool speaks another staging contract, and ReservedName when the dataset holds an
-    object whose name is reserved for the platform.
+    object whose name is reserved for the platform or whose path could leave the dataset's folder.
     info (a dict), when given, receives the staging record (staging_record) once the copy is resident; it stays
     empty when the job stages in-job."""
     repo, ref, commit = cfg.dataset_repo, cfg.dataset_ref, cfg.dataset_commit
@@ -382,12 +393,12 @@ def stage_dataset(cfg, stager, mint_wallet, info=None):
     wallet = mint_wallet()
     if not wallet:
         return ''
-    refuse_reserved_root(lakefs + '/api/v1/repositories/' + urllib.parse.quote(repo, safe=''), repo, commit, wallet)
-    if not stager.have_key():
-        print('stage: skipped (needs the staging key) - the job stages in-job', flush=True)
-        return ''
-    if not ssh_present():
-        print('stage: no ssh client - the job stages in-job', flush=True)
+    api = lakefs + '/api/v1/repositories/' + urllib.parse.quote(repo, safe='')
+    # First, and cheap: the root names under .kaos-, so that a reserved name never waits for the staging tool.
+    refuse_names(api, repo, commit, wallet, RESERVED_PREFIX)
+    if not stager.have_key() or not ssh_present():
+        print('stage: skipped (needs the staging key and an ssh client) - the job stages in-job', flush=True)
+        refuse_names(api, repo, commit, wallet)     # the in-job copy joins every name to its folder: check them all
         return ''
     began = time.time()
     deadline, attempt = began + STAGE_BUDGET_S, 0
@@ -408,4 +419,5 @@ def stage_dataset(cfg, stager, mint_wallet, info=None):
     if not path:
         print('stage: NOT STAGED - the job will download the dataset in-job on GPU time',
               flush=True)
+        refuse_names(api, repo, commit, wallet)     # before it is submitted, as above
     return path

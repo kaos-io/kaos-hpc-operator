@@ -62,3 +62,21 @@ p = subprocess.run([sys.executable, payload], env=env, stdout=subprocess.PIPE, s
 print(p.stderr.strip())
 assert p.returncode != 0 and downloads == [] and 'reserved for the platform' in p.stderr
 print('PASS: a reserved root name fails the stage-in before any download')
+del TREE['.kaos-commit']
+TREE['a/../../../escape.txt'] = b'out'
+p = subprocess.run([sys.executable, payload], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                   universal_newlines=True)
+print(p.stderr.strip())
+assert p.returncode != 0 and downloads == [] and "outside the dataset's folder" in p.stderr
+assert not any('escape' in n for _, _, names in os.walk(tmp) for n in names)
+print('PASS: an object path that leaves the cache folder fails the stage-in before any download')
+del TREE['a/../../../escape.txt']
+outside = os.path.join(tmp, 'outside')
+os.mkdir(outside)
+os.symlink(outside, os.path.join(dest, 'linked'))
+TREE['linked/sub/x.bin'] = b'x'
+p = subprocess.run([sys.executable, payload], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                   universal_newlines=True)
+print(p.stderr.strip())
+assert p.returncode != 0 and os.listdir(outside) == [] and "outside the dataset's folder" in p.stderr
+print('PASS: a folder of the copy that is a link to elsewhere is not written through')

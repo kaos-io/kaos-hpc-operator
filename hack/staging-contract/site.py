@@ -5,7 +5,7 @@ staging tool (stager.py of the platform repository, in forced-command mode), whi
 lakeFS and reads fake `lfs` / `squeue`. No test in either repository imports this file.
 
 usage: site.py <runner dir> <stager.py> <dir of the staging tool's test_stager.py> <scenario>
-scenarios: any-shape, old-partial, reserved-name, new-runner-old-tool, old-runner-new-tool
+scenarios: any-shape, old-partial, reserved-name, unsafe-name, new-runner-old-tool, old-runner-new-tool
 """
 import http.server
 import json
@@ -25,7 +25,7 @@ import helpers            # noqa: E402
 import test_stager        # noqa: E402  (FAKE_LFS, FAKE_SQUEUE)
 from kaos_hpc_runner import staging   # noqa: E402
 
-C1, C2, C3, C4 = 'c1' * 32, 'c2' * 32, 'c3' * 32, 'c4' * 32
+C1, C2, C3, C4, C5 = 'c1' * 32, 'c2' * 32, 'c3' * 32, 'c4' * 32, 'c5' * 32
 YOLO = {'data.yaml': b'names: [x]', 'images/a.jpg': b'a' * 100, 'labels/a.txt': b'0 0.5'}
 TREES = {
     # not YOLO-shaped: no data.yaml, images/ or labels/
@@ -36,6 +36,7 @@ TREES = {
          'calibration/cam0.json': b'{"fx": 2}', 'README.md': b'# a 3D dataset', 'splits.csv': b'0001,train\n0002,val\n'},
     C3: dict(YOLO, **{'README.md': b'# notes', 'calibration/cam0.json': b'{"fx": 1}'}),
     C4: {'scenes/0001/points.ply': b'p' * 300, '.kaos-ready': b'not a marker'},     # a reserved root name
+    C5: {'scenes/0001/points.ply': b'p' * 300, 'a/../../../escape.txt': b'out'},    # a path that leaves the folder
 }
 
 
@@ -154,17 +155,21 @@ elif scenario == 'old-partial':
     del os.environ['KAOS_TEST_LEASES']
     path, info = stage(C2)
     check('the partial copy is removed once no job leases it', not os.path.exists(aside) and tree(path) == TREES[C2])
-elif scenario == 'reserved-name':
+elif scenario in ('reserved-name', 'unsafe-name'):
+    commit, what = (C4, 'a reserved root name') if scenario == 'reserved-name' else (
+        C5, 'an object path that leaves its folder')
     for key in (True, False):         # with the staging key (login-node staging) and without it (in-job)
         if not key:
             os.remove(os.path.join(keydir, 'id_ed25519'))
         try:
-            stage(C4)
+            stage(commit)
             check('the run stops', False)
         except staging.ReservedName as e:
             print('message:', e)
-            check('a dataset with a reserved root name stops the run %s the staging key, nothing staged'
-                  % ('with' if key else 'without'), not os.path.exists(os.path.join(root, 'datasets')))
+            check('a dataset with %s stops the run %s the staging key, nothing staged'
+                  % (what, 'with' if key else 'without'),
+                  not os.path.exists(os.path.join(root, 'datasets'))
+                  and not any('escape' in n for _, _, names in os.walk(tmp) for n in names))
 elif scenario == 'new-runner-old-tool':
     try:
         stage(C1)

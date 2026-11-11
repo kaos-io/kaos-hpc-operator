@@ -61,10 +61,12 @@ const (
 	// (PRD kaos#1911 F-04). Failed before anything is staged or submitted; the runner reports it with
 	// ExitCodeStagingMismatch. Terminal: it ends when the other side is updated.
 	ReasonStagingMismatch = "StagingMismatch"
-	// ReasonReservedName: the dataset version holds an object whose name is reserved for the platform on the
-	// site (a root name starting with ".kaos-", or a file name ending in ".kaos-part"), where it would be taken
-	// for a marker of the copy. Failed before anything is staged or submitted; the runner reports it with
-	// ExitCodeReservedName and names the object. Terminal: it ends with a new version of the dataset.
+	// ReasonReservedName: the dataset version holds an object whose name cannot be copied to the site. Either
+	// it is reserved for the platform there (a root name starting with ".kaos-", or a file name ending in
+	// ".kaos-part"), where it would be taken for a marker of the copy; or its path could leave the dataset's
+	// folder (a ".." or "." or empty part, a leading "/", a NUL byte). Failed before anything is staged or
+	// submitted; the runner reports it with ExitCodeReservedName and its message names the object and which of
+	// the two it is. Terminal: it ends with a new version of the dataset.
 	ReasonReservedName         = "ReservedName"
 	ReasonMultiNodeUnsupported = "MultiNodeUnsupported"
 	ReasonWallTimeOverLimit    = "WallTimeOverLimit"
@@ -116,7 +118,7 @@ const (
 	// staging tool speaks another staging contract.
 	ExitCodeStagingMismatch = int32(241)
 	// ExitCodeReservedName is the exit code the runner reports (state FAILED, no site job) when the dataset
-	// holds an object whose name is reserved for the platform.
+	// holds an object whose name is reserved for the platform or whose path could leave the dataset's folder.
 	ExitCodeReservedName = int32(242)
 	// DefaultIdleTimeoutMinutes is the idle window of a step that does not set one (D-72).
 	DefaultIdleTimeoutMinutes = int32(20)

@@ -57,7 +57,7 @@ The job script and the runner reserve these codes; the controller turns them int
 | 237 | runner | staging does not fit the project's scratch quota (reported FAILED, no site job) | `InsufficientQuota` |
 | 238 | runner | the site refused the submit for its per-user cap (reported FAILED, no site job; the message has the cap and the count read from the site) | `SubmitLimit` |
 | 239 | runner | the step's image reference can never be pulled (reported FAILED, no site job) | `InvalidImage` |
-| 242 | runner | the dataset holds an object whose name is reserved for the platform (reported FAILED, nothing staged, no site job) | `ReservedName` |
+| 242 | runner | the dataset holds an object whose name is reserved for the platform, or whose path could leave the dataset's folder (reported FAILED, nothing staged, no site job) | `ReservedName` |
 | 241 | runner | the site's staging tool speaks another staging contract (reported FAILED, nothing staged, no site job) | `StagingMismatch` |
 
 ## The site job's name, adopt, and a site that does not answer

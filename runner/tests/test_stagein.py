@@ -138,6 +138,30 @@ def test_a_reserved_root_name_fails_the_stage_in_before_any_download(tmp_path, l
     assert not (tmp_path / "data-cache" / "ds" / COMMIT / ".kaos-complete").exists()
 
 
+@pytest.mark.parametrize("name", ["../escape.txt", "a/../../../escape.txt", "/abs/x", "a//b", "a/./b", "a/b/"])
+def test_an_object_path_that_could_leave_the_cache_folder_fails_the_stage_in_before_any_download(
+        tmp_path, lakefs, name):
+    fake = lakefs(dict(NOT_YOLO, **{name: b"x"}))
+    p = _run(tmp_path, fake)
+    assert p.returncode != 0 and fake.downloads == []
+    assert repr(name) in p.stderr and "ds@" in p.stderr and "outside the dataset's folder" in p.stderr
+    assert not (tmp_path / "escape.txt").exists() and not (tmp_path / "data-cache" / "escape.txt").exists()
+    assert not (tmp_path / "data-cache" / "ds" / COMMIT / ".kaos-complete").exists()
+
+
+def test_a_folder_of_the_copy_that_is_a_link_to_elsewhere_is_never_written_through(tmp_path, lakefs):
+    """Good names, but `scenes` in the cache folder is a symbolic link to a folder outside it."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    dest = tmp_path / "data-cache" / "ds" / COMMIT
+    dest.mkdir(parents=True)
+    (dest / "scenes").symlink_to(outside, target_is_directory=True)
+    p = _run(tmp_path, lakefs(NOT_YOLO))
+    assert p.returncode != 0 and "outside the dataset's folder" in p.stderr and "scenes/0001/" in p.stderr
+    assert list(outside.iterdir()) == [], "nothing was written through the link"
+    assert not (dest / ".kaos-complete").exists()
+
+
 def test_the_platforms_own_folder_is_downloaded(tmp_path, lakefs):
     tree = dict(NOT_YOLO, **{".kaos/seal.json": b"{}"})
     dest, _ = _stage_in(tmp_path, lakefs(tree))

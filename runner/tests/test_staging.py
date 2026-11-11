@@ -167,6 +167,51 @@ def test_a_name_ending_in_the_staging_tools_part_suffix_stops_the_run_before_the
     assert [w[0] for w, _ in stager.calls] == ["version", "status"], "refused while planning: no stage call"
 
 
+UNSAFE = ["../escape.txt", "a/../../escape.txt", "/abs/x", "a//b", "a/./b", "a/b/", "x\x00y"]
+
+
+@pytest.mark.parametrize("name", UNSAFE)
+@pytest.mark.parametrize("key", [True, False])
+@pytest.mark.parametrize("diff", [False, True])
+def test_an_object_path_that_could_leave_the_dataset_folder_stops_the_run_on_either_staging_path(
+        monkeypatch, name, key, diff):
+    """A path with `..`, an empty or `.` part, a leading slash or a NUL byte. The staging tool refuses it mid-copy
+    and the in-job stage-in would join it to the cache folder. With the staging key it is refused while the copy
+    is planned; without it (the job would stage in-job) the runner lists the commit once before it submits."""
+    lakefs = _LakeFS({name: 3, "a.bin": 1}, diff=[{"type": "added", "path": name, "size_bytes": 3}])
+    stager = _Stager({"ready": False, "base": BASE, "base_files": 10, "base_prefix": ""} if diff
+                     else {"ready": False, "base": None}, key=key)
+    cfg = _twin(monkeypatch, lakefs, stager)
+    with pytest.raises(staging.ReservedName) as e:
+        _stage(cfg, stager)
+    assert not any(w[0] == "stage" for w, _ in stager.calls), "nothing is copied"
+    msg = str(e.value)
+    assert repr(name) in msg and "dataset-poulaki@" in msg and "outside the dataset's folder" in msg
+    assert "reserved for the platform" not in msg, "the sentence says what is wrong with this name"
+    assert "Nothing was staged and nothing was submitted" in msg
+
+
+def test_a_job_that_will_stage_in_job_has_its_names_checked_before_it_is_submitted(monkeypatch):
+    """Every way to the in-job copy with a wallet in hand: no staging key, no ssh client, a staging tool that
+    cannot be reached within the budget."""
+    tree = {"ok/a.bin": 1, "a/../../escape.txt": 3}
+    for how in ("no key", "no ssh", "unreachable"):
+        stager = _Stager({"ready": False, "base": None}, key=how != "no key", version=(255, None))
+        cfg = _twin(monkeypatch, _LakeFS(tree), stager)
+        if how == "no ssh":
+            monkeypatch.setattr(staging, "ssh_present", lambda: False)
+        clock = [1000.0]
+        monkeypatch.setattr(staging.time, "time", lambda: clock[0])
+        monkeypatch.setattr(staging.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+        with pytest.raises(staging.ReservedName):
+            _stage(cfg, stager)
+    stager = _Stager({"ready": False, "base": None}, key=False)
+    lakefs = _LakeFS({"ok/a.bin": 1, ".kaos/seal.json": 2})
+    cfg = _twin(monkeypatch, lakefs, stager)
+    assert _stage(cfg, stager) == "", "good names: the job stages in-job as before"
+    assert len(_listings(lakefs)) == 1
+
+
 def test_the_platforms_own_folder_and_ordinary_dot_names_are_staged(monkeypatch):
     tree = {".kaos/seal.json": 5, ".gitattributes": 2, "a/.kaos-like/b": 1, "part.kaos-partial": 4}
     stager = _Stager({"ready": False, "base": None})

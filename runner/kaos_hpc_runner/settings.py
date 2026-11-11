@@ -34,7 +34,8 @@ INVALID_IMAGE_EXIT = 239
 GPU_VIOLATION_EXIT = 240
 # The runner reports it (FAILED, no site job) when the site's staging tool speaks another staging contract.
 STAGING_MISMATCH_EXIT = 241
-# The runner reports it (FAILED, no site job) when the dataset holds an object whose name is reserved for the platform.
+# The runner reports it (FAILED, no site job) when the dataset holds an object whose name is reserved for the platform,
+# or whose path could leave the dataset's folder.
 RESERVED_NAME_EXIT = 242
 DEFAULT_IDLE_TIMEOUT_MIN = 20
 # AC-28: a site that does not answer is waited for this long (the controller passes its --site-outage-max).

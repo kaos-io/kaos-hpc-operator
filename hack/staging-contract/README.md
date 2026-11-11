@@ -8,7 +8,7 @@ change to dataset staging on either side, against a checkout of the other.
 No cluster, no HPC site, no network: a fake `ssh` runs the staging tool in forced-command mode, a local HTTP
 server stands in for lakeFS, and the staging tool's own test file provides the fake `lfs` and `squeue`.
 
-## site.py: the four cases of the staging contract, and reserved names
+## site.py: the four cases of the staging contract, and names that are not copied
 
 ```
 python3 hack/staging-contract/site.py <runner dir> <stager.py> <dir of test_stager.py> <scenario>
@@ -21,6 +21,7 @@ Python 3.12+ (the runner's). With `STAGER=<checkout of the platform repository>/
 | `any-shape` | `runner` | `$STAGER/stager.py` | A dataset with no `data.yaml`, `images/` or `labels/` is complete on the site; the next version is a delta; a whole copy is a cache hit |
 | `old-partial` | `runner` | `$STAGER/stager.py` | A copy made when only the YOLO folders were staged is never served and never a base; a job that still reads it keeps its files; it goes when the lease ends |
 | `reserved-name` | `runner` | `$STAGER/stager.py` | A dataset with a root name under `.kaos-` stops the run before anything is staged, with and without the staging key |
+| `unsafe-name` | `runner` | `$STAGER/stager.py` | A dataset with an object path that leaves its folder (`a/../../../escape.txt`) stops the run before anything is staged or written, with and without the staging key |
 | `new-runner-old-tool` | `runner` | a `stager.py` from before the contract | The runner stops with `StagingMismatch`; nothing is staged |
 | `old-runner-new-tool` | a `runner/` from before the contract | `$STAGER/stager.py` | The staging tool refuses the runner; nothing is staged (that runner then stages in-job, as it always did) |
 
@@ -47,5 +48,6 @@ docker run --rm --network none \
   python:3.6-slim python /h/stagein36.py /p/stagein.py
 ```
 
-It completes a copy left with only the old `.complete` marker, serves a whole copy as a cache hit, and refuses a
-dataset with a reserved root name before any download.
+It completes a copy left with only the old `.complete` marker, serves a whole copy as a cache hit, refuses a
+dataset with a reserved root name or with an object path that leaves the cache folder before any download, and
+does not write through a folder of the copy that is a symbolic link to elsewhere.
