@@ -3,6 +3,7 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 mkdir -p "$BIN" "$STATE"
+short() { local i=${1#sha256:}; echo "${i:0:12}"; }
 say() { printf '\n== %s\n' "$*"; }
 
 # 1. kind cluster, single node
@@ -69,7 +70,7 @@ if [ -z "${LAKE_IMAGE:-}" ]; then
     fi
   fi
 fi
-echo "lake image: $LAKE_IMAGE"
+echo "lake image: $LAKE_IMAGE ($(short "$(docker image inspect -f '{{.Id}}' "$LAKE_IMAGE")"))"
 # kaos-lake multi-user mode with one declared app user (kaos.app_users, PRD kaos#1217 F-06):
 # user kaos-app-lab, read on dataset-*, write on its outputs repository outputs-lab.
 mkdir -p "$STATE/apps"
@@ -77,11 +78,12 @@ printf '{"user":"kaos-app-lab","access_key_id":"%s","secret_access_key":"%s","ou
   "$LAKE_APP_KEY" "$LAKE_APP_SECRET" "$OUT_REPO" > "$STATE/apps/lab.json"
 lake_args=(-e LAKEFS_AUTH_UI_CONFIG_RBAC=internal -e LAKEFS_KAOS_APP_USERS_PATH=/apps -e LAKEFS_KAOS_APP_USERS_INTERVAL=5s -v "$STATE/apps":/apps:ro)
 if [ "$LAKE_IMAGE" = "$LAKE_UPSTREAM" ]; then lake_args=(); fi   # upstream has no declared users: the app uses the admin key
-running=$(docker inspect -f '{{.Config.Image}} {{.State.Running}}' "$LAKE_CONTAINER" 2>/dev/null || true)
-if [ "$running" != "$LAKE_IMAGE true" ]; then
-  if [ -n "$running" ] && [ "${running% *}" != "$LAKE_IMAGE" ]; then
-    # another image: its data format may differ (upstream vs fork, other build), so start on a fresh volume
-    echo "lake image changes from ${running% *} to $LAKE_IMAGE: recreating the container on a fresh volume"
+want_id=$(docker image inspect -f '{{.Id}}' "$LAKE_IMAGE")
+running=$(docker inspect -f '{{.Image}} {{.State.Running}}' "$LAKE_CONTAINER" 2>/dev/null || true)
+if [ "$running" != "$want_id true" ]; then
+  if [ -n "$running" ] && [ "${running% *}" != "$want_id" ]; then
+    # another image (or the same tag rebuilt): its data format may differ, so start on a fresh volume
+    echo "lake image id changes from $(short "${running% *}") to $(short "$want_id") ($LAKE_IMAGE): recreating the container on a fresh volume"
     docker rm -f "$LAKE_CONTAINER" >/dev/null
     docker volume rm "$LAKE_VOLUME" >/dev/null 2>&1 || true
   fi
@@ -144,6 +146,7 @@ stringData:
   LAKE_SECRET_ACCESS_KEY: $LAKE_SECRET_ACCESS_KEY
 YAML
 echo "$LAKE_IMAGE" > "$STATE/lake-image"
+docker inspect -f '{{.Image}}' "$LAKE_CONTAINER" > "$STATE/lake-image-id"
 
 # 4. fake Slurm site (test/fakeslurmd), started as the repository's e2e starts it
 say "fake Slurm site"

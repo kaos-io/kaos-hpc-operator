@@ -26,8 +26,8 @@ Needs docker, kind, kubectl, helm, jq, openssl and curl. About 2 GiB of memory w
 
 Lake image: `LAKE_IMAGE` if set, else the local `kaos-lake:prd1911` if present, else the published dev image,
 else (with a loud warning) upstream `treeverse/lakefs:1.86.0`, which has no declared users, so the app uses the admin key.
-When the chosen image differs from the one the lake container runs, `up.sh` recreates the container on a fresh volume
-(data formats differ between builds) and re-seeds; what it prints and records in `.state` is what runs.
+When the id of the chosen image differs from the id of the one the lake container runs, `up.sh` recreates the container on a fresh volume
+(data formats differ between builds; a rebuilt image under the same tag counts) and re-seeds; what it prints and records in `.state` is what runs.
 
 Workflows run in namespace `lab` with service account `lab`:
 
