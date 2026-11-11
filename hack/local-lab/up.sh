@@ -14,8 +14,10 @@ else
 fi
 [ -s "$KUBECONFIG" ] || kind get kubeconfig --name "$LAB_NAME" > "$KUBECONFIG"
 
-# 2. Argo Workflows at dev's version, and the matching argo CLI
-say "argo CLI $ARGO_VERSION"
+# 2. Argo Workflows at the workload pool's version, and the matching argo CLI
+ARGO_VERSION=$(helm show chart argo-workflows --repo "$ARGO_REPO" --version "$ARGO_CHART_VERSION" | sed -n 's/^appVersion: //p')
+[ -n "$ARGO_VERSION" ] || { echo "cannot read the app version of chart $ARGO_CHART_VERSION" >&2; exit 1; }
+say "argo CLI $ARGO_VERSION (chart $ARGO_CHART_VERSION)"
 if [ ! -x "$BIN/argo" ] || ! "$BIN/argo" version --short 2>/dev/null | grep -q "${ARGO_VERSION#v}"; then
   curl -fsSL "https://github.com/argoproj/argo-workflows/releases/download/$ARGO_VERSION/argo-linux-amd64.gz" | gunzip > "$BIN/argo"
   chmod +x "$BIN/argo"

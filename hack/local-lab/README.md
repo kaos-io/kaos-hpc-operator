@@ -19,7 +19,7 @@ Needs docker, kind, kubectl, helm, jq, openssl and curl. About 2 GiB of memory w
 | Part | What it stands in for |
 |---|---|
 | kind cluster (one node) | the workload cluster of a project |
-| Argo Workflows (chart 1.0.14 installed with `--repo`, app v4.0.5, controller only) | the workflow engine on the dev hub; the matching `argo` CLI is downloaded to `.bin/` (git-ignored) |
+| Argo Workflows (chart 1.0.18 installed with `--repo`, app v4.0.6, controller only) | the workflow engine of a workload pool (the version pipelines run on, pinned in the pool's tool installation); `up.sh` upgrades the release when the deployed chart differs, and downloads the matching `argo` CLI to `.bin/` (git-ignored) |
 | kaos-lake container on local storage | the project's data lake; reachable from pods as `lake.lab.svc:8000`, from the host at the address `up.sh` prints. One declared app user (`kaos-app-lab`), outputs repository `outputs-lab`, dataset repository `dataset-lab` with three small files. Credentials in `.state/<LAB_NAME>/lake-app.env` and in the Secret `lake-app` of namespace `lab` |
 | fake Slurm site (`test/fakeslurmd`) | an HPC site: `https://fake-slurm.fake-slurm.svc`, token `lab-token`, CA in `.state/<LAB_NAME>/pki/ca.crt`; jobs are simulated, not executed. Its certificates last 365 days and are regenerated (and the Deployment rolled) when they expire within 7 days |
 | probe step image `kaos-lab-probe:<LAB_NAME>` | a pipeline step: prints its context, lists input folders with sha256 checksums, writes a result file; also carries the `lake` helper (put, commit, get, sync) |
