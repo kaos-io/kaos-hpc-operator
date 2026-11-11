@@ -1,0 +1,83 @@
+# Check 3(c): a step context of a given size reaches the container intact in KAOS_STEP_CONTEXT.
+#
+#   compose   builds a base context whose params hold `fill` characters of a sha256 chain (the check
+#             script builds the same text to know what to expect)
+#   prepare   an upstream step with a small result
+#   step      receives the context assembled in the DAG task argument, as in check 3(a)
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: contract-3c-
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: fill   # characters of filler inside params.blob
+  templates:
+    - name: compose
+      container:
+        image: alpine:3.20
+        command: [sh, -c]
+        args:
+          - |
+            set -e
+            mkdir -p /work
+            fill={{workflow.parameters.fill}}
+            h=contract-3c; n=0; : > /work/blob
+            while [ $n -lt $fill ]; do
+              h=$(printf %s "$h" | sha256sum | cut -c1-64); printf %s "$h" >> /work/blob; n=$((n+64))
+            done
+            {
+              printf %s '{"version":1,"run":"contract-3c","app":"hera-demo","project":"vision","step":"train","kind":"train","experiment":"baseline","params":'
+              printf %s '{"blob":"'; head -c $fill /work/blob; printf %s '"}'
+              printf %s ',"ledger":{"version":2,"reads":[],"writes":[]},"produces":[]}'
+            } > /work/context.json
+            wc -c /work/context.json
+      outputs:
+        parameters:
+          - name: kaos-context-train
+            valueFrom: {path: /work/context.json}
+
+    - name: producer
+      container:
+        image: alpine:3.20
+        command: [sh, -c]
+        args: ["mkdir -p /work/output && printf %s '{\"version\":1,\"status\":\"ok\",\"values\":{\"rows\":1200},\"reads\":[],\"writes\":[]}' > /work/output/kaos-result.json"]
+      outputs:
+        parameters:
+          - name: kaos-result
+            valueFrom:
+              path: /work/output/kaos-result.json
+              default: '{"version":1,"status":"absent"}'
+
+    - name: consumer
+      inputs:
+        parameters:
+          - name: kaos-context
+      container:
+        image: alpine:3.20
+        command: [sh, -c]
+        args: ['printf "BYTES=%s\n" "$(printf %s "$KAOS_STEP_CONTEXT" | wc -c)"; printf "SHA256=%s\n" "$(printf %s "$KAOS_STEP_CONTEXT" | sha256sum | cut -c1-64)"']
+        env:
+          - name: KAOS_STEP_CONTEXT
+            value: "{{inputs.parameters.kaos-context}}"
+
+    - name: main
+      dag:
+        tasks:
+          - name: compose
+            template: compose
+          - name: prepare
+            template: producer
+            depends: compose
+          - name: step
+            template: consumer
+            depends: "compose && prepare"
+            arguments:
+              parameters:
+                - name: kaos-context
+                  value: >-
+                    {{=sprig.trimSuffix("}", tasks.compose.outputs.parameters["kaos-context-train"])
+                    + ",\"upstream\":{\"prepare\":"
+                    + sprig.default("{\"version\":1,\"status\":\"absent\"}", tasks.prepare.outputs.parameters["kaos-result"])
+                    + "}" + "}"}}

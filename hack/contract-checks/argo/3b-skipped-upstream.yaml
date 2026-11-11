@@ -1,0 +1,115 @@
+# Check 3(b): an upstream step that did not run, or wrote no result, appears in the context as the
+# sentinel {"version":1,"status":"absent"}.
+#
+#   train     ran and wrote its result
+#   export    skipped: its `when` is false
+#   after     omitted: it depends on export having succeeded
+#   silent    ran, ended well, wrote no result file
+#
+#   evaluate  needs train and export: the DAG task argument must be context-skipped-upstream
+#   others    needs after and silent: both must be the sentinel
+#   plain     reads export's output with a plain reference and no default (what the engine did before):
+#             prints what it gets, to show why the default is needed
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: contract-3b-
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: base-b64     # the base context, wire form, base64
+      - name: result-b64   # the result of the upstream step that runs, wire form, base64
+  templates:
+    - name: compose
+      container:
+        image: alpine:3.20
+        command: [sh, -c]
+        args: ["mkdir -p /work && printf %s '{{workflow.parameters.base-b64}}' | base64 -d > /work/context.json"]
+      outputs:
+        parameters:
+          - name: kaos-context-evaluate
+            valueFrom: {path: /work/context.json}
+
+    - name: producer
+      inputs:
+        parameters:
+          - name: write
+      container:
+        image: alpine:3.20
+        command: [sh, -c]
+        args: ["mkdir -p /work/output; if [ '{{inputs.parameters.write}}' = yes ]; then printf %s '{{workflow.parameters.result-b64}}' | base64 -d > /work/output/kaos-result.json; fi"]
+      outputs:
+        parameters:
+          - name: kaos-result
+            valueFrom:
+              path: /work/output/kaos-result.json
+              default: '{"version":1,"status":"absent"}'
+
+    - name: consumer
+      inputs:
+        parameters:
+          - name: kaos-context
+      container:
+        image: alpine:3.20
+        command: [sh, -c]
+        args: ['printf "BYTES=%s\n" "$(printf %s "$KAOS_STEP_CONTEXT" | wc -c)"; printf "SHA256=%s\n" "$(printf %s "$KAOS_STEP_CONTEXT" | sha256sum | cut -c1-64)"; printf "VALUE=%s\n" "$KAOS_STEP_CONTEXT"']
+        env:
+          - name: KAOS_STEP_CONTEXT
+            value: "{{inputs.parameters.kaos-context}}"
+
+    - name: main
+      dag:
+        tasks:
+          - name: compose
+            template: compose
+          - name: train
+            template: producer
+            depends: compose
+            arguments: {parameters: [{name: write, value: "yes"}]}
+          - name: export
+            template: producer
+            depends: compose
+            when: "false"
+            arguments: {parameters: [{name: write, value: "yes"}]}
+          - name: after
+            template: producer
+            depends: "export.Succeeded"
+            arguments: {parameters: [{name: write, value: "yes"}]}
+          - name: silent
+            template: producer
+            depends: compose
+            arguments: {parameters: [{name: write, value: "no"}]}
+          - name: evaluate
+            template: consumer
+            depends: "compose && train && (export.Succeeded || export.Skipped || export.Omitted)"
+            arguments:
+              parameters:
+                - name: kaos-context
+                  value: >-
+                    {{=sprig.trimSuffix("}", tasks.compose.outputs.parameters["kaos-context-evaluate"])
+                    + ",\"upstream\":{\"train\":"
+                    + sprig.default("{\"version\":1,\"status\":\"absent\"}", tasks.train.outputs.parameters["kaos-result"])
+                    + ",\"export\":"
+                    + sprig.default("{\"version\":1,\"status\":\"absent\"}", tasks.export.outputs.parameters["kaos-result"])
+                    + "}" + "}"}}
+          - name: others
+            template: consumer
+            depends: "compose && silent && (after.Succeeded || after.Skipped || after.Omitted)"
+            arguments:
+              parameters:
+                - name: kaos-context
+                  value: >-
+                    {{=sprig.trimSuffix("}", tasks.compose.outputs.parameters["kaos-context-evaluate"])
+                    + ",\"upstream\":{\"after\":"
+                    + sprig.default("{\"version\":1,\"status\":\"absent\"}", tasks.after.outputs.parameters["kaos-result"])
+                    + ",\"silent\":"
+                    + sprig.default("{\"version\":1,\"status\":\"absent\"}", tasks.silent.outputs.parameters["kaos-result"])
+                    + "}" + "}"}}
+          - name: plain
+            template: consumer
+            depends: "compose && (export.Succeeded || export.Skipped || export.Omitted)"
+            arguments:
+              parameters:
+                - name: kaos-context
+                  value: "{{tasks.export.outputs.parameters.kaos-result}}"

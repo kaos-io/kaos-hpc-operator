@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "run": "hera-demo-x7k2p",
+  "app": "hera-demo",
+  "project": "vision",
+  "step": "train",
+  "kind": "train",
+  "experiment": "baseline",
+  "params": {"raw": "raw-images@latest", "labels": "labels@v3", "train": {"epochs": 3, "lr": 0.001}, "export": {"enabled": false}},
+  "ledger": {
+    "version": 2,
+    "reads": [
+      {"name": "labels", "repo": "dataset-labels", "owner": null, "ref": "v3", "commit": "2222222222222222222222222222222222222222222222222222222222222222"}
+    ],
+    "writes": []
+  },
+  "produces": [
+    {"name": "model", "type": "model", "repo": "outputs-hera-demo"}
+  ],
+  "upstream": {
+    "prepare": {"version": 1, "status": "ok", "values": {"rows": 1200, "dropped": 14}, "reads": [{"name": "raw", "repo": "dataset-raw-images", "owner": null, "ref": "latest", "commit": "1111111111111111111111111111111111111111111111111111111111111111"}], "writes": [{"name": "embeddings", "type": "dataset", "repo": "dataset-embeddings", "commit": "3333333333333333333333333333333333333333333333333333333333333333"}]}
+  }
+}

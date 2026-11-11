@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "run": "hera-demo-x7k2p",
+  "app": "hera-demo",
+  "project": "vision",
+  "step": "prepare",
+  "kind": "transform",
+  "experiment": "baseline",
+  "params": {"raw": "raw-images@latest", "labels": "labels@v3", "train": {"epochs": 3, "lr": 0.001}, "export": {"enabled": false}},
+  "ledger": {
+    "version": 2,
+    "reads": [
+      {"name": "raw", "repo": "dataset-raw-images", "owner": null, "ref": "latest", "commit": "1111111111111111111111111111111111111111111111111111111111111111"}
+    ],
+    "writes": []
+  },
+  "produces": [
+    {"name": "embeddings", "type": "dataset", "repo": "dataset-embeddings"}
+  ],
+  "upstream": {}
+}

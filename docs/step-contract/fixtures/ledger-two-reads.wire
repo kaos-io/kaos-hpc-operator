@@ -1,0 +1,1 @@
+{"version":2,"reads":[{"name":"raw","repo":"dataset-raw-images","owner":null,"ref":"latest","commit":"1111111111111111111111111111111111111111111111111111111111111111"},{"name":"labels","repo":"dataset-labels","owner":null,"ref":"v3","commit":"2222222222222222222222222222222222222222222222222222222222222222"}],"writes":[]}
