@@ -43,7 +43,7 @@ Phases: `Pending` (not judged yet, or the next attempt is about to be judged), `
 
 | Reason | Phase | Meaning | What the user sees |
 |---|---|---|---|
-| `Continuing` | Pending | The attempt ended on exit 85, wall time, node failure, pre-emption or an idle kill and left a verified checkpoint copy; the next attempt starts from it. Counted apart from failure retries. | Follower: "continuing from the last checkpoint as attempt N". |
+| `Continuing` | Pending | The attempt ended on exit 85, wall time, node failure, pre-emption or an idle kill and left a verified checkpoint copy; the next attempt starts from it. Counted apart from failure retries. A resumable step on a shared node continues the same way: a guest that was signalled before its host's job ended, saved and exited 85 is `Continuing` with 0 node-minutes settled for that attempt (its host's booking covers the node); a resumable host's checkpointed end is reported when its Slurm job ends and settled to that end (AC-73). | Follower: "continuing from the last checkpoint as attempt N". |
 | `ContinuationLimit` | Failed | The step used all its continuations (`spec.resumable.maxContinuations`, default 5). | Message: "the step reached its N continuations". |
 | `NoProgress` | Failed | A continuation did not get past the checkpoint it started from (same progress values or folder digest), or ended without saving any. The step is recorded as not verified. | Message with both progress values. |
 | `NotResumable` | Failed | The step exited 85 ("saved, continue me") but opted out of resuming (`resumable=False`). | Message. |
@@ -94,7 +94,7 @@ may still run). See [extreme-cases.md](extreme-cases.md) 2.13 and 2.17.
 - `GPUViolation`: on a shared node, a step computed on a GPU outside its own set and the slot manager stopped that
   step alone (AC-57 / D-29). It is written into the host job's Slurm comment (`kaos-state=done rc=N
   reason=GPUViolation`) and the job log (`gpu: step ... outside its set: stopping it`), not into the status of an
-  HPC job. Neighbouring steps keep running. Prevention first: where `nvidia-container-cli` works the step cannot see
+  HPC job: the step's attempt ends `Failed/SiteFAILED` (exit 137, never 0, also for `reason=memkill`; live 2026-11-10, job 5442274). Neighbouring steps keep running. Prevention first: where `nvidia-container-cli` works the step cannot see
   the other GPUs (`gpu fence: nvccli` in the job log).
 - Events not tied to a reason constant: `LaneRefused` (the site refused the lane; the attempt ran on the class
   default), `HostSettledToJobEnd` (a host's attempt settled to its Slurm job's end, booking released), `HostEndUnknown`

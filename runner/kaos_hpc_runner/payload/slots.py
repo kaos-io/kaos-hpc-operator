@@ -9,6 +9,11 @@ STEP_ENV = re.compile(r'^(SLURM_|CUDA_VISIBLE_DEVICES$|GPU_DEVICE_ORDINAL$|ROCR_
 if sys.argv[1:2] == ['--step']:
     import pwd
     script, job = sys.argv[2], sys.argv[3]
+    # The slot manager signals this step by pid (D-44, AC-73): the task process becomes the step's bash below.
+    pidfile = os.environ.get('KAOS_STEP_PIDFILE')
+    if pidfile:
+        with open(pidfile, 'w') as f:
+            f.write(str(os.getpid()))
     env = dict((k, v) for k, v in os.environ.items() if STEP_ENV.match(k))
     # The login basics, also when Slurm passed none (SLURM_EXPORT_ENV=NONE).
     me = pwd.getpwuid(os.getuid())
@@ -41,7 +46,10 @@ HOME = os.environ.get('HOME') or '/'
 GPUS = max(1, int(os.environ.get('HPC_GPUS') or 1))
 CPUS = max(1, int(os.environ.get('SLURM_CPUS_ON_NODE') or GPUS) // GPUS)
 IDLE_S = int(os.environ.get('KAOS_IDLE_S') or 120)
+KILLED_EXIT = 137       # 128 + KILL: the exit code of a step the slot manager stopped itself
+CHECKPOINT_EXIT = 85    # the step saved its checkpoint (D-44; resume.Classify)
 MARGIN_S = 300          # a guest must end this long before the host's own limit
+LEAD_UNIT_S = 60        # a resumable step's lead is declared in minutes
 TOKEN_MARGIN_S = 1800   # ... and this long before its own token expires (D-07)
 # Not takeable: held (another host took it) or waiting for another job. A job of this
 # scope waiting for its BeginTime is in its offer window (OFFER_S): exactly the job a
@@ -139,7 +147,7 @@ def given_limit(limit):
     return max(1, (limit + 59) // 60) * 60 if limit else None
 
 
-def launch(slot, job, script, log_to, limit=None):
+def launch(slot, job, script, log_to, limit=None, pidfile=None):
     # --export=ALL: a job with an explicit environment (REST) has SLURM_EXPORT_ENV=NONE,
     # and a plain srun would start the step without HOME or PATH (live 2026-11-03,
     # job 5417729). The launcher then keeps only Slurm's variables and the basics.
@@ -153,6 +161,8 @@ def launch(slot, job, script, log_to, limit=None):
     # usable_cpus()): the GPU is already the only one it sees; cores and memory are not hidden.
     env = dict(os.environ, KUBECORE_SLOT_GPUS='1', KUBECORE_SLOT_CPUS=str(CPUS),
                KUBECORE_SLOT_MEM_GIB=str(SHARE >> 30), KUBECORE_SLOT_SHARED='1')
+    if pidfile:
+        env['KAOS_STEP_PIDFILE'] = pidfile
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT if out else None,
                             env=env, preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM}))
     return proc
@@ -258,6 +268,49 @@ def step_limit_of(text):
     return int(m.group(1)) * 60 if m else None
 
 
+def lead_of(text):
+    # D-44 (AC-73): a resumable step's lead in seconds, from its script (KAOS_RESUMABLE_LEAD_MIN); 0 = not resumable.
+    m = re.search(r'^export KAOS_RESUMABLE_LEAD_MIN=(\d+)$', text, re.M)
+    return int(m.group(1)) * LEAD_UNIT_S if m else 0
+
+
+def fits(now, limit, lead, token_exp, host_end):
+    # May a guest of this step limit (and resumable lead, 0 = none) and token expiry be taken at `now`? It must
+    # end MARGIN_S before the host's limit and before its token expires. A resumable guest also fits when only
+    # its lead does: it is signalled at host_end - lead (AC-73) and checkpoints, so it needs host_end - now to
+    # cover its lead plus the margin; it then ends no later than the host's end.
+    if limit is None:
+        return False
+    ends = now + limit + MARGIN_S
+    if ends > host_end and lead:
+        if host_end - now < lead + MARGIN_S:
+            return False
+        ends = host_end
+    return ends <= host_end and not (token_exp and ends > token_exp - TOKEN_MARGIN_S)
+
+
+def signal_at(s, host_end):
+    # When a resumable step is sent USR1: its lead before the end of its own limit or of the host's job,
+    # whichever comes first. None for a step that is not resumable.
+    if not s.get('lead'):
+        return None
+    ends = min(s['start'] + s['limit'], host_end) if s.get('limit') else host_end
+    return ends - s['lead']
+
+
+def stop_signal(s):
+    # The stop signal (D-44): USR1 to the step's own shell, which passes it on to the processes of the step
+    # that handle it and tells the checkpoint copier to copy now (jobscript kaos_stop). Sent once.
+    try:
+        with open(s['pidfile']) as f:
+            os.kill(int(f.read().strip()), signal.SIGUSR1)
+    except (OSError, ValueError):
+        return False        # the step has not started, or is gone: tried again next poll
+    s['signalled'] = True
+    log('stop signal: USR1 to', s['job'], 'its lead before the end')
+    return True
+
+
 def take(slot, job, name, job_limit):
     # Take one waiting job onto slot. Its script is read first (no side effect); only a
     # job of this scope whose STEP fits the host's remaining time and its own token is
@@ -278,9 +331,9 @@ def take(slot, job, name, job_limit):
         log('not taking', job, '(no', HEADER + ')')
         return False
     limit = step_limit_of(text) or job_limit
+    lead = lead_of(text)
     m = re.search(r'^export KAOS_TOKEN_EXP=(\d+)$', text, re.M)
-    if (limit is None or now + limit + MARGIN_S > HOST_END
-            or (m and now + limit + MARGIN_S > int(m.group(1)) - TOKEN_MARGIN_S)):
+    if not fits(now, limit, lead, int(m.group(1)) if m else None, HOST_END):
         skip.add(job)
         return False
     c = comment(job)
@@ -306,9 +359,10 @@ def take(slot, job, name, job_limit):
         if rc != 0 or HEADER not in open(script).read().split('\n')[:3]:
             return False
         set_comment(job, '%skaos-state=taken host=%s slot=%d attempt=%d' % (lease(c), ME, slot, k))
+        pidfile = os.path.join(claim, 'step.pid')
         slots[slot] = {'job': job, 'claim': claim, 'name': name, 'memkill': False, 'attempt': k,
-                       'start': time.time(), 'limit': given_limit(limit),
-                       'proc': launch(slot, job, script, os.path.join(HOME, 'slurm-%s.out' % job), limit)}
+                       'start': time.time(), 'limit': given_limit(limit), 'lead': lead, 'pidfile': pidfile,
+                       'proc': launch(slot, job, script, os.path.join(HOME, 'slurm-%s.out' % job), limit, pidfile)}
         keep = True
         log('took', job, name, 'on slot', slot)
         return True
@@ -354,10 +408,18 @@ def finish(slot, rc):
     global own_rc
     s = slots.pop(slot)
     job = s['job']
+    if rc == 0 and (s['memkill'] or s.get('gpukill')):
+        # A step the slot manager stopped (memory, GPU trespass) did not succeed, whatever srun says: live 2026-11-10
+        # (job 5442274) srun returned 0 for a scancelled step and the job ended Succeeded.
+        rc = KILLED_EXIT
     reason = (' reason=memkill' if s['memkill'] else ' reason=GPUViolation' if s.get('gpukill')
               else ' reason=TIMEOUT' if timed_out(s, rc) else '')
     if job == ME:
         own_rc = rc
+        try:
+            os.remove(s['pidfile'])
+        except OSError:
+            pass
         c = comment(ME)
         set_comment(ME, '%skaos-state=done rc=%d%s%s' % (lease(c), rc, reason, err_part(c)))
         log('own step ended rc=%d%s' % (rc, reason))
@@ -366,10 +428,11 @@ def finish(slot, rc):
         log('guest', job, 'was stopped; its step ended rc=%d' % rc)
         unlock(s.get('claim'))
         return
-    if q(ME, '%T') != 'RUNNING':
+    if q(ME, '%T') != 'RUNNING' and rc != CHECKPOINT_EXIT:
         # The host itself is going away (cancelled, out of time): Slurm may end the
         # steps before this program's TERM handler runs (live 2026-11-03, host
-        # 5417697). The guest's run did not fail; it goes back to the queue.
+        # 5417697). The guest's run did not fail; it goes back to the queue. A step that saved and
+        # exited 85 is reported as it is: its checkpoint copy is in its comment (AC-73).
         requeue(s)
         return
     c = comment(job)
@@ -392,8 +455,12 @@ def requeue_all(signum, frame):
 
 signal.signal(signal.SIGTERM, requeue_all)
 OWN_LIMIT = int(os.environ.get('KAOS_STEP_LIMIT_MIN') or 0) * 60 or None
+OWN_PIDFILE = os.path.join(CLAIMS, '.own-%s.pid' % ME)
+os.makedirs(CLAIMS, exist_ok=True)
 slots[0] = {'job': ME, 'claim': None, 'name': 'own', 'memkill': False, 'attempt': 1,
-            'start': time.time(), 'limit': given_limit(OWN_LIMIT), 'proc': launch(0, ME, OWN_SCRIPT, None, OWN_LIMIT)}
+            'start': time.time(), 'limit': given_limit(OWN_LIMIT), 'pidfile': OWN_PIDFILE,
+            'lead': int(os.environ.get('KAOS_RESUMABLE_LEAD_MIN') or 0) * LEAD_UNIT_S,
+            'proc': launch(0, ME, OWN_SCRIPT, None, OWN_LIMIT, OWN_PIDFILE)}
 log('host', ME, 'partition', PART, 'slots', GPUS, 'cpus/slot', CPUS, 'mem/slot %d MiB' % (SHARE >> 20))
 idle_since, tick = None, 0
 while True:
@@ -403,6 +470,11 @@ while True:
         rc = s['proc'].poll()
         if rc is not None:
             finish(slot, rc)
+    # AC-73: every resumable step is sent USR1 its lead before its limit or the host job's end, one timer per step.
+    for s in list(slots.values()):
+        due = signal_at(s, HOST_END)
+        if due is not None and not s.get('signalled') and time.time() >= due:
+            stop_signal(s)
     rss = step_rss()
     for s in slots.values():
         sid = s.get('sid') or step_id(s['job'])
@@ -430,7 +502,9 @@ while True:
         if not slots:
             sys.exit(own_rc if own_rc is not None else 143)
         continue
-    free = [i for i in range(GPUS) if i not in slots]
+    # AC-73: a host whose own step saved (exit 85) takes nothing new and leaves once its guests are gone: its step's
+    # continuation is reported when this job ends, so the job must not be held open for more work.
+    free = [] if own_rc == CHECKPOINT_EXIT else [i for i in range(GPUS) if i not in slots]
     if free:
         rc, out = run('squeue', '-u', os.environ.get('USER', ''), '-h', '-t', 'PENDING',
                       '--sort=-p,i', '-o', '%i|%j|%r|%l|%P')
@@ -448,6 +522,6 @@ while True:
         idle_since = None
     elif idle_since is None:
         idle_since = time.time()
-    elif time.time() - idle_since >= IDLE_S or HOST_END - time.time() < MARGIN_S + 60:
+    elif time.time() - idle_since >= IDLE_S or HOST_END - time.time() < MARGIN_S + 60 or own_rc == CHECKPOINT_EXIT:
         log('idle: releasing the node')
         sys.exit(own_rc or 0)

@@ -333,3 +333,45 @@ def test_nothing_expires_when_the_queue_cannot_be_read(node):
 
 def test_an_unknown_mode_is_a_usage_error(node):
     assert node.run("bogus").returncode == 2
+
+
+def test_steps_sharing_one_slurm_job_keep_their_copies_leases_and_comments_apart(tmp_path):
+    """AC-73: resumable steps share a node and a Slurm job. Each step has its own work folder (per job id), its own
+    store (workflow uid / step name), its own copies and its own job comment (the guest's job), whatever its
+    neighbours save, restore or expire; the project's budget is the only thing they share."""
+    a = Node(tmp_path / "a", quota=(100 * GB, 1000 * GB, 10_000, 1_000_000))
+    b = Node(tmp_path / "b", quota=(100 * GB, 1000 * GB, 10_000, 1_000_000))
+    b.scr, b.root = a.scr, a.root                      # one project: one scratch space, one checkpoint root
+    env_a = dict(STEP_NAME="train-a", KAOS_JOB_ID="101")
+    env_b = dict(STEP_NAME="train-b", KAOS_JOB_ID="102")
+    a.write({"last.pt": "weights of A", "epoch": "3"})
+    b.write({"last.pt": "weights of B", "epoch": "9"})
+    assert a.run("final", **env_a).returncode == 0 and b.run("final", **env_b).returncode == 0
+    a.write({"epoch": "4"})
+    assert a.run("final", **env_a).returncode == 0       # a second copy of A only
+    assert sorted(p.name for p in (a.root / WF / "train-a").iterdir()) == ["000001.json", "000001.tar", "000002.json", "000002.tar"]
+    assert sorted(p.name for p in (b.root / WF / "train-b").iterdir()) == ["000001.json", "000001.tar"], "B untouched by A's second copy"
+    # The comments are each step's own job's: its own lease and its own copy, never the neighbour's.
+    ca, cb = a.comment(), b.comment()
+    assert "JobId=101" in ca and "kaos-ckpt-lease=%s/train-a" % WF in ca and "train-b" not in ca
+    assert "JobId=102" in cb and "kaos-ckpt-lease=%s/train-b" % WF in cb and "train-a" not in cb
+    assert "kaos-ckpt-path=kaos-ckpt/%s/train-a/000002.tar" % WF in ca and "kaos-ckpt-path=kaos-ckpt/%s/train-b/000001.tar" % WF in cb
+    # Each continuation restores its own folder.
+    for n in (a, b):
+        for f in n.folder.iterdir():
+            f.unlink()
+    assert a.run("restore", KAOS_RESUME_REF="", **env_a).returncode == 0
+    assert b.run("restore", KAOS_RESUME_REF="", **env_b).returncode == 0
+    assert (a.folder / "last.pt").read_text() == "weights of A" and (b.folder / "last.pt").read_text() == "weights of B"
+    # Expiry spares both leased steps and removes an abandoned third one.
+    old = time.time() - 8 * 86400
+    ghost = a.root / WF / "abandoned"
+    ghost.mkdir()
+    (ghost / "000001.json").write_text("{}")
+    for d in (a.root / WF / "train-a", b.root / WF / "train-b", ghost):
+        for p in [d, *d.iterdir()]:
+            os.utime(p, (old, old))
+    leased = "kaos-ckpt-lease=%s/train-a\nkaos-ckpt-lease=%s/train-b" % (WF, WF)
+    a.set_squeue(leased)
+    assert a.run("expire", **env_a).returncode == 0
+    assert (a.root / WF / "train-a").is_dir() and (a.root / WF / "train-b").is_dir() and not ghost.exists()

@@ -127,6 +127,7 @@ class Runner:
         self.pending_reason = None
         self.hosted = None
         self.job_limit_min = None    # the time limit this runner submitted the site job with
+        self.saved_host_noted = False   # printed once: a resumable host waits for its job's end (AC-73)
         self.host_job_open = False   # the terminal report was made while the host's Slurm job still ran
 
     # ------------------------------------------------------------------ submit
@@ -162,6 +163,9 @@ class Runner:
                'KAOS_ATTEMPT=%d' % cfg.attempt]
         if cfg.resumable_lead:
             env.append('KAOS_RESUMABLE=1')
+            # AC-73: a host reads a waiting guest's lead from its script (a step on a shared node is signalled
+            # by the slot manager, not by Slurm).
+            env.append('KAOS_RESUMABLE_LEAD_MIN=%d' % cfg.resumable_lead)
         # D-72: the idle watchdog the job script starts beside the step (its window; 0 = none).
         env.append('KAOS_IDLE_TIMEOUT_MIN=%d' % cfg.idle_timeout)
         if cfg.idle_timeout > 0:
@@ -213,7 +217,9 @@ class Runner:
             # host releases the node 2 minutes after its last step. No known maximum: no padding (a
             # request above the QOS cap would pend forever).
             cap = cfg.lane_cap(hpc)
-            if cap:
+            # AC-73: a resumable host's job is not padded: its guests are resumable steps that fit by their lead,
+            # and the job must end soon after its own step (it is reported when its job ends).
+            if cap and not cfg.resumable_lead:
                 job_limit = max(step_limit, min(2 * step_limit, cap))
             if self.wallet_exp:
                 env.append('KAOS_TOKEN_EXP=%d' % self.wallet_exp)   # the host's fit rule (D-07)
@@ -246,10 +252,11 @@ class Runner:
             # PRD-HPC-1461 D-37: requeue lets the site put a pre-empted job back in the queue with
             # its ID and place (users cannot requeue their own jobs on MeluXina).
             body['job']['requeue'] = True
-        if cfg.resumable_lead:
+        if cfg.resumable_lead and not hosting:
             # D-44 (amended 2026-11-05): only a resumable step is told to save. USR1 goes to the batch
-            # shell its lead before the wall time, which passes it to the step. A resumable step
-            # never shares a node, so this job's limit is its step's.
+            # shell its lead before the wall time, which passes it to the step. A host's batch shell is the
+            # slot manager, which would die of it: on a shared node the slot manager signals each step itself
+            # (AC-73), the host's own step included, by its own limit and by the host job's end.
             body['job'].update({'kill_warning_signal': 'USR1', 'kill_warning_flags': ['BATCH_JOB'],
                                 'kill_warning_delay': {'set': True, 'number': cfg.resumable_lead * 60}})
         if cfg.reservation:
@@ -676,6 +683,8 @@ class Runner:
                                   'with a fresh wallet (queue position is lost, credentials are not)'
                                   % (wallet.WALLET_MARGIN_S // 60))
                     continue
+                if self.saved_host_waits(st, share):
+                    continue
                 if any(x in TERMINAL for x in st) or ('RUNNING' in st and share.get('kaos-state') == 'done'):
                     rc = ((job.get('exit_code') or {}).get('return_code') or {}).get('number')
                     # A host's own step is over while its Slurm job still runs (it waits for more guests):
@@ -687,6 +696,8 @@ class Runner:
                         # PRD-1609 D-04: a host ran this step on a shared node and then cancelled this
                         # job; the step's result is in the comment.
                         rc = int(share['rc']) if share.get('rc', '').isdigit() else 1
+                        if rc == 0 and share.get('reason') in ('memkill', 'GPUViolation'):
+                            rc = 1      # a step the slot manager stopped did not succeed, whatever exit code it left
                         print('ran on a shared node: host job', share.get('host'),
                               'exit:', share.get('rc'), 'reason:', share.get('reason'), flush=True)
                         st = ['COMPLETED'] if rc == 0 else ['FAILED']
@@ -708,6 +719,20 @@ class Runner:
                 raise
             except Exception as e:
                 print('poll error (transient):', e, flush=True)
+
+    def saved_host_waits(self, st, share):
+        """AC-73: a resumable host whose own step saved (exit 85) while its Slurm job still holds the node for
+        guests is NOT reported yet: the controller continues a checkpointed step at once and releases its
+        booking, but the site charges the node until the job ends. One report, at the job's end, settles the
+        whole node time (the resumable host's job is not padded, so that end is close, test_core/test_slot_resumable)."""
+        waits = (self.cfg.resumable_lead and self.cfg.sharing and 'RUNNING' in st and not any(x in TERMINAL for x in st)
+                 and share.get('kaos-state') == 'done' and not share.get('host')
+                 and share.get('rc') == str(CHECKPOINT_EXIT))
+        if waits and not self.saved_host_noted:
+            self.saved_host_noted = True
+            print('the step saved (exit 85) on a shared node: reporting when its Slurm job ends, so the node time '
+                  'it held for guests is settled', flush=True)
+        return waits
 
     def follow_host_job_end(self):
         """A shared-node host settles from its Slurm job, not its step: the site charges the whole node

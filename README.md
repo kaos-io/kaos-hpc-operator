@@ -224,6 +224,14 @@ Controller flags (chart `controllerManager.container.args`, `runnerImage`, `runn
   checkpoint ends `NoProgress`; one that does (or that runs to completion, which leaves no copy to compare) marks the step key verified (`status.placement.resumable`), after
   which it keeps its declared limit and gets the wall-time signal. `spec.resumableOptOut` (`resumable=False`) turns
   continuing off; the follower passes it from `HPC_RESUMABLE=0`.
+- **Resumable steps share nodes (AC-73, reverses D-44's gate):** a resumable step may host or be a guest on a shared
+  node. Slurm's warning signal is the batch job's and never reaches a guest, so the slot manager sends USR1 to each
+  resumable step itself, `lead` before the end of the step's own limit or of the host's job, whichever is first
+  (the host's own step included; a plain step is never signalled). A guest whose limit does not fit the host's remaining
+  time is still taken when its lead plus a 5-minute margin does. A guest that saves and exits 85 is reported like a step
+  alone and continued from its checkpoint, settled 0 (its host's booking covers the node); the continuation may host,
+  guest or run alone. A resumable host's end is reported when its Slurm job ends, so the node time it held is settled to
+  that end, and its job is not padded to twice its step. Details and tests: `docs/extreme-cases.md` 4.13-4.18.
 - **Steps longer than the longest lane (D-67, D-74):** a resumable step whose declared `walltime` is above the class or
   site maximum is admitted and run as continuations of at most that maximum each (`status.placement.timeLimitMinutes`,
   one run booked at a time), up to the continuation cap + 1 runs in all; the follower prints "declared N min runs as

@@ -6,7 +6,7 @@ depends on it (verified live 2026-11-03):
 * `scontrol hold` works only on a pending job and shows it as PENDING/JobHeldUser;
 * `squeue` without -t reports pending, running and completing jobs only;
 * `srun` runs one job step with its own SLURM_STEP_ID and CUDA_VISIBLE_DEVICES;
-* `scancel <job>.<step>` ends that step only;
+* `scancel <job>.<step>` ends that step only (with FAKE_CANCELLED_STEP_EXITS_0 its srun then exits 0, as live job 5442274);
 * `srun --time=N` stops its step after N minutes with TERM and says so, as Slurm does (live job
   5439966, 2026-11-10: "*** step 5439966.1 CANCELLED DUE TO TIME LIMIT ***", srun exit 143).
 
@@ -103,6 +103,7 @@ def scancel(st):
     if "." in target:
         s = st.get("steps", {}).get(target)
         if s:
+            s["cancelled"] = True
             try:
                 os.killpg(s["pid"], signal.SIGKILL)
             except ProcessLookupError:
@@ -174,10 +175,14 @@ def srun():
     sys.stdout.buffer.write(forwarded + b"".join(stopped))
     sys.stdout.flush()
 
+    cancelled = []
+
     def ended(st):
-        st["steps"].pop("%s.%d" % (job, n), None)
+        cancelled.append(bool((st["steps"].pop("%s.%d" % (job, n), None) or {}).get("cancelled")))
         st.setdefault("ended_steps", []).append({"name": name, "rc": rc})
     locked(ended)
+    if cancelled and cancelled[0] and os.environ.get("FAKE_CANCELLED_STEP_EXITS_0"):
+        return 0   # live 2026-11-10 (job 5442274): srun reported 0 for a step the slot manager had scancelled
     return 128 - rc if rc < 0 else rc
 
 

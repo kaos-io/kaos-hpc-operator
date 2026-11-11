@@ -439,6 +439,38 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(got.Status.Attempts).To(HaveLen(2))
 	})
 
+	// AC-73 (reverses D-44's gate): a resumable step may be a guest on a host's node. A guest that checkpoints
+	// and exits 85 is continued like a step alone, and holds no node of its own: it settles 0.
+	It("continues a resumable guest that exited 85 on a shared node, settled 0, not failed", func() {
+		newSite(10, nil)
+		j := newResumable(envNS, 60, 5)
+		_, got := reconcileJob(j)
+		Expect(got.Status.Site).NotTo(BeNil())
+		code := hpcv1alpha1.ExitCodeContinue
+		start := metav1.NewTime(time.Now().Add(-50 * time.Minute))
+		endT := metav1.NewTime(time.Now())
+		slot := int32(1)
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5439977", HostSiteJobID: "5439966", Slot: &slot, State: "FAILED",
+			ExitCode: &code, StartTime: &start, EndTime: &endT, Terminal: true, CheckpointRef: "lakefs://outputs-app/ckpt-commit-1"})
+
+		res, got := reconcileJob(j)
+		Expect(res.RequeueAfter).To(Equal(ContinueResync))
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhasePending))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+		Expect(got.Status.Continuations).To(Equal(int32(1)))
+		Expect(got.Status.Resume.CheckpointRef).To(Equal("lakefs://outputs-app/ckpt-commit-1"))
+		Expect(got.Status.Attempts).To(HaveLen(1))
+		Expect(got.Status.Attempts[0].Outcome).To(Equal("Continued"))
+		Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(0)), "a guest holds no node of its own: its host's booking is the charge")
+		Expect(got.Status.Booking).To(BeNil())
+		Expect(siteStatus().GPU.UsedNodeMinutes).To(Equal(int64(0)))
+
+		// The continuation is admitted and booked like a new step; it may itself be a host or a guest.
+		_, got = reconcileJob(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
+		Expect(got.Status.Booking).NotTo(BeNil())
+	})
+
 	It("does not continue without a staged-out checkpoint: Timeout, checkpoint upload incomplete (T-19)", func() {
 		newSite(10, nil)
 		j := newResumable(envNS, 60, 5)
@@ -576,6 +608,22 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 			_, got := reconcileJob(j)
 			Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(1)))
 		}
+	})
+
+	// Live 2026-11-10 (job 5442274): a step the slot manager stopped (GPUViolation) must end Failed, not Succeeded.
+	It("fails a step the slot manager stopped (exit 137 on a shared node), settled by its own run, not Succeeded", func() {
+		newSite(10, nil)
+		j := newJob(envNS, 60)
+		reconcileJob(j)
+		code := int32(137)
+		start := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+		endT := metav1.NewTime(time.Now())
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5442274", State: "FAILED", ExitCode: &code,
+			StartTime: &start, EndTime: &endT, Terminal: true})
+		_, got := reconcileJob(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal("SiteFAILED"))
+		Expect(got.Status.Attempts[0].Outcome).To(Equal("SiteFAILED"))
 	})
 
 	It("keeps a guest at zero when a later end is reported", func() {

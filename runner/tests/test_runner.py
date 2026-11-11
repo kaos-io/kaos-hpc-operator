@@ -863,6 +863,34 @@ def test_a_failed_host_keeps_the_start_an_earlier_poll_saw_when_its_end_record_h
     assert last["startTime"] == first["startTime"], "the host job's end report keeps it too"
 
 
+def test_a_resumable_host_that_saved_is_reported_once_when_its_slurm_job_ends(rig):
+    """AC-73: the controller continues a checkpointed step at once and releases its booking, but the site charges the
+    node until the host's job ends. The step's end is held back; the one terminal report carries the job's end, so
+    the controller settles the node time the host held for its guests (and the continuation follows)."""
+    running = acc("RUNNING", start=1762300800, end=0)
+    step_saved = acc("RUNNING", comment=_ckpt_comment() + " kaos-state=done rc=85", start=1762300800, end=0)
+    job_over = acc("FAILED", rc=85, comment=_ckpt_comment() + " kaos-state=done rc=85", start=1762300800, end=1762302000)
+    slurm = FakeSlurm({"5001": [running, step_saved, step_saved, job_over]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", HPC_RESUMABLE_LEAD="10")
+    assert rig.runner.run() == 0
+    reports = terminal_reports(rig)
+    assert len(reports) == 1, "one terminal report, at the job's end - no early report with hostJobOpen"
+    run = rig.kube.run
+    assert (run["state"], run["exitCode"], run["endTime"]) == ("FAILED", 85, "2025-11-05T00:20:00Z")
+    assert "hostJobOpen" not in run and run["checkpointRef"].endswith("#" + CID)
+
+
+def test_a_resumable_host_job_is_not_padded_and_a_plain_one_is(rig):
+    """AC-73: a plain host's job asks for twice its step so guests fit; a resumable host's guests are resumable
+    steps that fit by their lead, and its job must end soon after its step."""
+    plain, resumable = FakeSlurm({"5001": [acc("COMPLETED")]}), FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(plain, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", SLURM_TIME_LIMIT="240")
+    rig.runner.run()
+    rig.make(resumable, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", SLURM_TIME_LIMIT="240", HPC_RESUMABLE_LEAD="10")
+    rig.runner.run()
+    assert plain.submitted[0]["job"]["time_limit"] == 480 and resumable.submitted[0]["job"]["time_limit"] == 240
+
+
 def test_a_start_is_never_carried_over_to_another_site_job(rig):
     rig.make(FakeSlurm({"5001": [acc("COMPLETED")]}))
     rig.runner.jid = "5001"
@@ -928,6 +956,54 @@ def test_a_guest_stopped_by_its_own_time_limit_reports_a_timeout_and_any_other_k
         run = rig.kube.run
         assert (run["state"], run["exitCode"], run["hostSiteJobID"], run["slot"]) == (state, 143, "5439966", 0), comment
         assert "hostJobOpen" not in run, "a guest never holds a node of its own"
+
+def test_a_resumable_sharing_job_hands_its_lead_to_the_slot_manager_and_asks_slurm_for_no_warning_signal(rig):
+    """AC-73: a host's batch shell is the slot manager, which USR1 would kill; every step on a shared node is
+    signalled by the slot manager, from the lead in its script (KAOS_RESUMABLE_LEAD_MIN). A resumable job alone
+    keeps Slurm's own warning signal (test_the_submitted_job_is_the_proven_one)."""
+    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", HPC_RESUMABLE_LEAD="15")
+    rig.runner.run()
+    sub = slurm.submitted[0]
+    assert "export KAOS_RESUMABLE_LEAD_MIN=15" in sub["script"].split("\n"), "a host reads it from the waiting script"
+    assert "export KAOS_RESUMABLE=1" in sub["script"].split("\n")
+    assert "kill_warning_signal" not in sub["job"] and "kill_warning_delay" not in sub["job"]
+    assert sub["job"]["name"].startswith("kaos-a1b2c3d4e5-"), "a resumable step is a job a host takes"
+    slurm2 = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm2, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    rig.runner.run()
+    assert "KAOS_RESUMABLE_LEAD_MIN" not in slurm2.submitted[0]["script"], "a step that is not resumable carries none"
+
+
+def test_a_resumable_guest_that_saved_is_reported_like_a_resumable_step_alone(rig):
+    """AC-73: a guest that checkpointed and exited 85 ends as FAILED/85 with its copy, on its host, and holds no
+    node of its own: the controller continues it from the checkpoint (a continuation may host or be a guest)."""
+    taken = acc("PENDING", comment="kaos-state=taken host=5439966 slot=1 attempt=1")
+    done = acc("CANCELLED", comment=_ckpt_comment() + " kaos-state=done rc=85 host=5439966 start=1762300800",
+               start=4294967294, end=1762301700)
+    rig.make(FakeSlurm({"5001": [taken, done], "5439966": [acc("RUNNING")]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5",
+             HPC_RESUMABLE_LEAD="10")
+    assert rig.runner.run() == 0
+    run = rig.kube.run
+    assert (run["state"], run["exitCode"], run["hostSiteJobID"], run["slot"]) == ("FAILED", 85, "5439966", 1)
+    assert run["checkpointRef"] == "scratch://kaos-ckpt/%s/model-training/000003.tar#%s" % (WF, CID)
+    assert run["checkpoint"]["progressValues"] == [3, 40] and "hostJobOpen" not in run
+
+
+def test_a_step_the_slot_manager_stopped_is_a_failure_even_with_exit_0__live_job_5442274(rig):
+    """Live 2026-11-10: `reason=GPUViolation` with rc 0 ended the HPC job Succeeded. Whatever exit code an older
+    slot manager wrote, a memkill or GPUViolation step is FAILED, as a guest and as a host's own step."""
+    for reason in ("GPUViolation", "memkill"):
+        taken = acc("PENDING", comment="kaos-state=taken host=5442272 slot=2 attempt=1")
+        done = acc("CANCELLED", comment="kaos-state=done rc=0 host=5442272 reason=" + reason, start=4294967294, end=0)
+        rig.make(FakeSlurm({"5001": [taken, done], "5442272": [acc("RUNNING")]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+        rig.runner.run()
+        assert (rig.kube.run["state"], rig.kube.run["exitCode"]) == ("FAILED", 1), reason
+    own = acc("COMPLETED", comment="kaos-state=done rc=0 reason=GPUViolation", start=1762300800, end=1762301400)
+    rig.make(FakeSlurm({"5001": [own]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    rig.runner.run()
+    assert (rig.kube.run["state"], rig.kube.run["exitCode"]) == ("FAILED", 1)
+
 
 # ---------------------------------------------------------------- the controller's batched reading (D-36)
 

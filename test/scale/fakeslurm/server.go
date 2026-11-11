@@ -70,6 +70,11 @@ const (
 	// outlasts the guest's run takes it ("kaos-state=taken host=H slot=1", held), runs it, and cancels it
 	// ("kaos-state=done rc=0 host=H start=<step start>"): the guest's own job is charged nothing.
 	EnvGuest = "FAKE_GUEST"
+	// EnvLeadMinutes is a resumable step's lead (dilated minutes before its end that it is asked to save,
+	// PRD-HPC-1461 AC-73). A resumable guest is taken when its lead fits the host's remaining time, and
+	// is signalled at the host job's end minus its lead: it saves and exits 85 ("kaos-state=done rc=85
+	// host=H start=<start> kaos-ckpt-seq=N") instead of running on past its host.
+	EnvLeadMinutes = "FAKE_LEAD_MINUTES"
 	// EnvResumeRef is the checkpoint reference of the attempt (set by the controller via the runner).
 	EnvResumeRef = "KAOS_RESUME_REF"
 	// EnvAttempt is the controller's attempt number of the submission.
@@ -125,6 +130,9 @@ type Options struct {
 	// AllocationNodeHours per account, for sshare.
 	AllocationNodeHours map[string]float64
 	Seed                int64
+	// GuestAloneAfter: a guest no host took within this (real) time after it became eligible starts as a job of
+	// its own, as a job does that finds no host. Zero: a guest waits for a host forever.
+	GuestAloneAfter time.Duration
 }
 
 // Job is one simulated site job. Fields are read under the site's lock only.
@@ -149,8 +157,9 @@ type Job struct {
 	tailReal                             time.Duration // a host keeps its node this long after its step (D-26)
 	stepDone                             bool          // a host's step is over, its job still runs
 	guest                                bool
-	host                                 int       // the host that took this guest
-	takenAt                              time.Time // when the host took it
+	leadReal                             time.Duration // a resumable step's lead, real time (EnvLeadMinutes)
+	host                                 int           // the host that took this guest
+	takenAt                              time.Time     // when the host took it
 }
 
 // Stats are the counters a test reads after a run.
@@ -176,6 +185,9 @@ type Stats struct {
 	PeakRunning, PeakActive int
 	// ChargedMinutes is the dilated node-minutes charged to each account so far (ended jobs).
 	ChargedMinutes map[string]float64
+	// GuestsTaken is the number of times a host took a guest; GuestsSignalled the number of resumable guests
+	// that were sent the stop signal (AC-73) before their run was over, and so exited 85 on their host.
+	GuestsTaken, GuestsSignalled int
 }
 
 // Site is a running fake site.
@@ -698,6 +710,9 @@ func (s *Site) planLocked(j *Job) {
 	j.endState, j.endExit = end, exit
 	j.runReal = time.Duration(runMin * 60 / s.Opts.Dilation * float64(time.Second))
 	j.guest = j.Env[EnvGuest] != ""
+	if lead, err := strconv.ParseFloat(j.Env[EnvLeadMinutes], 64); err == nil && lead > 0 {
+		j.leadReal = time.Duration(lead * 60 / s.Opts.Dilation * float64(time.Second))
+	}
 	if tail, err := strconv.ParseFloat(j.Env[EnvHostTailMinutes], 64); err == nil && tail > 0 && !j.guest && (end == Completed || end == Failed) {
 		if j.LimitMin > 0 {
 			tail = math.Max(0, math.Min(tail, float64(j.LimitMin)-runMin)) // the job ends by its time limit
@@ -707,7 +722,10 @@ func (s *Site) planLocked(j *Job) {
 }
 
 // guestLocked plays the slot manager for a waiting guest: a running host of its account whose job outlasts
-// the guest's run takes it, and once the run is over the guest's job is cancelled with the step's result.
+// the guest's run takes it, and once the run is over the guest's job is cancelled with the step's result. A
+// resumable guest (AC-73) is also taken when only its lead fits the host's remaining time, and is signalled
+// at the host job's end minus its lead: it saves and ends exit 85 with a checkpoint, however much of its run
+// is left.
 func (s *Site) guestLocked(j *Job, now time.Time) {
 	if j.host == 0 {
 		if now.Before(j.EligibleAt) {
@@ -715,19 +733,52 @@ func (s *Site) guestLocked(j *Job, now time.Time) {
 		}
 		for _, id := range s.order {
 			h := s.jobs[id]
-			if h.State == Running && h.Account == j.Account && h.tailReal > 0 && !now.Add(j.runReal).After(h.StartAt.Add(h.runReal+h.tailReal)) {
+			if h.State != Running || h.Account != j.Account || h.tailReal <= 0 {
+				continue
+			}
+			end := h.StartAt.Add(h.runReal + h.tailReal)
+			if !now.Add(j.runReal).After(end) || (j.leadReal > 0 && !now.Add(j.leadReal).After(end)) {
 				j.host, j.takenAt, j.Reason = h.ID, now, "JobHeldUser"
 				j.Cm += fmt.Sprintf(" kaos-state=taken host=%d slot=1", h.ID)
+				s.stats.GuestsTaken++
 				return
 			}
 		}
 		return
 	}
-	if now.Sub(j.takenAt) >= j.runReal {
-		j.Cm = strings.Replace(j.Cm, fmt.Sprintf("kaos-state=taken host=%d slot=1", j.host),
-			fmt.Sprintf("kaos-state=done rc=0 host=%d start=%d", j.host, j.takenAt.Unix()), 1)
-		s.endLocked(j, Cancelled, 0, now)
+	end := s.jobs[j.host].StartAt.Add(s.jobs[j.host].runReal + s.jobs[j.host].tailReal)
+	runEnd := j.takenAt.Add(j.runReal)
+	if j.leadReal > 0 && end.Add(-j.leadReal).Before(runEnd) {
+		if now.Before(end.Add(-j.leadReal)) {
+			return
+		}
+		// Signalled before its run is over: it saves (one more checkpoint than it started from) and exits 85.
+		seq := 0
+		if atoi(j.Env[EnvSegments]) > 0 {
+			seq = ckptSeqOf(j.Env[EnvResumeRef]) + 1
+		}
+		s.stats.GuestsSignalled++
+		s.finishGuestLocked(j, now, ExitCodeContinue, seq)
+		return
 	}
+	if now.Before(runEnd) {
+		return
+	}
+	rc := 0
+	if j.endExit == ExitCodeContinue {
+		rc = ExitCodeContinue
+	}
+	s.finishGuestLocked(j, now, rc, j.ckptSeq)
+}
+
+// finishGuestLocked writes what the slot manager writes when a guest's step ends, and cancels the guest's job.
+func (s *Site) finishGuestLocked(j *Job, now time.Time, rc, seq int) {
+	done := fmt.Sprintf("kaos-state=done rc=%d host=%d start=%d", rc, j.host, j.takenAt.Unix())
+	if rc == ExitCodeContinue && seq > 0 {
+		done += fmt.Sprintf(" kaos-ckpt-seq=%d", seq)
+	}
+	j.Cm = strings.Replace(j.Cm, fmt.Sprintf("kaos-state=taken host=%d slot=1", j.host), done, 1)
+	s.endLocked(j, Cancelled, 0, now)
 }
 
 func atoi(s string) int { n, _ := strconv.Atoi(s); return n }
@@ -784,6 +835,10 @@ func (s *Site) advanceLocked(now time.Time) {
 	}
 	for _, id := range s.order {
 		j := s.jobs[id]
+		if j.State == Pending && j.guest && j.host == 0 && s.Opts.GuestAloneAfter > 0 &&
+			!now.Before(j.EligibleAt.Add(s.Opts.GuestAloneAfter)) {
+			j.guest = false // no host took it: it runs as a job of its own
+		}
 		if j.State == Pending && j.guest {
 			s.guestLocked(j, now)
 			continue
