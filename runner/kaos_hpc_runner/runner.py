@@ -23,8 +23,8 @@ from .reporter import OutputsTooLarge, Reporter, checkpoint_uri
 from .sharing import inputs_in_script
 from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_site_down, lane_refusal,
                     share_state, site_time, submit_limit_refusal)
-from .settings import (CHECKPOINT_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT, INVALID_IMAGE_EXIT, OFFER_S, ROLE_POLL_S,
-                       SUBMIT_LIMIT_EXIT, Settings, image_problem)
+from .settings import (CHECKPOINT_EXIT, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT, INVALID_IMAGE_EXIT, OFFER_S, ROLE_POLL_S,
+                       RESERVED_NAME_EXIT, STAGING_MISMATCH_EXIT, SUBMIT_LIMIT_EXIT, Settings, image_problem)
 
 POLL_S = 30
 # --cancel-only (the controller's orphan sweep, PRD AC-08): how long one such runner works before it gives up
@@ -548,6 +548,10 @@ class Runner:
         except staging.InsufficientQuota as e:
             imagemod.cleanup_images(self.stager)   # AC-65: free what no job names before the next attempt
             return self.end_no_quota(e)
+        except staging.StagingMismatch as e:
+            return self.end_before_staging('StagingMismatch', STAGING_MISMATCH_EXIT, e)
+        except staging.ReservedName as e:
+            return self.end_before_staging('ReservedName', RESERVED_NAME_EXIT, e)
         if adopted:
             print('adopting existing job', jid, flush=True)
         self.jid = jid
@@ -581,6 +585,19 @@ class Runner:
         print('ERROR: InsufficientQuota:', msg, flush=True)
         self.write_termination('InsufficientQuota: ' + msg)
         self.reporter.report(must=True, state='FAILED', exitCode=INSUFFICIENT_QUOTA_EXIT, terminal=True,
+                             endTime=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), message=msg[:500])
+        return 0
+
+    def end_before_staging(self, reason, code, err):
+        """Staging was refused before it began (PRD kaos#1911 F-04): the site's staging tool speaks another staging
+        contract than this runner (StagingMismatch, exit code 241), or the dataset holds an object whose name is
+        reserved for the platform (ReservedName, exit code 242). Nothing was staged and no site job was submitted.
+        The one terminal report says so (FAILED, a plain message); the controller ends the job with the reason and
+        settles nothing."""
+        msg = str(err)
+        print('ERROR: %s:' % reason, msg, flush=True)
+        self.write_termination('%s: %s' % (reason, msg))
+        self.reporter.report(must=True, state='FAILED', exitCode=code, terminal=True,
                              endTime=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), message=msg[:500])
         return 0
 
@@ -741,6 +758,8 @@ class Runner:
                         rc = int(share['rc']) if share.get('rc', '').isdigit() else 1
                         if rc == 0 and share.get('reason') in ('memkill', 'GPUViolation'):
                             rc = 1      # a step the slot manager stopped did not succeed, whatever exit code it left
+                        if share.get('reason') == 'GPUViolation':
+                            rc = GPU_VIOLATION_EXIT   # its own exit code, so the controller says why (not SiteFAILED)
                         print('ran on a shared node: host job', share.get('host'),
                               'exit:', share.get('rc'), 'reason:', share.get('reason'), flush=True)
                         st = ['COMPLETED'] if rc == 0 else ['FAILED']

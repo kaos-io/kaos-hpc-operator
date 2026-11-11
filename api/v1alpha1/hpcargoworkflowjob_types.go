@@ -55,7 +55,19 @@ const (
 	// ReasonInvalidImage: the step's image reference is not registry-host/repository with a tag or digest, so it
 	// can never be pulled. Refused at admission (nothing booked), or Failed when the runner finds it (exit
 	// ExitCodeInvalidImage, no site job). Terminal; no credential retry can fix it.
-	ReasonInvalidImage         = "InvalidImage"
+	ReasonInvalidImage = "InvalidImage"
+	// ReasonStagingMismatch: the site's staging tool and the runner speak different staging contracts (the two
+	// ship separately and one was updated first), so no copy of the dataset can be trusted to be whole
+	// (PRD kaos#1911 F-04). Failed before anything is staged or submitted; the runner reports it with
+	// ExitCodeStagingMismatch. Terminal: it ends when the other side is updated.
+	ReasonStagingMismatch = "StagingMismatch"
+	// ReasonReservedName: the dataset version holds an object whose name cannot be copied to the site. Either
+	// it is reserved for the platform there (a root name starting with ".kaos-", or a file name ending in
+	// ".kaos-part"), where it would be taken for a marker of the copy; or its path could leave the dataset's
+	// folder (a ".." or "." or empty part, a leading "/", a NUL byte). Failed before anything is staged or
+	// submitted; the runner reports it with ExitCodeReservedName and its message names the object and which of
+	// the two it is. Terminal: it ends with a new version of the dataset.
+	ReasonReservedName         = "ReservedName"
 	ReasonMultiNodeUnsupported = "MultiNodeUnsupported"
 	ReasonWallTimeOverLimit    = "WallTimeOverLimit"
 	// ReasonTooLongNotResumable: the declared limit is above the longest lane and the step is not
@@ -96,6 +108,18 @@ const (
 	ExitCodeSubmitLimit = int32(238)
 	// ExitCodeInvalidImage is the exit code the runner reports (state FAILED, no site job) for an unpullable image reference.
 	ExitCodeInvalidImage = int32(239)
+	// ReasonGPUViolation: on a node shared by several steps, the slot manager stopped this step for computing on a
+	// GPU outside its set. The runner reports ExitCodeGPUViolation for it; the attempt is Failed with this reason.
+	ReasonGPUViolation = "GPUViolation"
+	// ExitCodeGPUViolation is the exit code the runner reports for a step stopped for GPUViolation. Next to
+	// ExitCodeInvalidImage, in the same reserved range.
+	ExitCodeGPUViolation = int32(240)
+	// ExitCodeStagingMismatch is the exit code the runner reports (state FAILED, no site job) when the site's
+	// staging tool speaks another staging contract.
+	ExitCodeStagingMismatch = int32(241)
+	// ExitCodeReservedName is the exit code the runner reports (state FAILED, no site job) when the dataset
+	// holds an object whose name is reserved for the platform or whose path could leave the dataset's folder.
+	ExitCodeReservedName = int32(242)
 	// DefaultIdleTimeoutMinutes is the idle window of a step that does not set one (D-72).
 	DefaultIdleTimeoutMinutes = int32(20)
 	// ReasonSiteUnavailable: the site does not answer (connection errors, 5xx, timeouts, slurmctld down). The job

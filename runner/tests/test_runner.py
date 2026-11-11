@@ -265,6 +265,38 @@ def test_staging_that_does_not_fit_the_quota_ends_the_attempt_insufficient_quota
     assert "InsufficientQuota" in capsys.readouterr().out
 
 
+def test_a_staging_tool_of_another_contract_ends_the_attempt_staging_mismatch_without_submitting(rig, capsys):
+    """PRD kaos#1911 F-04: no site job, one terminal report (FAILED, exit 241, a plain message); not a fallback."""
+    slurm = FakeSlurm()
+    rig.make(slurm)
+
+    def mismatch(cfg, stager, mint, **kw):
+        raise staging_mod.StagingMismatch("the site's staging tool and this runner speak different staging contracts")
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", mismatch)
+    assert rig.runner.run() == 0
+    assert slurm.submitted == []
+    run = rig.kube.run
+    assert run["state"] == "FAILED" and run["exitCode"] == 241 and run["terminal"] is True
+    assert run["message"].startswith("the site's staging tool") and not run.get("siteJobID")
+    assert "StagingMismatch" in capsys.readouterr().out
+
+
+def test_a_dataset_with_a_reserved_name_ends_the_attempt_reserved_name_without_submitting(rig, capsys):
+    """No site job, one terminal report (FAILED, exit 242, the object and the rule); not a fallback."""
+    slurm = FakeSlurm()
+    rig.make(slurm)
+
+    def reserved(cfg, stager, mint, **kw):
+        raise staging_mod.ReservedName("dataset d@c has an object named '.kaos-ready'")
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", reserved)
+    assert rig.runner.run() == 0
+    assert slurm.submitted == []
+    run = rig.kube.run
+    assert run["state"] == "FAILED" and run["exitCode"] == 242 and run["terminal"] is True
+    assert ".kaos-ready" in run["message"] and not run.get("siteJobID")
+    assert "ReservedName" in capsys.readouterr().out
+
+
 def test_an_image_that_does_not_fit_the_quota_also_ends_insufficient_quota(rig):
     slurm = FakeSlurm()
     rig.make(slurm)
@@ -1021,17 +1053,28 @@ def test_a_resumable_guest_that_saved_is_reported_like_a_resumable_step_alone(ri
 
 def test_a_step_the_slot_manager_stopped_is_a_failure_even_with_exit_0__live_job_5442274(rig):
     """Live 2026-11-10: `reason=GPUViolation` with rc 0 ended the HPC job Succeeded. Whatever exit code an older
-    slot manager wrote, a memkill or GPUViolation step is FAILED, as a guest and as a host's own step."""
-    for reason in ("GPUViolation", "memkill"):
+    slot manager wrote, a memkill or GPUViolation step is FAILED, as a guest and as a host's own step. A
+    GPUViolation reports exit 240 so the controller records the reason (live 2026-11-11 job 5447505 read SiteFAILED)."""
+    for reason, code in (("GPUViolation", 240), ("memkill", 1)):
         taken = acc("PENDING", comment="kaos-state=taken host=5442272 slot=2 attempt=1")
         done = acc("CANCELLED", comment="kaos-state=done rc=0 host=5442272 reason=" + reason, start=4294967294, end=0)
         rig.make(FakeSlurm({"5001": [taken, done], "5442272": [acc("RUNNING")]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
         rig.runner.run()
-        assert (rig.kube.run["state"], rig.kube.run["exitCode"]) == ("FAILED", 1), reason
+        assert (rig.kube.run["state"], rig.kube.run["exitCode"]) == ("FAILED", code), reason
     own = acc("COMPLETED", comment="kaos-state=done rc=0 reason=GPUViolation", start=1762300800, end=1762301400)
     rig.make(FakeSlurm({"5001": [own]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
     rig.runner.run()
-    assert (rig.kube.run["state"], rig.kube.run["exitCode"]) == ("FAILED", 1)
+    assert (rig.kube.run["state"], rig.kube.run["exitCode"]) == ("FAILED", 240)
+
+
+def test_a_guest_stopped_for_gpu_violation_reports_its_exit_code__live_job_5447505(rig):
+    """Live 2026-11-11: the slot manager stopped guest 5447505 (`rc=137 reason=GPUViolation`); the job read
+    SiteFAILED with exit 137, though the client docs name the reason GPUViolation."""
+    taken = acc("PENDING", comment="kaos-state=taken host=5447506 slot=2 attempt=1")
+    done = acc("CANCELLED", comment="kaos-state=done rc=137 host=5447506 reason=GPUViolation", start=4294967294, end=0)
+    rig.make(FakeSlurm({"5001": [taken, done], "5447506": [acc("RUNNING")]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    rig.runner.run()
+    assert (rig.kube.run["state"], rig.kube.run["exitCode"], rig.kube.run["hostSiteJobID"]) == ("FAILED", 240, "5447506")
 
 
 # ---------------------------------------------------------------- the controller's batched reading (D-36)
