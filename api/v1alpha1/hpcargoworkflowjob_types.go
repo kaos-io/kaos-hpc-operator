@@ -325,6 +325,37 @@ type GPUUtilization struct {
 	MaxPercent int32 `json:"maxPercent"`
 }
 
+// Staging kinds: how the dataset copy on the site's scratch came to be.
+const (
+	StagingFirst  = "first"  // no earlier version of the repository was on scratch: the whole commit was copied
+	StagingDelta  = "delta"  // only what differs from an earlier version was copied
+	StagingCached = "cached" // the commit was already on scratch: nothing was copied
+)
+
+// StagingStatus says how the step's dataset was staged on the site's scratch before the site job was
+// submitted. It is bounded (one short record, no paths) and set by the runner; the follower prints it
+// as one line in the step's log.
+type StagingStatus struct {
+	// Repo is the dataset repository's name.
+	// +kubebuilder:validation:MaxLength=128
+	Repo string `json:"repo"`
+	// Commit is the pinned commit, shortened to 12 characters.
+	// +kubebuilder:validation:MaxLength=12
+	Commit string `json:"commit"`
+	// Kind is first, delta or cached.
+	// +kubebuilder:validation:Enum=first;delta;cached
+	Kind string `json:"kind"`
+	// Files is the number of files copied in this staging (0 when cached).
+	// +kubebuilder:validation:Minimum=0
+	Files int32 `json:"files"`
+	// Bytes is the number of bytes copied in this staging (0 when cached).
+	// +kubebuilder:validation:Minimum=0
+	Bytes int64 `json:"bytes"`
+	// Seconds is how long the staging took (0 when cached).
+	// +kubebuilder:validation:Minimum=0
+	Seconds int32 `json:"seconds"`
+}
+
 // QueueReplacedKept is how many replacements status.run.queueReplaced (and an attempt record) lists: the
 // newest. The count of all of them is kept apart.
 const QueueReplacedKept = 5
@@ -415,6 +446,11 @@ type RunStatus struct {
 	// +listMapKey=gpu
 	// +optional
 	GPUUtilization []GPUUtilization `json:"gpuUtilization,omitempty"`
+	// Staging says how the dataset was staged before submit (first copy, delta or already cached; what was
+	// copied and how long it took). Absent when the step has no dataset or the job stages it itself. The
+	// follower prints it as one "HPC: dataset ... staged" line.
+	// +optional
+	Staging *StagingStatus `json:"staging,omitempty"`
 	// QueueReplaced lists the newest replacements of a queued site job of this attempt (at most
 	// QueueReplacedKept, oldest first); QueueReplacedCount counts all of them. A queued job is replaced
 	// before its credentials expire, which loses its place in the site's queue (AC-35).

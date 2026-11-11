@@ -99,6 +99,9 @@ var _ = Describe("HPC budget policy", func() {
 		Expect(events()).To(ContainElement(And(ContainSubstring("Warning BudgetWarning"), ContainSubstring("60%"))))
 		Expect(testutil.ToFloat64(metrics.BudgetWarning.WithLabelValues("meluxina", project, "gpu"))).To(Equal(1.0))
 		Expect(testutil.ToFloat64(metrics.BudgetPercent.WithLabelValues("meluxina", project, "gpu"))).To(Equal(70.0))
+		// The same figure is in status (additive), and a tier with no allowance publishes -1.
+		Expect(siteNow().Status.GPU.Percent).To(Equal(int32(70)))
+		Expect(siteNow().Status.CPU.Percent).To(Equal(int32(-1)))
 
 		// Another job and a resync while still above: no second event, the condition stays True.
 		submit(30)
@@ -120,6 +123,7 @@ var _ = Describe("HPC budget policy", func() {
 		Expect(submit(30).Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted)) // (420+30)/600 = 75%
 		Expect(warning().Status).To(Equal(metav1.ConditionFalse))
 		Expect(testutil.ToFloat64(metrics.BudgetPercent.WithLabelValues("meluxina", project, "gpu"))).To(Equal(75.0))
+		Expect(siteNow().Status.GPU.Percent).To(Equal(int32(75)), "status.gpu.percent is against the grant too")
 		Expect(events()).NotTo(ContainElement(ContainSubstring("BudgetWarning")))
 
 		Expect(submit(30).Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted)) // (420+60)/600 = 80%
@@ -127,6 +131,7 @@ var _ = Describe("HPC budget policy", func() {
 		Expect(warning().Reason).To(Equal(hpcv1alpha1.ReasonThresholdCrossed))
 		Expect(events()).To(ContainElement(And(ContainSubstring("Warning BudgetWarning"), ContainSubstring("80%"))))
 		Expect(testutil.ToFloat64(metrics.BudgetWarning.WithLabelValues("meluxina", project, "gpu"))).To(Equal(1.0))
+		Expect(siteNow().Status.GPU.Percent).To(Equal(int32(80)))
 		Expect(siteNow().Status.GPU.LeftNodeMinutes).To(Equal(int64(120)), "admission keeps counting the remainder: 180 - 60 booked")
 
 		// The period resets: the site reports the new month's allocation (left = grant) and the jobs are

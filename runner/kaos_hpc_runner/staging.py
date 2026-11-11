@@ -223,15 +223,23 @@ class Stager:
         return rc, events
 
 
-def stage_once(stager, repo, ref, commit, lakefs, wallet):
+def staging_record(repo, commit, kind, files=0, nbytes=0, seconds=0):
+    """status.run.staging (bounded, no paths): how the dataset came to be on scratch. The follower prints it."""
+    return {'repo': repo, 'commit': commit[:12], 'kind': kind, 'files': int(files), 'bytes': int(nbytes),
+            'seconds': int(seconds)}
+
+
+def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
     # One staging attempt. Returns (path, retry): the ready path, or '' with
-    # whether a later attempt can help.
+    # whether a later attempt can help. info (a dict) receives the staging record when the copy is ready.
     rc, ev = stager(['status', '--repo', repo, '--commit', commit, '--ref', ref])
     st = next((e for e in reversed(ev) if e.get('event') == 'status'), None)
     if rc != 0 or st is None:
         return '', rc in (EX_RETRY, 255)
     if st.get('ready'):
         print('stage: cache hit', st['path'], flush=True)
+        if info is not None:
+            info.update(staging_record(repo, commit, 'cached'))
         return st['path'], False
     api = lakefs + '/api/v1/repositories/' + urllib.parse.quote(repo, safe='')
     # The dataset sits at the repository root; is_dataset_path() keeps the rest out.
@@ -267,6 +275,10 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet):
     rc, ev = stager(words, feed())
     done = next((e for e in reversed(ev) if e.get('event') == 'done'), None)
     if rc == 0 and done:
+        if info is not None:
+            # A stage another runner finished while this one waited for the stager's lock is a cache hit.
+            info.update(staging_record(repo, commit, 'cached') if done.get('cached') else staging_record(
+                repo, commit, 'delta' if base else 'first', need_files, need_bytes))
         return done['path'], False
     if rc == EX_NOSPACE:
         print('stage: NOT ENOUGH SPACE on MeluXina scratch for this version even after'
@@ -283,10 +295,12 @@ def ssh_present():
     return shutil.which('ssh') is not None
 
 
-def stage_dataset(cfg, stager, mint_wallet):
+def stage_dataset(cfg, stager, mint_wallet, info=None):
     """The resident path of the dataset's pinned commit, or '' (the job then stages in-job). The commit is
     the one the pipeline pinned (spec.dataset); nothing is resolved here. Raises InsufficientQuota when
-    the dataset does not fit the project's scratch quota (AC-33): the one failure that is not a fallback."""
+    the dataset does not fit the project's scratch quota (AC-33): the one failure that is not a fallback.
+    info (a dict), when given, receives the staging record (staging_record) once the copy is resident; it stays
+    empty when the job stages in-job."""
     repo, ref, commit = cfg.dataset_repo, cfg.dataset_ref, cfg.dataset_commit
     lakefs = cfg.lakefs_url
     if not (repo and lakefs and stager.have_key()):
@@ -299,11 +313,12 @@ def stage_dataset(cfg, stager, mint_wallet):
     if not ssh_present():
         print('stage: no ssh client - the job stages in-job', flush=True)
         return ''
-    deadline, attempt = time.time() + STAGE_BUDGET_S, 0
+    began = time.time()
+    deadline, attempt = began + STAGE_BUDGET_S, 0
     while True:
         attempt += 1
         try:
-            path, retry = stage_once(stager, repo, ref, commit, lakefs, wallet)
+            path, retry = stage_once(stager, repo, ref, commit, lakefs, wallet, info)
         except InsufficientQuota:
             raise
         except Exception as e:
@@ -312,6 +327,8 @@ def stage_dataset(cfg, stager, mint_wallet):
         if path or not retry or time.time() > deadline:
             break
         time.sleep(min(60 * attempt, 600))
+    if path and info and info.get('kind') != 'cached':
+        info['seconds'] = int(time.time() - began)    # the whole staging, including resumed attempts
     if not path:
         print('stage: NOT STAGED - the job will download the dataset in-job on GPU time',
               flush=True)

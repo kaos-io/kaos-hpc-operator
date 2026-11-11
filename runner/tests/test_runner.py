@@ -254,7 +254,7 @@ def test_staging_that_does_not_fit_the_quota_ends_the_attempt_insufficient_quota
     slurm = FakeSlurm()
     rig.make(slurm)
 
-    def no_room(cfg, stager, mint):
+    def no_room(cfg, stager, mint, **kw):
         raise staging_mod.InsufficientQuota("not enough room on the project's scratch for dataset d@c")
     rig.monkeypatch.setattr(runmod.staging, "stage_dataset", no_room)
     assert rig.runner.run() == 0
@@ -268,7 +268,7 @@ def test_staging_that_does_not_fit_the_quota_ends_the_attempt_insufficient_quota
 def test_an_image_that_does_not_fit_the_quota_also_ends_insufficient_quota(rig):
     slurm = FakeSlurm()
     rig.make(slurm)
-    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", lambda cfg, st, mint: "")
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", lambda cfg, st, mint, **kw: "")
 
     def no_room(img, tok, st, strict=False):
         assert strict, "the first submit is strict"
@@ -496,6 +496,17 @@ def test_pull_resubmits_are_bounded(rig):
     rig.runner.run()
     assert len(slurm.submitted) == 1 + runmod.PULL_RESUBMITS
     assert rig.kube.run["terminal"] is True and rig.kube.run["exitCode"] == 231
+
+
+def test_the_dataset_staging_record_is_reported_from_the_first_report_on(rig):
+    """The follower prints it as one line: it must be in status.run while the job still queues."""
+    slurm = FakeSlurm({"5001": [acc("PENDING"), acc("COMPLETED")]})
+    rig.make(slurm)
+    rec = {"repo": "ds", "commit": "c2" * 6, "kind": "delta", "files": 3, "bytes": 1234, "seconds": 12}
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", lambda cfg, st, mint, info=None: info.update(rec) or "/p")
+    rig.runner.run()
+    runs = [c[2]["status"]["run"] for c in rig.kube.patches() if "run" in c[2]["status"]]
+    assert runs[0]["state"] == "PENDING" and runs[0]["staging"] == rec and runs[-1]["staging"] == rec
 
 
 def test_a_queued_job_is_replaced_before_its_wallet_expires(rig, monkeypatch):

@@ -68,6 +68,8 @@ type follower struct {
 	last view
 	// lastPlacement is the last placement text printed (see showPlacement).
 	lastPlacement string
+	// lastStaging is the dataset staging line already printed (see showStaging).
+	lastStaging string
 	// lastWarning is the time-limit warning already printed.
 	lastWarning string
 }
@@ -189,6 +191,7 @@ func (f *follower) show(job *hpcv1alpha1.HPCArgoWorkflowJob) {
 	if job.Status.Run != nil {
 		v.siteJob = job.Status.Run.SiteJobID
 	}
+	defer f.showStaging(job)
 	defer f.showPlacement(job)
 	if v == f.last {
 		return

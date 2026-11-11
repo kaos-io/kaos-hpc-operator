@@ -18,7 +18,7 @@ K8S_SA = '/var/run/secrets/kubernetes.io/serviceaccount'
 K8S_API = 'https://kubernetes.default.svc'
 RUN_FIELDS = ('attempt', 'siteJobID', 'state', 'exitCode', 'startTime', 'endTime', 'terminal',
               'hostSiteJobID', 'slot', 'hostJobOpen', 'hostJobEndTime', 'checkpointRef', 'checkpoint', 'logOffset', 'lastLog', 'message',
-              'gpuUtilization', 'queueReplaced', 'queueReplacedCount')
+              'gpuUtilization', 'staging', 'queueReplaced', 'queueReplacedCount')
 QUEUE_REPLACED_KEPT = 5   # status.run.queueReplaced keeps the newest; queueReplacedCount counts all
 CANCEL_ANNOTATION = 'hpc.kaos.io/cancel-requested'
 OUTPUTS_MAX_BYTES = 64 * 1024   # total of the declared outputs' JSON text (contract section 1)
@@ -58,6 +58,7 @@ class Reporter:
         self.attempt = cfg.attempt
         self.log_offset = None      # the log streamer's committed offset, written with every report
         self.gpu_util = None        # the log streamer's per-GPU last/max utilisation (AC-69), written likewise
+        self.staging = None         # how the dataset was staged (staging.staging_record), written with every report
         self.queue_replaced = []    # the newest replacements of a queued site job (AC-35), written with every report
         self.queue_replaced_count = 0   # all of them, also the ones no longer listed
         # The QoS and reservation the site job was submitted with (None: not known to this runner,
@@ -134,6 +135,7 @@ class Reporter:
             run['logOffset'] = self.log_offset
         if 'gpuUtilization' not in run:
             run['gpuUtilization'] = self.gpu_util
+        run['staging'] = self.staging
         # Every report carries the replacements (the run is written whole, a merge patch keeps no list).
         run['queueReplaced'] = list(self.queue_replaced) or None
         run['queueReplacedCount'] = self.queue_replaced_count or None
@@ -160,6 +162,21 @@ class Reporter:
         """A restarted runner of the same attempt carries on from what the earlier one reported."""
         self.queue_replaced = list(run.get('queueReplaced') or [])[-QUEUE_REPLACED_KEPT:]
         self.queue_replaced_count = max(int(run.get('queueReplacedCount') or 0), len(self.queue_replaced))
+
+    def restore_staging(self, run):
+        """A restarted runner of the same attempt keeps the record its predecessor reported: its own staging
+        finds the copy resident and would otherwise overwrite "first copy" with "already cached"."""
+        self.staging = run.get('staging') or None
+
+    def note_staging(self, info):
+        """The staging record of this runner (empty: the job stages in-job). A cache hit never replaces the record of
+        the same commit that an earlier runner of this attempt reported."""
+        if not info:
+            return
+        old = self.staging
+        if info.get('kind') == 'cached' and old and (old.get('repo'), old.get('commit')) == (info['repo'], info['commit']):
+            return
+        self.staging = dict(info)
 
     def note_replacement(self, new, old, reason, queued):
         """A queued site job was replaced (its queue place is lost): keep the newest QUEUE_REPLACED_KEPT

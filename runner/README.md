@@ -17,7 +17,7 @@ Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /ru
 | `settings.py` | all inputs, read once from the controller's env; identity, class, dataset, sharing, resume |
 | `slurm.py` | slurmrestd/slurmdbd client (token re-read per request), comment/share parsing, `host_gone` |
 | `wallet.py` | Zitadel wallet mint (RS256 in stdlib, no PyJWT), image WORKDIR lookup |
-| `staging.py` | `Stager` (ssh to the forced-command stager), dataset staging |
+| `staging.py` | `Stager` (ssh to the forced-command stager), dataset staging, `staging_record` (the bounded `status.run.staging`: kind first/delta/cached, files, bytes, seconds; the follower prints one line from it) |
 | `image.py` | registry client, docker-archive streaming, `image_key` (tar name = SIF name = `kaos-image=` lease, always in the job comment), `cleanup_images` (asks the stager's `gc` when an attempt is over; AC-65) |
 | `jobscript.py` | the batch script (+ KAOS_METRIC sampler, tar deletion after SIF build) |
 | `payload/` | on-node programs: stagein/stageout/ckpt/slots/idlewatch (`payloads.py` loads them) |

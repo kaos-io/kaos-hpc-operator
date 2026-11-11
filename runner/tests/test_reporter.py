@@ -172,3 +172,28 @@ def test_queue_replacements_keep_the_newest_and_count_all_and_a_restarted_runner
     r2.report(siteJobID="9", state="PENDING")
     assert kube2.run["queueReplacedCount"] == 9 and len(kube2.run["queueReplaced"]) == rep.QUEUE_REPLACED_KEPT
     assert kube2.run["queueReplaced"][-1]["reason"] == "HostLost"
+
+
+def test_the_staging_record_rides_every_report_and_a_restarted_runner_keeps_the_first_copy():
+    info = {"repo": "ds", "commit": "c2" * 6, "kind": "first", "files": 2, "bytes": 14, "seconds": 9}
+    r, kube = _reporter()
+    r.note_staging(info)
+    r.report(siteJobID="1", state="PENDING")
+    r.report(siteJobID="1", state="RUNNING")
+    assert kube.run["staging"] == info
+    # The runner restarts in the same attempt: its own staging finds the copy resident ("cached") and must not
+    # replace what the first one reported; another commit does replace it.
+    r2, kube2 = _reporter()
+    r2.restore_staging(kube.run)
+    r2.note_staging(dict(info, kind="cached", files=0, bytes=0, seconds=0))
+    r2.report(siteJobID="1", state="RUNNING")
+    assert kube2.run["staging"] == info
+    r2.note_staging(dict(info, commit="d3" * 6, kind="delta"))
+    assert r2.staging["kind"] == "delta"
+
+
+def test_no_staging_record_is_sent_when_the_job_stages_in_job():
+    r, kube = _reporter()
+    r.note_staging({})
+    r.report(siteJobID="1", state="PENDING")
+    assert "staging" not in kube.run

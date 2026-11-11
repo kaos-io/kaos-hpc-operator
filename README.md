@@ -103,7 +103,7 @@ allocation and no cross-project sum: each project's share is its own.
 the class's `tier` (`gpu`, `cpu`, `fpga`, `largemem`) names the allocation a step spends. Each has its own figure in
 `spec.budget` (and `siteLeft`), its own ledger in `status.gpu`, `status.cpu`, `status.fpga`, `status.largeMem`
 (`usedNodeMinutes`, `bookedNodeMinutes`, `leftNodeMinutes`; the existing fields are unchanged, the two new ones
-are additive), its own admission check, its own settlement (an attempt settles into the tier it booked) and its own
+are additive; `percent` is the warning percentage, -1 when there is none), its own admission check, its own settlement (an attempt settles into the tier it booked) and its own
 warning percentage. A spent allocation blocks only the steps that spend it: a CPU allocation with nothing left refuses
 (`SiteLimit` / `BudgetBlocked`) or holds (`WaitingForBudget`) CPU steps with a message that names the CPU allocation,
 and GPU, FPGA and large-memory steps are admitted as before. Whoever renders the `HPCSite` from the site's accounting
@@ -161,7 +161,7 @@ One image holds everything; the entrypoint is chosen by `command`:
 | Entrypoint | Who runs it |
 |---|---|
 | `/manager` | the controller (chart Deployment) |
-| `/follower` | the credential-free pipeline step: creates the job (`hpc-<20 hex of sha256(WF_UID/NODE_KEY)>`, owned by the Workflow), prints changes, writes `/tmp/outputs/<n>.json` and `/tmp/slurm-job-id`, exits 0 only on `Succeeded` |
+| `/follower` | the credential-free pipeline step: creates the job (`hpc-<20 hex of sha256(WF_UID/NODE_KEY)>`, owned by the Workflow), prints changes (the lane and time limit while it waits, and one `HPC: dataset <repo>@<commit> staged (first copy | delta | already cached), <size>, <seconds>s` line from `status.run.staging`; see `docs/reasons.md`), writes `/tmp/outputs/<n>.json` and `/tmp/slurm-job-id`, exits 0 only on `Succeeded` |
 | `python3 -u /runner/main.py` | the runner Job (source in `runner/`) |
 
 The runner's environment is built **only by the controller**: from the spec (`IMAGE_REF`,

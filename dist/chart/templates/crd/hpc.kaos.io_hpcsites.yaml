@@ -557,6 +557,15 @@ spec:
                       zero.
                     format: int64
                     type: integer
+                  percent:
+                    description: |-
+                      Percent is the share of the month's allowance that is spent or committed, rounded down: the figure
+                      the BudgetWarning condition and the kaos_hpc_budget_percent metric use (ledger.Tier.Percent; with a
+                      grant under source site it is against the grant). -1 when there is nothing to be a percentage of
+                      (unbounded, or no allowance). Always written, so 0 means 0 percent, not unknown.
+                    format: int32
+                    minimum: -1
+                    type: integer
                   unbounded:
                     description: |-
                       Unbounded is true when the site gave no figure for this allocation (source site, AC-84): nothing
@@ -585,6 +594,15 @@ spec:
                       zero.
                     format: int64
                     type: integer
+                  percent:
+                    description: |-
+                      Percent is the share of the month's allowance that is spent or committed, rounded down: the figure
+                      the BudgetWarning condition and the kaos_hpc_budget_percent metric use (ledger.Tier.Percent; with a
+                      grant under source site it is against the grant). -1 when there is nothing to be a percentage of
+                      (unbounded, or no allowance). Always written, so 0 means 0 percent, not unknown.
+                    format: int32
+                    minimum: -1
+                    type: integer
                   unbounded:
                     description: |-
                       Unbounded is true when the site gave no figure for this allocation (source site, AC-84): nothing
@@ -611,6 +629,15 @@ spec:
                     description: LeftNodeMinutes = share - used - booked, never below
                       zero.
                     format: int64
+                    type: integer
+                  percent:
+                    description: |-
+                      Percent is the share of the month's allowance that is spent or committed, rounded down: the figure
+                      the BudgetWarning condition and the kaos_hpc_budget_percent metric use (ledger.Tier.Percent; with a
+                      grant under source site it is against the grant). -1 when there is nothing to be a percentage of
+                      (unbounded, or no allowance). Always written, so 0 means 0 percent, not unknown.
+                    format: int32
+                    minimum: -1
                     type: integer
                   unbounded:
                     description: |-
@@ -640,6 +667,15 @@ spec:
                     description: LeftNodeMinutes = share - used - booked, never below
                       zero.
                     format: int64
+                    type: integer
+                  percent:
+                    description: |-
+                      Percent is the share of the month's allowance that is spent or committed, rounded down: the figure
+                      the BudgetWarning condition and the kaos_hpc_budget_percent metric use (ledger.Tier.Percent; with a
+                      grant under source site it is against the grant). -1 when there is nothing to be a percentage of
+                      (unbounded, or no allowance). Always written, so 0 means 0 percent, not unknown.
+                    format: int32
+                    minimum: -1
                     type: integer
                   unbounded:
                     description: |-
