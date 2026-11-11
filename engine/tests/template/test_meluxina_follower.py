@@ -54,7 +54,7 @@ def test_no_template_is_named_meluxina_run(hpc):
     assert "meluxina-run" not in names
     assert meluxina.HPC_TWIN_TEMPLATE in names
     called = {t.get("template") for t in next(t for t in wf["spec"]["templates"] if "dag" in t)["dag"]["tasks"]
-              if t["name"].endswith("-meluxina")}
+              if t["name"].endswith("-hpc")}
     assert called == {meluxina.HPC_TWIN_TEMPLATE}
 
 
@@ -70,7 +70,7 @@ def test_serve_env_is_the_follower_interface(serve):
                                         "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}}
     want = {"WF_NAME": "{{workflow.name}}", "WF_UID": "{{workflow.uid}}",
             "STEP_NAME": "{{inputs.parameters.step-name}}",
-            "NODE_KEY": "{{inputs.parameters.step-name}}-meluxina",
+            "NODE_KEY": "{{inputs.parameters.step-name}}-hpc",
             "IMAGE_REF": "{{inputs.parameters.image}}", "STEP_COMMAND": "{{inputs.parameters.step-command}}",
             "SLURM_TIME_LIMIT": "{{inputs.parameters.time-limit}}", "HPC_CLASS": "{{inputs.parameters.hpc-class}}",
             "HPC_RESUMABLE_LEAD": "{{inputs.parameters.resumable-lead}}",
@@ -80,7 +80,8 @@ def test_serve_env_is_the_follower_interface(serve):
             "STEP_OUTPUTS": "{{inputs.parameters.step-outputs}}"}
     for k, v in want.items():
         assert env[k]["value"] == v, k
-    for k in ("DATASET", "OUTPUTS_REPO", "OUTPUTS_REF", "CHECKPOINT_BUCKET", "CHECKPOINT_PREFIX"):
+    assert env["DATASET_PIN"]["value"] == "{{inputs.parameters.dataset-pin}}"
+    for k in ("OUTPUTS_REPO", "OUTPUTS_REF", "CHECKPOINT_BUCKET", "CHECKPOINT_PREFIX"):
         assert k in env, k
 
 
@@ -88,7 +89,7 @@ def test_serve_env_is_only_the_allowlist_and_interface(serve):
     allowed = {"HPC_JOB_NAMESPACE", "WF_NAME", "WF_UID", "STEP_NAME", "NODE_KEY", "IMAGE_REF", "STEP_COMMAND",
                "SLURM_TIME_LIMIT", "HPC_CLASS", "HPC_RESUMABLE_LEAD", "HPC_RESUMABLE", "HPC_IDLE_TIMEOUT_MINUTES", "HPC_MAX_CONTINUATIONS",
                "STEP_OUTPUTS",
-               "DATASET", "HPC_SHARING", "HPC_SCOPE", "OUTPUTS_REPO", "OUTPUTS_REF", "CHECKPOINT_BUCKET",
+               "DATASET_PIN", "HPC_SHARING", "HPC_SCOPE", "OUTPUTS_REPO", "OUTPUTS_REF", "CHECKPOINT_BUCKET",
                "CHECKPOINT_PREFIX", meluxina.KAOS_LIB_SUPPORT_ENV}
     assert set(_env(_tpl(serve))) <= allowed
 
@@ -107,7 +108,7 @@ def test_serve_keeps_inputs_outputs_deadline_retry_labels(serve):
     new = _tpl(serve)
     assert {p["name"] for p in new["inputs"]["parameters"]} == {
         "step-name", "image", "step-command", "time-limit", "deadline-seconds", "step-outputs", "hpc-class",
-        "resumable-lead", "resumable", "idle-timeout"}
+        "resumable-lead", "resumable", "idle-timeout", "dataset-pin"}
     assert new["activeDeadlineSeconds"] == "{{inputs.parameters.deadline-seconds}}"
     assert new["retryStrategy"]["retryPolicy"] == "Always" and new["retryStrategy"]["limit"] == "2"
     assert new["retryStrategy"]["expression"] == meluxina.POD_LOSS_RETRY
@@ -140,7 +141,7 @@ def test_node_key_is_unique_per_twin_and_stable_across_retries(serve):
     dag = next(t for t in serve["spec"]["templates"] if t["name"] == serve["spec"]["entrypoint"])
     twins = [t for t in dag["dag"]["tasks"] if t.get("template") == "hpc-follower"]
     assert twins
-    keys = [next(p["value"] for p in t["arguments"]["parameters"] if p["name"] == "step-name") + "-meluxina"
+    keys = [next(p["value"] for p in t["arguments"]["parameters"] if p["name"] == "step-name") + "-hpc"
             for t in twins]
     assert keys == [t["name"] for t in twins]
     assert len(set(keys)) == len(keys)

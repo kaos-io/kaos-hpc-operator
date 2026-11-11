@@ -148,7 +148,7 @@ engine-corpus: engine-venv ## Render every historical template state and the lab
 	KAOS_ENGINE_CORPUS_DIR=$(CORPUS_DIR) PYTHONDONTWRITEBYTECODE=1 $(ENGINE_PY) -m pytest -c engine/pytest.ini engine/tests/test_corpus.py -q
 
 .PHONY: lint-engine
-lint-engine: engine-venv ## Run ruff on the engine's own Python (the byte-copied kubecore/ and the template tests are excluded).
+lint-engine: engine-venv ## Run ruff on the engine's own Python (kubecore/ and the template tests are excluded).
 	cd engine && $(ENGINE_VENV)/bin/ruff check --config ruff.toml .
 
 ##@ Build

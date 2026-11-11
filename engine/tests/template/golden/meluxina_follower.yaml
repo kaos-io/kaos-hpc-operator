@@ -15,6 +15,8 @@ inputs:
     value: auto
   - name: idle-timeout
     value: ''
+  - name: dataset-pin
+    value: '{}'
 activeDeadlineSeconds: '{{inputs.parameters.deadline-seconds}}'
 retryStrategy:
   limit: '2'
@@ -35,10 +37,6 @@ outputs:
     valueFrom:
       path: /tmp/outputs/dataset-info.json
       default: '{}'
-  - name: params
-    valueFrom:
-      path: /tmp/outputs/params.json
-      default: '{}'
 container:
   image: registry.example/kaos-hpc-operator:v1.2.3
   command:
@@ -55,7 +53,7 @@ container:
   - name: STEP_NAME
     value: '{{inputs.parameters.step-name}}'
   - name: NODE_KEY
-    value: '{{inputs.parameters.step-name}}-meluxina'
+    value: '{{inputs.parameters.step-name}}-hpc'
   - name: IMAGE_REF
     value: '{{inputs.parameters.image}}'
   - name: STEP_COMMAND
@@ -74,8 +72,8 @@ container:
     value: '5'
   - name: STEP_OUTPUTS
     value: '{{inputs.parameters.step-outputs}}'
-  - name: DATASET
-    value: '{{workflow.parameters.dataset}}'
+  - name: DATASET_PIN
+    value: '{{inputs.parameters.dataset-pin}}'
   - name: OUTPUTS_REPO
     value: outputs-PLACEHOLDER-app
   - name: OUTPUTS_REF
@@ -84,4 +82,5 @@ container:
     value: outputs-PLACEHOLDER-app
   - name: CHECKPOINT_PREFIX
     value: main/checkpoints
+  terminationMessagePolicy: FallbackToLogsOnError
 serviceAccountName: hpc-submitter

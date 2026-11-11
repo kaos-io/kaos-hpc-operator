@@ -32,10 +32,21 @@ Failure modes concentrated here, all before any GPU time:
 - ADVANCED override with unknown keys -> struct-mode merge rejects it
 - ADVANCED override touching platform.* -> hard error (below)
 - params.yaml too large         -> explicit size check (>200KB)
+- a data input a step reads does not resolve (no such dataset or version, lakeFS
+  unreachable, no credentials)  -> hard error naming the form field (below)
+
+The run's data lock: every data input a step reads (today the `dataset` leaf, when a
+step declares reads=["dataset"]) is resolved ONCE here, with kaos-lib, to a commit,
+and written as --lock-output in kaos-lib's lock format. Every step receives it as
+$KAOS_LIB_LOCK, an HPC step as its job's dataset commit, so the whole run reads one
+commit whatever happens to the dataset meanwhile. Nothing is skipped: a reference
+that cannot be resolved fails the run here. --offline (for a laptop without the
+platform; never in a rendered pipeline) resolves nothing and writes an empty lock.
 """
 
 import argparse
 import json
+import os
 import re
 import sys
 from enum import Enum
@@ -48,6 +59,16 @@ from omegaconf.nodes import BooleanNode, EnumNode, FloatNode, IntegerNode, Strin
 from kubecore import derive_tree
 
 MAX_PARAMS_BYTES = 200 * 1024
+DATASET_FIELD = "dataset"          # the top-level config leaf and form field that names the run's dataset
+EMPTY_LOCK = '{"version":1,"reads":[]}'
+NO_PIN = "{}"   # the dataset pin of a run without a dataset: never an empty value (an empty output parameter is
+                # the one thing a workflow engine may treat as "not set")
+STEP_IMAGES_ENV = "KAOS_STEP_IMAGES"   # {"<step>": "<the image the run resolved for it>"}, set by the enhancer
+# registry[:port]/repository[/...] then :tag or @digest. A reference without a registry and a repository is what
+# the image record holds for a step whose image was never built (":<step>-latest").
+# A tag, a digest, or both (a tag with its digest is a valid reference).
+_IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?(/[A-Za-z0-9][A-Za-z0-9._-]*)+"
+                        r"(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}(@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})\Z")
 
 HERE = Path(__file__).parent  # kubecore/
 DEFAULT_OUTPUT = HERE.parent / "out" / "params.yaml"
@@ -260,6 +281,106 @@ def compose_and_validate(overrides: list, advanced: str = "", required: list = N
     return text
 
 
+def check_step_images(raw) -> None:
+    """Refuse the run when a step has no real image, before any step starts.
+
+    A step added to pipeline.py appears in the released pipeline before its first image is built; until then
+    its image reference has no registry and no repository, and the run would fail later with an image pull
+    error (or, on HPC, after a queue wait). `raw` is $KAOS_STEP_IMAGES; absent means nothing to check.
+    """
+    if not raw:
+        return
+    try:
+        images = json.loads(raw)
+        if not isinstance(images, dict):
+            raise ValueError("not a JSON object")
+    except ValueError as exc:
+        raise ComposeError(f"cannot read the steps' images ({STEP_IMAGES_ENV}: {exc})") from None
+    # Every step is checked, also one a `when=` would skip in this run: whether it is skipped is not known
+    # here, and a pipeline whose step has never been built is not a pipeline to start.
+    bad = {step: ref for step, ref in images.items()
+           if not isinstance(ref, str) or not _IMAGE_REF.match(ref.strip())}
+    if bad:
+        listed = ", ".join(f"{step} ({ref!r})" for step, ref in sorted(bad.items()))
+        raise ComposeError(
+            f"no image has been built yet for: {listed}. The platform builds a step's image after you push; "
+            "wait for the app's build to finish (or see why it failed), then run again"
+        )
+
+
+_COMMIT = re.compile(r"^[0-9a-f]{64}$")
+DATASET_PREFIX = "dataset-"   # a platform Dataset is a repository named dataset-<name>
+LAKEFS_TIMEOUT_S = 30     # per request; kaos-lib retries a failing GET a few times, so a dead lakeFS ends the run in minutes
+
+
+def _kaos_lib():
+    """kaos-lib's datasets and lock modules and a lakeFS client with a short per-request timeout."""
+    try:
+        from kaos_lib import datasets, lock
+        from kaos_lib.lakefs import LakeFS
+    except ImportError as exc:
+        raise ComposeError(f"{DATASET_FIELD}: cannot resolve the dataset: kaos-lib is not installed in the "
+                           f"compose image ({exc}). The platform's compose image installs it.") from None
+    # A lock in this pod's own environment would be REPLAYED by kaos-lib: the resolve below would return its
+    # commit without asking lakeFS. This step is the one that decides the commit, so it never replays one.
+    os.environ.pop("KAOS_LIB_LOCK", None)
+    lock.reset()
+    try:
+        client = LakeFS.connect()
+        client.timeout = LAKEFS_TIMEOUT_S
+    except Exception as exc:   # no endpoint or no credentials: the run cannot read its data either
+        raise ComposeError(f"{DATASET_FIELD}: cannot reach the project's data: {exc}") from None
+    return datasets, lock, client
+
+
+def data_lock(resolved: dict, required: list, offline: bool = False, datasets=None, lock=None, client=None) -> tuple:
+    """(the run's data lock, the run's dataset pin, the dataset reference as the lock holds it); the first two
+    are JSON text, the third is "" when nothing was pinned.
+
+    The lock (kaos-lib's format) holds the commit of every data input a step reads; every step gets it as
+    $KAOS_LIB_LOCK. The pin is the same fact for the run's dataset as one object,
+    `{"repo", "version", "commit", "owner"}` (`{}` when the run has none): an HPC step's job is created from it,
+    so a cluster step and an HPC step can never disagree about what the run reads. The reference is what the
+    caller writes into the params every step reads, so a step always asks the lock in the form the lock holds.
+
+    `resolved` is the composed config, `required` the sections steps declared with reads=. Only a `dataset`
+    some step reads is resolved, and only when it is a string: a config that carries a `dataset` no step reads,
+    or a `dataset` section that is a mapping of the app's own settings, costs nothing and cannot fail the run.
+    `datasets`/`lock`/`client` default to kaos-lib's (tests pass their own).
+    """
+    wanted = resolved.get(DATASET_FIELD) if DATASET_FIELD in (required or []) else None
+    if offline or wanted is None or (isinstance(wanted, str) and not wanted.strip()):
+        return EMPTY_LOCK, NO_PIN, ""
+    if not isinstance(wanted, str):
+        print(f"compose-and-validate: `{DATASET_FIELD}` is not a <dataset>@<version> string: nothing is pinned for "
+              "this run", file=sys.stderr)
+        return EMPTY_LOCK, NO_PIN, ""
+    if datasets is None or lock is None:
+        datasets, lock, client = _kaos_lib()
+    try:
+        ref = datasets.DatasetRef.parse(wanted)
+        if not str(ref.repo).startswith(DATASET_PREFIX):
+            raise ValueError(f"{ref.repo} is not a dataset: a dataset is a repository named {DATASET_PREFIX}<name> "
+                             f"(for example {DATASET_PREFIX}default@latest)")
+        commit = datasets.resolve(ref, client)
+    except Exception as exc:   # no such dataset or version, lakeFS unreachable, no credentials: all end the run
+        raise ComposeError(f"{DATASET_FIELD}: cannot use {wanted!r}: {exc}") from None
+    if not isinstance(commit, str) or not _COMMIT.match(commit):
+        raise ComposeError(f"{DATASET_FIELD}: cannot use {wanted!r}: the data store answered with {commit!r} "
+                           "where a commit id was expected")
+    reads = json.loads(lock.current().to_json()).get("reads") or []
+    read = next((r for r in reads if r.get("repo") == ref.repo and r.get("ref") == ref.version
+                 and r.get("commit") == commit), None)
+    if read is None:
+        raise ComposeError(f"{DATASET_FIELD}: cannot use {wanted!r}: resolving it recorded no read "
+                           f"(the lock holds {reads!r})")
+    text = lock.current().to_json()
+    pin = json.dumps({"repo": read["repo"], "version": read["ref"], "commit": commit,
+                      "owner": read.get("owner") or ""}, separators=(",", ":"))
+    canonical = f"{read['owner']}/{read['repo']}@{read['ref']}" if read.get("owner") else f"{read['repo']}@{read['ref']}"
+    return text, pin, canonical
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="Compose and validate the experiment config.")
     parser.add_argument("--advanced", default="", help="ADVANCED override YAML, merged last.")
@@ -268,13 +389,35 @@ def main(argv=None) -> None:
     parser.add_argument("--render-defaults", default="{}",
                         help="JSON manifest {override_key: render-time default} for elision.")
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
+    parser.add_argument("--lock-output", default="",
+                        help="Where to write the run's data lock (JSON). Without it nothing is resolved.")
+    parser.add_argument("--pin-output", default="",
+                        help="Where to write the run's dataset pin (JSON, empty when the run has no dataset).")
+    parser.add_argument("--offline", action="store_true",
+                        help="Resolve nothing and write an empty data lock (a laptop without the platform).")
     parser.add_argument("overrides", nargs="*", help="Hydra override tokens (key=value).")
     args = parser.parse_args(argv)
 
     try:
+        check_step_images(os.environ.get(STEP_IMAGES_ENV))
         text = compose_and_validate(
             args.overrides, args.advanced, args.require, json.loads(args.render_defaults)
         )
+        lock_text, pin_text = EMPTY_LOCK, NO_PIN
+        if args.lock_output or args.pin_output:
+            if args.offline:
+                print("compose-and-validate: OFFLINE - no data input was resolved; the data lock is empty",
+                      file=sys.stderr)
+            resolved = yaml.safe_load(text) or {}
+            lock_text, pin_text, canonical = data_lock(resolved, args.require, args.offline)
+            if canonical and resolved.get(DATASET_FIELD) != canonical:
+                # A reference that names the own project as owner resolves, and is locked, without one. Every
+                # step reads the dataset from these params: they get the reference exactly as the lock holds
+                # it, so the lock always answers, on a cluster and on HPC alike.
+                print(f"compose-and-validate: {DATASET_FIELD} {resolved[DATASET_FIELD]!r} is {canonical!r} for this run",
+                      file=sys.stderr)
+                resolved[DATASET_FIELD] = canonical
+                text = OmegaConf.to_yaml(OmegaConf.create(resolved), resolve=True)
     except Exception as exc:  # any composition failure = hard error, pre-GPU
         message = str(exc)
         if exc.__cause__ is not None:  # e.g. enum ValidationError inside Hydra's wrapper
@@ -286,6 +429,11 @@ def main(argv=None) -> None:
     out.parent.mkdir(exist_ok=True)
     out.write_text(text)
     print(f"wrote {out} ({len(text.encode())} bytes)")
+    for target, body in ((args.lock_output, lock_text), (args.pin_output, pin_text)):
+        if target:
+            Path(target).parent.mkdir(exist_ok=True)
+            Path(target).write_text(body)
+            print(f"wrote {target} ({body})")
 
 
 if __name__ == "__main__":

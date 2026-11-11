@@ -30,6 +30,8 @@ func run() int {
 	cfg, err := follower.ConfigFromEnv(os.Getenv)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "follower:", err)
+		// The step's message in the run is the pod's termination message: say why there, not only in the log.
+		_ = os.WriteFile("/dev/termination-log", []byte(err.Error()), 0o644)
 		return follower.ExitFailed
 	}
 	scheme := runtime.NewScheme()

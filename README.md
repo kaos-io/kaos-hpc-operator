@@ -133,7 +133,7 @@ One image holds everything; the entrypoint is chosen by `command`:
 | `python3 -u /runner/main.py` | the runner Job (source in `runner/`) |
 
 The runner's environment is built **only by the controller**: from the spec (`IMAGE_REF`,
-`STEP_COMMAND`, `SLURM_TIME_LIMIT`, `STEP_OUTPUTS`, `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `DATASET`,
+`STEP_COMMAND`, `SLURM_TIME_LIMIT`, `STEP_OUTPUTS`, `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `DATASET_REPO`/`DATASET_VERSION`/`DATASET_COMMIT`/`DATASET_OWNER` (the dataset as the pipeline pinned it, from `spec.dataset`),
 `HPC_SCOPE`, resume info `KAOS_RESUME_REF`, and the allowlisted `spec.env`: `OUTPUTS_REPO`,
 `OUTPUTS_REF`, `CHECKPOINT_BUCKET`, `CHECKPOINT_PREFIX`, `KAOS_LIB_SUPPORT`), from the HPCSite
 (`HPC_ACCOUNT`, `HPC_USER`, `HPC_SCRATCH`, `HPC_HOME`, `HPC_CLASSES_JSON`, `HPC_ENDPOINT`), and

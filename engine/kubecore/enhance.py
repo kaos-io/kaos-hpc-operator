@@ -71,6 +71,7 @@ developer's repo pins.
 """
 
 import argparse
+import json
 from pathlib import Path
 
 import yaml
@@ -977,6 +978,32 @@ def enhance_platform_group(steps: list, ctx: dict) -> None:
     compose["container"]["args"] = tokens + args
 
 
+STEP_IMAGES_ENV = "KAOS_STEP_IMAGES"
+
+
+def enhance_image_guard(steps: list) -> None:
+    """Hand the compose step the image every other step will run, as the run resolved it.
+
+    A step's image is a workflow parameter read from the app's image record when a run starts. A step that
+    was just added has no built image yet and its record is a reference without registry or repository;
+    the compose step (kubecore/compose.py check_step_images) refuses such a run before any step starts.
+    Steps with a verbatim `image` annotation have no parameter and are not listed.
+    """
+    compose = next((s for s in steps if s["name"] == "compose-and-validate"), None)
+    if compose is None:
+        return
+    images = {}
+    for step in steps:
+        image = (step.get("container") or {}).get("image") or ""
+        if step is not compose and image == f"{{{{workflow.parameters.image-{step['name']}}}}}":
+            images[step["name"]] = image
+    if not images:
+        return
+    env = compose["container"].setdefault("env", [])
+    if not any(e.get("name") == STEP_IMAGES_ENV for e in env):
+        env.append({"name": STEP_IMAGES_ENV, "value": json.dumps(images, separators=(",", ":"), sort_keys=True)})
+
+
 def enhance_pipeline_info(spec: dict, ctx: dict, steps: list) -> None:
     """Read-only documentation parameter, first in the form (like the
     live WFT's pipeline-info)."""
@@ -1100,6 +1127,7 @@ def enhance(wft: dict, ctx: dict) -> dict:
         enhance_volumes(step, annots, ctx)
         enhance_resilience(spec, step, ctx, annots, gpu, inject_disabled(annots, "lakefs"), shared)
         enhance_connections(step, ctx)
+    enhance_image_guard(steps)
     enhance_workspace_pvc(spec, steps)
     enhance_platform_group(steps, ctx)
     enhance_pipeline_info(spec, ctx, steps)

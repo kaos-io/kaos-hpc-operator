@@ -90,6 +90,9 @@ func (r *HPCArgoWorkflowJobReconciler) serveGate(ctx context.Context, job *hpcv1
 		return res, true, err
 	}
 	if job.Status.Booking == nil {
+		if err := runnerjob.ValidateDataset(&job.Spec); err != nil {
+			return ctrl.Result{}, true, r.setPhase(ctx, job, hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonInvalidSpec, err.Error(), nil)
+		}
 		if err := runnerjob.ValidateEnv(job.Spec.Env); err != nil {
 			return ctrl.Result{}, true, r.setPhase(ctx, job, hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonInvalidSpec, err.Error(), nil)
 		}

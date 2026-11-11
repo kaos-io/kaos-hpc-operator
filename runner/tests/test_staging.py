@@ -54,9 +54,8 @@ class _Stager:
 
 
 def _twin(monkeypatch, lakefs, stager, **env):
-    summary = json.dumps({"dataset_commit": COMMIT})
-    over = {"STEP_COMMAND": json.dumps(["python", "-m", "train", "--dataset-info", summary]),
-            "DATASET": "dataset-poulaki@latest", "LAKEFS_EXTERNAL_URL": "https://lakefs.example/"}
+    over = {"DATASET_REPO": "dataset-poulaki", "DATASET_VERSION": "latest", "DATASET_COMMIT": COMMIT,
+            "LAKEFS_EXTERNAL_URL": "https://lakefs.example/"}
     over.update(env)
     cfg = helpers.settings(**over)
     monkeypatch.setattr(urllib.request, "urlopen", lakefs)
@@ -78,7 +77,7 @@ def test_first_copy_streams_every_dataset_object(monkeypatch):
     lakefs = _LakeFS({"data.yaml": 4, "images/a.jpg": 10, "README.md": 99})
     stager = _Stager({"ready": False, "base": None})
     cfg = _twin(monkeypatch, lakefs, stager)
-    assert _stage(cfg, stager)[0].endswith(COMMIT)
+    assert _stage(cfg, stager).endswith(COMMIT)
     words, records = _stage_call(stager)
     assert "--base" not in words
     assert words[words.index("--need-bytes") + 1] == 14 and words[words.index("--need-files") + 1] == 2
@@ -98,7 +97,7 @@ def test_delta_lists_only_the_two_dot_diff_against_the_base(monkeypatch):
         {"type": "removed", "path": "images/gone.jpg", "size_bytes": 3}])
     stager = _Stager({"ready": False, "base": BASE, "base_files": 10, "base_prefix": ""})
     cfg = _twin(monkeypatch, lakefs, stager)
-    assert _stage(cfg, stager)[0]
+    assert _stage(cfg, stager)
     words, records = _stage_call(stager)
     assert words[words.index("--base") + 1] == BASE
     assert words[words.index("--need-files") + 1] == 2 and words[words.index("--need-bytes") + 1] == 12
@@ -112,7 +111,7 @@ def test_a_base_with_another_layout_is_not_used(monkeypatch):
     lakefs = _LakeFS({"images/a.jpg": 1})
     stager = _Stager({"ready": False, "base": BASE, "base_files": 10, "base_prefix": "dataset/"})
     cfg = _twin(monkeypatch, lakefs, stager)
-    assert _stage(cfg, stager)[0]
+    assert _stage(cfg, stager)
     assert "--base" not in _stage_call(stager)[0]
 
 
@@ -120,7 +119,7 @@ def test_a_ready_copy_is_never_listed_again(monkeypatch):
     lakefs = _LakeFS({"images/a.jpg": 1})
     stager = _Stager({"ready": True})
     cfg = _twin(monkeypatch, lakefs, stager)
-    assert _stage(cfg, stager)[0].endswith(COMMIT)
+    assert _stage(cfg, stager).endswith(COMMIT)
     assert lakefs.urls == [] and [w[0] for w, _ in stager.calls] == ["status"]
 
 
@@ -128,7 +127,7 @@ def test_retry_resumes_and_no_space_stops_insufficient_quota(monkeypatch):
     lakefs = _LakeFS({"images/a.jpg": 1})
     stager = _Stager({"ready": False, "base": None}, stage_rcs=[75, 0])
     cfg = _twin(monkeypatch, lakefs, stager)
-    assert _stage(cfg, stager)[0], "exit 75 (dropped session, busy lock) is retried"
+    assert _stage(cfg, stager), "exit 75 (dropped session, busy lock) is retried"
     stager = _Stager({"ready": False, "base": None}, stage_rcs=[76, 0])
     cfg = _twin(monkeypatch, lakefs, stager)
     with pytest.raises(staging.InsufficientQuota) as e:
@@ -140,13 +139,13 @@ def test_retry_resumes_and_no_space_stops_insufficient_quota(monkeypatch):
 def test_without_the_staging_key_the_job_stages_in_job(monkeypatch):
     stager = _Stager({"ready": True}, key=False)
     cfg = _twin(monkeypatch, _LakeFS({}), stager)
-    assert _stage(cfg, stager) == ("", COMMIT) and stager.calls == []
+    assert _stage(cfg, stager) == "" and stager.calls == []
 
 
 def test_without_a_wallet_the_job_stages_in_job(monkeypatch):
     stager = _Stager({"ready": True})
     cfg = _twin(monkeypatch, _LakeFS({}), stager)
-    assert _stage(cfg, stager, wallet="") == ("", COMMIT) and stager.calls == []
+    assert _stage(cfg, stager, wallet="") == "" and stager.calls == []
 
 
 def test_a_failed_feed_ends_the_stream_without_an_end_record(monkeypatch, tmp_path):
@@ -187,24 +186,16 @@ def test_the_stager_is_reached_on_the_sites_login_node_as_the_project_user(monke
     assert "UserKnownHostsFile=%s/known_hosts" % tmp_path in args and args[-2] == "status --repo r"
 
 
-def test_the_first_step_pins_the_commit_by_resolving_the_dataset_ref(monkeypatch):
-    """No upstream recorded a dataset_commit: the runner resolves it, so the stager is keyed by
-    repository and commit even for the first step of a run."""
-    class Resolving(_LakeFS):
-        def __call__(self, req, timeout=0):
-            url = req.full_url if hasattr(req, "full_url") else req
-            if "/commits?" in url:
-                self.urls.append(url)
-                return io.BytesIO(json.dumps({"results": [{"id": COMMIT}]}).encode())
-            return super().__call__(req, timeout)
-    lakefs = Resolving({"images/a.jpg": 1})
+def test_the_runner_never_resolves_a_version(monkeypatch):
+    """The commit comes from the job (spec.dataset, pinned by the pipeline's compose step): staging asks
+    lakeFS for that commit's objects only, never for what a version points at."""
+    lakefs = _LakeFS({"images/a.jpg": 1})
     stager = _Stager({"ready": False, "base": None})
-    cfg = _twin(monkeypatch, lakefs, stager, STEP_COMMAND=json.dumps(["python", "-m", "first"]),
-                DATASET="dataset-poulaki@v3")
-    path, pinned = _stage(cfg, stager)
-    assert path.endswith(COMMIT) and pinned == COMMIT
-    assert any("/repositories/dataset-poulaki/refs/v3/commits?amount=1" in u for u in lakefs.urls)
-
+    cfg = _twin(monkeypatch, lakefs, stager, DATASET_VERSION="v3")
+    assert _stage(cfg, stager).endswith(COMMIT)
+    assert lakefs.urls and not any("/commits" in u for u in lakefs.urls)
+    assert all("/refs/%s/" % COMMIT in u for u in lakefs.urls)
+    assert not hasattr(staging, "resolve_commit")
 
 
 def _fake_ssh(tmp_path, master_rc=0):

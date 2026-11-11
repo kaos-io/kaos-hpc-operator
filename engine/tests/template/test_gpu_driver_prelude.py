@@ -76,7 +76,7 @@ def test_should_keep_the_prelude_out_of_the_hpc_twin_and_the_follower():
     tpls = _render(copy.deepcopy(BASE))
     assert tpls["train"]["container"]["command"][:4] == PRELUDE_HEAD  # the KAOS (in-cluster) leg is wrapped
     dag = next(t for t in tpls.values() if "dag" in t)["dag"]["tasks"]
-    twin = next(t for t in dag if t["name"] == "train-" + BASE["hpc"]["provider"])
+    twin = next(t for t in dag if t["name"] == "train-" + meluxina.HPC_TWIN_SUFFIX)
     cmd = next(p["value"] for p in twin["arguments"]["parameters"] if p["name"] == "step-command")
     assert enhance.GPU_PRELUDE_NAME not in cmd and "nvidia" not in cmd and "app.entry" in cmd
     assert enhance.GPU_PRELUDE_NAME not in str(tpls[meluxina.HPC_TWIN_TEMPLATE])

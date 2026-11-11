@@ -51,17 +51,6 @@ def quota_message(what, need_bytes, need_files):
             % (what, human_bytes(need_bytes), need_files))
 
 
-def resolve_commit(repo, ref, lakefs, wallet):
-    """ref -> commit for a first step that has no upstream pin. The commit log
-    (amount=1) is the proven endpoint: GET /refs/{ref} does not exist on our
-    lakeFS version. Tags and branches both work as {ref}."""
-    url = (lakefs + '/api/v1/repositories/' + urllib.parse.quote(repo, safe='')
-           + '/refs/' + urllib.parse.quote(ref, safe='') + '/commits?amount=1')
-    page = json.load(urllib.request.urlopen(urllib.request.Request(
-        url, headers={'Authorization': 'Bearer ' + wallet}), timeout=60))
-    return page['results'][0]['id']
-
-
 def lakefs_pages(url, wallet, params):
     # Every object of a paginated lakeFS listing (objects/ls or diff).
     after = ''
@@ -295,30 +284,21 @@ def ssh_present():
 
 
 def stage_dataset(cfg, stager, mint_wallet):
-    """(resident path of the pinned commit or '' (the job stages in-job), the commit pinned for this
-    run: the upstream pin, else resolved here, else ''). Raises InsufficientQuota when the dataset does
-    not fit the project's scratch quota (AC-33): the one failure that is not a fallback."""
-    repo, ref = cfg.dataset_coords()
-    commit = cfg.pinned_commit()
+    """The resident path of the dataset's pinned commit, or '' (the job then stages in-job). The commit is
+    the one the pipeline pinned (spec.dataset); nothing is resolved here. Raises InsufficientQuota when
+    the dataset does not fit the project's scratch quota (AC-33): the one failure that is not a fallback."""
+    repo, ref, commit = cfg.dataset_repo, cfg.dataset_ref, cfg.dataset_commit
     lakefs = cfg.lakefs_url
     if not (repo and lakefs and stager.have_key()):
-        print('stage: skipped (needs the dataset parameter, the lakeFS'
-              ' endpoint and the staging key) - the job stages in-job', flush=True)
-        return '', commit
+        print('stage: skipped (needs a dataset, the lakeFS endpoint and the staging key)'
+              ' - the job stages in-job', flush=True)
+        return ''
     wallet = mint_wallet()
     if not wallet:
-        return '', commit
-    if not commit:
-        # The first step of the run: nothing upstream pinned a commit, so pin it
-        # here (the step then resolves the same ref; a vN tag cannot move).
-        try:
-            commit = resolve_commit(repo, ref, lakefs, wallet)
-        except Exception as e:
-            print('stage: cannot resolve %s@%s (%s) - the job stages in-job' % (repo, ref, e), flush=True)
-            return '', commit
+        return ''
     if not ssh_present():
         print('stage: no ssh client - the job stages in-job', flush=True)
-        return '', commit
+        return ''
     deadline, attempt = time.time() + STAGE_BUDGET_S, 0
     while True:
         attempt += 1
@@ -335,4 +315,4 @@ def stage_dataset(cfg, stager, mint_wallet):
     if not path:
         print('stage: NOT STAGED - the job will download the dataset in-job on GPU time',
               flush=True)
-    return path, commit
+    return path

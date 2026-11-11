@@ -24,7 +24,7 @@
    "required": false,
    "default": false,
    "type": "boolean",
-   "doc": "The step needs one GPU; only GPU steps run on the HPC target."
+   "doc": "The step needs one GPU."
   },
   {
    "name": "needs",
@@ -63,7 +63,7 @@
    "default": null,
    "type": "string",
    "pattern": "^[0-9]+[mh]?$",
-   "doc": "Slurm wall-clock limit of a gpu=True step on the HPC target: '90m', '12h' or '720' (minutes)."
+   "doc": "Slurm wall-clock limit of the step when it runs on an HPC class: '90m', '12h' or '720' (minutes)."
   },
   {
    "name": "resumable",
@@ -74,7 +74,7 @@
     "string"
    ],
    "pattern": "^[0-9]+[mh]?$",
-   "doc": "gpu=True only. True or a lead time ('20m', '1h'): how long before the HPC wall time the step is told to save its checkpoint; False opts out.",
+   "doc": "True or a lead time ('20m', '1h'): how long before the HPC wall time the step is told to save its checkpoint; False opts out.",
    "true_means": "10m"
   },
   {

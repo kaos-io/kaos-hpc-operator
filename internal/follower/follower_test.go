@@ -361,7 +361,7 @@ func podEnv(extra map[string]string) func(string) string {
 		"HPC_JOB_NAMESPACE": "ns", "WF_NAME": "wf-1", "WF_UID": "uid-1", "STEP_NAME": "train", "NODE_KEY": "train-meluxina",
 		"IMAGE_REF": "img:1", "STEP_COMMAND": `["python","train.py"]`, "SLURM_TIME_LIMIT": "60", "HPC_CLASS": "meluxina-gpu",
 		"HPC_RESUMABLE_LEAD": "0", "HPC_RESUMABLE": "auto", "HPC_IDLE_TIMEOUT_MINUTES": "", "HPC_MAX_CONTINUATIONS": "5",
-		"STEP_OUTPUTS": "model,metrics", "DATASET": "", "OUTPUTS_REPO": "outputs-app", "OUTPUTS_REF": "main",
+		"STEP_OUTPUTS": "model,metrics", "DATASET_PIN": "", "OUTPUTS_REPO": "outputs-app", "OUTPUTS_REF": "main",
 		"CHECKPOINT_BUCKET": "outputs-app", "CHECKPOINT_PREFIX": "main/checkpoints",
 	}
 	for k, v := range extra {
@@ -424,5 +424,111 @@ func TestShouldReattachToTheJobAsTheAPIServerStoredItAndRefuseRealConflicts(t *t
 				t.Fatalf("want a re-attach, exit %d:\n%s", code, h.out)
 			}
 		})
+	}
+}
+
+func TestTheJobsDatasetIsExactlyWhatTheComposeStepPinned(t *testing.T) {
+	commit := strings.Repeat("c2", 32)
+	pin := `{"repo":"dataset-a","version":"latest","commit":"` + commit + `","owner":""}`
+	cfg, err := ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": pin}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := cfg.Job().Spec.Dataset; d == nil || d.Repo != "dataset-a" || d.Version != "latest" || d.Commit != commit || d.Owner != "" {
+		t.Errorf("spec.dataset = %+v", d)
+	}
+	if cfg.Job().Spec.DatasetRef != "" {
+		t.Error("the deprecated datasetRef is never written")
+	}
+	branch := `{"repo":"dataset-a","version":"feature/x","commit":"` + commit + `","owner":""}`
+	if cfg, err = ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": branch})); err != nil || cfg.Dataset.Version != "feature/x" {
+		t.Errorf("a branch as version is fine: %+v, %v", cfg.Dataset, err)
+	}
+	for _, none := range []string{"", "  \n", "{}", " {}\n"} {
+		if cfg, err = ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": none})); err != nil || cfg.Job().Spec.Dataset != nil {
+			t.Errorf("no dataset: no pin and no error, got %+v, %v", cfg.Dataset, err)
+		}
+	}
+}
+
+// Nothing but a complete pin of the project's own dataset becomes a job: every other value fails the step
+// with a reason, and never yields a job without its data.
+func TestAPinThatIsNotCompleteAndOwnIsRefused(t *testing.T) {
+	commit := strings.Repeat("c2", 32)
+	for name, pin := range map[string]string{
+		"not json":         "{",
+		"an array":         "[]",
+		"two values":       `{"repo":"dataset-a","version":"v1","commit":"` + commit + `"} {}`,
+		"unknown field":    `{"repo":"dataset-a","version":"v1","commit":"` + commit + `","endpoint":"https://evil.example"}`,
+		"no commit":        `{"repo":"dataset-a","version":"v1"}`,
+		"short commit":     `{"repo":"dataset-a","version":"v1","commit":"abc123"}`,
+		"upper commit":     `{"repo":"dataset-a","version":"v1","commit":"` + strings.ToUpper(commit) + `"}`,
+		"no repo":          `{"version":"v1","commit":"` + commit + `"}`,
+		"one-letter repo":  `{"repo":"x","version":"v1","commit":"` + commit + `"}`,
+		"not a dataset":    `{"repo":"models-v2","version":"v1","commit":"` + commit + `"}`,
+		"outputs repo":     `{"repo":"outputs-app","version":"main","commit":"` + commit + `"}`,
+		"bare prefix":      `{"repo":"dataset-","version":"v1","commit":"` + commit + `"}`,
+		"repo with slash":  `{"repo":"a/b","version":"v1","commit":"` + commit + `"}`,
+		"repo upper case":  `{"repo":"Dataset-A","version":"v1","commit":"` + commit + `"}`,
+		"no version":       `{"repo":"dataset-a","commit":"` + commit + `"}`,
+		"version option":   `{"repo":"dataset-a","version":"--base=/etc","commit":"` + commit + `"}`,
+		"version shell":    `{"repo":"dataset-a","version":"x; rm -rf /","commit":"` + commit + `"}`,
+		"version dot-dot":  `{"repo":"dataset-a","version":"a/../b","commit":"` + commit + `"}`,
+		"version slashes":  `{"repo":"dataset-a","version":"a//b","commit":"` + commit + `"}`,
+		"version trailing": `{"repo":"dataset-a","version":"a/","commit":"` + commit + `"}`,
+		"version too long": `{"repo":"dataset-a","version":"` + strings.Repeat("v", 256) + `","commit":"` + commit + `"}`,
+		"version subshell": `{"repo":"dataset-a","version":"$(id)","commit":"` + commit + `"}`,
+		"shared dataset":   `{"repo":"dataset-a","version":"v1","commit":"` + commit + `","owner":"other"}`,
+	} {
+		cfg, err := ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": pin}))
+		if err == nil {
+			t.Errorf("%s: expected an error, got dataset %+v", name, cfg.Dataset)
+		}
+	}
+	_, err := ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": `{"repo":"dataset-a","version":"v1","commit":"` + commit + `","owner":"other"}`}))
+	if err == nil || !strings.Contains(err.Error(), "cannot be read on HPC yet") {
+		t.Errorf("a shared dataset is refused with what to do instead, got %v", err)
+	}
+}
+
+// A pipeline released before the run's data was pinned names a dataset and no commit: the step fails and
+// says the pipeline is being re-released, instead of creating a job without data.
+func TestAPipelineReleasedBeforeThePinIsRefused(t *testing.T) {
+	_, err := ConfigFromEnv(podEnv(map[string]string{"DATASET": "dataset-a@latest"}))
+	if err == nil || !strings.Contains(err.Error(), "released before the platform update") {
+		t.Errorf("got %v", err)
+	}
+}
+
+// A cluster whose CRD is older than this follower would drop spec.dataset and run the step without its data.
+// The follower creates strictly (such a cluster refuses the create), and when a server stores the job without
+// the dataset anyway, the follower removes the job and fails the step.
+func TestAJobStoredWithoutItsDatasetIsRemovedAndTheStepFails(t *testing.T) {
+	pin := `{"repo":"dataset-a","version":"latest","commit":"` + strings.Repeat("c2", 32) + `","owner":""}`
+	cfg, err := ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": pin}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict := false
+	h := newHarness(t, interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, o ...client.CreateOption) error {
+		opts := &client.CreateOptions{}
+		opts.ApplyOptions(o)
+		strict = opts.FieldValidation == "Strict"
+		obj.(*hpcv1alpha1.HPCArgoWorkflowJob).Spec.Dataset = nil // what an older CRD does to the field
+		return c.Create(ctx, obj, o...)
+	}})
+	if code := h.run(context.Background(), cfg); code != ExitFailed {
+		t.Fatalf("exit %d, want the step to fail", code)
+	}
+	if !strict {
+		t.Error("the job must be created with strict field validation")
+	}
+	if !strings.Contains(h.out.String(), "without its dataset dataset-a@latest") {
+		t.Errorf("the reason must be printed:\n%s", h.out)
+	}
+	var left hpcv1alpha1.HPCArgoWorkflowJob
+	key := client.ObjectKey{Namespace: cfg.Namespace, Name: JobName(cfg.WorkflowUID, cfg.NodeKey)}
+	if err := h.c.Get(context.Background(), key, &left); !apierrors.IsNotFound(err) {
+		t.Errorf("the job without its data must be gone, got err=%v", err)
 	}
 }

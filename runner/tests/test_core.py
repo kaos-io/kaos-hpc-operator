@@ -138,15 +138,50 @@ def test_the_job_name_carries_the_hpc_job_and_the_attempt():
 
 # ---------------------------------------------------------------- dataset
 
-def test_dataset_coordinates_and_the_upstream_pin():
-    assert helpers.settings().dataset_coords() == ("dataset-default", "main")
-    assert helpers.settings(DATASET="dataset-cars@v3").dataset_coords() == ("dataset-cars", "v3")
-    assert helpers.settings(DATASET=None).dataset_coords() == ("", "")
-    with pytest.raises(SystemExit):
-        helpers.settings(DATASET="cars@latest").dataset_coords()
-    summary = json.dumps({"dataset_commit": "c0ffee12"})
-    assert helpers.settings(STEP_COMMAND=json.dumps(["x", "--info", summary])).pinned_commit() == "c0ffee12"
-    assert helpers.settings().pinned_commit() == ""
+def test_the_dataset_is_the_pinned_commit_and_nothing_is_resolved():
+    commit = "c0ffee12" + "0" * 56
+    cfg = helpers.settings()
+    assert (cfg.dataset_repo, cfg.dataset_ref, cfg.dataset_commit) == ("dataset-default", "main", commit)
+    cfg.check_dataset()
+    assert helpers.settings(DATASET_REPO="my-repo", DATASET_VERSION="v3").dataset_ref == "v3", "any repository"
+    assert json.loads(cfg.data_lock()) == {"version": 1, "reads": [
+        {"repo": "dataset-default", "owner": None, "ref": "latest", "commit": commit}]}
+    none = helpers.settings(DATASET_REPO=None, DATASET_VERSION=None, DATASET_COMMIT=None)
+    assert none.dataset_repo == "" and none.data_lock() == ""
+    none.check_dataset()
+
+
+@pytest.mark.parametrize("env, said", [
+    ({"DATASET_COMMIT": None}, "has no pinned commit"),
+    ({"DATASET_COMMIT": "c0ffee12"}, "has no pinned commit"),
+    ({"DATASET_COMMIT": "main"}, "has no pinned commit"),
+    ({"DATASET_OWNER": "other-project"}, "cannot be read on HPC yet"),
+    # a job stored before the run's data was pinned, as this controller passes it on
+    ({"DATASET_REPO": None, "DATASET_VERSION": None, "DATASET_COMMIT": None, "DATASET_UNPINNED": "dataset-a@latest"},
+     "without a pinned commit"),
+    # the same job under an older controller's environment (DATASET only)
+    ({"DATASET_REPO": None, "DATASET_VERSION": None, "DATASET_COMMIT": None, "DATASET": "dataset-a@latest"},
+     "without a pinned commit"),
+])
+def test_an_attempt_whose_dataset_cannot_be_staged_as_pinned_never_starts_and_says_why(env, said, capsys):
+    cfg = helpers.settings(**env)          # reading the settings never ends the process ...
+    with pytest.raises(SystemExit) as exc:
+        cfg.check_dataset()                # ... starting an attempt does, before staging and before any submit
+    assert exc.value.code == 1 and said in capsys.readouterr().out
+
+
+def test_the_cancel_only_runner_is_never_stopped_by_the_dataset_check(monkeypatch):
+    """The controller sends a cancel-only runner after an attempt that died without a report. If the dataset
+    check ended it too, the controller would keep sending cancel runners until its give-up time (hours)."""
+    from kaos_hpc_runner import runner as runmod
+    called = []
+    monkeypatch.setattr(runmod.Runner, "cancel_only", lambda self: called.append("cancel") or 0)
+    for extra in ({"DATASET_OWNER": "other-project"}, {"DATASET_COMMIT": None},
+                  {"DATASET_REPO": None, "DATASET_VERSION": None, "DATASET_COMMIT": None,
+                   "DATASET_UNPINNED": "dataset-a@latest"}):
+        env = {k: v for k, v in dict(helpers.BASE_ENV, **extra).items() if v is not None}
+        assert runmod.main(env, ["--cancel-only"]) == 0
+    assert called == ["cancel"] * 3
 
 
 # ---------------------------------------------------------------- Slurm readings
@@ -326,3 +361,12 @@ def test_main_py_is_the_entrypoint_the_job_runs(tmp_path):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("HPC_", "KAOS_", "PYTHONPATH"))}
     r = subprocess.run(["python3", "-u", str(PKG.parent / "main.py")], cwd=tmp_path, env=env, capture_output=True, text=True)
     assert r.returncode == 2 and "HPC_JOB_NAMESPACE" in r.stdout
+
+
+def test_a_job_that_cannot_be_replaced_is_not_cancelled_for_it():
+    """resubmit() is cancel-then-submit. The dataset check must run BEFORE the cancel: a healthy running job
+    whose replacement would be refused keeps running instead of being cancelled and then not replaced."""
+    import inspect
+    from kaos_hpc_runner import runner as runmod
+    body = inspect.getsource(runmod.Runner.resubmit)
+    assert body.index("check_dataset()") < body.index("self.slurm.cancel(")

@@ -21,7 +21,6 @@ const engineGolden = "../../engine/tests/template/golden/meluxina_follower.yaml"
 var engineGoldenArgoValues = map[string]string{
 	"workflow.name":                    "wf-1",
 	"workflow.uid":                     "uid-1",
-	"workflow.parameters.dataset":      "dataset-default@latest",
 	"inputs.parameters.step-name":      "train",
 	"inputs.parameters.image":          "registry.example/app/train:v0",
 	"inputs.parameters.step-command":   `["python","-m","app.entry"]`,
@@ -31,6 +30,9 @@ var engineGoldenArgoValues = map[string]string{
 	"inputs.parameters.resumable":      "auto",
 	"inputs.parameters.idle-timeout":   "40",
 	"inputs.parameters.step-outputs":   "model,metrics",
+	// The run's dataset pin as the compose step writes it.
+	"inputs.parameters.dataset-pin": `{"repo":"dataset-default","version":"latest",` +
+		`"commit":"c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2","owner":""}`,
 }
 
 type goldenEnvVar struct {
@@ -103,7 +105,8 @@ func TestEngineGoldenIsAValidFollowerEnvironment(t *testing.T) {
 	if cfg.IdleTimeout == nil || *cfg.IdleTimeout != 40 {
 		t.Errorf("HPC_IDLE_TIMEOUT_MINUTES did not come through: %v", cfg.IdleTimeout)
 	}
-	if len(cfg.Outputs) != 2 || len(cfg.Command) != 3 || cfg.Dataset != "dataset-default@latest" {
+	if len(cfg.Outputs) != 2 || len(cfg.Command) != 3 || cfg.Dataset == nil || cfg.Dataset.Repo != "dataset-default" || cfg.Dataset.Version != "latest" ||
+		len(cfg.Dataset.Commit) != 64 {
 		t.Errorf("outputs, command or dataset did not come through: %+v", cfg)
 	}
 }
@@ -111,7 +114,7 @@ func TestEngineGoldenIsAValidFollowerEnvironment(t *testing.T) {
 func TestEngineGoldenSetsNoVariableTheFollowerIgnores(t *testing.T) {
 	read := map[string]bool{
 		"HPC_JOB_NAMESPACE": true, "WF_NAME": true, "WF_UID": true, "STEP_NAME": true, "NODE_KEY": true,
-		"IMAGE_REF": true, "HPC_CLASS": true, "DATASET": true, "HPC_SCOPE": true, "STEP_COMMAND": true,
+		"IMAGE_REF": true, "HPC_CLASS": true, "DATASET_PIN": true, "HPC_SCOPE": true, "STEP_COMMAND": true,
 		"SLURM_TIME_LIMIT": true, "HPC_IDLE_TIMEOUT_MINUTES": true, "STEP_OUTPUTS": true, "HPC_SHARING": true,
 		"HPC_RESUMABLE_LEAD": true, "HPC_RESUMABLE": true, "HPC_MAX_CONTINUATIONS": true,
 	}

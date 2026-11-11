@@ -16,7 +16,7 @@ func fixtures() (*hpcv1alpha1.HPCArgoWorkflowJob, *hpcv1alpha1.HPCSite) {
 	job := &hpcv1alpha1.HPCArgoWorkflowJob{
 		ObjectMeta: metav1.ObjectMeta{Name: "hpc-abc", Namespace: "env-ns", UID: "11111111-2222"},
 		Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg/app:v1", Command: []string{"python", "t.py"},
-			WallTimeMinutes: 120, DatasetRef: "ds@v1", Outputs: []string{"model", "m"}, StepName: "train",
+			WallTimeMinutes: 120, Dataset: &hpcv1alpha1.DatasetPin{Repo: "dataset-ds", Version: "v1", Commit: "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}, Outputs: []string{"model", "m"}, StepName: "train",
 			Workflow:  &hpcv1alpha1.WorkflowRef{Name: "wf-1", UID: "wf-uid"},
 			Resumable: &hpcv1alpha1.Resumable{LeadMinutes: 20, MaxContinuations: 5},
 			Sharing:   &hpcv1alpha1.Sharing{Scope: "abcdef12"},
@@ -105,7 +105,7 @@ func TestShouldSetTheRunnerEnvironmentFromSpecAndSite(t *testing.T) {
 		"KAOS_RESUME_REF": "ckpt-1", "KAOS_RESUME_FROM_ATTEMPT": "1",
 		"IMAGE_REF": "reg/app:v1", "STEP_COMMAND": `["python","t.py"]`, "SLURM_TIME_LIMIT": "120",
 		"HPC_RESUMABLE_LEAD": "20", "STEP_OUTPUTS": "model,m", "HPC_CLASS": "meluxina-gpu", "STEP_NAME": "train",
-		"WF_UID": "wf-uid", "KUBECORE_WORKFLOW_NAME": "wf-1", "KUBECORE_RUN_ID": "wf-1", "DATASET": "ds@v1",
+		"WF_UID": "wf-uid", "KUBECORE_WORKFLOW_NAME": "wf-1", "KUBECORE_RUN_ID": "wf-1", "DATASET_REPO": "dataset-ds", "DATASET_VERSION": "v1", "DATASET_COMMIT": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2", "DATASET_OWNER": "", "DATASET_UNPINNED": "",
 		"HPC_SHARING": "1", "HPC_SCOPE": "abcdef12", "OUTPUTS_REPO": "outputs-app",
 		"HPC_SITE": "meluxina", "HPC_ACCOUNT": "p1", "HPC_USER": "u1", "HPC_SCRATCH": "/project/scratch/p1",
 		"HPC_HOME": "/home/users/u1", "HPC_ENDPOINT": "https://slurm-api.example", "HPC_REST_VERSION": "v0.0.44",
@@ -149,7 +149,7 @@ func TestEveryEndpointAndIdentityComesFromTheSiteNotTheSpec(t *testing.T) {
 	// Every variable a tenant can influence is a spec field or the allowlist; none carries an
 	// endpoint, identity or path: those names must come from the site.
 	siteOnly := []string{"HPC_ACCOUNT", "HPC_USER", "HPC_SCRATCH", "HPC_HOME", "HPC_CLASSES_JSON", "HPC_ENDPOINT", "HPC_REST_VERSION"}
-	job.Spec.Image, job.Spec.DatasetRef = "x", "y"
+	job.Spec.Image, job.Spec.Dataset = "x", nil
 	site.Spec.Identity.User = "other"
 	env2, _ := Env(job, site, 1)
 	m1, m2 := envOf(t, env), envOf(t, env2)
@@ -373,4 +373,31 @@ func TestEnvCarriesTheSitesSubmitCapOnlyWhenKnown(t *testing.T) {
 		}
 	}
 	t.Fatal("HPC_MAX_SUBMIT_JOBS=5 missing")
+}
+
+// A job stored before the run's data was pinned (or created by an older follower) names its dataset
+// without a commit. It is refused before it is admitted, and an attempt of one that was already running
+// tells its runner so: it never gets an environment that looks like "no dataset".
+func TestAJobThatNamesADatasetWithoutACommitNeverLooksDataless(t *testing.T) {
+	job, site := fixtures()
+	job.Spec.Dataset, job.Spec.DatasetRef = nil, "dataset-a@latest"
+	if err := ValidateDataset(&job.Spec); err == nil || !strings.Contains(err.Error(), "without a pinned commit") {
+		t.Errorf("ValidateDataset = %v", err)
+	}
+	env, err := Env(job, site, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := envOf(t, env)
+	if got["DATASET_UNPINNED"] != "dataset-a@latest" || got["DATASET_REPO"] != "" {
+		t.Errorf("env = DATASET_UNPINNED=%q DATASET_REPO=%q", got["DATASET_UNPINNED"], got["DATASET_REPO"])
+	}
+	job.Spec.DatasetRef = ""
+	if err := ValidateDataset(&job.Spec); err != nil {
+		t.Errorf("a job without a dataset is fine: %v", err)
+	}
+	pinned, _ := fixtures()
+	if err := ValidateDataset(&pinned.Spec); err != nil {
+		t.Errorf("a pinned dataset is fine: %v", err)
+	}
 }

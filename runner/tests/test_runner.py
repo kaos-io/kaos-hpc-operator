@@ -268,7 +268,7 @@ def test_staging_that_does_not_fit_the_quota_ends_the_attempt_insufficient_quota
 def test_an_image_that_does_not_fit_the_quota_also_ends_insufficient_quota(rig):
     slurm = FakeSlurm()
     rig.make(slurm)
-    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", lambda cfg, st, mint: ("", ""))
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", lambda cfg, st, mint: "")
 
     def no_room(img, tok, st, strict=False):
         assert strict, "the first submit is strict"
@@ -299,18 +299,20 @@ def test_a_sharing_gpu_job_is_a_host_with_an_offer_window_and_inputs_in_its_scri
 
 
 def test_the_leases_ride_in_the_job_comment(rig, monkeypatch):
-    summary = json.dumps({"dataset_commit": "c0ffee12"})
+    commit = "c0ffee12" + "0" * 56
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    rig.make(slurm, STEP_COMMAND=json.dumps(["x", "--info", summary]))
+    rig.make(slurm)
     monkeypatch.setattr(runmod.imagemod, "stage_image", lambda img, tok, st, **kw: "/scr/kaos/images/k.tar")
     rig.runner.run()
     key = runmod.imagemod.image_key(rig.cfg.image)
     assert slurm.submitted[0]["job"]["comment"] == \
-        "kaos-commit=c0ffee12 kaos-image=" + key + " kaos-ckpt-lease=%s/model-training" % WF
+        "kaos-commit=" + commit + " kaos-image=" + key + " kaos-ckpt-lease=%s/model-training" % WF
     env = dict(e.split("=", 1) for e in slurm.submitted[0]["job"]["environment"])
-    assert env["IMAGE_STAGED"] == "/scr/kaos/images/k.tar" and env["KAOS_COMMIT"] == "c0ffee12"
+    assert env["IMAGE_STAGED"] == "/scr/kaos/images/k.tar" and env["KAOS_COMMIT"] == commit
+    assert json.loads(env["KAOS_LIB_LOCK"])["reads"][0]["commit"] == commit, "the step's kaos-lib reads the pin"
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    rig.make(slurm)           # no pin, nothing staged (the SIF may be resident): the image lease is still there (AC-65)
+    # no dataset, nothing staged (the SIF may be resident): the image lease is still there (AC-65)
+    rig.make(slurm, DATASET_REPO=None, DATASET_VERSION=None, DATASET_COMMIT=None)
     monkeypatch.setattr(runmod.imagemod, "stage_image", lambda img, tok, st, **kw: "")
     rig.runner.run()
     assert slurm.submitted[0]["job"]["comment"] == "kaos-image=%s kaos-ckpt-lease=%s/model-training" % (key, WF)

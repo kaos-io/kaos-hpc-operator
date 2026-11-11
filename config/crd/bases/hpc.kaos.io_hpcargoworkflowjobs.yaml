@@ -73,8 +73,45 @@ spec:
                 items:
                   type: string
                 type: array
+              dataset:
+                description: |-
+                  Dataset is the dataset the step reads, pinned to one commit by the pipeline's compose step.
+                  The runner stages exactly this commit and never resolves a version itself. Absent: the step
+                  runs without a dataset.
+                properties:
+                  commit:
+                    description: Commit is the lakeFS commit the version was resolved
+                      to when the run started.
+                    pattern: ^[0-9a-f]{64}$
+                    type: string
+                  owner:
+                    description: 'Owner is the project that shares the dataset with
+                      this one. Absent: the project''s own dataset.'
+                    pattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+                    type: string
+                  repo:
+                    description: 'Repo is the dataset''s repository: a platform Dataset
+                      is a repository named dataset-<name>.'
+                    pattern: ^dataset-[a-z0-9][a-z0-9-]{0,54}$
+                    type: string
+                  version:
+                    description: |-
+                      Version is what the run asked for (latest, v3, a branch or a tag). It is a label: the commit decides
+                      what is read.
+                    maxLength: 255
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$
+                    type: string
+                required:
+                - commit
+                - repo
+                - version
+                type: object
               datasetRef:
-                description: DatasetRef the step reads, <dataset-repo>@<version>.
+                description: |-
+                  DatasetRef is DEPRECATED and never read as a dataset: before the run's data was pinned by the
+                  pipeline, a job named its dataset as <dataset-repo>@<version> and the runner resolved it. The field
+                  stays in the schema so that a job stored with it, or created by an older follower, keeps it and is
+                  REFUSED with a clear reason instead of running without its data.
                 type: string
               env:
                 description: |-

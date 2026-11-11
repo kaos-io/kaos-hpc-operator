@@ -122,6 +122,17 @@ func BuildCancel(cfg Config, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alp
 	return rj, nil
 }
 
+// ValidateDataset refuses a job that names a dataset without a pinned commit: one stored before the run's
+// data was pinned by the pipeline, or created by an older follower (spec.datasetRef). Running it would run
+// the step without its data.
+func ValidateDataset(spec *hpcv1alpha1.HPCArgoWorkflowJobSpec) error {
+	if spec.Dataset == nil && spec.DatasetRef != "" {
+		return fmt.Errorf("the job names dataset %s without a pinned commit: it was created before the platform "+
+			"update that pins a run's dataset. Run the pipeline again", spec.DatasetRef)
+	}
+	return nil
+}
+
 // ValidateEnv enforces the allowlist on spec.env (the CRD enforces it too; this is the second lock).
 func ValidateEnv(env []hpcv1alpha1.NameValue) error {
 	if len(env) > maxEnvItems {
@@ -273,6 +284,14 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 	if spec.Sharing != nil && site.Spec.Sharing {
 		sharing, scope = "1", spec.Sharing.Scope
 	}
+	// A job already running when the platform was updated names its dataset the old way (no commit). Its
+	// next attempt must not run without data: the runner is told, and refuses to start.
+	ds, unpinned := hpcv1alpha1.DatasetPin{}, ""
+	if spec.Dataset != nil {
+		ds = *spec.Dataset
+	} else {
+		unpinned = spec.DatasetRef
+	}
 	kv := [][2]string{
 		{"HPC_JOB_NAMESPACE", job.Namespace}, {"HPC_JOB_NAME", job.Name},
 		{"KAOS_ATTEMPT", strconv.Itoa(int(attempt))},
@@ -281,7 +300,8 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 		{"STEP_OUTPUTS", strings.Join(spec.Outputs, ",")}, {"HPC_CLASS", spec.Class},
 		{"STEP_NAME", spec.StepName}, {"WF_UID", wfUID},
 		{"KUBECORE_WORKFLOW_NAME", wfName}, {"KUBECORE_RUN_ID", wfName},
-		{"DATASET", spec.DatasetRef}, {"HPC_SHARING", sharing}, {"HPC_SCOPE", scope},
+		{"DATASET_REPO", ds.Repo}, {"DATASET_VERSION", ds.Version}, {"DATASET_COMMIT", ds.Commit},
+		{"DATASET_OWNER", ds.Owner}, {"DATASET_UNPINNED", unpinned}, {"HPC_SHARING", sharing}, {"HPC_SCOPE", scope},
 		{"HPC_SITE", site.Spec.Site}, {"HPC_ACCOUNT", site.Spec.Identity.Account}, {"HPC_USER", site.Spec.Identity.User},
 		{"HPC_SCRATCH", site.Spec.Profile.ScratchRoot}, {"HPC_HOME", homeOf(site)},
 		{"HPC_CLASSES_JSON", classes}, {"HPC_ENDPOINT", site.Spec.Profile.Endpoint},

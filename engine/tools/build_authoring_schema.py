@@ -28,7 +28,7 @@ def _described(authoring) -> dict[str, dict]:
                  "doc": "DNS-label step name: the Argo template, the steps/<dir> folder and the image-<step> parameter."},
         "reads": {"type": "array", "items": "string",
                   "doc": "Config sections (top-level keys of the config/ tree) the step reads; checked at render."},
-        "gpu": {"type": "boolean", "doc": "The step needs one GPU; only GPU steps run on the HPC target."},
+        "gpu": {"type": "boolean", "doc": "The step needs one GPU."},
         "needs": {"type": "array", "items": "step",
                   "doc": "Steps this one depends on; their declared outputs become inputs of this step."},
         "outputs": {"type": "array", "items": "string",
@@ -37,10 +37,10 @@ def _described(authoring) -> dict[str, dict]:
         "disk": {"type": "string", "pattern": authoring._DISK_QUANTITY_RE.pattern,
                  "doc": "Ephemeral-storage request as a Kubernetes quantity, e.g. '20Gi'."},
         "hpc_time_limit": {"type": "string", "pattern": authoring._HPC_TIME_LIMIT_RE.pattern,
-                           "doc": "Slurm wall-clock limit of a gpu=True step on the HPC target: '90m', '12h' or "
+                           "doc": "Slurm wall-clock limit of the step when it runs on an HPC class: '90m', '12h' or "
                                   "'720' (minutes)."},
         "resumable": {"type": ["boolean", "string"], "pattern": authoring._HPC_TIME_LIMIT_RE.pattern,
-                      "doc": "gpu=True only. True or a lead time ('20m', '1h'): how long before the HPC wall time "
+                      "doc": "True or a lead time ('20m', '1h'): how long before the HPC wall time "
                              "the step is told to save its checkpoint; False opts out.",
                       "true_means": authoring.DEFAULT_RESUMABLE_LEAD},
         "checkpoint_every": {"type": ["boolean", "integer", "string"], "pattern": authoring._CHECKPOINT_EVERY_RE.pattern,

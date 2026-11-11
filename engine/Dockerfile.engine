@@ -43,8 +43,11 @@ ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONDONTWRITEBYTECODE=1
 # with apk upgrade.
 RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
 
-COPY engine/requirements.txt /tmp/requirements.txt
-RUN pip install -r /tmp/requirements.txt
+# The pinned set stays in the image as a pip constraints file: an image built FROM this one (the compose image,
+# which adds kaos-lib) installs with `pip install -c /etc/kaos-engine/constraints.txt ...`, so nothing the engine
+# was tested with is moved by what is added on top.
+COPY engine/requirements.txt /etc/kaos-engine/constraints.txt
+RUN pip install -r /etc/kaos-engine/constraints.txt
 
 # The wheel (runner + versioned metadata); --no-deps because the line above resolved them.
 COPY VERSION /src/VERSION

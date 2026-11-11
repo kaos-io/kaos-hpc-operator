@@ -191,9 +191,17 @@ type HPCArgoWorkflowJobSpec struct {
 	// +kubebuilder:default=1
 	// +optional
 	Nodes int32 `json:"nodes,omitempty"`
-	// DatasetRef the step reads, <dataset-repo>@<version>.
+	// DatasetRef is DEPRECATED and never read as a dataset: before the run's data was pinned by the
+	// pipeline, a job named its dataset as <dataset-repo>@<version> and the runner resolved it. The field
+	// stays in the schema so that a job stored with it, or created by an older follower, keeps it and is
+	// REFUSED with a clear reason instead of running without its data.
 	// +optional
 	DatasetRef string `json:"datasetRef,omitempty"`
+	// Dataset is the dataset the step reads, pinned to one commit by the pipeline's compose step.
+	// The runner stages exactly this commit and never resolves a version itself. Absent: the step
+	// runs without a dataset.
+	// +optional
+	Dataset *DatasetPin `json:"dataset,omitempty"`
 	// Outputs the step declares.
 	// +optional
 	Outputs []string `json:"outputs,omitempty"`
@@ -240,6 +248,25 @@ type HPCArgoWorkflowJobSpec struct {
 	// +listMapKey=name
 	// +optional
 	Env []NameValue `json:"env,omitempty"`
+}
+
+// DatasetPin is one dataset at one commit: what the run's data lock recorded for the step's dataset.
+type DatasetPin struct {
+	// Repo is the dataset's repository: a platform Dataset is a repository named dataset-<name>.
+	// +kubebuilder:validation:Pattern=`^dataset-[a-z0-9][a-z0-9-]{0,54}$`
+	Repo string `json:"repo"`
+	// Version is what the run asked for (latest, v3, a branch or a tag). It is a label: the commit decides
+	// what is read.
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`
+	// +kubebuilder:validation:MaxLength=255
+	Version string `json:"version"`
+	// Commit is the lakeFS commit the version was resolved to when the run started.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
+	Commit string `json:"commit"`
+	// Owner is the project that shares the dataset with this one. Absent: the project's own dataset.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`
+	// +optional
+	Owner string `json:"owner,omitempty"`
 }
 
 // Resumable is a step's declaration that it saves and continues (step(..., resumable=...)).

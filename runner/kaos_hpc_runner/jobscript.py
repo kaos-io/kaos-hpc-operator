@@ -93,7 +93,7 @@ def batch_lines(scope, scratch):
         '  DATASET_DIR=$DATASET_STAGED; touch "$DATASET_DIR/.kaos-used" 2>/dev/null',
         '  echo "dataset: resident copy $DATASET_DIR"',
         'elif [ -n "$LAKEFS_BEARER_TOKEN" ] && [ -n "$LAKEFS_ENDPOINT" ] &&'
-        ' [ -n "$DATASET_REPO" ] && [ -n "$DATASET_REF" ] &&'
+        ' [ -n "$DATASET_REPO" ] && [ -n "$DATASET_COMMIT" ] &&'
         ' [ -n "$STAGEIN_B64" ] && command -v python3 >/dev/null; then',
         '  [ -n "$DATASET_STAGED" ] && echo "dataset: WARNING staged copy $DATASET_STAGED'
         ' not ready - downloading in-job on GPU time"',

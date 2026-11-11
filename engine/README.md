@@ -13,16 +13,15 @@ It is released by the same build as the controller, at the same version (D-58/D-
 
 | path | what |
 |---|---|
-| `kubecore/` | the engine: a byte copy of hera-pipeline-template `kubecore/` at the commit in `UPSTREAM.json`, with two patches in `derive_tree.py` (below). Edit nothing else here. |
-| `upstream/derive_tree.py` | the pristine `derive_tree.py`, so the patches are a visible diff |
-| `UPSTREAM.json` | template commit, git blob sha of every file (a test proves the copy is byte-exact) |
+| `kubecore/` | the engine. **This is its source** (PRD-HPC-1461 D-80, 2026-11-10): apps carry no copy and there is no upstream to stay equal to. Edit it here |
 | `kaos_engine/render.py` | the runner, `python -I -m kaos_engine.render` |
+| `kaos_engine/compose.py` | what the compose-and-validate step runs, `python -I -m kaos_engine.compose`: the engine's compose with the engine first on the path. Writes `params.yaml` and the run's data lock (D-81) |
 | `kaos_engine/version.py` | build tag -> PEP 440 |
 | `kaos_pipeline_engine/known-vendored.json` | every historical blob of `derive_tree.py` / `authoring.py` -> profile + template commits |
 | `kaos_pipeline_engine/authoring-schema.json` | `step()` options for the pipeline linter |
 | `kaos_pipeline_engine/compat-surface.json` | every module-level name `authoring` / `derive_tree` ever had |
-| `Dockerfile.engine`, `pyproject.toml`, `setup.py`, `requirements*.txt` | image and wheel |
-| `tools/` | generators for the three JSON files, the corpus, `sync_upstream.py` |
+| `Dockerfile.engine`, `pyproject.toml`, `setup.py`, `requirements*.txt` | image and wheel  The image keeps the pinned set at `/etc/kaos-engine/constraints.txt` for images built on top of it |
+| `tools/` | generators for the three JSON files, the corpus |
 | `tests/` | `template/` = the template's own kubecore tests, moved in; `app/` = the fixture app they render; the rest are the engine's tests |
 | `CORPUS_REPORT.md` | the last corpus run (generated) |
 
@@ -107,7 +106,7 @@ and counted in the fleet.
 `make test-engine` (a pinned venv under `bin/engine-venv`) and `make lint-engine` (ruff) on a workstation; CI runs both in
 the `engine-tests` stage of `Dockerfile.engine` (the Go CI container has no Python), so building the image runs them. They cover the template's kubecore tests, the runner contract incl. the booby-trap (a vendored
 `authoring.py` that raises still renders), the wheel (build, contents, `python -I` from an installed wheel), the
-byte-copy and patch proof, the compat surface, the authoring schema, known-vendored and the follower contract
+compat surface, the run's data lock (`tests/test_data_lock.py`), the authoring schema, known-vendored and the follower contract
 (`tests/test_follower_contract.py` and the Go side `internal/follower/engine_contract_test.go`, which feeds the
 golden follower template to `ConfigFromEnv`).
 
@@ -118,8 +117,6 @@ YAML must be equal. It rewrites `CORPUS_REPORT.md`, where private apps appear on
 
 ## Updating the engine
 
-When the CI chart's `platformEnhancer.ref` (or the template `dev`) moves: `python engine/tools/sync_upstream.py
---corpus DIR --commit <sha>`, re-apply the two `derive_tree.py` patches (the diff against `upstream/derive_tree.py`
-shows them), then regenerate `known-vendored.json`, `compat-surface.json` and `authoring-schema.json` with the three
-`tools/build_*.py`, run `make test-engine engine-corpus`, and commit. Skew rule: compose gains flags in release N,
+Edit `engine/kubecore/` directly, regenerate `compat-surface.json` and `authoring-schema.json` with their
+`tools/build_*.py` when the authoring surface changed, run `make test-engine`, and commit. Skew rule: compose gains flags in release N,
 authoring may emit them from N+1.

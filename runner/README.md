@@ -30,7 +30,7 @@ Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /ru
 Env (controller): `HPC_JOB_NAMESPACE`, `HPC_JOB_NAME`, `KAOS_ATTEMPT`, `KAOS_RESUME_REF` (a
 `scratch://<tar path>#<sha256>` checkpoint reference), `HPC_CKPT_BUDGET_PERCENT`, `IMAGE_REF`, `STEP_COMMAND`, `SLURM_TIME_LIMIT`,
 `HPC_RESUMABLE_LEAD`, `STEP_OUTPUTS`, `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `KUBECORE_WORKFLOW_NAME`, `KUBECORE_RUN_ID`,
-`DATASET`, `HPC_SHARING` (`on`/`1`) + `HPC_SCOPE`, allowlisted `OUTPUTS_REPO`/`OUTPUTS_REF`/`CHECKPOINT_*`/
+`DATASET_REPO`/`DATASET_VERSION`/`DATASET_COMMIT` (the dataset at the commit the pipeline pinned; the runner never resolves a version), `HPC_SHARING` (`on`/`1`) + `HPC_SCOPE`, allowlisted `OUTPUTS_REPO`/`OUTPUTS_REF`/`CHECKPOINT_*`/
 `KAOS_LIB_SUPPORT`, site: `HPC_ACCOUNT`, `HPC_USER`, `HPC_SCRATCH`, `HPC_HOME`, `HPC_CLASSES_JSON`, `HPC_ENDPOINT`,
 `HPC_REST_VERSION`, the lane the controller chose (`HPC_QOS`, `HPC_RESERVATION`, `HPC_QOS_MAX_MINUTES`), the idle window
 (`HPC_IDLE_TIMEOUT_MINUTES`, 0 = off, default 20), the site's per-user submit cap when the profile has one
