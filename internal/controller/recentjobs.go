@@ -168,6 +168,9 @@ func recentJobOf(j *hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) hpcv1alpha1.R
 	if run := st.Run; run != nil {
 		rj.SiteState, rj.SiteJobID, rj.HostSiteJobID = run.State, run.SiteJobID, run.HostSiteJobID
 		rj.StartTime, rj.EndTime = siteTime(run.StartTime, now), siteTime(run.EndTime, now)
+		if current(run, st.Attempt) && !attemptSettled(st, st.Attempt) { // a settled attempt's count is in its record
+			rj.QueueReplacedCount += run.QueueReplacedCount
+		}
 		if run.QOS != "" { // what the site job was actually submitted with
 			rj.QOS, rj.Reservation = run.QOS, run.Reservation
 		}
@@ -184,8 +187,19 @@ func recentJobOf(j *hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) hpcv1alpha1.R
 	rj.BookedNodeMinutes = bookedOf(j)
 	for _, a := range st.Attempts {
 		rj.SettledNodeMinutes += max(a.SettledNodeMinutes, 0)
+		rj.QueueReplacedCount += a.QueueReplacedCount
 	}
 	return rj
+}
+
+// attemptSettled reports whether the attempt already has a record in status.attempts.
+func attemptSettled(st *hpcv1alpha1.HPCArgoWorkflowJobStatus, attempt int32) bool {
+	for _, a := range st.Attempts {
+		if a.Attempt == max(attempt, 1) {
+			return true
+		}
+	}
+	return false
 }
 
 // pendingReasonOf is the scheduler's pending reason, preferring the controller's batched reading.

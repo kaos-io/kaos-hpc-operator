@@ -118,6 +118,8 @@ class Runner:
         self.logs = logs or LogStreamer(cfg, self.stager, self.reporter)
         self._mint = mint or (lambda: wallet.mint_wallet(cfg.env))
         self.jid = None
+        self.submitted_at = 0.0      # when the current site job was submitted (its queue time starts here)
+        self.replacing = None        # the queued job being replaced, noted into the next report
         self.wallet, self.wallet_exp = '', 0.0
         self.staged, self.stage_tried = '', False
         self.resubmits = 0
@@ -279,6 +281,11 @@ class Runner:
         # A resubmit replaces the site job of the same attempt: the attempt does not end.
         self.reporter.log_offset = None
         self.reporter.gpu_util = None
+        if self.replacing:
+            # The replaced job's record rides in this report, so the new job id and the loss are written together.
+            self.reporter.note_replacement(str(j), **self.replacing)
+            self.replacing = None
+        self.submitted_at = time.time()
         self.reporter.report(siteJobID=str(j), state='PENDING')
         return j
 
@@ -336,9 +343,14 @@ class Runner:
         return ('%s; a new job is not accepted until some finish. Resubmit when the count is below the cap '
                 '(site said: %s)' % (head, str(err)[:200]))
 
-    def resubmit(self, why):
-        """Replace the site job of this attempt (cancel, then submit a fresh one)."""
+    def resubmit(self, why, queue_lost=None):
+        """Replace the site job of this attempt (cancel, then submit a fresh one). queue_lost is the reason
+        (TokenRefresh, HostLost, Replanned) when the old job was still queued: its place in the queue is lost,
+        and the replacement is recorded in status.run.queueReplaced (PRD-HPC-1461 AC-35)."""
         print(why, flush=True)
+        if queue_lost and self.jid:
+            self.replacing = {'old': str(self.jid), 'reason': queue_lost,
+                              'queued': max(0, int(time.time() - self.submitted_at)) if self.submitted_at else 0}
         self.cfg.check_dataset()         # before the cancel: a job that cannot be replaced is not cancelled for it
         self.logs.finish()               # what the old job wrote, before its offset is replaced
         self.slurm.cancel(self.jid)
@@ -510,6 +522,8 @@ class Runner:
                   flush=True)
             return 0
         run = (job.get('status') or {}).get('run') or {}
+        if int(run.get('attempt') or 0) == cfg.attempt:
+            self.reporter.restore_replacements(run)
         if int(run.get('attempt') or 0) == cfg.attempt and run.get('terminal') and run.get('hostJobOpen'):
             # A restarted host runner: the step was reported, the host job's end not yet (D-26). Only that is left.
             print('attempt %d reported its step; following its host job to its end' % cfg.attempt, flush=True)
@@ -699,7 +713,7 @@ class Runner:
                     self.lost_hosts += 1
                     self.logs.active.clear()
                     self.resubmit('host job %s is gone with this step - resubmitting (%d/%d)'
-                                  % (share['host'], self.lost_hosts, LOST_HOST_RESUBMITS))
+                                  % (share['host'], self.lost_hosts, LOST_HOST_RESUBMITS), 'HostLost')
                     continue
                 # A job a host took stays queued (held) while its step runs: never resubmit it. The
                 # host checked its token outlives the step (D-07).
@@ -707,7 +721,7 @@ class Runner:
                         and time.time() > self.wallet_exp - wallet.WALLET_MARGIN_S):
                     self.resubmit('wallet expires within %d min and the job is still queued - resubmitting '
                                   'with a fresh wallet (queue position is lost, credentials are not)'
-                                  % (wallet.WALLET_MARGIN_S // 60))
+                                  % (wallet.WALLET_MARGIN_S // 60), 'TokenRefresh')
                     continue
                 if self.saved_host_waits(st, share):
                     continue
@@ -774,7 +788,7 @@ class Runner:
         cfg.apply_plan(plan)
         self.logs.active.clear()
         self.resubmit('the controller planned this step again as a host (lane %s) - submitting it to start on a node '
-                      'of its own' % (cfg.qos or 'standard'))
+                      'of its own' % (cfg.qos or 'standard'), 'Replanned')
         return True
 
     def follow_host_job_end(self):

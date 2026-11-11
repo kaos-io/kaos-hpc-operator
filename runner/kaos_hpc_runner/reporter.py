@@ -18,7 +18,8 @@ K8S_SA = '/var/run/secrets/kubernetes.io/serviceaccount'
 K8S_API = 'https://kubernetes.default.svc'
 RUN_FIELDS = ('attempt', 'siteJobID', 'state', 'exitCode', 'startTime', 'endTime', 'terminal',
               'hostSiteJobID', 'slot', 'hostJobOpen', 'hostJobEndTime', 'checkpointRef', 'checkpoint', 'logOffset', 'lastLog', 'message',
-              'gpuUtilization')
+              'gpuUtilization', 'queueReplaced', 'queueReplacedCount')
+QUEUE_REPLACED_KEPT = 5   # status.run.queueReplaced keeps the newest; queueReplacedCount counts all
 CANCEL_ANNOTATION = 'hpc.kaos.io/cancel-requested'
 OUTPUTS_MAX_BYTES = 64 * 1024   # total of the declared outputs' JSON text (contract section 1)
 
@@ -57,6 +58,8 @@ class Reporter:
         self.attempt = cfg.attempt
         self.log_offset = None      # the log streamer's committed offset, written with every report
         self.gpu_util = None        # the log streamer's per-GPU last/max utilisation (AC-69), written likewise
+        self.queue_replaced = []    # the newest replacements of a queued site job (AC-35), written with every report
+        self.queue_replaced_count = 0   # all of them, also the ones no longer listed
         # The QoS and reservation the site job was submitted with (None: not known to this runner,
         # e.g. it adopted a job; the report then leaves the earlier values alone).
         self.qos = None
@@ -131,6 +134,9 @@ class Reporter:
             run['logOffset'] = self.log_offset
         if 'gpuUtilization' not in run:
             run['gpuUtilization'] = self.gpu_util
+        # Every report carries the replacements (the run is written whole, a merge patch keeps no list).
+        run['queueReplaced'] = list(self.queue_replaced) or None
+        run['queueReplacedCount'] = self.queue_replaced_count or None
         status = {'run': {k: run.get(k) for k in RUN_FIELDS}}
         if self.qos is not None:
             status['run'].update(qos=self.qos, reservation=self.reservation or None)
@@ -149,6 +155,19 @@ class Reporter:
             print('HPC job: the end of the site job could not be reported', flush=True)
             sys.exit(1)
         return False
+
+    def restore_replacements(self, run):
+        """A restarted runner of the same attempt carries on from what the earlier one reported."""
+        self.queue_replaced = list(run.get('queueReplaced') or [])[-QUEUE_REPLACED_KEPT:]
+        self.queue_replaced_count = max(int(run.get('queueReplacedCount') or 0), len(self.queue_replaced))
+
+    def note_replacement(self, new, old, reason, queued):
+        """A queued site job was replaced (its queue place is lost): keep the newest QUEUE_REPLACED_KEPT
+        and count all. Sent with the next report. AC-35."""
+        self.queue_replaced.append({'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'oldSiteJobID': old,
+                                    'newSiteJobID': new, 'queuedSeconds': queued, 'reason': reason})
+        del self.queue_replaced[:-QUEUE_REPLACED_KEPT]
+        self.queue_replaced_count += 1
 
     def pending_reason(self, reason):
         """Slurm's reason while the job queues; None clears it."""

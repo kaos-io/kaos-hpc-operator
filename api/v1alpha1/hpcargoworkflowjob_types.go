@@ -325,6 +325,33 @@ type GPUUtilization struct {
 	MaxPercent int32 `json:"maxPercent"`
 }
 
+// QueueReplacedKept is how many replacements status.run.queueReplaced (and an attempt record) lists: the
+// newest. The count of all of them is kept apart.
+const QueueReplacedKept = 5
+
+// QueueReplacement is one queued site job the runner replaced by a fresh one (PRD-HPC-1461 AC-35): the
+// replacement loses the job's place in the site's queue, so it is recorded.
+type QueueReplacement struct {
+	// At is when the runner replaced the job.
+	At metav1.Time `json:"at"`
+	// OldSiteJobID is the cancelled job; NewSiteJobID its replacement.
+	// +kubebuilder:validation:MaxLength=32
+	OldSiteJobID string `json:"oldSiteJobID"`
+	// +kubebuilder:validation:MaxLength=32
+	NewSiteJobID string `json:"newSiteJobID"`
+	// QueuedSeconds is how long the old job had been queued.
+	// +kubebuilder:validation:Minimum=0
+	QueuedSeconds int64 `json:"queuedSeconds"`
+	// Reason: TokenRefresh (the job's wallet or token would expire before it started: the replacement
+	// carries fresh credentials), HostLost (the host a guest waited for is gone), Replanned (the
+	// controller planned a waiting guest as a host).
+	Reason QueueReplacementReason `json:"reason"`
+}
+
+// QueueReplacementReason says why a queued site job was replaced.
+// +kubebuilder:validation:Enum=TokenRefresh;HostLost;Replanned
+type QueueReplacementReason string
+
 // RunStatus is written by the submitter (in phase 0 the in-pod runner, D-34): what the site says
 // about the current attempt's site job. The controller only reads it.
 type RunStatus struct {
@@ -388,6 +415,15 @@ type RunStatus struct {
 	// +listMapKey=gpu
 	// +optional
 	GPUUtilization []GPUUtilization `json:"gpuUtilization,omitempty"`
+	// QueueReplaced lists the newest replacements of a queued site job of this attempt (at most
+	// QueueReplacedKept, oldest first); QueueReplacedCount counts all of them. A queued job is replaced
+	// before its credentials expire, which loses its place in the site's queue (AC-35).
+	// +kubebuilder:validation:MaxItems=5
+	// +optional
+	QueueReplaced []QueueReplacement `json:"queueReplaced,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	QueueReplacedCount int32 `json:"queueReplacedCount,omitempty"`
 	// LastLog is the tail of the step's log (a few lines, at most 2 KiB), reported only when the
 	// idle watchdog ended the step, so the controller can name what the step last said (D-72).
 	// +kubebuilder:validation:MaxLength=2048
@@ -503,6 +539,15 @@ type AttemptRecord struct {
 	// job's own end; the attempt is then settled from the job's start to that end.
 	// +optional
 	HostJobOpen bool `json:"hostJobOpen,omitempty"`
+	// QueueReplaced and QueueReplacedCount are copied from the attempt's run when it is settled: the
+	// queued site jobs replaced during the attempt (the newest QueueReplacedKept, and the total). The
+	// attempt's queue place was lost that many times (AC-35).
+	// +kubebuilder:validation:MaxItems=5
+	// +optional
+	QueueReplaced []QueueReplacement `json:"queueReplaced,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	QueueReplacedCount int32 `json:"queueReplacedCount,omitempty"`
 }
 
 // PlacementSource says where a Placement's time limit came from.

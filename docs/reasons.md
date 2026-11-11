@@ -78,6 +78,19 @@ attempt is settled to it and the message reads "attempt N settled M node-minutes
 <time>)". `status.run.endTime` stays the step's own end: a learned time limit comes from the step's run time, never
 from the time the node was kept for guests (D-67).
 
+## Queue place lost (not a reason: `status.run.queueReplaced`)
+
+A queued site job whose token would expire before it starts is replaced by a fresh one with fresh credentials; its
+place in the site's queue is lost, so the runner records each replacement (PRD-HPC-1461 AC-35). It is not a
+`status.reason`: the job stays `Admitted` (or `Running`) and starts as soon as the new job is scheduled.
+
+| Field | Meaning |
+|---|---|
+| `status.run.queueReplaced` | The newest 5 replacements of this attempt, oldest first: `at`, `oldSiteJobID`, `newSiteJobID`, `queuedSeconds` (how long the old job had queued) and `reason` (`TokenRefresh`; also `HostLost` for a guest whose host is gone and `Replanned` for a guest planned as a host). |
+| `status.run.queueReplacedCount` | All replacements of this attempt, also the ones no longer listed. |
+| `status.attempts[].queueReplaced`, `.queueReplacedCount` | The same, copied when the attempt is settled. |
+| `HPCSite.status.recentJobs[].queueReplacedCount` | The total over the job's attempts, for the console to say "queue place lost N times (token refresh)". A count only, so the list stays bounded. |
+
 ## Cancelling
 
 A cancel (the job deleted, or its Argo Workflow deleted, shut down or ended while the job had not) never releases the

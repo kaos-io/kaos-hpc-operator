@@ -371,7 +371,7 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 	}
 	job.Status.Attempts = append(job.Status.Attempts, hpcv1alpha1.AttemptRecord{Attempt: attempt,
 		SiteJobID: run.SiteJobID, ExitCode: run.ExitCode, Outcome: reason, Tier: tier,
-		SettledNodeMinutes: used, EndTime: end})
+		SettledNodeMinutes: used, EndTime: end, QueueReplaced: run.QueueReplaced, QueueReplacedCount: run.QueueReplacedCount})
 	job.Status.Booking = nil
 	msg := settledWords(attempt, used)
 	if reason == hpcv1alpha1.ReasonIdle {
