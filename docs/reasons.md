@@ -103,7 +103,7 @@ may still run). See [extreme-cases.md](extreme-cases.md) 2.13 and 2.17.
 
 | Condition / reason | Meaning |
 |---|---|
-| `BudgetWarning` True, reason `ThresholdCrossed` | For some allocation, used plus booked is at or above `budget.warnAtPercent` (default 80) of what the project may spend this month. Raised whatever `budget.atLimit` is. A `BudgetWarning` Warning event on the HPCSite; metrics `kaos_hpc_budget_warning` and `kaos_hpc_budget_percent`. |
+| `BudgetWarning` True, reason `ThresholdCrossed` | For some allocation, used plus booked is at or above `budget.warnAtPercent` (default 80) of what the project may spend this month. With `source: site` and a `budget.grantNodeHours` figure for the allocation, the base is the month's grant: (grant - left at `observedAt` + used since + booked) / grant, so it counts what was spent before the observation too; without a grant, used plus booked over used plus what is left. Raised whatever `budget.atLimit` is. A `BudgetWarning` Warning event on the HPCSite; metrics `kaos_hpc_budget_warning` and `kaos_hpc_budget_percent`. |
 | `BudgetWarning` False, reason `BelowThreshold` | Below it, for every allocation that may spend anything. |
 | `SiteReachable` False, reason `NotAnswering` | The site's REST API has not answered for at least 90 s. |
 | `SiteReachable` True, reason `Answering` | It answers. |

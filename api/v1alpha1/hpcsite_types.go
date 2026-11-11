@@ -259,18 +259,67 @@ type Budget struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	LargeMemNodeHours *int64 `json:"largeMemNodeHours,omitempty"`
+	// GrantNodeHours is what the site granted the project for the month, per allocation (source site only):
+	// the base of the warning percentage (AC-22). With source site the figures above are what is LEFT at
+	// ObservedAt, so used since then over what was left stays near 0 all month; the share of the grant
+	// spent or committed is (grant - left at ObservedAt + used since + booked) / grant. It never changes
+	// admission or ceilings, which keep using what is left (D-56). Absent, or for an allocation without
+	// a figure, or when a figure is below what is left, or ObservedAt is from before this month: the
+	// warning keeps the earlier base (used plus booked over used plus what is left).
+	// +optional
+	GrantNodeHours *GrantNodeHours `json:"grantNodeHours,omitempty"`
 	// AtLimit: block (default) or warn (D-13).
 	// +kubebuilder:default=block
 	// +optional
 	AtLimit AtLimitPolicy `json:"atLimit,omitempty"`
 	// WarnAtPercent is the percentage of what the project may spend this month (used plus booked, over used
-	// plus the lower of share left and site left) at which the BudgetWarning condition, event and metric are
+	// plus the lower of share left and site left; with source site and a grantNodeHours figure, spent and committed over the grant) at which the BudgetWarning condition, event and metric are
 	// raised for an allocation. Raised whatever AtLimit says; AtLimit decides only what happens at the limit.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	// +kubebuilder:default=80
 	// +optional
 	WarnAtPercent int32 `json:"warnAtPercent,omitempty"`
+}
+
+// GrantNodeHours is the site's grant of node-hours for the month per allocation, as the site reported it
+// at the budget's ObservedAt. A figure absent means the site gave none for that allocation; 0 is not
+// a grant (a spent or empty allocation has no percentage) and is treated as absent.
+type GrantNodeHours struct {
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	GPU *int64 `json:"gpu,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	CPU *int64 `json:"cpu,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	FPGA *int64 `json:"fpga,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	LargeMem *int64 `json:"largeMem,omitempty"`
+}
+
+// Of is the grant of one allocation in node-hours, and whether the site gave a positive figure.
+func (g *GrantNodeHours) Of(t Tier) (int64, bool) {
+	if g == nil {
+		return 0, false
+	}
+	var v *int64
+	switch t {
+	case TierGPU:
+		v = g.GPU
+	case TierCPU:
+		v = g.CPU
+	case TierFPGA:
+		v = g.FPGA
+	case TierLargeMem:
+		v = g.LargeMem
+	}
+	if v == nil || *v <= 0 {
+		return 0, false
+	}
+	return *v, true
 }
 
 // SiteLeft is the site's remaining node-hours per tier, as the site reported at ObservedAt.
