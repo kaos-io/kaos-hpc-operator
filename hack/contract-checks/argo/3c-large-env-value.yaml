@@ -1,7 +1,7 @@
 # Check 3(c): a step context of a given size reaches the container intact in KAOS_STEP_CONTEXT.
 #
-#   compose   builds a base context whose params hold `fill` characters of a sha256 chain (the check
-#             script builds the same text to know what to expect)
+#   compose   builds a base context whose params hold `items` short strings and `fill` characters of a
+#             sha256 chain (the check script builds the same text to know what to expect)
 #   prepare   an upstream step with a small result
 #   step      receives the context assembled in the DAG task argument, as in check 3(a)
 apiVersion: argoproj.io/v1alpha1
@@ -13,6 +13,8 @@ spec:
   arguments:
     parameters:
       - name: fill   # characters of filler inside params.blob
+      - name: items  # short strings in params.list before the filler: each adds two quotes to the context
+        value: "0"
   templates:
     - name: compose
       container:
@@ -29,7 +31,9 @@ spec:
             done
             {
               printf %s '{"version":1,"run":"contract-3c","app":"hera-demo","project":"vision","step":"train","kind":"train","experiment":"baseline","params":'
-              printf %s '{"blob":"'; head -c $fill /work/blob; printf %s '"}'
+              printf %s '{"list":['
+              i=0; while [ $i -lt {{workflow.parameters.items}} ]; do printf %s '"x",'; i=$((i+1)); done
+              printf %s '""],"blob":"'; head -c $fill /work/blob; printf %s '"}'
               printf %s ',"ledger":{"version":2,"reads":[],"writes":[]},"produces":[]}'
             } > /work/context.json
             wc -c /work/context.json

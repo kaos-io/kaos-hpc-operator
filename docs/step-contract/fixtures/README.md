@@ -12,6 +12,7 @@ All fixtures describe one run, `hera-demo-x7k2p`, of the app `hera-demo` in the 
 | File | What it is |
 |---|---|
 | `context-no-upstream.json` | The context of `prepare`: one input, one produced dataset, no upstream. |
+| `context-promote.json` | The context of `prepare` in a run that asked to promote: the same as `context-no-upstream.json`, with `promote: true` on the produced dataset. |
 | `context-one-upstream.json` | The context of `train`: one upstream (`prepare`, whose result is `result-ok.json`). |
 | `context-skipped-upstream.json` | The context of `evaluate`: `train` ran (`result-model.json`), `export` was skipped and is the sentinel. |
 | `context-escapes.json` | A context whose strings hold `{{...}}`, a quote, a backslash and non-ASCII characters, and whose numbers a float would change. Its `.wire` file shows every escape. |

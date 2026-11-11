@@ -21,8 +21,8 @@ import json
 import pathlib
 import sys
 
-CONTEXT_CAP = 96 * 1024   # bytes of the wire form of a step context
-RESULT_CAP = 32 * 1024    # bytes of the wire form of a step result
+CONTEXT_CAP = 96 * 1024   # the most a step context may cost
+RESULT_CAP = 32 * 1024    # the most a step result may cost
 ABSENT = {"version": 1, "status": "absent"}
 
 FIXTURES = pathlib.Path(__file__).resolve().parents[2] / "docs" / "step-contract" / "fixtures"
@@ -46,6 +46,12 @@ def dumps(value):
                 raise TypeError("object keys must be strings, got %r" % (key,))
         return "{" + ",".join(_string(k) + ":" + dumps(v) for k, v in value.items()) + "}"
     raise TypeError("not a JSON value: %r" % (value,))
+
+
+def cost(wire_text):
+    """What a value in wire form costs against its cap: its length as a JSON string, where each quote and
+    each backslash counts twice. This is the room it takes in a step's definition (section 7)."""
+    return len(wire_text) + wire_text.count('"') + wire_text.count(chr(92))
 
 
 def _load(name):
@@ -107,19 +113,23 @@ def check_fixtures():
         want(json.loads(wire) == value, "%s: the .wire file does not parse back to the fixture" % name)
         want(b"{{" not in wire and all(b < 128 for b in wire), "%s: the wire form holds {{ or a non-ASCII byte" % name)
         if name.startswith("context-"):
-            want(len(wire) <= CONTEXT_CAP, "%s is over the context cap" % name)
+            want(cost(wire.decode("ascii")) <= CONTEXT_CAP, "%s is over the context cap" % name)
             want(list(value) == ["version", "run", "app", "project", "step", "kind", "experiment", "params",
                                  "ledger", "produces", "upstream"], "%s: fields differ from the contract" % name)
             want(value["version"] == 1 and value["ledger"]["version"] == 2, "%s: versions" % name)
         if name.startswith("result-"):
-            want(len(wire) <= RESULT_CAP, "%s is over the result cap" % name)
+            want(cost(wire.decode("ascii")) <= RESULT_CAP, "%s is over the result cap" % name)
         if name.startswith("ledger-"):
             want(value["version"] == 2 and all(r.get("name") for r in value["reads"]), "%s: not a version 2 ledger" % name)
+    sample = (FIXTURES / "context-escapes.wire").read_text()
+    want(cost(sample) == len(json.dumps(sample)) - 2, "cost() is not the length as a JSON string")
     want(_load("result-absent.json") == ABSENT, "result-absent.json is not the sentinel")
     want(_load("context-one-upstream.json")["upstream"] == {"prepare": _load("result-ok.json")},
          "context-one-upstream.json: upstream.prepare is not result-ok.json")
     want(_load("context-skipped-upstream.json")["upstream"] == {"train": _load("result-model.json"), "export": ABSENT},
          "context-skipped-upstream.json: upstream is not result-model.json plus the sentinel")
+    want(_load("context-promote.json")["produces"] == [dict(_load("context-no-upstream.json")["produces"][0], promote=True)],
+         "context-promote.json: its produced dataset is not the one of context-no-upstream.json with promote true")
     want(len(_load("ledger-two-reads.json")["reads"]) == 2, "ledger-two-reads.json does not hold two reads")
     want(_load("hpc-job.json") == _hpc_job(), "hpc-job.json is not derived from the other fixtures (run write-fixtures)")
     for p in problems:

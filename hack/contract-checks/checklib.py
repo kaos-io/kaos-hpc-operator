@@ -48,7 +48,8 @@ def same(label, log, expected_text):
 # ---- check 3(c): a context of an exact size, built the same way by the workflow's compose step
 
 LARGE_HEAD = ('{"version":1,"run":"contract-3c","app":"hera-demo","project":"vision","step":"train","kind":"train",'
-              '"experiment":"baseline","params":{"blob":"')
+              '"experiment":"baseline","params":{"list":[')
+LARGE_MID = '""],"blob":"'
 LARGE_TAIL = ('"},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[],"upstream":{"prepare":'
               '{"version":1,"status":"ok","values":{"rows":1200},"reads":[],"writes":[]}}}')
 
@@ -62,12 +63,17 @@ def chain(fill, seed="contract-3c"):
     return "".join(out)[:fill]
 
 
-def large_fill(size):
-    """How many filler characters make the whole context exactly `size` bytes."""
-    return size - len(LARGE_HEAD) - len(LARGE_TAIL)
+def large_fill(size, items=0):
+    """How many filler characters make the whole context exactly `size` bytes, with `items` short strings in it."""
+    return size - len(LARGE_HEAD) - 4 * items - len(LARGE_MID) - len(LARGE_TAIL)
 
 
-def large_context(size):
-    text = LARGE_HEAD + chain(large_fill(size)) + LARGE_TAIL
+def large_context(size, items=0):
+    text = LARGE_HEAD + '"x",' * items + LARGE_MID + chain(large_fill(size, items)) + LARGE_TAIL
     assert len(text) == size and json.loads(text)["version"] == 1
     return text
+
+
+def as_json_string(text):
+    """The length of `text` inside a JSON string: what it costs in the step's definition (section 7)."""
+    return len(json.dumps(text)) - 2

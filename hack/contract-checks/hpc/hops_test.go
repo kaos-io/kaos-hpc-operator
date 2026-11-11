@@ -54,7 +54,7 @@ func repoRoot(t *testing.T) string {
 func largeContext(t *testing.T, size int) string {
 	t.Helper()
 	head := `{"version":1,"run":"contract-4","app":"hera-demo","project":"vision","step":"train","kind":"train",` +
-		`"experiment":"it's $HOME ` + "`x`" + ` ; done \\n \"q\" {{workflow.name}}","params":{"blob":"`
+		`"experiment":"it's $HOME ` + "`x`" + ` ; done \\n \"q\" \u007b\u007bworkflow.name\u007d\u007d","params":{"blob":"`
 	tail := `"},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[],"upstream":{"prepare":{"version":1,"status":"absent"}}}`
 	fill := size - len(head) - len(tail)
 	var b strings.Builder

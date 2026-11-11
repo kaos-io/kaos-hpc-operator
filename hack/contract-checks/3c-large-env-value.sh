@@ -41,4 +41,26 @@ else
     *) pass "a context over the kernel limit fails the step before it runs; it is never shortened" ;;
   esac
 fi
-pass "3(c) a 96 KiB env value reaches the container intact"
+
+# What the ceiling counts. Two contexts of the same 98304 bytes: one holds 15000 short strings, the other
+# 17000. Inside the step's definition the context is a JSON string, where every quote costs two bytes, so
+# the first costs 128368 bytes and the second 132368. The first must arrive intact; the second must not start.
+for items in 15000 17000; do
+  cost="$(python3 -c "import checklib as c; print(c.as_json_string(c.large_context($CONTEXT_CAP, $items)))")"
+  wf="$(run_workflow "$HERE/argo/3c-large-env-value.yaml" -p items=$items \
+    -p fill="$(python3 -c "import checklib as c; print(c.large_fill($CONTEXT_CAP, $items))")")"
+  phase="$(wf_phase "$wf")"
+  say "$CONTEXT_CAP bytes that cost $cost as a JSON string: workflow $wf $phase"
+  if [ "$cost" -le 130000 ]; then
+    [ "$phase" = Succeeded ] || fail "3(c) a context that costs $cost did not start"
+    step_log "$wf" step > "$log" 2>&1
+    python3 -c "
+import sys, checklib as c
+sys.exit(0 if c.same('KAOS_STEP_CONTEXT, $CONTEXT_CAP bytes, cost $cost', open('$log').read(), c.large_context($CONTEXT_CAP, $items)) else 1)" \
+      || fail "3(c) a context that costs $cost did not arrive intact"
+  else
+    [ "$phase" = Succeeded ] && fail "3(c) a context that costs $cost started: the ceiling does not count the JSON string"
+    pass "a context of $CONTEXT_CAP bytes that costs $cost as a JSON string does not start: the ceiling counts the cost, not the bytes"
+  fi
+done
+pass "3(c) a 96 KiB env value reaches the container intact when its cost as a JSON string fits"
