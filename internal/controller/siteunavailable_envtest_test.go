@@ -265,4 +265,20 @@ var _ = Describe("HPCArgoWorkflowJob waits for an unreachable site", func() {
 		Expect(site.Status.RecentJobs).NotTo(BeEmpty())
 		Expect(site.Status.RecentJobs[0].Reason).To(Equal(hpcv1alpha1.ReasonSiteUnavailable), "the console lists the job as SiteUnavailable")
 	})
+
+	It("should_publish_SiteReachable_True_with_reason_Answering_once_the_site_is_back", func() {
+		siteDown()
+		j := newJob()
+		reconcileOnce(j)
+		siteUp()
+		reconcileOnce(j)
+		var site hpcv1alpha1.HPCSite
+		Eventually(func() string {
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: hpcNS, Name: "meluxina"}, &site)).To(Succeed())
+			if c := meta.FindStatusCondition(site.Status.Conditions, hpcv1alpha1.ConditionSiteReachable); c != nil && c.Status == metav1.ConditionTrue {
+				return c.Reason
+			}
+			return ""
+		}).Should(Equal(hpcv1alpha1.ReasonSiteAnswering))
+	})
 })

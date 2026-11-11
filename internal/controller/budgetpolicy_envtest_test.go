@@ -87,6 +87,7 @@ var _ = Describe("HPC budget policy", func() {
 		c := meta.FindStatusCondition(siteNow().Status.Conditions, hpcv1alpha1.ConditionBudgetWarning)
 		Expect(c).NotTo(BeNil())
 		Expect(c.Status).To(Equal(metav1.ConditionFalse), "120 of 300 is 40%, below 60")
+		Expect(c.Reason).To(Equal(hpcv1alpha1.ReasonBelowThreshold))
 		Expect(events()).NotTo(ContainElement(ContainSubstring("BudgetWarning")))
 		Expect(testutil.ToFloat64(metrics.BudgetWarning.WithLabelValues("meluxina", project, "gpu"))).To(Equal(0.0))
 

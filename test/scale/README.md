@@ -12,7 +12,7 @@ go test -tags scale ./test/scale/ -run TestScaleM -v    # one scenario
 
 Needs `KUBEBUILDER_ASSETS` (`make scale-test` sets it through setup-envtest). Normal CI is untouched: every
 file of the harness has the build tag `scale`; only the small `fakeslurm` package (and its unit tests) is in
-`make test`. `SCALE_TMPDIR` moves the scratch files (default `$TMPDIR`), `SCALE_REPORT` the report path. `SCALE_OUTAGE` sets the L-chaos site outage (default 10m).
+`make test`. `SCALE_TMPDIR` moves the scratch files (default `$TMPDIR`), `SCALE_REPORT` the report path. `SCALE_OUTAGE` sets the L-chaos site outage (default 10m); `SCALE_ACCT_LAG` (default 5m) and `SCALE_LATE_JOBS` (default 300) set the L-late scenario.
 
 ## What runs
 
@@ -88,6 +88,7 @@ reports its host while taken and ends with the result its host wrote. GPU slots 
 | **M** | 50 jobs, two classes, a share and siteLeft that admit only part: the rest wait `WaitingForBudget` and are admitted as bookings settle; on every snapshot `used + booked <= min(share, siteLeft)`; the fake site's own charge never exceeds it; every job terminal; no duplicate submission; the published ledger ends with nothing booked |
 | **L** | 1,000 jobs, 3 projects on 2 sites (two projects share one site profile and so one token bucket), lanes `test` and `dev` on with one-job-per-user limits at the site: reconcile throughput, `jobs/state` calls per poll cycle (batched, O(sites)), the shared rate-limit bucket, controller RSS and heap over time, `recentJobs` <= 50 and bounded object size, HPCSite write rate, no lane refusal (the controller never submits a second job into a one-job lane) |
 | **L-chaos** | L plus: controller killed and restarted mid-run (bookings unchanged, no re-submission), a 10-minute outage of the shared site (all 5xx: jobs wait `Waiting/SiteUnavailable`, no runner Job is created for it while it lasts, none fails, all finish afterwards; `SiteReachable` false, then true), lost submit replies that finish before the retry (found in accounting by name: 0 duplicates), a 422 storm on the other site, 10 % `NODE_FAIL`, jobs that always lose their node (`RerunLimit` after exactly 2 re-runs), checkpointing steps (continue at most 5 times; a cohort needing 8 segments ends `ContinuationLimit`) |
+| **L-late** | 300 jobs on one site whose accounting lags slurmctld by 5 minutes (`fakeslurm.Options.AcctLag`; PRD-HPC-1461 AC-58, T-14): for 5 minutes after a job ends, `jobs/state` says so but the accounting record still shows `RUNNING` with no exit code and no end. No job ends `Failed`, all 300 end `Succeeded/Completed` once the record arrives, every job saw a lagged read, nothing is submitted twice, the ledger equals the site's charge, and `jobs/state` stays batched (about 3.5 calls per poll for 300 jobs) inside the token bucket. The fake runner (not the real one) re-reads the accounting record every tick, so the `acct` call count of the site is the stand-in's, not a production rate |
 
 ## Assertions that fail the test
 

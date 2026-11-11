@@ -489,6 +489,61 @@ func TestScaleM(t *testing.T) {
 	w.verifyPublishedLedger(r, jobs)
 }
 
+// TestScaleLateRecord: PRD-HPC-1461 AC-58 / T-14. 300 jobs on one site whose accounting lags slurmctld by 5 minutes
+// (SCALE_ACCT_LAG): after a job ends, jobs/state already says so, but slurmdbd still shows it RUNNING without an
+// exit code or an end for 5 minutes. The terminal state of a job comes from the site's record, never from a guess:
+// no job may end Failed, every job ends Succeeded/Completed once the record arrives, and the call rate to the site
+// stays batched and inside the token bucket (one list-owned call per HPCSite per interval, not one per job).
+func TestScaleLateRecord(t *testing.T) {
+	lag := envDuration("SCALE_ACCT_LAG", 5*time.Minute)
+	r := newResult(t, "L-late (late exit record)", "300 jobs on one site whose accounting record lags the job's end by "+
+		lag.String()+": a late record never marks a good job Failed and the call rate stays constant (D-36, T-14).")
+	w := newWorld(t, ctrlOpts{pollInterval: 3 * time.Second, restRate: 2, restBurst: 5})
+	o := siteOptions("meluxina", 31)
+	o.AcctLag, o.Capacity = lag, 100
+	site := fakeslurm.New(o)
+	p := w.addProject("pl", "meluxina", "u1", "acct1", site, budget{gpuShare: 4000, cpuShare: 4000, gpuSiteLeft: 3500, cpuSiteLeft: 3500}, 0)
+	w.startController()
+	w.startKubelet()
+	w.startSampler()
+	w.startMonitor()
+	n := envInt("SCALE_LATE_JOBS", 300)
+	start := time.Now()
+	w.createJobs(p, mixedSpecs(n, rand.New(rand.NewSource(58))))
+	ok := w.waitTerminal(n, lag+12*time.Minute, func(jobs []hpcv1alpha1.HPCArgoWorkflowJob) {
+		t.Logf("%s %v", time.Since(start).Round(time.Second), histogram(jobs))
+	})
+	dur := time.Since(start)
+	jobs := w.allJobs()
+	st := site.Snapshot()
+	r.row("duration", dur.Round(time.Second))
+	r.row("final phases", histogram(jobs))
+	r.row("accounting reads that lagged (record still RUNNING after the end)", st.LaggedReads)
+	if !ok {
+		r.fail("not every job reached a terminal phase: %v", histogram(jobs))
+	}
+	if h := histogram(jobs); h["Succeeded/Completed"] != n {
+		r.fail("want all %d jobs Succeeded/Completed with the exit record %s late, got %v", n, lag, h)
+	}
+	for i := range jobs {
+		if jobs[i].Status.Phase == hpcv1alpha1.PhaseFailed {
+			r.fail("job %s ended Failed/%s while the record was late: %s", jobs[i].Name, jobs[i].Status.Reason, jobs[i].Status.Message)
+		}
+	}
+	if st.LaggedReads < n {
+		r.fail("only %d lagged accounting reads for %d jobs: the scenario does not exercise the late record", st.LaggedReads, n)
+	}
+	if dur < lag {
+		r.fail("all jobs ended in %s, before the %s lag: the late record was not waited for", dur.Round(time.Second), lag)
+	}
+	w.verifySubmits(r, jobs)
+	w.budgetRows(r, jobs)
+	w.verifyRateLimit(r)
+	w.siteCallRows(r, dur, false)
+	w.reconcileRows(r, start, dur)
+	w.verifyPublishedLedger(r, jobs)
+}
+
 // verifyPublishedLedger waits for the published ledger of each HPCSite to settle and compares it with
 // the jobs: with every job over, nothing may be shown as booked or active.
 func (w *world) verifyPublishedLedger(r *result, jobs []hpcv1alpha1.HPCArgoWorkflowJob) {
