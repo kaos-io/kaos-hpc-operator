@@ -118,6 +118,20 @@ var _ = Describe("HPCArgoWorkflowJob waits for an unreachable site", func() {
 		Expect(runnerJobs(got)).To(HaveLen(1))
 	})
 
+	It("should_spawn_no_runner_after_one_failed_probe_and_spawn_it_after_the_next_good_one", func() {
+		health.Observe(siteKey, sitestate.Down, "HTTP 503", clock)
+		j := newJob()
+		res, got := reconcileOnce(j)
+		Expect(runnerJobs(got)).To(BeEmpty(), "nothing new starts against a site whose latest probe failed")
+		Expect(res.RequeueAfter).To(Equal(FailingSiteResync))
+		Expect(got.Status.Reason).NotTo(Equal(hpcv1alpha1.ReasonSiteUnavailable), "one failed probe is a blip: the job is not told the site is down")
+		Expect(meta.FindStatusCondition(got.Status.Conditions, hpcv1alpha1.ConditionSiteUnavailable)).To(BeNil())
+
+		siteUp()
+		_, got = reconcileOnce(j)
+		Expect(runnerJobs(got)).To(HaveLen(1))
+	})
+
 	It("should_keep_an_admitted_job_booked_but_spawn_no_runner_while_the_site_is_down", func() {
 		j := newJob()
 		_, got := reconcileOnce(j)

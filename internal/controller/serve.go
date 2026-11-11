@@ -283,6 +283,13 @@ func (r *HPCArgoWorkflowJobReconciler) driveRunner(ctx context.Context, job *hpc
 			}
 			return herr
 		}
+		// The latest probe failed but the site does not count as down yet (that takes FailuresToDown probes
+		// over MinDownAfter): start nothing new in the doubt window and look again soon. The job keeps its
+		// phase and reason; one good probe lets it through. Without this every admitted job got a runner Job
+		// for a dead site until the verdict, which a starved poller delays (PRD-HPC-1461 AC-106).
+		if r.Health.Failing(client.ObjectKeyFromObject(site).String()) {
+			return &requeueError{after: FailingSiteResync}
+		}
 		return r.createRunnerJob(ctx, job, site, attempt)
 	}
 	if err != nil {
@@ -365,6 +372,10 @@ func (r *HPCArgoWorkflowJobReconciler) runnerEnded(ctx context.Context, job *hpc
 	}
 	return r.runnerFailed(ctx, job, site, rj, "the runner exited without reporting the end of the site job")
 }
+
+// FailingSiteResync is how soon a job looks again when its runner Job was held back because the site's latest
+// probe failed.
+const FailingSiteResync = 10 * time.Second
 
 // requeueError asks the caller to look again after a delay without it being a failure.
 type requeueError struct{ after time.Duration }
