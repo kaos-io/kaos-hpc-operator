@@ -91,6 +91,31 @@ place in the site's queue is lost, so the runner records each replacement (PRD-H
 | `status.attempts[].queueReplaced`, `.queueReplacedCount` | The same, copied when the attempt is settled. |
 | `HPCSite.status.recentJobs[].queueReplacedCount` | The total over the job's attempts, for the console to say "queue place lost N times (token refresh)". A count only, so the list stays bounded. |
 
+## Dataset staging (not a reason: `status.run.staging`)
+
+Before it submits the site job the runner stages the pinned dataset commit on the project's scratch (PRD-HPC-1461,
+PRD-HPC-1541). It reports one bounded record, and the follower prints one line from it in the step's own log, in the
+`HPC: ...` style, so a user does not have to read the runner Job's log:
+
+```
+HPC: dataset <repo>@<short commit> staged (first copy | delta | already cached), <size>, <seconds>s
+```
+
+(an already cached copy has no size or seconds). The line appears once, as soon as the runner has reported the record
+(with its first status report, while the site job queues); a resubmit that finds the copy resident does not print it again.
+
+| Field | Meaning |
+|---|---|
+| `status.run.staging.repo` | The dataset repository. |
+| `status.run.staging.commit` | The pinned commit, the first 12 characters. |
+| `status.run.staging.kind` | `first` (no earlier version on scratch: the whole commit was copied), `delta` (only what differs from an earlier version was copied) or `cached` (already on scratch, or finished by another runner while this one waited: nothing copied). |
+| `status.run.staging.files`, `.bytes` | What this staging copied (0 when `cached`; a delta counts the files it fetched, not the ones it hard-linked). |
+| `status.run.staging.seconds` | How long it took, including a resumed attempt (0 when `cached`). |
+
+The record holds no path and no site identity, and is absent when the step has no dataset or the job stages it itself
+(the runner says so in its log). A runner restarted within the same attempt keeps the record its predecessor reported
+(its own staging finds the copy resident and would otherwise overwrite "first copy" with "already cached").
+
 ## Cancelling
 
 A cancel (the job deleted, or its Argo Workflow deleted, shut down or ended while the job had not) never releases the
@@ -103,7 +128,7 @@ may still run). See [extreme-cases.md](extreme-cases.md) 2.13 and 2.17.
 
 | Condition / reason | Meaning |
 |---|---|
-| `BudgetWarning` True, reason `ThresholdCrossed` | For some allocation, used plus booked is at or above `budget.warnAtPercent` (default 80) of what the project may spend this month. With `source: site` and a `budget.grantNodeHours` figure for the allocation, the base is the month's grant: (grant - left at `observedAt` + used since + booked) / grant, so it counts what was spent before the observation too; without a grant, used plus booked over used plus what is left. Raised whatever `budget.atLimit` is. A `BudgetWarning` Warning event on the HPCSite; metrics `kaos_hpc_budget_warning` and `kaos_hpc_budget_percent`. |
+| `BudgetWarning` True, reason `ThresholdCrossed` | For some allocation, used plus booked is at or above `budget.warnAtPercent` (default 80) of what the project may spend this month. With `source: site` and a `budget.grantNodeHours` figure for the allocation, the base is the month's grant: (grant - left at `observedAt` + used since + booked) / grant, so it counts what was spent before the observation too; without a grant, used plus booked over used plus what is left. Raised whatever `budget.atLimit` is. A `BudgetWarning` Warning event on the HPCSite; metrics `kaos_hpc_budget_warning` and `kaos_hpc_budget_percent`. The same figure is in `HPCSite.status.gpu|cpu|fpga|largeMem.percent` (int, rounded down; `-1` when there is nothing to be a percentage of: the allocation is `unbounded` or has no allowance), so a client reads it without the metric or its own sum; it is always written, so 0 means 0 percent. |
 | `BudgetWarning` False, reason `BelowThreshold` | Below it, for every allocation that may spend anything. |
 | `SiteReachable` False, reason `NotAnswering` | The site's REST API has not answered for at least 90 s. |
 | `SiteReachable` True, reason `Answering` | It answers. |

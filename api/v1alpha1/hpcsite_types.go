@@ -400,6 +400,13 @@ type TierLedger struct {
 	// limits it here, so leftNodeMinutes is 0 and means nothing. Used and booked are still recorded.
 	// +optional
 	Unbounded bool `json:"unbounded,omitempty"`
+	// Percent is the share of the month's allowance that is spent or committed, rounded down: the figure
+	// the BudgetWarning condition and the kaos_hpc_budget_percent metric use (ledger.Tier.Percent; with a
+	// grant under source site it is against the grant). -1 when there is nothing to be a percentage of
+	// (unbounded, or no allowance). Always written, so 0 means 0 percent, not unknown.
+	// +kubebuilder:validation:Minimum=-1
+	// +optional
+	Percent int32 `json:"percent"`
 }
 
 // RecentJobsMax bounds HPCSiteStatus.RecentJobs: every active job plus the jobs that ended in the

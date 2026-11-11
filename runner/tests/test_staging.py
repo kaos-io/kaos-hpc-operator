@@ -136,6 +136,33 @@ def test_retry_resumes_and_no_space_stops_insufficient_quota(monkeypatch):
     assert sum(w[0] == "stage" for w, _ in stager.calls) == 1, "no space is not retried"
 
 
+def test_a_stager_killed_mid_copy_is_resumed_by_the_next_attempt_with_the_whole_plan(monkeypatch):
+    """PRD-HPC-1461 AC-31a, runner side: the login-node stager dying mid-copy (ssh exit 255, no `done`) leaves the
+    runner with no path, so the job is never pointed at a half version; the next attempt sends the SAME plan and
+    the stager (which keeps what it fetched, see its test_stager.py) finishes it. Only then is the path returned."""
+    lakefs = _LakeFS({"data.yaml": 4, "images/a.jpg": 10, "images/b.jpg": 20})
+    stager = _Stager({"ready": False, "base": None}, stage_rcs=[255, 0])
+    cfg = _twin(monkeypatch, lakefs, stager)
+    info = {}
+    assert staging.stage_dataset(cfg, stager, lambda: "wallet-jwt", info=info).endswith(COMMIT)
+    stages = [(w, r) for w, r in stager.calls if w[0] == "stage"]
+    assert len(stages) == 2, "the killed copy is retried"
+    assert stages[0][1] == stages[1][1] and stages[0][1][-1] == {"op": "end", "files": 3, "bytes": 34, "ref": "main",
+                                                                  "prefix": ""}, "the whole plan again, end record last"
+    assert info["kind"] == "first" and info["files"] == 3, "recorded once the copy is whole, not for the killed try"
+
+
+def test_a_stager_that_keeps_dying_never_hands_the_job_a_half_copy(monkeypatch):
+    stager = _Stager({"ready": False, "base": None}, stage_rcs=[255] * 40)
+    cfg = _twin(monkeypatch, _LakeFS({"images/a.jpg": 1}), stager)
+    clock = [1000.0]
+    monkeypatch.setattr(staging.time, "time", lambda: clock[0])
+    monkeypatch.setattr(staging.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    info = {}
+    assert staging.stage_dataset(cfg, stager, lambda: "wallet-jwt", info=info) == "" and info == {}, \
+        "no path (the job stages in-job and says so) and no staging record"
+
+
 def test_without_the_staging_key_the_job_stages_in_job(monkeypatch):
     stager = _Stager({"ready": True}, key=False)
     cfg = _twin(monkeypatch, _LakeFS({}), stager)
@@ -253,3 +280,74 @@ def test_concurrent_calls_start_one_master(monkeypatch, tmp_path):
     [t.join() for t in ts]
     calls = (tmp_path / "calls").read_text().splitlines()
     assert len([c for c in calls if " -N -f " in " %s " % c]) == 1, calls
+
+
+# ---------------------------------------------------------------- the staging record (status.run.staging)
+
+def _stage_info(cfg, stager):
+    info = {}
+    assert staging.stage_dataset(cfg, stager, lambda: "wallet-jwt", info=info)
+    return info
+
+
+def test_a_first_copy_is_recorded_with_its_size_and_the_short_commit(monkeypatch):
+    lakefs = _LakeFS({"data.yaml": 4, "images/a.jpg": 10, "README.md": 99})
+    stager = _Stager({"ready": False, "base": None})
+    cfg = _twin(monkeypatch, lakefs, stager)
+    assert _stage_info(cfg, stager) == {"repo": "dataset-poulaki", "commit": COMMIT[:12], "kind": "first",
+                                        "files": 2, "bytes": 14, "seconds": 0}
+
+
+def test_a_delta_is_recorded_with_what_it_copied(monkeypatch):
+    lakefs = _LakeFS({}, diff=[{"type": "added", "path": "images/new.jpg", "size_bytes": 7},
+                               {"type": "removed", "path": "images/gone.jpg", "size_bytes": 5}])
+    stager = _Stager({"ready": False, "base": BASE, "base_files": 10, "base_prefix": ""})
+    cfg = _twin(monkeypatch, lakefs, stager)
+    assert _stage_info(cfg, stager) == {"repo": "dataset-poulaki", "commit": COMMIT[:12], "kind": "delta",
+                                        "files": 1, "bytes": 7, "seconds": 0}
+
+
+def test_a_resident_copy_is_recorded_as_cached_and_copied_nothing(monkeypatch):
+    stager = _Stager({"ready": True})
+    cfg = _twin(monkeypatch, _LakeFS({}), stager)
+    info = _stage_info(cfg, stager)
+    assert info["kind"] == "cached" and (info["files"], info["bytes"], info["seconds"]) == (0, 0, 0)
+
+
+class _LateStager(_Stager):
+    """The stager's lock was held by another runner, which finished the same commit: `done` says cached."""
+
+    def __call__(self, words, feed=None, quiet=False):
+        if words[0] != "stage":
+            return super().__call__(words, feed, quiet)
+        list(feed)
+        return 0, [{"event": "done", "cached": True, "path": "/scr/kaos/p/datasets/ds/" + COMMIT}]
+
+
+def test_a_copy_another_runner_finished_while_this_one_waited_is_recorded_as_cached(monkeypatch):
+    stager = _LateStager({"ready": False, "base": None})
+    cfg = _twin(monkeypatch, _LakeFS({"images/a.jpg": 1}), stager)
+    assert _stage_info(cfg, stager)["kind"] == "cached"
+
+
+def test_the_seconds_cover_a_resumed_staging(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(staging.time, "time", lambda: clock[0])
+    stager = _Stager({"ready": False, "base": None}, stage_rcs=[75, 0])
+    cfg = _twin(monkeypatch, _LakeFS({"images/a.jpg": 1}), stager)
+    monkeypatch.setattr(staging.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    assert _stage_info(cfg, stager)["seconds"] == 60, "the wait before the resumed attempt is part of the staging"
+
+
+def test_nothing_is_recorded_when_the_job_stages_in_job(monkeypatch):
+    stager = _Stager({"ready": True}, key=False)
+    cfg = _twin(monkeypatch, _LakeFS({}), stager)
+    info = {}
+    assert staging.stage_dataset(cfg, stager, lambda: "w", info=info) == "" and info == {}
+
+
+def test_the_record_holds_no_path_and_no_site_identity(monkeypatch):
+    stager = _Stager({"ready": False, "base": None})
+    cfg = _twin(monkeypatch, _LakeFS({"images/a.jpg": 1}), stager)
+    text = json.dumps(_stage_info(cfg, stager))
+    assert "/scr" not in text and "/" not in text and cfg.identity()["user"] not in text

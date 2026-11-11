@@ -145,7 +145,9 @@ class Runner:
             # spending the staging budget again.
             self.stage_tried = True
             cfg.check_dataset()
-            self.staged = staging.stage_dataset(cfg, self.stager, self._mint)
+            info = {}
+            self.staged = staging.stage_dataset(cfg, self.stager, self._mint, info=info)
+            self.reporter.note_staging(info)    # carried by every later report; the follower prints it
         reg = ''
         try:
             r = urllib.request.Request(
@@ -524,6 +526,7 @@ class Runner:
         run = (job.get('status') or {}).get('run') or {}
         if int(run.get('attempt') or 0) == cfg.attempt:
             self.reporter.restore_replacements(run)
+            self.reporter.restore_staging(run)
         if int(run.get('attempt') or 0) == cfg.attempt and run.get('terminal') and run.get('hostJobOpen'):
             # A restarted host runner: the step was reported, the host job's end not yet (D-26). Only that is left.
             print('attempt %d reported its step; following its host job to its end' % cfg.attempt, flush=True)

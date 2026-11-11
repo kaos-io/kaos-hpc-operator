@@ -878,6 +878,54 @@ spec:
                     description: Slot is the GPU slot the host gave this job.
                     format: int32
                     type: integer
+                  staging:
+                    description: |-
+                      Staging says how the dataset was staged before submit (first copy, delta or already cached; what was
+                      copied and how long it took). Absent when the step has no dataset or the job stages it itself. The
+                      follower prints it as one "HPC: dataset ... staged" line.
+                    properties:
+                      bytes:
+                        description: Bytes is the number of bytes copied in this staging
+                          (0 when cached).
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      commit:
+                        description: Commit is the pinned commit, shortened to 12
+                          characters.
+                        maxLength: 12
+                        type: string
+                      files:
+                        description: Files is the number of files copied in this staging
+                          (0 when cached).
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      kind:
+                        description: Kind is first, delta or cached.
+                        enum:
+                        - first
+                        - delta
+                        - cached
+                        type: string
+                      repo:
+                        description: Repo is the dataset repository's name.
+                        maxLength: 128
+                        type: string
+                      seconds:
+                        description: Seconds is how long the staging took (0 when
+                          cached).
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    required:
+                    - bytes
+                    - commit
+                    - files
+                    - kind
+                    - repo
+                    - seconds
+                    type: object
                   startTime:
                     description: StartTime and EndTime as the site reports them.
                     format: date-time

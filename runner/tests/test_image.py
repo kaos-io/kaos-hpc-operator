@@ -252,6 +252,56 @@ def test_a_registry_failure_never_raises_and_a_dropped_stream_retries_once(monke
         reg.close()
 
 
+class _KilledMidStream(FakeStager):
+    """The stager dies after receiving `cut` bytes of the first stream (no `done`, ssh exit 255); the second
+    stream is received whole."""
+
+    def __init__(self, cut, **kw):
+        super().__init__(**kw)
+        self.cut, self.streams = cut, []
+
+    def __call__(self, words, feed=None, quiet=False):
+        if words[0] != "image":
+            return super().__call__(words, feed, quiet)
+        self.calls.append(words)
+        got = b""
+        for chunk in feed:
+            got += chunk
+            if not self.streams and len(got) >= self.cut:
+                self.streams.append(got)
+                return 255, []
+        self.streams.append(got)
+        return 0, [{"event": "done", "path": "/scr/kaos/p/images/k.tar"}]
+
+
+def test_a_stream_killed_mid_tar_is_streamed_again_whole_and_only_the_whole_tar_is_named(monkeypatch):
+    """PRD-HPC-1461 AC-66, runner side: a stager killed with part of the tar received returns no path (the job
+    is not pointed at a half tar); the retry streams the whole tar again from its first byte, ending in the
+    sha256 line the stager checks before it keeps anything."""
+    reg = FakeRegistry()
+    try:
+        stager = _KilledMidStream(cut=600_000, status={"ready": False})
+        img = _stage(monkeypatch, stager, reg)
+        assert image.stage_image(img, "gcp-tok", stager) == "/scr/kaos/p/images/k.tar"
+        half, whole = stager.streams
+        assert 600_000 <= len(half) < len(whole), "the first stream was cut before its end"
+        assert half == whole[:len(half)], "the retry starts again at the first byte"
+        _read_tar([whole])                    # whole tar + its sha256 trailer, as the stager verifies
+        assert [w[0] for w in stager.calls] == ["image-status", "image", "image"]
+    finally:
+        reg.close()
+
+
+def test_a_stager_killed_on_every_try_leaves_the_job_to_pull_and_names_no_tar(monkeypatch):
+    reg = FakeRegistry()
+    try:
+        stager = FakeStager(status={"ready": False}, image_rc=255)
+        img = _stage(monkeypatch, stager, reg)
+        assert image.stage_image(img, "gcp-tok", stager) == "", "no path: the job pulls from the registry"
+    finally:
+        reg.close()
+
+
 def test_the_lease_key_is_the_job_scripts_cache_key():
     key = hashlib.sha256(b"r/x:t").hexdigest()[:16]
     assert image.image_key("r/x:t") == key and len(key) == 16

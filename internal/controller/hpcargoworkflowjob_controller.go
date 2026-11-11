@@ -532,7 +532,8 @@ func (r *HPCArgoWorkflowJobReconciler) publishLedgerNow(ctx context.Context, sit
 			left = 0 // meaningless without a figure; the ledger says so with unbounded=true
 		}
 		site.Status.SetLedger(tier, &hpcv1alpha1.TierLedger{UsedNodeMinutes: t.Used, BookedNodeMinutes: t.Booked,
-			LeftNodeMinutes: left, Unbounded: t.Unbounded})
+			LeftNodeMinutes: left, Unbounded: t.Unbounded,
+			Percent: int32(t.Percent())})
 		metrics.SetSiteLedger(site.Spec.Site, projectOf(site), string(tier), t.Used, t.Booked, left)
 	}
 	metrics.ActiveJobs.WithLabelValues(projectOf(site), site.Spec.Site).Set(float64(l.Active))
