@@ -157,17 +157,20 @@ def _make(path, old):
 def test_caches_are_cleaned_by_last_use(tmp_path):
     lines = _job_script_lines()
     cleanup = [l for l in lines if l.startswith(("touch -c", "find $SCR/", "apptainer cache clean"))]
-    assert len(cleanup) == 5, cleanup
+    assert len(cleanup) == 6, cleanup
     scr = tmp_path / "scratch"
     _make(scr / "sif-cache" / "old.sif", old=True)
     _make(scr / "sif-cache" / "recent.sif", old=False)
     _make(scr / "sif-cache" / "inuse.sif", old=True)        # this job's image
     _make(scr / "sif-cache" / "dead.sif.part-1-2", old=True)  # a pull killed mid-way (PRD-1609 F-02)
     _make(scr / "sif-cache" / "live.sif.part-3-4", old=False)  # a pull still running
-    _make(scr / "data-cache" / "repo" / "c1" / ".complete", old=True)
+    _make(scr / "data-cache" / "repo" / "c1" / ".kaos-complete", old=True)
     _make(scr / "data-cache" / "repo" / "c1" / "f", old=True)
-    _make(scr / "data-cache" / "repo" / "c2" / ".complete", old=False)
+    _make(scr / "data-cache" / "repo" / "c2" / ".kaos-complete", old=False)
     _make(scr / "data-cache" / "repo" / "c3" / "partial", old=True)  # no marker: left alone
+    _make(scr / "data-cache" / "repo" / "c4" / ".complete", old=True)   # a copy with only the marker of before
+    _make(scr / "data-cache" / "repo" / "c5" / ".complete", old=True)   # a dataset file named .complete ...
+    _make(scr / "data-cache" / "repo" / "c5" / ".kaos-complete", old=False)   # ... in a copy used yesterday
     bindir = tmp_path / "bin"
     bindir.mkdir()
     (bindir / "apptainer").write_text('#!/bin/sh\necho "$@" > "$SCR/apptainer-args"\n')
@@ -178,7 +181,7 @@ def test_caches_are_cleaned_by_last_use(tmp_path):
     subprocess.run(["bash", "-c", "\n".join(cleanup)], env=env, check=True)
 
     assert sorted(p.name for p in (scr / "sif-cache").iterdir()) == ["inuse.sif", "live.sif.part-3-4", "recent.sif"]
-    assert sorted(p.name for p in (scr / "data-cache" / "repo").iterdir()) == ["c2", "c3"]
+    assert sorted(p.name for p in (scr / "data-cache" / "repo").iterdir()) == ["c2", "c3", "c5"]
     assert (scr / "apptainer-args").read_text().split() == ["cache", "clean", "--force", "--days", "1"]
 
 
@@ -187,7 +190,7 @@ def test_this_jobs_image_and_download_are_touched_before_the_cleanup():
     touch = lines.index('touch -c "$SIF"')
     first_clean = next(i for i, l in enumerate(lines) if l.startswith("find $SCR/"))
     assert touch < first_clean
-    assert "(dest / '.complete').touch()" in payloads.STAGEIN
+    assert "(dest / '.kaos-complete').touch()" in payloads.STAGEIN
 
 
 def _pull_block():

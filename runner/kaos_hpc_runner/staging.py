@@ -8,9 +8,16 @@ base (its newest ready commit of the repo); the runner lists only the lakeFS dif
 the whole commit for a first copy, and streams one JSON line per file: every object of the commit,
 whatever the dataset's shape (PRD kaos#1911 F-04). Unchanged files are hard links of the base. Bytes
 come from the lakeFS API with the wallet bearer (sent once on stdin, held in memory only). Any failure
-returns '' and the job stages in-job as before, saying so (F-06), with two exceptions that end the run
-before anything is submitted: no room in the quota (InsufficientQuota) and a staging tool that speaks
-another staging contract (StagingMismatch).
+returns '' and the job stages in-job as before, saying so (F-06), with three exceptions that end the run
+before anything is submitted: no room in the quota (InsufficientQuota), a staging tool that speaks
+another staging contract (StagingMismatch), and a dataset object whose name is reserved for the
+platform (ReservedName).
+
+Reserved names: the markers of a copy on the site live at its root under `.kaos-` (.kaos-ready, .kaos-used,
+.kaos-complete, .kaos-commit, ...) and the staging tool's half-downloaded files end in `.kaos-part`. A
+dataset object with such a name would be taken for a marker, or refused by the staging tool mid-copy. It is
+refused here, by name, before anything is copied. The `.kaos/` folder is the platform's own inside a
+dataset and is staged like any other.
 
 The staging contract (CONTRACT) is what `status` and `stage` mean to the runner and to the staging tool,
 which ship separately. The runner asks the tool for its number (`version`) and sends its own with every
@@ -48,6 +55,40 @@ class StagingMismatch(Exception):
     """The site's staging tool speaks another staging contract than this runner (one of the two was updated
     first). Nothing is staged with it and the job does not stage in-job either: the run ends StagingMismatch
     before anything is submitted. The message is a plain sentence for the job's status and the pipeline log."""
+
+
+class ReservedName(Exception):
+    """The dataset commit holds an object whose name is reserved for the platform on the site. Nothing is staged
+    and the job does not stage in-job either: the run ends ReservedName before anything is submitted. The
+    message names the object and the rule, for the job's status and the pipeline log."""
+
+
+RESERVED_PREFIX, RESERVED_SUFFIX = '.kaos-', '.kaos-part'
+
+
+def is_reserved(path):
+    # The same two rules as the staging tool's safe_rel: the first part of the path, and the file name.
+    return path.startswith(RESERVED_PREFIX) or path.endswith(RESERVED_SUFFIX)
+
+
+def reserved_message(repo, commit, path):
+    return ('dataset %s@%s has an object named %r: names starting with .kaos are reserved for the platform (at the '
+            'root of a dataset every name starting with %s, and anywhere a file name ending in %s). Nothing was '
+            'staged and nothing was submitted to the site. Rename or remove the object and commit a new version of '
+            'the dataset.' % (repo, commit[:12], path, RESERVED_PREFIX, RESERVED_SUFFIX))
+
+
+def refuse_reserved_root(api, repo, commit, wallet):
+    """Raise ReservedName when the commit holds a root name under `.kaos-`: one small listing, whichever way
+    the dataset is staged afterwards (from the login node or in-job). A listing that cannot be read judges
+    nothing: the stage plan and the in-job stage-in check the names again."""
+    try:
+        first = next(lakefs_pages(api + '/refs/%s/objects/ls' % commit, wallet, {'prefix': RESERVED_PREFIX}), None)
+    except Exception as e:
+        print('stage: reserved names not checked (%s)' % e, flush=True)
+        return
+    if first is not None:
+        raise ReservedName(reserved_message(repo, commit, first['path']))
 
 
 def mismatch_message(theirs):
@@ -273,10 +314,12 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
     prefix = ''
     base = st.get('base') if st.get('base') and st.get('base_prefix') == prefix else None
     need_bytes = need_files = added = removed = 0
-    for kind, _, size in stage_plan(api, commit, base, prefix, wallet):
+    for kind, path, size in stage_plan(api, commit, base, prefix, wallet):
         if kind == 'removed':
             removed += 1
             continue
+        if is_reserved(path):
+            raise ReservedName(reserved_message(repo, commit, path))
         need_bytes += size
         need_files += 1
         added += kind == 'added'
@@ -325,19 +368,23 @@ def ssh_present():
 
 def stage_dataset(cfg, stager, mint_wallet, info=None):
     """The resident path of the dataset's pinned commit, or '' (the job then stages in-job). The commit is
-    the one the pipeline pinned (spec.dataset); nothing is resolved here. Two failures are not a fallback:
-    InsufficientQuota when the dataset does not fit the project's scratch quota (AC-33), and StagingMismatch
-    when the site's staging tool speaks another staging contract.
+    the one the pipeline pinned (spec.dataset); nothing is resolved here. Three failures are not a fallback:
+    InsufficientQuota when the dataset does not fit the project's scratch quota (AC-33), StagingMismatch
+    when the site's staging tool speaks another staging contract, and ReservedName when the dataset holds an
+    object whose name is reserved for the platform.
     info (a dict), when given, receives the staging record (staging_record) once the copy is resident; it stays
     empty when the job stages in-job."""
     repo, ref, commit = cfg.dataset_repo, cfg.dataset_ref, cfg.dataset_commit
     lakefs = cfg.lakefs_url
-    if not (repo and lakefs and stager.have_key()):
-        print('stage: skipped (needs a dataset, the lakeFS endpoint and the staging key)'
-              ' - the job stages in-job', flush=True)
+    if not (repo and lakefs):
+        print('stage: skipped (needs a dataset and the lakeFS endpoint) - the job stages in-job', flush=True)
         return ''
     wallet = mint_wallet()
     if not wallet:
+        return ''
+    refuse_reserved_root(lakefs + '/api/v1/repositories/' + urllib.parse.quote(repo, safe=''), repo, commit, wallet)
+    if not stager.have_key():
+        print('stage: skipped (needs the staging key) - the job stages in-job', flush=True)
         return ''
     if not ssh_present():
         print('stage: no ssh client - the job stages in-job', flush=True)
@@ -348,7 +395,7 @@ def stage_dataset(cfg, stager, mint_wallet, info=None):
         attempt += 1
         try:
             path, retry = stage_once(stager, repo, ref, commit, lakefs, wallet, info)
-        except (InsufficientQuota, StagingMismatch):
+        except (InsufficientQuota, StagingMismatch, ReservedName):
             raise
         except Exception as e:
             print('stage: attempt', attempt, 'failed:', e, flush=True)

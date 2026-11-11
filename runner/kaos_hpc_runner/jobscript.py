@@ -180,8 +180,11 @@ def batch_lines(scope, scratch):
         # Staged layers are only a way to build the SIF (the stager evicts them under
         # space pressure too): unused for 3 days they go.
         '[ -n "$IMAGE_STAGED" ] && find "${IMAGE_STAGED%/*}" -maxdepth 1 -name "*.tar" -user "$USER" -mtime +2 -delete 2>/dev/null',
-        'find $SCR/data-cache -mindepth 3 -maxdepth 3 -name .complete -user "$USER" -mtime +14'
+        'find $SCR/data-cache -mindepth 3 -maxdepth 3 -name .kaos-complete -user "$USER" -mtime +14'
         ' -printf "%h\\n" 2>/dev/null | xargs -r rm -rf',
+        # A copy with only the marker of before (.complete) and no .kaos-complete was never completed since.
+        'find $SCR/data-cache -mindepth 3 -maxdepth 3 -name .complete -user "$USER" -mtime +14'
+        ' -printf "%h\\n" 2>/dev/null | while read -r d; do [ -e "$d/.kaos-complete" ] || rm -rf "$d"; done',
         # AC-65: the layer cache is only a by-product of a pull (the SIF is the cache that counts). Files older
         # than a day go every time (younger ones may belong to a build on another node); the stager's cleanup
         # does the same from the login node when no job runs.

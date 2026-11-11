@@ -74,6 +74,11 @@ def _stage(cfg, stager, wallet="wallet-jwt"):
     return staging.stage_dataset(cfg, stager, lambda: wallet)
 
 
+def _listings(lakefs):
+    """The listings of the commit's objects, without the one small look for reserved root names."""
+    return [u for u in lakefs.urls if "/objects/ls?" in u and "prefix=.kaos-" not in u]
+
+
 def _stage_call(stager):
     return next((w, r) for w, r in stager.calls if w[0] == "stage")
 
@@ -130,6 +135,56 @@ def test_the_filter_is_gone():
     assert not hasattr(staging, "is_dataset_path")
 
 
+# ------------------------------------------------ names reserved for the platform
+
+@pytest.mark.parametrize("name", [".kaos-ready", ".kaos-commit", ".kaos-complete", ".kaos-notes/a.txt"])
+@pytest.mark.parametrize("key", [True, False])
+def test_a_dataset_with_a_reserved_root_name_stops_the_run_on_either_staging_path(monkeypatch, name, key):
+    """Site markers live under `.kaos-` at the root of a copy. A dataset object there would be refused by the
+    staging tool (and the job would copy in-job on node time) or would overwrite a marker. Both paths stop
+    before anything is staged or submitted: with the staging key (login-node staging) and without it (in-job)."""
+    lakefs = _LakeFS(dict(NOT_YOLO, **{name: 3}))
+    stager = _Stager({"ready": False, "base": None}, key=key)
+    cfg = _twin(monkeypatch, lakefs, stager)
+    with pytest.raises(staging.ReservedName) as e:
+        _stage(cfg, stager)
+    assert stager.calls == [], "the staging tool is not even asked"
+    assert repr(name) in str(e.value) and "names starting with .kaos are reserved for the platform" in str(e.value)
+    assert "Nothing was staged" in str(e.value)
+    assert len(lakefs.urls) == 1 and "prefix=.kaos-" in lakefs.urls[0], "one small listing, not the whole commit"
+
+
+@pytest.mark.parametrize("diff", [False, True])
+def test_a_name_ending_in_the_staging_tools_part_suffix_stops_the_run_before_the_copy(monkeypatch, diff):
+    name = "scenes/0001/points.ply.kaos-part"
+    lakefs = _LakeFS({name: 3, "a.bin": 1}, diff=[{"type": "added", "path": name, "size_bytes": 3}])
+    stager = _Stager({"ready": False, "base": BASE, "base_files": 10, "base_prefix": ""} if diff
+                     else {"ready": False, "base": None})
+    cfg = _twin(monkeypatch, lakefs, stager)
+    with pytest.raises(staging.ReservedName) as e:
+        _stage(cfg, stager)
+    assert repr(name) in str(e.value)
+    assert [w[0] for w, _ in stager.calls] == ["version", "status"], "refused while planning: no stage call"
+
+
+def test_the_platforms_own_folder_and_ordinary_dot_names_are_staged(monkeypatch):
+    tree = {".kaos/seal.json": 5, ".gitattributes": 2, "a/.kaos-like/b": 1, "part.kaos-partial": 4}
+    stager = _Stager({"ready": False, "base": None})
+    cfg = _twin(monkeypatch, _LakeFS(tree), stager)
+    assert _stage(cfg, stager)
+    assert {r["path"] for r in _stage_call(stager)[1] if r["op"] == "fetch"} == set(tree)
+
+
+def test_a_listing_that_cannot_be_read_does_not_judge_the_names(monkeypatch):
+    stager = _Stager({"ready": True})
+    cfg = _twin(monkeypatch, _LakeFS({}), stager)
+
+    def down(req, timeout=0):
+        raise IOError("lakeFS 502")
+    monkeypatch.setattr(urllib.request, "urlopen", down)
+    assert _stage(cfg, stager).endswith(COMMIT), "the copy on the site was checked when it was made"
+
+
 # ------------------------------------------------ the staging contract of the site's staging tool
 
 def test_the_runner_asks_the_staging_tool_for_its_contract_and_sends_its_own(monkeypatch):
@@ -157,7 +212,7 @@ def test_a_staging_tool_of_another_contract_stops_the_run_before_anything_is_sta
     with pytest.raises(staging.StagingMismatch) as e:
         _stage(cfg, stager)
     assert [w[0] for w, _ in stager.calls] == ["version"], "no status, no stage, no retry"
-    assert lakefs.urls == []
+    assert _listings(lakefs) == []
     assert "Nothing was staged" in str(e.value) and "staging contract" in str(e.value)
 
 
@@ -201,7 +256,7 @@ def test_delta_lists_only_the_two_dot_diff_against_the_base(monkeypatch):
     assert {"op": "delete", "path": "images/gone.jpg"} in records
     assert records[-1]["files"] == 10 + 1 - 1, "base count + added - removed"
     assert any("/refs/%s/diff/%s?" % (BASE, COMMIT) in u and "type=two_dot" in u for u in lakefs.urls)
-    assert not any("/objects/ls?" in u for u in lakefs.urls), "a delta never lists the whole commit"
+    assert _listings(lakefs) == [], "a delta never lists the whole commit"
 
 
 def test_a_base_with_another_layout_is_not_used(monkeypatch):
@@ -217,7 +272,8 @@ def test_a_ready_copy_is_never_listed_again(monkeypatch):
     stager = _Stager({"ready": True})
     cfg = _twin(monkeypatch, lakefs, stager)
     assert _stage(cfg, stager).endswith(COMMIT)
-    assert lakefs.urls == [] and [w[0] for w, _ in stager.calls] == ["version", "status"]
+    assert _listings(lakefs) == []
+    assert [w[0] for w, _ in stager.calls] == ["version", "status"]
 
 
 def test_retry_resumes_and_no_space_stops_insufficient_quota(monkeypatch):

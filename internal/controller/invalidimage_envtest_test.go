@@ -89,6 +89,20 @@ var _ = Describe("HPC invalid image", func() {
 		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(0))))
 	})
 
+	It("should_end_a_job_whose_dataset_holds_a_reserved_name_as_failed_reserved_name_and_settle_nothing", func() {
+		j := reconcileOnce(newJob("reserved", "zot.example/proj/app:v1"))
+		orig := j.DeepCopy()
+		code := hpcv1alpha1.ExitCodeReservedName
+		j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, State: "FAILED", ExitCode: &code, Terminal: true,
+			Message: "dataset d@c0ffee has an object named '.kaos-ready': names starting with .kaos are reserved for the platform"}
+		Expect(k8sClient.Status().Patch(ctx, j, client.MergeFrom(orig))).To(Succeed())
+		got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonReservedName))
+		Expect(got.Status.Message).To(ContainSubstring(".kaos-ready"))
+		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(0))))
+	})
+
 	It("should_end_a_job_the_runner_found_invalid_as_failed_invalid_image_and_settle_nothing", func() {
 		j := reconcileOnce(newJob("runner-found", "zot.example/proj/app:v1"))
 		orig := j.DeepCopy()

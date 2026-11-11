@@ -66,11 +66,15 @@ def lakefs():
         fake.httpd.server_close()
 
 
-def _stage_in(tmp_path, fake):
+def _run(tmp_path, fake):
     env = {"LAKEFS_ENDPOINT": fake.url, "LAKEFS_BEARER_TOKEN": "w", "DATASET_REPO": "ds", "DATASET_COMMIT": COMMIT,
            "DATASET_CACHE": str(tmp_path / "data-cache"), "DATASET_DIRFILE": str(tmp_path / "dirfile"),
            "SLURM_JOB_ID": "9"}
-    p = subprocess.run([sys.executable, "-"], input=payloads.STAGEIN, env=env, capture_output=True, text=True)
+    return subprocess.run([sys.executable, "-"], input=payloads.STAGEIN, env=env, capture_output=True, text=True)
+
+
+def _stage_in(tmp_path, fake):
+    p = _run(tmp_path, fake)
     assert p.returncode == 0, p.stderr
     dest = tmp_path / "data-cache" / "ds" / COMMIT
     assert (tmp_path / "dirfile").read_text() == str(dest)
@@ -79,18 +83,18 @@ def _stage_in(tmp_path, fake):
 
 def _tree(dest):
     return {str(f.relative_to(dest)): f.read_bytes() for f in dest.rglob("*")
-            if f.is_file() and f.name not in (".complete", ".kaos-commit")}
+            if f.is_file() and f.name not in (".kaos-complete", ".kaos-commit")}
 
 
 def test_a_tree_without_data_yaml_images_or_labels_is_downloaded_whole(tmp_path, lakefs):
     fake = lakefs(NOT_YOLO)
     dest, _ = _stage_in(tmp_path, fake)
     assert _tree(dest) == NOT_YOLO
-    assert (dest / ".complete").read_text().strip() == "full" and (dest / ".kaos-commit").read_text() == COMMIT
+    assert (dest / ".kaos-complete").exists() and (dest / ".kaos-commit").read_text() == COMMIT
 
 
 def test_an_old_partial_copy_is_completed_not_served(tmp_path, lakefs):
-    """The copy an older stage-in left: the YOLO folders and an empty .complete marker."""
+    """The copy an older stage-in left: the YOLO folders and its marker, `.complete`."""
     dest = tmp_path / "data-cache" / "ds" / COMMIT
     for rel, body in YOLO.items():
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -101,7 +105,7 @@ def test_an_old_partial_copy_is_completed_not_served(tmp_path, lakefs):
     assert "cache hit" not in out, "a copy of the YOLO folders only is not the dataset"
     assert _tree(dest) == dict(YOLO, **REST)
     assert sorted(fake.downloads) == sorted(REST), "what the old copy holds is not downloaded again"
-    assert (dest / ".complete").read_text().strip() == "full"
+    assert (dest / ".kaos-complete").exists() and not (dest / ".complete").exists(), "the old marker is gone"
 
 
 def test_a_whole_copy_is_a_cache_hit_and_downloads_nothing(tmp_path, lakefs):
@@ -110,4 +114,31 @@ def test_a_whole_copy_is_a_cache_hit_and_downloads_nothing(tmp_path, lakefs):
     fake.downloads.clear()
     dest, out = _stage_in(tmp_path, fake)
     assert "cache hit" in out and fake.downloads == []
-    assert (dest / ".complete").read_text().strip() == "full", "marking the last use keeps the marker's word"
+
+
+def test_a_dataset_file_named_like_the_old_marker_is_data_and_never_a_marker(tmp_path, lakefs):
+    """`.complete` is a name a dataset may use. The marker lives under the reserved `.kaos-` prefix, so the file
+    is downloaded like any other and its presence never makes a half copy look whole."""
+    tree = dict(NOT_YOLO, **{".complete": b"a file of the dataset"})
+    dest = tmp_path / "data-cache" / "ds" / COMMIT
+    dest.mkdir(parents=True)
+    (dest / ".complete").write_bytes(tree[".complete"])     # a download that was killed after this one file
+    fake = lakefs(tree)
+    dest, out = _stage_in(tmp_path, fake)
+    assert "cache hit" not in out and _tree(dest) == tree
+    assert (dest / ".kaos-complete").exists()
+
+
+@pytest.mark.parametrize("name", [".kaos-complete", ".kaos-commit", ".kaos-x/y.bin"])
+def test_a_reserved_root_name_fails_the_stage_in_before_any_download(tmp_path, lakefs, name):
+    fake = lakefs(dict(NOT_YOLO, **{name: b"x"}))
+    p = _run(tmp_path, fake)
+    assert p.returncode != 0 and fake.downloads == []
+    assert repr(name) in p.stderr and "names starting with .kaos are reserved for the platform" in p.stderr
+    assert not (tmp_path / "data-cache" / "ds" / COMMIT / ".kaos-complete").exists()
+
+
+def test_the_platforms_own_folder_is_downloaded(tmp_path, lakefs):
+    tree = dict(NOT_YOLO, **{".kaos/seal.json": b"{}"})
+    dest, _ = _stage_in(tmp_path, lakefs(tree))
+    assert _tree(dest) == tree

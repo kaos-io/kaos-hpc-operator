@@ -281,6 +281,22 @@ def test_a_staging_tool_of_another_contract_ends_the_attempt_staging_mismatch_wi
     assert "StagingMismatch" in capsys.readouterr().out
 
 
+def test_a_dataset_with_a_reserved_name_ends_the_attempt_reserved_name_without_submitting(rig, capsys):
+    """No site job, one terminal report (FAILED, exit 242, the object and the rule); not a fallback."""
+    slurm = FakeSlurm()
+    rig.make(slurm)
+
+    def reserved(cfg, stager, mint, **kw):
+        raise staging_mod.ReservedName("dataset d@c has an object named '.kaos-ready'")
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", reserved)
+    assert rig.runner.run() == 0
+    assert slurm.submitted == []
+    run = rig.kube.run
+    assert run["state"] == "FAILED" and run["exitCode"] == 242 and run["terminal"] is True
+    assert ".kaos-ready" in run["message"] and not run.get("siteJobID")
+    assert "ReservedName" in capsys.readouterr().out
+
+
 def test_an_image_that_does_not_fit_the_quota_also_ends_insufficient_quota(rig):
     slurm = FakeSlurm()
     rig.make(slurm)
