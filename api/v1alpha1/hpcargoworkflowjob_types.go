@@ -96,6 +96,12 @@ const (
 	ExitCodeSubmitLimit = int32(238)
 	// ExitCodeInvalidImage is the exit code the runner reports (state FAILED, no site job) for an unpullable image reference.
 	ExitCodeInvalidImage = int32(239)
+	// ReasonGPUViolation: on a node shared by several steps, the slot manager stopped this step for computing on a
+	// GPU outside its set. The runner reports ExitCodeGPUViolation for it; the attempt is Failed with this reason.
+	ReasonGPUViolation = "GPUViolation"
+	// ExitCodeGPUViolation is the exit code the runner reports for a step stopped for GPUViolation. Next to
+	// ExitCodeInvalidImage, in the same reserved range.
+	ExitCodeGPUViolation = int32(240)
 	// DefaultIdleTimeoutMinutes is the idle window of a step that does not set one (D-72).
 	DefaultIdleTimeoutMinutes = int32(20)
 	// ReasonSiteUnavailable: the site does not answer (connection errors, 5xx, timeouts, slurmctld down). The job

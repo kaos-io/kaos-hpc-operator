@@ -64,6 +64,7 @@ Phases: `Pending` (not judged yet, or the next attempt is about to be judged), `
 | `Idle` | Failed | The on-node idle watchdog ended the step: GPU (CPU on a CPU class) use below 5 % and no log growth for `spec.idleTimeoutMinutes` (default 20; 0 = off). Exit 236. The node-minutes it saved are recorded. | Follower: "stopped: no GPU use and no output for N min", then the step's last lines. `Idle` Warning event, `kaos_hpc_idle_kills_total`. |
 | `InsufficientQuota` | Failed | Staging the dataset or image would exceed the project's scratch quota (space or files) even after evicting everything unused. The runner stops before any copy and submits nothing (exit 237, no site job). | Message: what did not fit, "nothing was copied and nothing in use was deleted", free space or raise the quota. `InsufficientQuota` Warning event. |
 | `SubmitLimit` | Failed | The site itself refused a submit for its per-user cap (`QOSMaxSubmitJobPerUserLimit`, `AssocMaxSubmitJobLimit`, ...). The runner reports exit 238 with the cap and the count it read from the site. See the Refused form above. | Message with the cap and the count, "resubmit when the count is below the cap". `SubmitLimit` Warning event. |
+| `GPUViolation` | Failed | On a node shared by several steps (AC-57 / D-29), the step computed on a GPU outside its own set and the slot manager stopped that step alone; neighbouring steps keep running. The slot manager writes `kaos-state=done rc=N reason=GPUViolation` into the host job's Slurm comment and `gpu: step ... outside its set: stopping it` into the job log; the runner reports exit 240 (live 2026-11-11, job 5447505, read `SiteFAILED` exit 137 before). Prevention first: where `nvidia-container-cli` works the step cannot see the other GPUs (`gpu fence: nvccli` in the job log). | Reason `GPUViolation`; the guest settles 0 node-minutes (its host pays). |
 
 Other final states in `status.reason`: `Completed` (Succeeded), `Cancelled` (Cancelled), `Continued` (attempt record
 outcome only), `Ended` (the site reported no state), and `Site<STATE>` (the site's own state of an attempt that ended
@@ -138,11 +139,9 @@ may still run). See [extreme-cases.md](extreme-cases.md) 2.13 and 2.17.
 - `TIMEOUT` in a host's Slurm comment (`kaos-state=done rc=143 reason=TIMEOUT`): the slot manager's word that a step
   on a shared node was stopped by its own time limit (it ended by TERM or KILL after running its whole `srun --time`).
   The runner turns it into the attempt state `TIMEOUT` (see `WallTimeReached`).
-- `GPUViolation`: on a shared node, a step computed on a GPU outside its own set and the slot manager stopped that
-  step alone (AC-57 / D-29). It is written into the host job's Slurm comment (`kaos-state=done rc=N
-  reason=GPUViolation`) and the job log (`gpu: step ... outside its set: stopping it`), not into the status of an
-  HPC job: the step's attempt ends `Failed/SiteFAILED` (exit 137, never 0, also for `reason=memkill`; live 2026-11-10, job 5442274). Neighbouring steps keep running. Prevention first: where `nvidia-container-cli` works the step cannot see
-  the other GPUs (`gpu fence: nvccli` in the job log).
+- `memkill` in a host's Slurm comment (`kaos-state=done rc=N reason=memkill`): the slot manager stopped a step on a
+  shared node for using more than its memory share. The attempt ends `Failed/SiteFAILED` (never exit 0; live
+  2026-11-10, job 5442274).
 - Events not tied to a reason constant: `LaneRefused` (the site refused the lane; the attempt ran on the class
   default), `HostSettledToJobEnd` (a host's attempt settled to its Slurm job's end, booking released), `HostEndUnknown`
   (a Warning: the host's runner ended before the job's end was reported; settled up to now, booking released),
