@@ -29,6 +29,11 @@ type Tier struct {
 	// SiteSource is true when the budget is the site's own remainder (source site): there is no
 	// project share, so the site's limit is the only one.
 	SiteSource bool
+	// Grant is what the site granted for the month in node-minutes (source site, AC-22), 0 when unknown.
+	// Set only when the budget's observation is from this period and the grant is not below what was
+	// left at the observation (Share). It decides the warning percentage and nothing else: Ceiling,
+	// Left and admission keep using the remainder (D-56).
+	Grant int64
 }
 
 // Ceiling is the most the project can still spend this period before counting bookings: the share
@@ -57,11 +62,18 @@ func (t Tier) SiteBinds() bool {
 // warning percentage (AC-22). May be zero or negative when nothing may be spent.
 func (t Tier) Total() int64 { return t.Used + t.Ceiling() }
 
-// Percent is used plus booked as a share of Total, rounded down, capped at 100 000 so a tiny total
-// cannot overflow a gauge. -1 when the total is not positive (nothing may be spent: no percentage).
+// Percent is the share of the month's allowance that is spent or committed, rounded down, capped at
+// 100 000 so a tiny total cannot overflow a gauge. -1 when there is nothing to be a percentage of
+// (AC-22). With a known Grant (source site) it is (Grant - Share + Used + Booked) / Grant: what the
+// site had already charged when it was asked (the grant less what it reported left), plus what ended
+// since, plus what is booked. Otherwise it is used plus booked over Total (the lower of the share and the
+// site's remainder, as before the grant existed).
 func (t Tier) Percent() int64 {
 	if t.Unbounded {
 		return -1 // no figure from the site: nothing to be a percentage of
+	}
+	if t.Grant > 0 {
+		return min((t.Grant-t.Share+t.Used+t.Booked)*100/t.Grant, 100000)
 	}
 	total := t.Total()
 	if total <= 0 {
@@ -200,6 +212,7 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 		hours, known := site.Spec.Budget.NodeHours(tier)
 		l.Tiers[tier] = Tier{Share: hours * 60, SiteSource: siteSource, Unbounded: !known}
 	}
+	applyGrant(&l, site, periodStart)
 	// Source share with siteLeft: the site's remainder is an upper bound beside the share. It counts
 	// only when observed within this period, since what ended before the observation is already in
 	// the site's figure and a figure from last month says nothing about this one. Attempts that ended
@@ -266,6 +279,23 @@ func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 		l.SiteJobs++
 	}
 	return l
+}
+
+// applyGrant sets each tier's Grant (AC-22), for a source-site budget with a grant figure. A grant counts only
+// when its observation is from this period (an older figure describes another month) and is not below what was
+// left at it (inconsistent: ignored, the earlier warning base applies).
+func applyGrant(l *Ledger, site *hpcv1alpha1.HPCSite, periodStart time.Time) {
+	b := site.Spec.Budget
+	if b.Source != hpcv1alpha1.BudgetSourceSite || b.ObservedAt == nil || b.ObservedAt.UTC().Before(periodStart) {
+		return
+	}
+	for _, tier := range hpcv1alpha1.Tiers {
+		t := l.Tiers[tier]
+		if g, ok := b.GrantNodeHours.Of(tier); ok && !t.Unbounded && g*60 >= t.Share {
+			t.Grant = g * 60
+			l.Tiers[tier] = t
+		}
+	}
 }
 
 func withSiteBound(t Tier, siteLeftMinutes int64) Tier {

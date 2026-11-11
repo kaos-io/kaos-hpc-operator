@@ -122,6 +122,15 @@ While a tier is at or above it, the `HPCSite` condition `BudgetWarning` is `True
 and `kaos_hpc_budget_warning{site,project,tier}` is 1 (`kaos_hpc_budget_percent` carries the number).
 The policy (`budget.atLimit`) decides only what happens at the limit; the warning is raised either way.
 
+With `source: site` the figures in `spec.budget` are what is LEFT on the account at `observedAt`, so used-since-then over
+what was left says nothing about the month. A site-source budget therefore also carries the month's grant,
+`spec.budget.grantNodeHours` (`gpu`, `cpu`, `fpga`, `largeMem`, node-hours, rendered by the integrating platform from the
+site's accounting), and the warning percentage of that allocation becomes the share of the grant spent or committed:
+`(grant - left at observedAt + used since + booked) / grant`. Example: grant 868 h, 847 h left at `observedAt`, nothing
+booked: 21 h of 868 are spent, 2%. Admission and the ceilings do not change: they keep using what is left. No grant
+for an allocation (field absent, 0, below what is left, or `observedAt` from before this month) keeps the earlier base,
+so an older writer is unaffected, and an older controller ignores the field. `source: share` is unchanged.
+
 **GPU utilisation (AC-69).** The batch script samples `nvidia-smi` every 30 s into the job output
 (`KAOS_METRIC` lines). The runner keeps the latest and the highest value per GPU and writes them to
 `status.run.gpuUtilization` (`[{gpu, percent, maxPercent}]`) with the log offset. While the attempt's site job

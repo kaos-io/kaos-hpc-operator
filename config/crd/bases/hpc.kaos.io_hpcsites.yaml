@@ -97,6 +97,33 @@ spec:
                     format: int64
                     minimum: 0
                     type: integer
+                  grantNodeHours:
+                    description: |-
+                      GrantNodeHours is what the site granted the project for the month, per allocation (source site only):
+                      the base of the warning percentage (AC-22). With source site the figures above are what is LEFT at
+                      ObservedAt, so used since then over what was left stays near 0 all month; the share of the grant
+                      spent or committed is (grant - left at ObservedAt + used since + booked) / grant. It never changes
+                      admission or ceilings, which keep using what is left (D-56). Absent, or for an allocation without
+                      a figure, or when a figure is below what is left, or ObservedAt is from before this month: the
+                      warning keeps the earlier base (used plus booked over used plus what is left).
+                    properties:
+                      cpu:
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      fpga:
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      gpu:
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      largeMem:
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    type: object
                   largeMemNodeHours:
                     description: |-
                       LargeMemNodeHours per period (source share) or left on the account (source site). Absent and zero mean
@@ -159,7 +186,7 @@ spec:
                     default: 80
                     description: |-
                       WarnAtPercent is the percentage of what the project may spend this month (used plus booked, over used
-                      plus the lower of share left and site left) at which the BudgetWarning condition, event and metric are
+                      plus the lower of share left and site left; with source site and a grantNodeHours figure, spent and committed over the grant) at which the BudgetWarning condition, event and metric are
                       raised for an allocation. Raised whatever AtLimit says; AtLimit decides only what happens at the limit.
                     format: int32
                     maximum: 100

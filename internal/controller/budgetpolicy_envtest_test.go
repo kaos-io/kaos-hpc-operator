@@ -106,6 +106,49 @@ var _ = Describe("HPC budget policy", func() {
 		Expect(events()).NotTo(ContainElement(ContainSubstring("BudgetWarning")))
 	})
 
+	// AC-22 with source site: the figures are what is LEFT, so the warning reads against the month's grant
+	// (spent before the observation + ended since + booked, over the grant). Admission still uses what is left.
+	It("warns against the month's grant under source site, and clears when the period resets", func() {
+		obs := metav1.NewTime(time.Now())
+		gpuGrant := int64(10) // 600 node-minutes; 3 hours (180 minutes) are left, so 420 were spent before obs
+		newSite(hpcv1alpha1.Budget{Source: hpcv1alpha1.BudgetSourceSite, GPUNodeHours: 3, ObservedAt: &obs,
+			GrantNodeHours: &hpcv1alpha1.GrantNodeHours{GPU: &gpuGrant}, WarnAtPercent: 80})
+		warning := func() *metav1.Condition {
+			return meta.FindStatusCondition(siteNow().Status.Conditions, hpcv1alpha1.ConditionBudgetWarning)
+		}
+
+		Expect(submit(30).Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted)) // (420+30)/600 = 75%
+		Expect(warning().Status).To(Equal(metav1.ConditionFalse))
+		Expect(testutil.ToFloat64(metrics.BudgetPercent.WithLabelValues("meluxina", project, "gpu"))).To(Equal(75.0))
+		Expect(events()).NotTo(ContainElement(ContainSubstring("BudgetWarning")))
+
+		Expect(submit(30).Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted)) // (420+60)/600 = 80%
+		Expect(warning().Status).To(Equal(metav1.ConditionTrue))
+		Expect(warning().Reason).To(Equal(hpcv1alpha1.ReasonThresholdCrossed))
+		Expect(events()).To(ContainElement(And(ContainSubstring("Warning BudgetWarning"), ContainSubstring("80%"))))
+		Expect(testutil.ToFloat64(metrics.BudgetWarning.WithLabelValues("meluxina", project, "gpu"))).To(Equal(1.0))
+		Expect(siteNow().Status.GPU.LeftNodeMinutes).To(Equal(int64(120)), "admission keeps counting the remainder: 180 - 60 booked")
+
+		// The period resets: the site reports the new month's allocation (left = grant) and the jobs are
+		// long over; what is still booked is all that counts.
+		site := siteNow()
+		reset := metav1.NewTime(time.Now())
+		site.Spec.Budget.GPUNodeHours, site.Spec.Budget.ObservedAt = gpuGrant, &reset
+		Expect(k8sClient.Update(ctx, site)).To(Succeed())
+		Expect(r.publishLedger(ctx, siteNow())).To(Succeed())
+		Expect(warning().Status).To(Equal(metav1.ConditionFalse), "60 booked of a 600 grant is 10%")
+		Expect(warning().Reason).To(Equal(hpcv1alpha1.ReasonBelowThreshold))
+		Expect(testutil.ToFloat64(metrics.BudgetWarning.WithLabelValues("meluxina", project, "gpu"))).To(Equal(0.0))
+	})
+
+	It("keeps the earlier warning base when the site gave no grant", func() {
+		obs := metav1.NewTime(time.Now())
+		newSite(hpcv1alpha1.Budget{Source: hpcv1alpha1.BudgetSourceSite, GPUNodeHours: 3, ObservedAt: &obs, WarnAtPercent: 80})
+		Expect(submit(150).Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted)) // 150 of 180 left = 83%
+		c := meta.FindStatusCondition(siteNow().Status.Conditions, hpcv1alpha1.ConditionBudgetWarning)
+		Expect(c.Status).To(Equal(metav1.ConditionTrue))
+	})
+
 	It("blocks under the default policy and names the project share (BudgetBlocked)", func() {
 		newSite(hpcv1alpha1.Budget{GPUNodeHours: 1})
 		got := submit(120)
