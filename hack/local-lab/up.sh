@@ -10,8 +10,9 @@ say "kind cluster $LAB_NAME"
 if kind get clusters 2>/dev/null | grep -qx "$LAB_NAME"; then
   echo "cluster exists"
 else
-  kind create cluster --name "$LAB_NAME" ${KIND_NODE_IMAGE:+--image "$KIND_NODE_IMAGE"} --wait 120s
+  kind create cluster --name "$LAB_NAME" --kubeconfig "$KUBECONFIG" ${KIND_NODE_IMAGE:+--image "$KIND_NODE_IMAGE"} --wait 120s
 fi
+[ -s "$KUBECONFIG" ] || kind get kubeconfig --name "$LAB_NAME" > "$KUBECONFIG"
 
 # 2. Argo Workflows at dev's version, and the matching argo CLI
 say "argo CLI $ARGO_VERSION"
@@ -22,13 +23,11 @@ fi
 "$BIN/argo" version --short 2>&1 | head -1
 say "Argo Workflows chart $ARGO_CHART_VERSION (controller only)"
 k create namespace "$LAB_NS" --dry-run=client -o yaml | k apply -f - >/dev/null
-helm repo add argo https://argoproj.github.io/argo-helm >/dev/null 2>&1 || true
-helm repo update argo >/dev/null
-if helm --kube-context "$CTX" status argo-workflows -n argo-workflows 2>/dev/null | grep -q 'STATUS: deployed' \
-   && helm --kube-context "$CTX" list -n argo-workflows -o json | jq -e --arg c "argo-workflows-$ARGO_CHART_VERSION" '.[]|select(.chart==$c)' >/dev/null; then
+deployed=$(helm --kube-context "$CTX" list -n argo-workflows -o json | jq -r --arg c "argo-workflows-$ARGO_CHART_VERSION" '[.[]|select(.chart==$c and .status=="deployed")]|length')
+if [ "$deployed" = 1 ]; then
   echo "chart already deployed"
 else
-helm --kube-context "$CTX" upgrade --install argo-workflows argo/argo-workflows --version "$ARGO_CHART_VERSION" \
+helm --kube-context "$CTX" upgrade --install argo-workflows argo-workflows --repo "$ARGO_REPO" --version "$ARGO_CHART_VERSION" \
   --namespace argo-workflows --create-namespace --wait --timeout 5m \
   --set server.enabled=false \
   --set controller.resources.requests.memory=128Mi --set controller.resources.limits.memory=512Mi \
@@ -76,7 +75,14 @@ printf '{"user":"kaos-app-lab","access_key_id":"%s","secret_access_key":"%s","ou
   "$LAKE_APP_KEY" "$LAKE_APP_SECRET" "$OUT_REPO" > "$STATE/apps/lab.json"
 lake_args=(-e LAKEFS_AUTH_UI_CONFIG_RBAC=internal -e LAKEFS_KAOS_APP_USERS_PATH=/apps -e LAKEFS_KAOS_APP_USERS_INTERVAL=5s -v "$STATE/apps":/apps:ro)
 if [ "$LAKE_IMAGE" = "$LAKE_UPSTREAM" ]; then lake_args=(); fi   # upstream has no declared users: the app uses the admin key
-if ! docker inspect -f '{{.State.Running}}' "$LAKE_CONTAINER" 2>/dev/null | grep -q true; then
+running=$(docker inspect -f '{{.Config.Image}} {{.State.Running}}' "$LAKE_CONTAINER" 2>/dev/null || true)
+if [ "$running" != "$LAKE_IMAGE true" ]; then
+  if [ -n "$running" ] && [ "${running% *}" != "$LAKE_IMAGE" ]; then
+    # another image: its data format may differ (upstream vs fork, other build), so start on a fresh volume
+    echo "lake image changes from ${running% *} to $LAKE_IMAGE: recreating the container on a fresh volume"
+    docker rm -f "$LAKE_CONTAINER" >/dev/null
+    docker volume rm "$LAKE_VOLUME" >/dev/null 2>&1 || true
+  fi
   docker rm -f "$LAKE_CONTAINER" >/dev/null 2>&1 || true
   docker volume create "$LAKE_VOLUME" >/dev/null
   docker run -d --name "$LAKE_CONTAINER" --network kind --memory 1g --user 0 \
@@ -107,7 +113,8 @@ done
 echo "waiting for the declared app user"
 for _ in $(seq 60); do app "$LAKE_URL/api/v1/repositories/$OUT_REPO" >/dev/null 2>&1 && break; sleep 2; done
 app "$LAKE_URL/api/v1/repositories/$OUT_REPO" >/dev/null || { echo "app user cannot reach $OUT_REPO" >&2; docker logs "$LAKE_CONTAINER" | tail -20; exit 1; }
-if [ "$(adm "$LAKE_URL/api/v1/repositories/$DATA_REPO/refs/main/objects/ls" | jq '.results|length')" = 0 ]; then
+seeded=$(adm "$LAKE_URL/api/v1/repositories/$DATA_REPO/refs/main/objects/ls" | jq '.results|length')
+if [ "$seeded" = 0 ]; then
   for f in readme.txt samples/a.csv samples/b.csv; do
     printf 'lab dataset file %s\n1,2,3\n' "$f" | adm -X POST --data-binary @- -H 'Content-Type: application/octet-stream' \
       "$LAKE_URL/api/v1/repositories/$DATA_REPO/branches/main/objects?path=$f" >/dev/null
@@ -138,11 +145,12 @@ echo "$LAKE_IMAGE" > "$STATE/lake-image"
 
 # 4. fake Slurm site (test/fakeslurmd), started as the repository's e2e starts it
 say "fake Slurm site"
-if [ ! -f "$STATE/pki/tls.crt" ]; then
+if [ ! -f "$STATE/pki/tls.crt" ] || ! openssl x509 -checkend 604800 -noout -in "$STATE/pki/tls.crt" >/dev/null; then
+  echo "generating the fake site certificates (valid 365 days)"
   mkdir -p "$STATE/pki"
-  openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=lab-ca" -keyout "$STATE/pki/ca.key" -out "$STATE/pki/ca.crt" 2>/dev/null
+  openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=lab-ca" -keyout "$STATE/pki/ca.key" -out "$STATE/pki/ca.crt" 2>/dev/null
   openssl req -newkey rsa:2048 -nodes -subj "/CN=fake-slurm" -keyout "$STATE/pki/tls.key" -out "$STATE/pki/tls.csr" 2>/dev/null
-  openssl x509 -req -in "$STATE/pki/tls.csr" -CA "$STATE/pki/ca.crt" -CAkey "$STATE/pki/ca.key" -CAcreateserial -days 30 \
+  openssl x509 -req -in "$STATE/pki/tls.csr" -CA "$STATE/pki/ca.crt" -CAkey "$STATE/pki/ca.key" -CAcreateserial -days 365 \
     -extfile <(printf 'subjectAltName=DNS:fake-slurm.%s.svc,DNS:fake-slurm' "$SLURM_NS") -out "$STATE/pki/tls.crt" 2>/dev/null
 fi
 docker build -q -t "$SLURM_IMAGE" -f "$REPO_ROOT/test/fakeslurmd/Dockerfile" "$REPO_ROOT" >/dev/null
@@ -162,7 +170,9 @@ spec:
   replicas: 1
   selector: {matchLabels: {app: fake-slurm}}
   template:
-    metadata: {labels: {app: fake-slurm}}
+    metadata:
+      labels: {app: fake-slurm}
+      annotations: {lab/tls-sha256: "$(sha256sum "$STATE/pki/tls.crt" | cut -d' ' -f1)"}
     spec:
       containers:
       - name: fakeslurmd

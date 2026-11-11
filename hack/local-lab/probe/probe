@@ -8,7 +8,6 @@ if [ "${1:-}" = "--result" ]; then result=$2; shift 2; fi
 echo "== context =="
 echo "host=$(hostname) user=$(id -u) pwd=$(pwd) date=$(date -u +%FT%TZ)"
 env | grep -E '^(KAOS|ARGO|LAKE|HPC|POD|STEP|WORKFLOW)' | sed 's/\(SECRET\|KEY\|TOKEN\)=.*/\1=<redacted>/' | sort || true
-sums=""
 for d in "$@"; do
   echo "== inputs: $d =="
   if [ ! -d "$d" ]; then echo "(missing)"; continue; fi

@@ -5,6 +5,10 @@ REPO_ROOT=$(cd "$LAB_DIR/../.." && pwd)
 BIN=$LAB_DIR/.bin
 STATE=$LAB_DIR/.state/$LAB_NAME
 CTX=kind-$LAB_NAME
+ARGO_REPO=https://argoproj.github.io/argo-helm
+# the lab has its own kubeconfig: nothing is written to the user's ~/.kube/config
+mkdir -p "$STATE"
+export KUBECONFIG=$STATE/kubeconfig
 LAB_NS=lab
 SLURM_NS=fake-slurm
 LAKE_CONTAINER=$LAB_NAME-lake

@@ -2,17 +2,22 @@
 # lake put REPO BRANCH PATH FILE | lake commit REPO BRANCH MSG | lake get REPO REF PATH DEST
 # lake sync REPO REF PREFIX DESTDIR
 # Reads LAKE_ENDPOINT, LAKE_ACCESS_KEY_ID, LAKE_SECRET_ACCESS_KEY from the environment.
+# Every HTTP error, empty commit id and empty listing is a failure (non-zero exit).
 set -eu
 api="$LAKE_ENDPOINT/api/v1"
 auth="$LAKE_ACCESS_KEY_ID:$LAKE_SECRET_ACCESS_KEY"
+call() { curl -sS --fail-with-body -u "$auth" "$@"; }
 cmd=$1; shift
 case $cmd in
-  put)    curl -sf -u "$auth" -X POST --data-binary @"$4" "$api/repositories/$1/branches/$2/objects?path=$3" >/dev/null ;;
-  commit) curl -sf -u "$auth" -X POST -H 'Content-Type: application/json' \
-            -d "{\"message\":\"$3\"}" "$api/repositories/$1/branches/$2/commits" | jq -r .id ;;
-  get)    mkdir -p "$(dirname "$4")"; curl -sf -u "$auth" -G --data-urlencode "path=$3" "$api/repositories/$1/refs/$2/objects" -o "$4" ;;
-  sync)   curl -sf -u "$auth" -G --data-urlencode "prefix=$3" --data-urlencode "amount=1000" "$api/repositories/$1/refs/$2/objects/ls" \
-            | jq -r '.results[]|select(.path_type=="object")|.path' | while read -r p; do
-              lake get "$1" "$2" "$p" "$4/${p#$3}"; done ;;
+  put)    call -X POST --data-binary @"$4" "$api/repositories/$1/branches/$2/objects?path=$3" >/dev/null ;;
+  commit) resp=$(call -X POST -H 'Content-Type: application/json' -d "{\"message\":\"$3\"}" "$api/repositories/$1/branches/$2/commits")
+          id=$(printf '%s' "$resp" | jq -r '.id // empty')
+          [ -n "$id" ] || { echo "lake commit: no commit id in: $resp" >&2; exit 1; }
+          echo "$id" ;;
+  get)    mkdir -p "$(dirname "$4")"; call -G --data-urlencode "path=$3" "$api/repositories/$1/refs/$2/objects" -o "$4" ;;
+  sync)   resp=$(call -G --data-urlencode "prefix=$3" --data-urlencode "amount=1000" "$api/repositories/$1/refs/$2/objects/ls")
+          paths=$(printf '%s' "$resp" | jq -r '.results[]|select(.path_type=="object")|.path')
+          [ -n "$paths" ] || { echo "lake sync: nothing listed under '$3' of $1@$2" >&2; exit 1; }
+          for p in $paths; do lake get "$1" "$2" "$p" "$4/${p#$3}"; done ;;
   *) echo "unknown: $cmd" >&2; exit 2 ;;
 esac
