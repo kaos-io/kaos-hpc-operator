@@ -1,0 +1,18 @@
+#!/bin/sh
+# lake put REPO BRANCH PATH FILE | lake commit REPO BRANCH MSG | lake get REPO REF PATH DEST
+# lake sync REPO REF PREFIX DESTDIR
+# Reads LAKE_ENDPOINT, LAKE_ACCESS_KEY_ID, LAKE_SECRET_ACCESS_KEY from the environment.
+set -eu
+api="$LAKE_ENDPOINT/api/v1"
+auth="$LAKE_ACCESS_KEY_ID:$LAKE_SECRET_ACCESS_KEY"
+cmd=$1; shift
+case $cmd in
+  put)    curl -sf -u "$auth" -X POST --data-binary @"$4" "$api/repositories/$1/branches/$2/objects?path=$3" >/dev/null ;;
+  commit) curl -sf -u "$auth" -X POST -H 'Content-Type: application/json' \
+            -d "{\"message\":\"$3\"}" "$api/repositories/$1/branches/$2/commits" | jq -r .id ;;
+  get)    mkdir -p "$(dirname "$4")"; curl -sf -u "$auth" -G --data-urlencode "path=$3" "$api/repositories/$1/refs/$2/objects" -o "$4" ;;
+  sync)   curl -sf -u "$auth" -G --data-urlencode "prefix=$3" --data-urlencode "amount=1000" "$api/repositories/$1/refs/$2/objects/ls" \
+            | jq -r '.results[]|select(.path_type=="object")|.path' | while read -r p; do
+              lake get "$1" "$2" "$p" "$4/${p#$3}"; done ;;
+  *) echo "unknown: $cmd" >&2; exit 2 ;;
+esac
