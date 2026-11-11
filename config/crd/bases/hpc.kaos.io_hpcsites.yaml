@@ -717,6 +717,13 @@ spec:
                         the site refused (the job then ran on the class default).
                       maxLength: 63
                       type: string
+                    queueReplacedCount:
+                      description: |-
+                        QueueReplacedCount is how many times the job's queue place was lost to a replacement of its queued
+                        site job (token refresh), over all attempts; the console says "queue place lost N times". Only a
+                        count: the records are in the job's status (AC-35).
+                      format: int32
+                      type: integer
                     reason:
                       maxLength: 63
                       type: string

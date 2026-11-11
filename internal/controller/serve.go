@@ -503,6 +503,7 @@ func (r *HPCArgoWorkflowJobReconciler) failAttempt(ctx context.Context, job *hpc
 			SettledNodeMinutes: used, EndTime: metav1.NewTime(r.now())}
 		if run := job.Status.Run; run != nil && current(run, job.Status.Attempt) {
 			rec.SiteJobID, rec.ExitCode = run.SiteJobID, run.ExitCode
+			rec.QueueReplaced, rec.QueueReplacedCount = run.QueueReplaced, run.QueueReplacedCount
 		}
 		job.Status.Attempts = append(job.Status.Attempts, rec)
 		observeSettled(site, b.Tier, used, job.Status.Run, &b.At)

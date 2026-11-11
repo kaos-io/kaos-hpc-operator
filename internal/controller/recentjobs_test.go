@@ -263,7 +263,7 @@ func worstCaseRecentJob(i int) hpcv1alpha1.RecentJob {
 		TimeLimitMinutes: 2147483647, LimitSource: hpcv1alpha1.PlacementTimeoutRetry, LimitSamples: 2147483647,
 		IdleTimeoutMinutes: 2147483647, Attempt: 2147483647, SiteJobID: s(63), HostSiteJobID: s(63),
 		CreatedAt: ts, StartTime: &ts, EndTime: &ts,
-		BookedNodeMinutes: 9223372036854775807, SettledNodeMinutes: 9223372036854775807,
+		BookedNodeMinutes: 9223372036854775807, SettledNodeMinutes: 9223372036854775807, QueueReplacedCount: 2147483647,
 	}
 }
 

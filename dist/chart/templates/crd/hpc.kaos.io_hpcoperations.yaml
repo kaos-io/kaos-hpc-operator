@@ -314,6 +314,57 @@ spec:
                       QOS and Reservation are what the site job was actually submitted with. The submitter reports
                       them because it may fall back from a lane the site refused (PRD-HPC-1461 D-68).
                     type: string
+                  queueReplaced:
+                    description: |-
+                      QueueReplaced lists the newest replacements of a queued site job of this attempt (at most
+                      QueueReplacedKept, oldest first); QueueReplacedCount counts all of them. A queued job is replaced
+                      before its credentials expire, which loses its place in the site's queue (AC-35).
+                    items:
+                      description: |-
+                        QueueReplacement is one queued site job the runner replaced by a fresh one (PRD-HPC-1461 AC-35): the
+                        replacement loses the job's place in the site's queue, so it is recorded.
+                      properties:
+                        at:
+                          description: At is when the runner replaced the job.
+                          format: date-time
+                          type: string
+                        newSiteJobID:
+                          maxLength: 32
+                          type: string
+                        oldSiteJobID:
+                          description: OldSiteJobID is the cancelled job; NewSiteJobID
+                            its replacement.
+                          maxLength: 32
+                          type: string
+                        queuedSeconds:
+                          description: QueuedSeconds is how long the old job had been
+                            queued.
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        reason:
+                          description: |-
+                            Reason: TokenRefresh (the job's wallet or token would expire before it started: the replacement
+                            carries fresh credentials), HostLost (the host a guest waited for is gone), Replanned (the
+                            controller planned a waiting guest as a host).
+                          enum:
+                          - TokenRefresh
+                          - HostLost
+                          - Replanned
+                          type: string
+                      required:
+                      - at
+                      - newSiteJobID
+                      - oldSiteJobID
+                      - queuedSeconds
+                      - reason
+                      type: object
+                    maxItems: 5
+                    type: array
+                  queueReplacedCount:
+                    format: int32
+                    minimum: 0
+                    type: integer
                   reservation:
                     type: string
                   siteJobID:

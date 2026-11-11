@@ -446,6 +446,11 @@ type RecentJob struct {
 	BookedNodeMinutes int64 `json:"bookedNodeMinutes,omitempty"`
 	// +optional
 	SettledNodeMinutes int64 `json:"settledNodeMinutes,omitempty"`
+	// QueueReplacedCount is how many times the job's queue place was lost to a replacement of its queued
+	// site job (token refresh), over all attempts; the console says "queue place lost N times". Only a
+	// count: the records are in the job's status (AC-35).
+	// +optional
+	QueueReplacedCount int32 `json:"queueReplacedCount,omitempty"`
 }
 
 // ResumableStepsMax bounds HPCSiteStatus.ResumableSteps (one entry per app and step).

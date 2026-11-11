@@ -508,6 +508,22 @@ def test_a_queued_job_is_replaced_before_its_wallet_expires(rig, monkeypatch):
     assert slurm.cancelled == ["5001"] and len(slurm.submitted) == 2 and rig.kube.run["siteJobID"] == "5002"
 
 
+def test_the_replacement_of_a_queued_job_is_reported_with_both_ids_and_the_queued_seconds(rig, monkeypatch):
+    """AC-35: the queue place lost to a token refresh is recorded in status.run, not only in the log."""
+    slurm = FakeSlurm({"5001": [acc("PENDING")], "5002": [acc("COMPLETED")]})
+    rig.make(slurm)
+    clock = [100.0]
+    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 100.0 + 4 * 3600)
+    monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
+    rig.runner.sleep = lambda s: clock.__setitem__(0, clock[0] + 3600)   # every poll of the queued job takes an hour
+    rig.runner.run()
+    assert slurm.cancelled == ["5001"] and rig.kube.run["siteJobID"] == "5002"
+    (rec,) = rig.kube.run["queueReplaced"]
+    assert (rec["oldSiteJobID"], rec["newSiteJobID"], rec["reason"]) == ("5001", "5002", "TokenRefresh")
+    assert 3 * 3600 <= rec["queuedSeconds"] <= 4 * 3600 and rec["at"].endswith("Z")
+    assert rig.kube.run["queueReplacedCount"] == 1
+
+
 def test_a_job_a_host_took_is_never_replaced_for_its_wallet(rig, monkeypatch):
     taken = acc("PENDING", comment="kaos-commit=c0ffee12 kaos-state=taken host=4000 slot=1 attempt=1")
     done = acc("RUNNING", comment="kaos-state=done rc=0 host=4000")
