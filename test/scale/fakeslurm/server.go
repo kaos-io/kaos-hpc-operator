@@ -142,7 +142,11 @@ type Options struct {
 	// MinJobAge is how long (real) a finished job stays known to slurmctld; after it jobs/state
 	// answers 422 for the ID and only accounting still has the job (default 5 min).
 	MinJobAge time.Duration
-	QOS       []QOS
+	// AcctLag is how long (real) slurmdbd lags behind slurmctld: for that long after a job ended, slurmctld
+	// already says so (jobs/state) but the accounting record still shows the job as RUNNING, with no exit code
+	// and no end. It is the late exit record of PRD-HPC-1461 T-14 (a 5-minute lag is the acceptance case).
+	AcctLag time.Duration
+	QOS     []QOS
 	// Reservations are the reservation names the account may use.
 	Reservations []string
 	// AllocationNodeHours per account, for sshare.
@@ -200,6 +204,8 @@ type Stats struct {
 	// Injected counts the requests answered with an injected 5xx or hang; LostReplies the accepted
 	// submissions whose reply was dropped.
 	Injected, LostReplies int
+	// LaggedReads is the number of accounting reads answered with a record that lagged (AcctLag).
+	LaggedReads int
 	// QuickLost counts the lost-reply submissions that finished before any retry (LostReplyQuick).
 	QuickLost int
 	// Started counts the jobs that ever ran on a node: a guest never does, so for sharing jobs this is the number of
@@ -524,8 +530,17 @@ func (s *Site) cancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"errors": []any{}})
 }
 
-// accountingRecord is slurmdbd's record of a job.
-func accountingRecord(j *Job) map[string]any {
+// accountingRecord is slurmdbd's record of a job. Under AcctLag it lags: a job that ended less than AcctLag ago
+// is still RUNNING in it, with no exit code and no end time. The caller holds the site's lock.
+func (s *Site) accountingRecord(j *Job) map[string]any {
+	if lag := s.Opts.AcctLag; lag > 0 && j.State != Pending && j.State != Running && !j.endedReal.IsZero() && time.Since(j.endedReal) < lag {
+		s.stats.LaggedReads++
+		return map[string]any{"job_id": j.ID, "name": j.Name, "account": j.Account, "user": j.User,
+			keyState:    map[string]any{"current": []string{Running}},
+			"exit_code": map[string]any{"return_code": map[string]any{"set": false, "number": 0}},
+			"comment":   map[string]any{"job": j.Cm},
+			"time":      map[string]any{"start": epoch(j.StartAt), "end": epoch(time.Time{})}}
+	}
 	return map[string]any{"job_id": j.ID, "name": j.Name, "account": j.Account, "user": j.User,
 		keyState:    map[string]any{"current": []string{j.State}},
 		"exit_code": map[string]any{"return_code": map[string]any{"set": true, "number": j.Exit}},
@@ -542,7 +557,7 @@ func (s *Site) accounting(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "Invalid job id specified")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": []map[string]any{accountingRecord(j)}})
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": []map[string]any{s.accountingRecord(j)}})
 }
 
 // accountingList is GET /slurmdb/v/jobs?job_name=: slurmdbd lists every job of that name, finished or not,
@@ -554,7 +569,7 @@ func (s *Site) accountingList(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0, 1)
 	for _, id := range s.order {
 		if j := s.jobs[id]; name == "" || j.Name == name {
-			out = append(out, accountingRecord(j))
+			out = append(out, s.accountingRecord(j))
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": out})

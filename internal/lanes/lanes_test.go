@@ -114,3 +114,27 @@ func TestParse(t *testing.T) {
 		t.Fatalf("got %+v, %v", c, err)
 	}
 }
+
+// PRD-HPC-1461 AC-75: production's candidates are the dev reservations only (the hub renders no `test` lane
+// there). Whatever the limit, the free slots and the profile say, a job is never placed in `test`.
+func TestChooseNeverPlacesAProductionJobInTest(t *testing.T) {
+	cands, err := Parse(`[{"qos":"dev","reservationByPartition":{"gpu":"gpudev","cpu":"cpudev"}}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for limit := int32(1); limit <= 400; limit++ {
+		for _, free := range []bool{true, false} {
+			r := req(limit, func(r *Request) {
+				if !free {
+					r.InUse = func(string) int32 { return 1 }
+				}
+			})
+			if l, ok := Choose(cands, r); ok && l.QOS == "test" {
+				t.Fatalf("limit %d placed in test", limit)
+			}
+		}
+	}
+	if l, ok := Choose(cands, req(20, nil)); !ok || l != (Lane{"dev", "gpudev"}) {
+		t.Fatalf("a 20 minute job, which fits test, should use the dev reservation in production, got %+v %v", l, ok)
+	}
+}
