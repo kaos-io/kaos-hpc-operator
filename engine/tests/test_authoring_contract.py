@@ -93,7 +93,6 @@ def test_disk_says_a_step_gets_the_disk_of_its_class():
 
 
 def test_any_other_unknown_keyword_lists_the_keywords_that_exist():
-    from kubecore import authoring
     with pytest.raises(TypeError) as exc:
         render(lambda a: a.step("one", kind="evaluate", gpus=1))
     assert str(exc.value) == ("step() got an unexpected keyword argument 'gpus'. The keywords are: name, kind, reads, "
@@ -181,7 +180,8 @@ def test_an_input_names_a_top_level_config_value():
         "(top-level keys: experiment, dataset). Add `raw: <dataset>@<version>` to config/")
     assert refused(lambda a: a.step("load", kind="ingest", inputs=["experiment"], **valid(a, "ingest"))).startswith(
         "step 'load' declares the input 'experiment', but the config value 'experiment' is a section.")
-    assert "inputs= holds 'data.raw'" in refused(lambda a: a.step("load", kind="ingest", inputs=["data.raw"], **valid(a, "ingest")))
+    assert "inputs= holds 'data.raw'" in refused(
+        lambda a: a.step("load", kind="ingest", inputs=["data.raw"], **valid(a, "ingest")))
     assert "inputs= names dataset more than once" in refused(
         lambda a: a.step("load", kind="ingest", inputs=["dataset", "dataset"], **valid(a, "ingest")))
 
