@@ -159,7 +159,8 @@ func ValidateImage(ref string) error {
 			"Fix the image the step names (registry/repository:tag or @sha256 digest)", ref, why)
 	}
 	if strings.IndexFunc(ref, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._:/@-", r))
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._:/@-", r)
+		return !ok
 	}) >= 0 {
 		return bad("it holds a space, a control character or another character an image reference never has")
 	}
@@ -171,7 +172,8 @@ func ValidateImage(ref string) error {
 	if m == nil {
 		name, _, _ := strings.Cut(ref, "@")
 		host, _, found := strings.Cut(name, "/")
-		if !found || host == "" || !(strings.ContainsAny(host, ".:") || host == "localhost") {
+		isHost := strings.ContainsAny(host, ".:") || host == "localhost"
+		if !found || host == "" || !isHost {
 			return bad("it has no registry host and repository (want <registry>/<repository>:<tag>)")
 		}
 		return bad("it is not a lowercase <registry>/<repository>:<tag> reference")
