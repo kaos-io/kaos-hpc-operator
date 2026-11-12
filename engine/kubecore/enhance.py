@@ -627,7 +627,8 @@ def class_offer(step: dict, ctx: dict, annots: dict) -> dict:
     CPU-only (see the gpus routing in enhance_gpu_routing). A step that does not declare gpu=True is offered the
     cluster's cpu classes only: a gpu class would put it on a machine it cannot use. A pool with no cpu class at
     all keeps offering what exists. The HPC classes are offered to a step that can run on HPC (meluxina.py
-    runs_on_hpc: not an ingest, publish or control step, not a step that produces a dataset)."""
+    runs_on_hpc: not an ingest, publish or control step, not a step that produces a dataset), and an HPC class with
+    `gpus` above 0 only to a step that declares gpu=True (a GPU step may pick a CPU HPC class)."""
     default = tier_default(ctx, step)["name"]
     catalog = ctx["computeClasses"]["all"]
     offered = catalog
@@ -636,9 +637,14 @@ def class_offer(step: dict, ctx: dict, annots: dict) -> dict:
     options = [c["name"] for c in offered]
     if default not in options:
         options.insert(0, default)
-    hpc_all = [c["name"] for c in hpc_classes(ctx)]
+    hpc = hpc_classes(ctx)
+    hpc_all = [c["name"] for c in hpc]
+    # A GPU partition (`gpus` above 0) is offered to a step that declares gpu=True only, as the cluster's GPU classes
+    # are (D-25): a CPU step on it would take a GPU slot of a shared node for nothing. A GPU step may still pick a CPU
+    # HPC class.
+    gpu_partitions = {c["name"] for c in hpc if (c.get("gpus") or 0) > 0}
     if runs_on_hpc(step):
-        options += [n for n in hpc_all if n not in options]
+        options += [n for n in hpc_all if n not in options and (is_gpu_step(step) or n not in gpu_partitions)]
     choose = f"Choose one of: {', '.join(options)}."
     labels = (step.get("metadata") or {}).get("labels") or {}
     refused = {}
@@ -648,6 +654,10 @@ def class_offer(step: dict, ctx: dict, annots: dict) -> dict:
                                     "Add gpu=True to the step in pipeline.py to run it on a GPU machine."]
     for name in hpc_all:
         if name not in options:
+            if name in gpu_partitions and runs_on_hpc(step):
+                refused[name] = ["it is a GPU machine and the step does not declare gpu=True",
+                                 "Add gpu=True to the step in pipeline.py to run it on a GPU machine."]
+                continue
             if labels.get(STEP_KIND_LABEL) in CLUSTER_ONLY_KINDS:
                 reason = f"a {labels.get(STEP_KIND_LABEL)} step never runs on HPC (Slurm)"
             else:

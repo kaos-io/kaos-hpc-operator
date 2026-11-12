@@ -125,7 +125,10 @@ that lead: compose refuses a smaller value, naming the field.
 **Classes on the run form.** A step is offered the GPU classes of the cluster only when its code declares
 `gpu=True`. A step with `gpu=True` is offered the GPU and the CPU classes (it can run CPU-only on a CPU class); a step
 without it, the platform's own compose step included, is offered the CPU classes only, or every class the pool has
-when the pool declares no CPU class. The default class of a step does not change. The HPC classes are offered by the
+when the pool declares no CPU class. The default class of a step does not change. **The same rule holds on HPC:** an HPC
+class whose entry has `gpus` above 0 (a GPU partition) is offered only to a step with `gpu=True`, and is refused for any other
+step with the same sentence; a step with `gpu=True` is offered every HPC class that its kind may use, GPU and CPU alike (a GPU
+step on a CPU partition is the developer's choice, as it is on the cluster). The HPC classes are otherwise offered by the
 rules below.
 
 A class the form does not offer a step is refused when the run starts, before the first step, whoever submitted
