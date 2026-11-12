@@ -36,6 +36,7 @@ import yaml
 
 from kubecore.meluxina import POD_LOSS_RETRY
 from kubecore.outputs_repo import outputs_repo
+from kubecore.run_settings import add_input, add_task_argument, setting
 
 CHECKPOINT_ENV = "KAOS_CHECKPOINT_DIR"
 CHECKPOINT_MOUNT = "/kaos/checkpoint"
@@ -54,6 +55,8 @@ HELPER_FILE = "checkpoint_helper.py"   # the ConfigMap key and the file name und
 HELPER_VOLUME = "kaos-ckpt-helper"
 HELPER_MOUNT = "/ckpt-helper"
 HELPER_CONFIGMAP_SUFFIX = "-ckpt-helper"
+CHECKPOINT_PARAM = "checkpoint-every"
+CHECKPOINT_PARAM_REF = "{{inputs.parameters.%s}}" % CHECKPOINT_PARAM
 EVERY_RE = re.compile(r"^(off|[0-9]+)$")
 
 
@@ -183,7 +186,9 @@ def helper_env(step: dict, ctx: dict, every: str) -> list:
         {"name": "CKPT_BRANCH", "value": CHECKPOINT_BRANCH},
         {"name": "CKPT_ROOT", "value": CHECKPOINT_ROOT},
         {"name": "CKPT_KEY", "value": "{{workflow.name}}/%s" % step["name"]},
-        {"name": "CKPT_EVERY_MIN", "value": every if every.isdigit() else str(DEFAULT_EVERY_MINUTES)},
+        # A step that declares checkpoint_every= is copied at the run form's `<step>-checkpoint-every`.
+        {"name": "CKPT_EVERY_MIN",
+         "value": CHECKPOINT_PARAM_REF if every.isdigit() else str(DEFAULT_EVERY_MINUTES)},
         {"name": "CKPT_STAGE", "value": STAGE_MOUNT},
         {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
     ]
@@ -230,6 +235,9 @@ def enhance_resilience(spec: dict, step: dict, ctx: dict, annots: dict, gpu: boo
     helper = wants_helper(step, gpu, every, ctx, inject_off, shared)
     if not inject_folder(step, helper, ctx) or not helper:
         return
+    if every.isdigit():
+        add_input(step, CHECKPOINT_PARAM, every)
+        add_task_argument(spec, step["name"], CHECKPOINT_PARAM, "{{=%s}}" % setting(step["name"], "checkpoint-every"))
     step.setdefault("initContainers", [])
     step.setdefault("sidecars", [])
     _add_named(step["initContainers"], helper_container(INIT_NAME, "restore", step, ctx, every))

@@ -32,3 +32,15 @@ def run_render(repo: Path, profile: str = "hera", extra_args=(), extra_env=None,
 def raw_template(repo: Path) -> dict:
     """The parsed out/raw-workflow-template.yaml the render wrote."""
     return yaml.safe_load((repo / RAW).read_text())
+
+
+def evaluate(expression: str, settings: dict):
+    """The value of a `{{=...}}` argument the engine renders for a number compose wrote (kaos-run-settings):
+    the expressions use arithmetic, `int` and `fromJSON` of compose's output only, so Python can read them."""
+    import json
+    import re
+
+    body = re.fullmatch(r"\{\{=(.*)\}\}", expression, re.S).group(1)
+    body = re.sub(r'fromJSON\(tasks\["compose-and-validate"\]\.outputs\.parameters\["kaos-run-settings"\]\)',
+                  "json.loads(%r)" % json.dumps(settings), body)
+    return eval(body, {"json": json, "int": int})  # noqa: S307 - the engine's own output, in a test

@@ -102,7 +102,8 @@ def test_should_add_the_helper_to_gpu_steps_and_opt_in_cpu_steps_only(tpls):
 
 def test_should_use_the_interval_the_step_asked_for(tpls):
     side = {e["name"]: e for e in tpls["cpu-opt-in"]["sidecars"][0]["env"]}
-    assert side["CKPT_EVERY_MIN"]["value"] == "20"
+    assert side["CKPT_EVERY_MIN"]["value"] == "{{inputs.parameters.checkpoint-every}}"   # the run form's value
+    assert {"name": "checkpoint-every", "default": "20"} in tpls["cpu-opt-in"]["inputs"]["parameters"]
     assert {e["name"]: e for e in tpls["train"]["sidecars"][0]["env"]}["CKPT_EVERY_MIN"]["value"] == "10"
 
 

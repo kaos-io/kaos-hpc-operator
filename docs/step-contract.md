@@ -56,13 +56,29 @@ Everything after `name` is keyword-only.
 | `produces=` | What the step writes: `model("name")`, `artifact("name")`, `dataset("name")`. A dataset an app produces is the repository `dataset-<app>-<name>`: `dataset("clean")` in the app `hera1` is `dataset-hera1-clean`. The name is per app because every app made from a template declares the same names and a dataset has exactly one producer; two apps of a project never share one. |
 | `gpu=` | Unchanged. |
 | `when=` | A condition in plain words: the name of a run-form field, `==` or `!=`, and a value: `when="quantization-mode != off"`. The field is a setting's path with dashes, as the run form shows it. The value is a bare word or number (`off`, `3`) or a quoted string (`"two words"`). Comparisons join with `and` / `or` (`and` binds tighter; no parentheses, no other operators). The engine writes it as one condition on the step's task and on its HPC variant, comparing the field's value as text: `quantization-mode != off` becomes `{{=workflow.parameters['quantization-mode'] != 'off'}}` (`and` becomes `&&`, `or` becomes a double bar, in the order written). The step is skipped when it is false. |
-| `walltime=` | The step's time limit wherever it runs, on any kind: `'90m'`, `'12h'` or `'720'` (minutes). On the cluster it is the step's deadline; on an HPC class it is the job's limit. A step that declares none keeps the platform's default (30 minutes on the cluster, 90 for a GPU step, 4 hours on an HPC class). |
-| `resumable=`, `checkpoint_every=`, `idle_timeout=` | Unchanged. |
+| `walltime=` | The step's time limit, on any kind: `'90m'`, `'12h'` or `'720'` (minutes). It is the default of the step's run-form field `<step>-walltime` (below). |
+| `resumable=`, `idle_timeout=` | Unchanged. |
+| `checkpoint_every=` | How often the step's checkpoint is saved: `'20m'`, `'1h'` or `20` (minutes); `False` for no copies. It is the default of the run-form field `<step>-checkpoint-every`. |
 
 Removed, with no alias: `outputs=` (the result replaces it), `hpc_time_limit=` (`walltime=` replaces it) and
 `disk=`: a step is not told its disk, it gets the disk of the machine its class runs on (the usable disk of that
 class, less a fixed reserve for the container images, or 10Gi where the platform does not say). A step that
 passes `disk=` is refused.
+
+**Time limit and checkpoint interval on the run form.** Every step of the developer's pipeline has one time limit,
+wherever it runs, and the run form shows it: a field `<step>-walltime` for every step, with the description "The
+longest the step may run, as minutes or hours: 90m, 12h. Default from pipeline.py." Its default is the step's
+`walltime=`, else `4h` (the same default as an HPC class). On a cluster machine the value is the step's deadline; on
+an HPC class it is the job's limit. The platform's own compose step has a fixed limit of 30 minutes and no field.
+Waiting for a machine does not count: a step that never gets one is bounded by the platform's pending reaper, not by
+this limit. A step that declares `checkpoint_every=` (not `False`) also has `<step>-checkpoint-every` ("How often
+the 'x' step's checkpoint is saved: minutes or hours, for example 10m or 1h."), default the value in code. Both are
+text: minutes (`90`, `90m`) or hours (`12h`), at least one minute; compose refuses any other value before a step
+starts, naming the field: `<step>-walltime is '1d'. Write minutes or hours, for example 90, 90m or 12h: at least
+one minute, no other unit.` Compose writes the numbers as its output `kaos-run-settings` (`{"<step>": {"walltime":
+minutes, "checkpoint-every": minutes}}`), which the deadline, the HPC job's limit and the checkpoint copies read.
+A step with a checkpoint interval has the field `checkpoint_every` (minutes, a number) in its context, after
+`produces`; a step without one has no such field.
 
 **Classes on the run form.** A step is offered the GPU classes of the cluster only when its code declares
 `gpu=True`. A step with `gpu=True` is offered the GPU and the CPU classes (it can run CPU-only on a CPU class); a step

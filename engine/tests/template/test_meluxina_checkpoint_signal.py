@@ -74,15 +74,16 @@ def test_a_resumable_steps_follower_gets_its_lead_and_a_deadline_for_every_conti
     from kubecore import meluxina
     one_job = (120 + meluxina.QUEUE_ALLOWANCE_MINUTES) * 60
     all_jobs = (1 + meluxina.HPC_MAX_CONTINUATIONS) * one_job
+    from helpers import evaluate
+    form = {"train": {"walltime": 120}}      # the run form's train-walltime, as compose writes it
     plain = _render(walltime="2h")      # not declared: resumability is discovered, so it may continue
     assert plain["resumable-lead"] == "0"
-    assert int(plain["deadline-seconds"]) == all_jobs
+    assert evaluate(plain["deadline-seconds"], form) == all_jobs
     opted_out = _render(walltime="2h", resumable=False)
-    assert int(opted_out["deadline-seconds"]) == one_job
+    assert evaluate(opted_out["deadline-seconds"], form) == one_job
     resumable = _render(walltime="2h", resumable="20m")
     assert resumable["resumable-lead"] == "20"
-    assert int(resumable["deadline-seconds"]) == \
-        (1 + meluxina.HPC_MAX_CONTINUATIONS) * (120 + meluxina.QUEUE_ALLOWANCE_MINUTES) * 60
+    assert evaluate(resumable["deadline-seconds"], form) == all_jobs
 
 
 def test_idle_timeout_reaches_the_follower_as_minutes_and_unset_leaves_the_platform_default():

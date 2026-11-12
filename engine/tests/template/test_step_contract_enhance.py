@@ -160,7 +160,8 @@ KNOWN_REFERENCES = {
     "inputs.parameters.step-name", "inputs.parameters.image",
     "inputs.parameters.step-command", "inputs.parameters.step-kind", "inputs.parameters.time-limit",
     "inputs.parameters.deadline-seconds", "inputs.parameters.hpc-class", "inputs.parameters.resumable-lead",
-    "inputs.parameters.resumable", "inputs.parameters.idle-timeout",
+    "inputs.parameters.resumable", "inputs.parameters.idle-timeout", "inputs.parameters.deadline",
+    "inputs.parameters.checkpoint-every",
 }
 
 
@@ -227,7 +228,7 @@ def test_a_cpu_step_gets_what_a_node_of_its_class_offers_and_the_numbers_follow_
     assert resources["requests"]["cpu"] == resources["limits"]["cpu"] == "7"
     assert resources["requests"]["memory"] == resources["limits"]["memory"] == "27Gi", "the default class, cpu-standard"
     assert {p["name"]: p.get("default") for p in template["inputs"]["parameters"]} == {
-        "kaos-context": None, "cpu": "7", "mem": "27Gi", "disk": "10Gi"}
+        "kaos-context": None, "deadline": "14400", "cpu": "7", "mem": "27Gi", "disk": "10Gi"}
     patch = yaml.safe_load(template["podSpecPatch"])["containers"][0]
     assert patch == {"name": "main", "resources": {
         "requests": {"cpu": "{{inputs.parameters.cpu}}", "memory": "{{inputs.parameters.mem}}",
@@ -245,7 +246,8 @@ def test_a_gpu_step_gets_its_gpu_and_the_node_numbers_in_one_patch():
     template = _template(wft, "one")
     assert template["container"]["resources"]["requests"]["memory"] == "25Gi", "the default of a gpu step is gpu-t4"
     assert {p["name"]: p.get("default") for p in template["inputs"]["parameters"]} == {
-        "kaos-context": None, "cpu": "7", "mem": "25Gi", "disk": "10Gi", "gpus": "1"}
+        "kaos-context": None, "deadline": "14400", "cpu": "7", "mem": "25Gi", "disk": "10Gi",
+        "gpus": "1"}
     patch = yaml.safe_load(template["podSpecPatch"])["containers"]
     assert len(patch) == 1 and patch[0]["resources"]["requests"] == {
         "cpu": "{{inputs.parameters.cpu}}", "memory": "{{inputs.parameters.mem}}",
@@ -265,7 +267,7 @@ def test_a_step_pinned_to_one_class_has_plain_resources_and_no_runtime_numbers()
     assert template["container"]["resources"]["requests"] == {
         "cpu": "7", "memory": "25Gi", "ephemeral-storage": "10Gi", "nvidia.com/gpu": "1"}
     assert "podSpecPatch" not in template
-    assert [p["name"] for p in template["inputs"]["parameters"]] == ["kaos-context"]
+    assert [p["name"] for p in template["inputs"]["parameters"]] == ["kaos-context", "deadline"]
     assert not any(p["name"] in ("cpu", "mem") for p in _task(wft, "pinned")["arguments"]["parameters"])
     assert "pinned-class" not in [p["name"] for p in wft["spec"]["arguments"]["parameters"]]
 

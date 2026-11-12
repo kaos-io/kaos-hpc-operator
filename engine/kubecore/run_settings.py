@@ -16,7 +16,8 @@ SETTINGS_PATH = "/work/kaos-run-settings.json"
 _TIME = re.compile(r"^([0-9]+)([mh]?)$")
 PROMOTE_CHOICES = ("false", "true")
 
-WALLTIME_EXAMPLE = "90, 90m or 12h"
+WALLTIME_EXAMPLE = "90m, 12h"
+DEFAULT_WALLTIME = "4h"                       # a step with no walltime= (the HPC path's default, meluxina.py)
 
 
 def walltime_field(step: str) -> str:
@@ -47,7 +48,7 @@ def time_problem(field: str, value) -> str:
     """The refusal for a walltime or checkpoint-every value that is not minutes or hours, or ''."""
     if minutes(value):
         return ""
-    return (f"{field} is {str(value)!r}. Write minutes or hours, for example {WALLTIME_EXAMPLE}: at least one "
+    return (f"{field} is {str(value)!r}. Write minutes or hours, for example 90, 90m or 12h: at least one "
             f"minute, no other unit.")
 
 
@@ -72,3 +73,21 @@ def class_problem(step: str, chosen: str, offer: dict) -> str:
     reason, remedy = offer["refused"].get(chosen) or (
         "it is not a machine class of this cluster", f"Choose one of: {', '.join(offer['offered'])}.")
     return f"step '{step}' cannot run on class '{chosen}': {reason}. {remedy}"
+
+
+def add_task_argument(spec: dict, template: str, name: str, expression: str) -> None:
+    """Every DAG task that runs `template` is given the argument `name` (unless it has one)."""
+    for tpl in spec["templates"]:
+        for task in (tpl.get("dag") or {}).get("tasks", []):
+            if task.get("template") != template:
+                continue
+            params = task.setdefault("arguments", {}).setdefault("parameters", [])
+            if not any(p.get("name") == name for p in params):
+                params.append({"name": name, "value": expression})
+
+
+def add_input(step: dict, name: str, default: str) -> None:
+    """The template takes the input `name`, with `default` for a task that passes none."""
+    params = step.setdefault("inputs", {}).setdefault("parameters", [])
+    if not any(p.get("name") == name for p in params):
+        params.append({"name": name, "default": default})

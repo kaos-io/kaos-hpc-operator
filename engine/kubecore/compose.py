@@ -69,6 +69,7 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from omegaconf.nodes import BooleanNode, EnumNode, FloatNode, IntegerNode, StringNode
 
 from kubecore import derive_tree
+from kubecore.run_settings import checkpoint_field, minutes, time_problem, walltime_field
 from kubecore.step_contract import (
     CONTEXT_CAP,
     CONTEXT_VERSION,
@@ -467,8 +468,30 @@ def step_params(step: dict, resolved: dict) -> dict:
     return {section: resolved[section] for section in step["reads"] if section in resolved}
 
 
+def _pairs(items: list) -> dict:
+    """{step: value} from the repeated `--walltime step=value` arguments."""
+    return {key: value for key, _, value in (item.partition("=") for item in items)}
+
+
+def run_settings(steps: list, walltimes: list, checkpoints: list) -> dict:
+    """What the run form says about each step's time (`<step>-walltime`, `<step>-checkpoint-every`), checked
+    here before any step starts: {step: {"walltime": minutes, "checkpoint-every": minutes}} for the steps that
+    have such a field. The refusal names the field."""
+    known = {step["name"] for step in steps}
+    settings = {}
+    for key, flag, field in (("walltime", walltimes, walltime_field), ("checkpoint-every", checkpoints, checkpoint_field)):
+        for step, value in _pairs(flag).items():
+            if step not in known:
+                raise ComposeError(f"{field(step)}: the pipeline has no step '{step}'")
+            problem = time_problem(field(step), value)
+            if problem:
+                raise ComposeError(problem)
+            settings.setdefault(step, {})[key] = minutes(value)
+    return settings
+
+
 def base_context(step: dict, run: str, app: str, project: str, experiment: str, params: dict, reads: dict,
-                 promote: dict = None) -> dict:
+                 promote: dict = None, checkpoint_every: int = 0) -> dict:
     """A step's context without `upstream` (the DAG task argument adds it), in the contract's field order.
     `params` is the step's own (step_params)."""
     produces = []
@@ -478,16 +501,19 @@ def base_context(step: dict, run: str, app: str, project: str, experiment: str, 
         if entry["type"] == "dataset" and (promote or {}).get(entry["name"]):
             produced["promote"] = True
         produces.append(produced)
-    return {
+    context = {
         "version": CONTEXT_VERSION, "run": run, "app": app, "project": project, "step": step["name"],
         "kind": step["kind"], "experiment": experiment, "params": params,
         "ledger": ledger([reads[name] for name in step["inputs"] if name in reads]),
         "produces": produces,
     }
+    if checkpoint_every:     # only a step that declares checkpoint_every= has it (minutes)
+        context["checkpoint_every"] = checkpoint_every
+    return context
 
 
 def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict, reads: dict,
-                  plan: dict = None) -> dict:
+                  plan: dict = None, settings: dict = None) -> dict:
     """{step: its base context in wire form}, each within its cap.
 
     `params` holds the config sections the step names in reads=. The cap is checked on the real text,
@@ -511,7 +537,8 @@ def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict,
     for step in steps:
         try:
             params = step_params(step, resolved)
-            text = wire(base_context(step, run, app, project, experiment, params, reads, promote))
+            text = wire(base_context(step, run, app, project, experiment, params, reads, promote,
+                                      (settings or {}).get(step["name"], {}).get("checkpoint-every", 0)))
         except (TypeError, ValueError) as exc:   # a value JSON cannot hold (inf, nan)
             raise ComposeError(f"the resolved config cannot be handed to the steps: {exc}") from None
         cap, size = base_context_cap(len(step["needs"])), base_cost(text, step["needs"])
@@ -557,6 +584,12 @@ def main(argv=None) -> None:
     parser.add_argument("--app", default="", help="The app.")
     parser.add_argument("--project", default="", help="The project.")
     parser.add_argument("--context-dir", default="", help="Where to write each step's context: <dir>/<step>.json.")
+    parser.add_argument("--walltime", action="append", default=[], metavar="STEP=VALUE",
+                        help="The run form's <step>-walltime (repeatable).")
+    parser.add_argument("--checkpoint-every", action="append", default=[], metavar="STEP=VALUE",
+                        help="The run form's <step>-checkpoint-every (repeatable).")
+    parser.add_argument("--settings-output", default="",
+                        help="Where to write the numbers the form gave each step: {step: {walltime, checkpoint-every}}.")
     parser.add_argument("--ledger-output", default="", help="Where to write the run's ledger: every pinned input.")
     parser.add_argument("overrides", nargs="*", help="Hydra override tokens (key=value).")
     args = parser.parse_args(argv)
@@ -566,15 +599,16 @@ def main(argv=None) -> None:
         if missing:
             parser.error(f"--steps needs {', '.join(missing)}")
 
-    contexts, reads = {}, {}
+    contexts, reads, settings = {}, {}, {}
     try:
         check_step_images(os.environ.get(STEP_IMAGES_ENV))
         advanced, plan = split_plan(args.advanced)
         resolved = compose_config(args.overrides, advanced, args.require, json.loads(args.render_defaults))
         if args.steps:
             steps = _steps(args.steps)
+            settings = run_settings(steps, args.walltime, args.checkpoint_every)
             reads = pin_inputs(resolved, steps)
-            contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, plan)
+            contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, plan, settings)
     except Exception as exc:  # any composition failure = hard error, pre-GPU
         message = str(exc)
         if exc.__cause__ is not None:  # e.g. enum ValidationError inside Hydra's wrapper
@@ -595,6 +629,10 @@ def main(argv=None) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body)
         print(f"wrote {target} ({len(body)} bytes)")
+    if args.settings_output:
+        Path(args.settings_output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.settings_output).write_text(wire(settings))
+        print(f"wrote {args.settings_output}")
     if args.ledger_output:
         Path(args.ledger_output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.ledger_output).write_text(wire(ledger(list(reads.values()))))

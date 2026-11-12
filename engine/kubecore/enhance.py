@@ -80,7 +80,18 @@ from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
 from kubecore.meluxina import HPC_TWIN_TEMPLATE, enhance_hpc, hpc_classes, parse_time_limit, runs_on_hpc
 from kubecore.outputs_repo import outputs_repo
-from kubecore.resilience import enhance_resilience, shared_templates, write_helper_configmap
+from kubecore.run_settings import (
+    DEFAULT_WALLTIME,
+    SETTINGS_PARAM,
+    SETTINGS_PATH,
+    WALLTIME_EXAMPLE,
+    add_input,
+    add_task_argument,
+    checkpoint_field,
+    setting,
+    walltime_field,
+)
+from kubecore.resilience import enhance_resilience, every_minutes, shared_templates, write_helper_configmap
 from kubecore.step_contract import (
     CONTEXT_PARAM,
     DATASET_PRODUCER_LABEL,
@@ -702,24 +713,71 @@ def enhance_env(step: dict, ctx: dict, annots: dict) -> None:
         add({"name": KAOS_LIB_SUPPORT_ENV, "value": support_value(ctx)})
 
 
-# How long a step may sit Pending before the platform calls it unschedulable.
-# A step whose node cannot be created (cloud capacity stockout, exhausted quota,
-# a class whose pool is at max) otherwise waits FOREVER with no signal: Argo does
-# not time out a Pending pod, and the developer sees a run that is neither
-# succeeding nor failing. Alexandra's run sat Pending 17 HOURS this way
-# (2026-07-15), and a GPU stockout reproduced it exactly (2026-07-16: 105
-# FailedScaleUp over 2d5h, still Pending).
+# The platform's own compose step keeps a short fixed limit. Every step of the developer's pipeline has one time
+# limit instead, the run form's `<step>-walltime` (enhance_walltime), wherever it runs.
 #
-# GPU steps get longer: accelerator pools legitimately take minutes to scale from
-# zero, and a transient stockout often clears. The point is not to fail fast —
-# it is to fail *visibly* instead of hanging silently until someone notices.
-PENDING_DEADLINE_SECONDS = 1800  # CPU steps: 30 min
-GPU_PENDING_DEADLINE_SECONDS = 5400  # GPU steps: 90 min (scale-from-zero + retries)
+# That limit is not what bounds a step that never gets a machine (cloud stockout, exhausted quota, a pool at
+# max): a deadline counts from the pod's start, so a Pending pod accrues none. The CI workflows chart's
+# pending reaper stops a run whose step sits Pending past its threshold (45 minutes).
+COMPOSE_STEP = "compose-and-validate"
+COMPOSE_DEADLINE_SECONDS = 1800
 
 
-def walltime_seconds(annots: dict) -> int:
-    """The step's declared walltime= in seconds, 0 when it declares none."""
-    return parse_time_limit(annots["hpc"]) * 60 if annots.get("hpc") else 0
+def declared_walltime(annots: dict) -> str:
+    """The step's walltime= as written in pipeline.py, else the default: the form field's default."""
+    return annots.get("hpc") or DEFAULT_WALLTIME
+
+
+def enhance_walltime(spec: dict, step: dict, annots: dict) -> None:
+    """A step of the developer's pipeline is ended when the run form's `<step>-walltime` elapses: its deadline
+    is an input of the template, which every DAG task of the step gives from what compose wrote
+    (`kaos-run-settings`). The step's walltime= (else 4h) is the form's default (enhance_run_form)."""
+    if step["name"] == COMPOSE_STEP:
+        return
+    add_input(step, "deadline", str(parse_time_limit(declared_walltime(annots)) * 60))
+    step["activeDeadlineSeconds"] = "{{inputs.parameters.deadline}}"
+    add_task_argument(spec, step["name"], "deadline", "{{=%s * 60}}" % setting(step["name"], "walltime"))
+
+
+def enhance_run_form(spec: dict, steps: list) -> None:
+    """The run form's own fields for the steps that declare walltime= and checkpoint_every=: `<step>-walltime`
+    and `<step>-checkpoint-every`, whose default is the value in code. Compose gets each value (checks it,
+    and writes the numbers as its output `kaos-run-settings`)."""
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
+    if compose is None:
+        return
+    args = compose["container"].setdefault("args", [])
+    parameters = spec["arguments"]["parameters"]
+    existing = _param_names(parameters)
+    declared = False
+
+    def field(name: str, value: str, description: str, flag: str, key: str) -> None:
+        nonlocal declared
+        if name in existing:
+            raise EnhanceError(f"the run form already has a field '{name}'; rename the setting or the step "
+                               f"that would give the form a second one")
+        parameters.append({"name": name, "value": value, "description": description})
+        existing.add(name)
+        args.extend([flag, "%s={{workflow.parameters.%s}}" % (key, name)])
+        declared = True
+
+    for step in steps:
+        step_name = step["name"]
+        if step_name == COMPOSE_STEP:
+            continue
+        annots = platform_annotations(step)
+        field(walltime_field(step_name), declared_walltime(annots),
+              f"The longest the step may run, as minutes or hours: {WALLTIME_EXAMPLE}. Default from pipeline.py.",
+              "--walltime", step_name)
+        every = every_minutes(annots)
+        if every.isdigit():
+            field(checkpoint_field(step_name), f"{every}m",
+                  f"How often the '{step_name}' step's checkpoint is saved: minutes or hours, "
+                  f"for example 10m or 1h.", "--checkpoint-every", step_name)
+    if declared:
+        args.extend(["--settings-output", SETTINGS_PATH])
+        compose.setdefault("outputs", {}).setdefault("parameters", []).append(
+            {"name": SETTINGS_PARAM, "valueFrom": {"path": SETTINGS_PATH}})
 
 
 def enhance_scheduling(step: dict, ctx: dict, annots: dict) -> None:
@@ -761,11 +819,9 @@ def enhance_scheduling(step: dict, ctx: dict, annots: dict) -> None:
         for key, value in selector.items():
             step["nodeSelector"].setdefault(key, value)
 
-    # Bound how long this step may sit unschedulable (see the constants above).
-    # fill-absent: a developer who set their own deadline keeps it. A step that declares walltime= is ended
-    # when it elapses, on the cluster as on an HPC class; any other step keeps the default.
-    step.setdefault("activeDeadlineSeconds", walltime_seconds(annots) or (
-        GPU_PENDING_DEADLINE_SECONDS if gpu else PENDING_DEADLINE_SECONDS))
+    # The compose step's fixed limit; a developer's step has its walltime (enhance_walltime).
+    if step["name"] == COMPOSE_STEP:
+        step.setdefault("activeDeadlineSeconds", COMPOSE_DEADLINE_SECONDS)
 
     tolerations = step.setdefault("tolerations", [])
     # Tolerate EVERY catalog class's taint, not just the default class's
@@ -1011,7 +1067,7 @@ def enhance_compose_identity(steps: list, ctx: dict) -> None:
         raise EnhanceError(
             f"the app name '{ctx['app']}' is {len(ctx['app'])} characters; an app that runs pipelines may have at "
             f"most {MAX_APP_NAME}. Create the app under a shorter name.")
-    compose = next((s for s in steps if s["name"] == "compose-and-validate"), None)
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
     if compose is None:
         return
     args = compose["container"].setdefault("args", [])
@@ -1192,6 +1248,7 @@ def enhance(wft: dict, ctx: dict) -> dict:
         compute_class = resolve_compute_class(step, ctx, annots)
         enhance_class_sizing(spec, step, ctx, annots)  # the node of the chosen class
         enhance_scheduling(step, ctx, annots)
+        enhance_walltime(spec, step, annots)
         # After scheduling fill, so the final requests (developer-set or
         # platform whole-node) are what get checked against the class budget.
         validate_scheduling(step, compute_class, gpu, env_has_gpu=bool(gpu_class_names(ctx)))
@@ -1205,6 +1262,7 @@ def enhance(wft: dict, ctx: dict) -> dict:
     enhance_image_guard(steps)
     enhance_workspace_pvc(spec, steps)
     enhance_compose_identity(steps, ctx)
+    enhance_run_form(spec, steps)
     enhance_pipeline_info(spec, ctx, steps)
     # PRD-1016: the MeluXina leg — must run LAST (twin tasks copy each routed
     # step's FINAL container image/command, and the depends rewrite needs the
