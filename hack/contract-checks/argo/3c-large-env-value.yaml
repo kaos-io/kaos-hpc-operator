@@ -81,7 +81,7 @@ spec:
               parameters:
                 - name: kaos-context
                   value: >-
-                    {{=sprig.trimSuffix("}", tasks.compose.outputs.parameters["kaos-context-train"])
+                    {{=sprig.trimSuffix("}", tasks["compose"].outputs.parameters["kaos-context-train"])
                     + ",\"upstream\":{\"prepare\":"
-                    + sprig.default("{\"version\":1,\"status\":\"absent\"}", tasks.prepare.outputs.parameters["kaos-result"])
+                    + sprig.default("{\"version\":1,\"status\":\"absent\"}", tasks["prepare"].outputs.parameters["kaos-result"])
                     + "}" + "}"}}
