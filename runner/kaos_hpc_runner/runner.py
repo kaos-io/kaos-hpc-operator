@@ -149,7 +149,7 @@ class Runner:
             # spending the staging budget again.
             self.stage_tried = True
             cfg.check_job()
-            self.check_handback()
+            self.prepare_handback()
             for inp in cfg.inputs:
                 info = {}
                 self.staged[inp['name']] = staging.stage_dataset(cfg, inp, self.stager, self._mint, info=info)
@@ -261,10 +261,7 @@ class Runner:
                 'KAOS_PROJID=' + ''.join(c for c in ident['account'] if c.isdigit())]
         if cfg.env.get('KAOS_LIB_SUPPORT'):      # the one variable a job's spec.env may hand to the step
             env.append('KAOS_LIB_SUPPORT=' + cfg.env['KAOS_LIB_SUPPORT'])
-        w = self.wallet = self._mint()
-        self.wallet_exp = wallet.wallet_exp(w)
-        if not w:
-            self.fail_handback('no data-plane token could be minted for this job')
+        w = self.wallet      # minted by prepare_handback, before anything was staged or cancelled
         # Public endpoints only, short-lived bearer only (T-03). MLflow's client honors MLFLOW_TRACKING_TOKEN
         # natively; the stage-in, the result hand-back and any in-step lakeFS API calls ride the same bearer.
         if cfg.mlflow_url:
@@ -344,10 +341,19 @@ class Runner:
                              endTime=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), message=msg[:500])
         sys.exit(0)   # reported: the pod ends cleanly, the controller ends the job SubmitLimit
 
+    def prepare_handback(self):
+        """Everything the way back needs, found first: the lakeFS endpoint, the app, and the data-plane token (minted
+        here, used by the site job). Before any staging, and before a resubmit cancels the queued job: a run that
+        cannot hand its result back ends the attempt with nothing staged, submitted or cancelled."""
+        self.check_handback()
+        w = self.wallet = self._mint()
+        self.wallet_exp = wallet.wallet_exp(w)
+        if not w:
+            self.fail_handback('no data-plane token could be minted for this job')
+
     def check_handback(self):
-        """Before anything is staged or submitted: a step must be able to hand its result back, or it can never
-        end well (PRD kaos#1911 CON-04: fail closed, before GPU). The way back is the hand-off branch of the app's
-        outputs repository in lakeFS."""
+        """A step must be able to hand its result back, or it can never end well (PRD kaos#1911 CON-04: fail
+        closed, before GPU). The way back is the hand-off branch of the app's outputs repository in lakeFS."""
         missing = [what for what, have in (('the project\'s lakeFS endpoint', self.cfg.lakefs_url),
                                            ('the app\'s outputs repository (the job names no app)', self.cfg.outputs_repo)) if not have]
         if missing:
@@ -387,6 +393,7 @@ class Runner:
             self.replacing = {'old': str(self.jid), 'reason': queue_lost,
                               'queued': max(0, int(time.time() - self.submitted_at)) if self.submitted_at else 0}
         self.cfg.check_job()             # before the cancel: a job that cannot be replaced is not cancelled for it
+        self.prepare_handback()          # likewise: no token, no cancel
         self.logs.finish()               # what the old job wrote, before its offset is replaced
         self.slurm.cancel(self.jid)
         self.jid = self.submit()

@@ -283,6 +283,48 @@ def test_a_run_that_cannot_hand_its_result_back_is_never_submitted(rig, capsys, 
     assert "ERROR: ResultNotHandedBack:" in capsys.readouterr().out and "result" not in rig.kube.status
 
 
+@pytest.mark.parametrize("make, said", [
+    (dict(wallet=""), "no data-plane token could be minted"),
+    (dict(LAKEFS_EXTERNAL_URL=None), "no the project's lakeFS endpoint"),
+    (dict(KAOS_APP=None), "no the app's outputs repository"),
+])
+def test_a_run_that_cannot_hand_its_result_back_is_found_before_anything_is_staged(rig, make, said):
+    """The token, the endpoint and the app are found first: not after the datasets and the image were staged."""
+    staged = []
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", lambda *a, **kw: staged.append("dataset") or "")
+    rig.monkeypatch.setattr(runmod.imagemod, "stage_image", lambda *a, **kw: staged.append("image") or "")
+    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm, **make)
+    with pytest.raises(SystemExit):
+        rig.runner.run()
+    assert staged == [] and slurm.submitted == [] and slurm.cancelled == []
+    assert said in rig.kube.run["message"]
+
+
+def test_a_resubmit_that_cannot_hand_its_result_back_cancels_nothing(rig):
+    """The queued job is replaced only when its replacement can be submitted: no token, no cancel."""
+    slurm = FakeSlurm({"5001": [acc("PENDING", start=0)]})
+    rig.make(slurm)
+    rig.runner.jid = 5001
+    rig.runner._mint = lambda: ""
+    with pytest.raises(SystemExit) as e:
+        rig.runner.resubmit("pull token expired")
+    assert e.value.code == 0
+    assert slurm.cancelled == [] and slurm.submitted == []
+    run = rig.kube.run
+    assert (run["state"], run["exitCode"], run["terminal"]) == ("FAILED", 243, True)
+    assert "no data-plane token could be minted" in run["message"]
+
+
+def test_a_resubmit_with_a_token_cancels_the_queued_job_and_submits_the_next(rig):
+    slurm = FakeSlurm({"5001": [acc("PENDING", start=0)]})
+    rig.make(slurm)
+    rig.runner.jid = 5001
+    rig.runner.stage_tried = True
+    rig.runner.resubmit("pull token expired")
+    assert slurm.cancelled == ["5001"] and len(slurm.submitted) == 1 and rig.runner.jid == 5001
+
+
 def test_a_refused_submit_stops_the_runner_with_the_reason_and_reports_nothing(rig, capsys):
     class Refusing(FakeSlurm):
         def submit(self, body):
@@ -814,14 +856,14 @@ def test_a_guest_on_a_shared_node_hands_its_result_back_like_a_job_alone(rig):
 
 def test_a_long_job_gets_a_fresh_wallet_for_its_result(rig, monkeypatch):
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    minted = iter(["w1", "w2"])
+    minted = iter("w%d" % n for n in range(1, 99))
     r = rig.make(slurm)
     r.runner._mint = lambda: next(minted)
     seen = []
     monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 100.0 if w == "w1" else 1e12)
     monkeypatch.setattr(r.runner, "handed_back", lambda name: seen.append(r.runner.wallet))
     r.runner.run()
-    assert set(seen) == {"w2"}, "the wallet minted at submit had expired by the end of the job"
+    assert seen and "w1" not in seen, "the wallet minted at submit (w1) had expired by the end of the job"
 
 
 # ---------------------------------------------------------------- SIGTERM (the controller deleted the runner Job)

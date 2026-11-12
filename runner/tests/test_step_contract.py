@@ -293,6 +293,7 @@ class Site:
         return d
 
     def run(self, jid="5001", result_text=None):
+        self.runner.prepare_handback()
         batch, env, commits, limit = self.runner.site_job("", "")
         self.batch, self.env = batch, env
         node = dict(e.split("=", 1) for e in env)
