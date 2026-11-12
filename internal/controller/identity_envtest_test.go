@@ -49,7 +49,7 @@ var _ = Describe("HPCArgoWorkflowJob site identity", func() {
 	}
 
 	spec := func(seq int) hpcv1alpha1.HPCArgoWorkflowJobSpec {
-		return hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: fmt.Sprintf("reg.example/id/app%d:v1", seq),
+		return hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: fmt.Sprintf("reg.example/id/app%d:v1", seq),
 			WallTimeMinutes: 20, Command: []string{"python", "train.py"}, StepName: "train"}
 	}
 

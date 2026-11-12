@@ -77,7 +77,7 @@ func TestTimeoutRetry(t *testing.T) {
 	site := &hpcv1alpha1.HPCSite{Spec: hpcv1alpha1.HPCSiteSpec{Profile: hpcv1alpha1.SiteProfile{
 		Classes: []hpcv1alpha1.SiteClass{{Name: "c", MaxWallTimeMinutes: 2880}}}}}
 	job := func(p *hpcv1alpha1.Placement, wall int32) *hpcv1alpha1.HPCArgoWorkflowJob {
-		j := &hpcv1alpha1.HPCArgoWorkflowJob{Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "c", WallTimeMinutes: wall}}
+		j := &hpcv1alpha1.HPCArgoWorkflowJob{Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "c", WallTimeMinutes: wall}}
 		j.Status.Placement = p
 		return j
 	}

@@ -136,16 +136,9 @@ $(ENGINE_VENV)/.stamp: engine/requirements-dev.txt engine/requirements.txt
 engine-venv: $(ENGINE_VENV)/.stamp ## Create the engine's Python venv (pinned hera/hydra/omegaconf/PyYAML).
 
 .PHONY: test-engine
-test-engine: engine-venv ## Run the engine tests (the template's kubecore tests, runner, wheel, compat surface, follower contract).
-	PYTHONDONTWRITEBYTECODE=1 $(ENGINE_PY) -m pytest -c engine/pytest.ini engine/tests -q
-
-# Needs network: clones both templates and the private apps in $$KAOS_ENGINE_CORPUS_LAB into .corpus/.
-CORPUS_DIR ?= $(CURDIR)/.corpus
-.PHONY: engine-corpus
-engine-corpus: engine-venv ## Render every historical template state and the lab apps with the engine and with their own vendored copy; write engine/CORPUS_REPORT.md.
-	hack/engine-corpus-fetch.sh $(CORPUS_DIR)
-	$(ENGINE_PY) engine/tools/corpus.py --corpus $(CORPUS_DIR) --report engine/CORPUS_REPORT.md > /dev/null
-	KAOS_ENGINE_CORPUS_DIR=$(CORPUS_DIR) PYTHONDONTWRITEBYTECODE=1 $(ENGINE_PY) -m pytest -c engine/pytest.ini engine/tests/test_corpus.py -q
+# ENGINE_KAOS_LIB=<kaos-lib checkout> also runs the compose test against the real kaos-lib 0.5 (it is skipped without).
+test-engine: engine-venv ## Run the engine tests (the step contract, the template's kubecore tests, runner, wheel, follower contract).
+	PYTHONDONTWRITEBYTECODE=1 $(if $(ENGINE_KAOS_LIB),PYTHONPATH=$(ENGINE_KAOS_LIB)/src) $(ENGINE_PY) -m pytest -c engine/pytest.ini engine/tests -q
 
 .PHONY: lint-engine
 lint-engine: engine-venv ## Run ruff on the engine's own Python (kubecore/ and the template tests are excluded).

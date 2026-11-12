@@ -42,9 +42,8 @@ def test_should_ship_the_engine_under_kaos_pipeline_engine_and_no_toplevel_kubec
 
 def test_should_ship_the_data_files(wheel):
     names = zipfile.ZipFile(wheel).namelist()
-    for data in ("known-vendored.json", "authoring-schema.json", "compat-surface.json"):
-        assert f"kaos_pipeline_engine/{data}" in names
-    assert "kaos_pipeline_engine/kubecore/config/platform/live.yaml" in names
+    assert "kaos_pipeline_engine/authoring-schema.json" in names
+    assert "kaos_pipeline_engine/kubecore/local-dev/pipeline-context.yaml" in names
 
 
 def test_should_render_isolated_from_an_installed_wheel(wheel, tmp_path):

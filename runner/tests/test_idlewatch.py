@@ -282,6 +282,7 @@ def _run_block(tmp_path, step_cmd, **extra_env):
     env = dict(os.environ, SIF="img.sif", STEP_CMD=step_cmd, NV="", PWD_OPT="", BIND="", SCR=str(tmp_path),
                KAOS_JOB_ID="7", KAOS_WORK=str(tmp_path / "work"), HPC_GPUS="1", KAOS_IDLE_TIMEOUT_MIN="20",
                IDLEWATCH_B64=payloads.b64(payloads.IDLEWATCH), KAOS_IDLE_SAMPLE_S="0.2", KAOS_IDLE_GRACE_S="1",
+               HANDBACK_B64=payloads.b64("pass\n"),     # the result hand-back is not what these tests are about
                KAOS_IDLE_WINDOW_S="1.5", PATH=str(bindir) + os.pathsep + os.environ["PATH"])
     env.update(extra_env)
     with open(tmp_path / "slurm-7.out", "w") as out:

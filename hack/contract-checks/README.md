@@ -9,6 +9,7 @@ script that can be run again; `run-all.sh` runs them all and prints one line per
 | `3a-context-expression.sh` | Does one expression assemble the step context as one JSON value from task outputs, as a DAG task argument and as a container env value? | the lab | Pass |
 | `3b-skipped-upstream.sh` | Is the result of a skipped upstream step the sentinel inside that expression, also for a step with an HPC variant? | the lab | Pass |
 | `3c-large-env-value.sh` | Does a 96 KiB env value reach the container intact? | the lab | Pass when its cost as a JSON string fits |
+| `3d-env-expansion.sh` | Does Kubernetes change `$$` and `$(NAME)` in an env value, and does the wire form (`$` as `\u0024`) arrive unchanged? | an existing local cluster (`KAOS_LAB_KUBECONFIG`); not run by `run-all.sh`, creates no cluster | Pass: RAW arrives changed, ESCAPED byte for byte |
 | `4-hpc-hops.sh` | Does a 96 KiB value survive follower, job object, runner and job environment? | go, python3 | Pass, with the limits below |
 | `5-crd-upgrade.sh` | Do stored HPC jobs stay readable when fields are removed from the job definition? | go | Pass |
 
@@ -97,23 +98,24 @@ context in the cluster from a sha256 chain; the script builds the same text and 
 
 ### 4 The HPC hops
 
-`hpc/hops_test.go` and `hpc/runner_hop.py`. One context of 98304 bytes, with quotes, a dollar,
-backticks, a backslash and a semicolon in a string:
+`hpc/hops_test.go` and `hpc/runner_hop.py`, on the product code and the repository's own job definition.
+One context that costs exactly 98304, the cap (98242 bytes), with quotes, a dollar, backticks, a backslash
+and a semicolon in a string:
 
 | Hop | How it is checked | Real parts |
 |---|---|---|
-| 1. Follower to job object | The job the follower's code builds is created with `spec.context` and read back. One byte more is refused; the spec stays immutable; `status.result` takes 8192 bytes and refuses 8193. | `follower.ConfigFromEnv`, `Config.Job`, the API server, the repository's job definition with the contract's fields added |
-| 2. Job object to runner Job | The runner Job the controller's code builds, with the context as one more env value, is created and read back. | `runnerjob.Build`, the API server |
+| 1. Follower to job object | The job the follower builds from its environment is created and its `spec.context` read back. A context of 98305 characters is refused by the definition; the spec stays immutable; `status.result` takes 8192 bytes and refuses 8193. | `follower.ConfigFromEnv`, `Config.Job`, the API server, the repository's job definition (`config/crd/bases`) |
+| 2. Job object to runner Job | The runner Job the controller builds from the stored job is created and read back. | `runnerjob.Build`, the API server |
 | 3. Runner Job to runner process | A process is started with exactly the environment of the stored Job's container and reports what it sees. | the kernel's exec |
-| 4. Runner to site | The site job is built the way `Runner.submit` builds it, alone (inputs in the Slurm environment) and for a shared node (inputs as export lines in the script), and sent with the runner's client. | `jobscript.batch_lines`, `inputs_in_script`, the payloads, `Slurm.submit`, the fake Slurm site |
+| 4. Runner to site | The site job is built by the code `Runner.submit` sends (`Runner.site_job`), alone (inputs in the Slurm environment) and for a shared node (inputs as export lines in the script), and sent with the runner's client. | `Runner.site_job`, `jobscript.batch_lines`, `inputs_in_script`, the payloads, `Slurm.submit`, the fake Slurm site |
 | 5. Job script to step | The whole job script runs under bash with a stand-in for Apptainer; the step reports what it finds in `KAOS_STEP_CONTEXT`. | the job script |
 
 A control run changes one character of the value before it is handed to the job: both steps and the
 fake site must show the change. It is there because the first version of this check passed with a
 comparison that had not been shown able to fail.
 
-Sizes seen: the runner Job object 107 KiB; the submission 155 KiB alone and 186 KiB for a shared node,
-where the job script is 185 KiB.
+Sizes seen: the runner Job object 104 KiB; the submission 167 KiB alone and 197 KiB for a shared node,
+where the job script is 196 KiB.
 
 **What this does not prove, because it needs a live site:**
 
@@ -133,9 +135,10 @@ been run:** site time is the client's money and it needs the owner's word. It is
 Not checked here either: the kubelet starting the runner's container with the value. Check 3(c) shows
 the same mechanism (a pod with a 98304-byte env value) on kind.
 
-The contract's fields are not in the product code yet. The check adds `spec.context` to the definition
-and the env value to the runner Job itself; the work package that adds them for real (W3) should keep
-this check and drop those two additions.
+The check runs on the product code: the definition it loads is the repository's, the follower fills
+`spec.context` and the controller's runner Job carries it. The step in the check writes no result, so the job
+hands back "no result" to a stand-in for lakeFS; the hand-back itself is tested in
+`runner/tests/test_step_contract.py`.
 
 ### 5 The job definition upgrade
 
@@ -147,27 +150,32 @@ so every chart upgrade rewrites them in place, in the same release as the contro
 keeps them when the release is removed. There is one version, `v1alpha1`; nothing converts or rewrites
 stored objects.
 
-`hpc/crd_upgrade_test.go` stores two jobs under today's definition (dataset pin, declared outputs, the
-cancel finalizer, outputs in the status), then changes the definition in place: `spec.dataset`,
-`spec.datasetRef`, `spec.outputs` and `status.outputs` removed; `spec.context`, `spec.app`,
-`spec.inputs` and `status.result` added. Once with `spec.context` optional, once required.
+`hpc/crd_upgrade_test.go` stores two jobs under the definition of before the step contract (kept as
+`hpc/testdata/hpcargoworkflowjobs-before.yaml`: dataset pin, declared outputs, the cancel finalizer; one is
+Running with outputs in its status, one is not judged yet), then replaces the definition in place by the
+repository's own: `spec.dataset`, `spec.datasetRef`, `spec.outputs` and `status.outputs` removed;
+`spec.context` and `spec.app` (both required), `spec.inputs` and `status.result` added. It then runs the
+controller on the job that was not judged yet.
 
 Found, on Kubernetes 1.33:
 
 - Stored jobs stay readable, by name and in a list, with the typed client too.
 - The removed fields are no longer returned. A job stored with a dataset pin reads back without it.
-- The status of a stored job can be written, its finalizer removed, and it can be deleted, also when
+- The status of a stored job can be written, its finalizer removed, and it can be deleted, although
   `spec.context` is required and the stored job has none.
-- A job in the old shape created after the change is refused when it is created with strict field
-  validation, which is what the follower does (`unknown field "spec.dataset"`). Without strict
-  validation and with `context` optional it is accepted and stored without its dataset.
+- The controller refuses the stored job it had not judged yet: phase `Refused`, reason `NoContext`, nothing
+  booked; it then drops the finalizer and the job can be deleted.
+- A job in the old shape created after the change is refused: with strict field validation, which is what
+  the follower does (`unknown field "spec.dataset"`), and without it (`spec.context: Required value`).
 
 What follows for the cutover:
 
 - **Drain before the definition changes.** A job that is still running when its definition changes
   reads back without its dataset. A later attempt of it, built by a controller that does not refuse a
   job without context, would run without its data.
-- **The new controller refuses a job without context**, so what was not drained ends with a reason.
-- Making `spec.context` required in the definition is safe for stored jobs on this API server version
+- **The controller refuses a job without context** (reason `NoContext`), so what was not drained ends with
+  a reason: before it is booked; before a runner is started for a job that was already booked; and when a
+  job that ran to its end under the runner of before reports success.
+- `spec.context` is required in the definition. That is safe for stored jobs on this API server version
   and closes the non-strict path. It was not checked on an API server older than 1.30.
 - A failed chart upgrade is rolled back by the release (`rollbackLimit: 10`), definitions included.

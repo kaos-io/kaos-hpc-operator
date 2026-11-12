@@ -47,27 +47,21 @@ def test_the_log_offset_rides_every_report_and_is_cleared_for_a_new_site_job():
     assert "logOffset" not in kube.run and "startTime" not in kube.run
 
 
-def test_outputs_ride_in_the_same_patch_as_the_terminal_report():
+def test_the_result_rides_in_the_same_patch_as_the_terminal_report():
     r, kube = _reporter()
-    outs = {"training-result": json.dumps({"map50": 0.71})}
-    r.report(must=True, outputs=outs, siteJobID="1", state="COMPLETED", exitCode=0, terminal=True)
+    wire = helpers.fixture("result-model.wire")
+    r.report(must=True, result=wire, siteJobID="1", state="COMPLETED", exitCode=0, terminal=True)
     (patch,) = kube.patches()
-    assert patch[2]["status"]["outputs"] == outs and patch[2]["status"]["run"]["terminal"] is True
-    assert kube.status["outputs"] == outs
+    assert patch[2]["status"]["result"] == wire and patch[2]["status"]["run"]["terminal"] is True
+    assert kube.status["result"] == wire
 
 
-def test_outputs_above_64_kib_in_total_are_an_error_and_nothing_is_written():
+def test_no_other_report_touches_the_result():
     r, kube = _reporter()
-    half = {"a": "x" * (32 * 1024), "b": "y" * (32 * 1024)}
-    r.report(must=True, outputs=half, siteJobID="1", state="COMPLETED", terminal=True)   # exactly 64 KiB: fine
-    kube.calls.clear()
-    over = {"a": "x" * (32 * 1024), "b": "y" * (32 * 1024 + 1)}
-    with pytest.raises(rep.OutputsTooLarge, match="65537 bytes"):
-        r.report(must=True, outputs=over, siteJobID="1", state="COMPLETED", terminal=True)
-    assert kube.calls == []
-    assert rep.check_outputs({"é": "é" * 100})   # bytes, not characters, are counted
-    with pytest.raises(rep.OutputsTooLarge):
-        rep.check_outputs({"a": "é" * (32 * 1024 + 1)})
+    for fields in ({"state": "RUNNING"}, {"state": "FAILED", "exitCode": 1, "terminal": True}):
+        r.report(must=True, siteJobID="1", **fields)
+    assert all("result" not in p[2]["status"] for p in kube.patches())
+    assert not hasattr(rep, "check_outputs"), "status.outputs is gone: one result, checked by result.check"
 
 
 def test_the_end_of_an_attempt_is_reported_until_it_lands():
@@ -180,20 +174,23 @@ def test_the_staging_record_rides_every_report_and_a_restarted_runner_keeps_the_
     r.note_staging(info)
     r.report(siteJobID="1", state="PENDING")
     r.report(siteJobID="1", state="RUNNING")
-    assert kube.run["staging"] == info
+    assert kube.run["staged"] == [info]
     # The runner restarts in the same attempt: its own staging finds the copy resident ("cached") and must not
     # replace what the first one reported; another commit does replace it.
     r2, kube2 = _reporter()
     r2.restore_staging(kube.run)
     r2.note_staging(dict(info, kind="cached", files=0, bytes=0, seconds=0))
     r2.report(siteJobID="1", state="RUNNING")
-    assert kube2.run["staging"] == info
-    r2.note_staging(dict(info, commit="d3" * 6, kind="delta"))
-    assert r2.staging["kind"] == "delta"
+    assert kube2.run["staged"] == [info]
+    # A second input is a second record, in the order staged.
+    other = dict(info, repo="labels", commit="d3" * 6, kind="delta")
+    r2.note_staging(other)
+    r2.report(siteJobID="1", state="RUNNING")
+    assert kube2.run["staged"] == [info, other]
 
 
 def test_no_staging_record_is_sent_when_the_job_stages_in_job():
     r, kube = _reporter()
     r.note_staging({})
     r.report(siteJobID="1", state="PENDING")
-    assert "staging" not in kube.run
+    assert "staged" not in kube.run

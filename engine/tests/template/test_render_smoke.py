@@ -52,11 +52,13 @@ def test_dataset_is_a_form_parameter_the_platform_can_fill_with_choices():
     assert "data-ref" not in params
 
 
-def test_dataset_loading_pins_the_dataset_for_the_steps_after_it():
+def test_a_step_gets_the_result_of_the_step_it_needs_in_its_context():
     wft = _enhanced()
     tasks = {t["name"]: t for t in next(x for x in wft["spec"]["templates"] if "dag" in x)["dag"]["tasks"]}
     assert "dataset-loading" in tasks["hello-world"]["depends"]
-    names = {p["name"] for p in tasks["hello-world"]["arguments"]["parameters"]}
-    assert "dataset-info" in names
-    loading = next(t for t in wft["spec"]["templates"] if t["name"] == "dataset-loading")
-    assert [o["name"] for o in loading["outputs"]["parameters"]] == ["dataset-info"]
+    arguments = {p["name"]: p["value"] for p in tasks["hello-world"]["arguments"]["parameters"]}
+    assert 'tasks["dataset-loading"].outputs.parameters["kaos-result"]' in arguments["kaos-context"]
+    for name in ("dataset-loading", "hello-world"):
+        step = next(t for t in wft["spec"]["templates"] if t["name"] == name)
+        assert [o["name"] for o in step["outputs"]["parameters"]] == ["kaos-result"]
+        assert step["container"]["command"] == ["python", "-m", "app.entry"] and "args" not in step["container"]

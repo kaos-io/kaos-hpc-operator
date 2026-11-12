@@ -18,8 +18,11 @@ MeluXina runs only through the pool's HPC controller (PRD-HPC-1461 D-58, D-59,
 F-35). The operator publishes pipeline-context hpc.controller "serve" (and
 hpc.followerImage) when the controller serves the project; `hpc-follower` is
 then a credential-free follower (see follower_template): it creates the step's
-HPCArgoWorkflowJob, prints its progress and writes the Argo outputs from its
-status. The controller's runner Job owns submission, staging, the Slurm token,
+HPCArgoWorkflowJob, prints its progress and writes the step's one result from
+its status. A step's HPC variant follows the same step contract as its pod
+(docs/step-contract.md): the twin task gets the same `kaos-context` argument,
+the follower hands it to the job unchanged, and the job's result comes back as
+the same `kaos-result` output. The controller's runner Job owns submission, staging, the Slurm token,
 continuation and resubmits. The in-pod waiter this module used to embed is
 gone: for a project the controller does not serve, `hpc-follower` is a step
 that fails at once with HPC_NOT_SERVED_MESSAGE (see refusal_template) and
@@ -30,78 +33,15 @@ import re
 
 from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
-from kubecore.outputs_repo import OUTPUTS_REF, checkpoint_prefix, outputs_repo
-
-
-_SUBST_TAG = re.compile(
-    r"\{\{\s*((?:workflow\.parameters|tasks)\.[A-Za-z0-9_.-]+)\s*\}\}")
-_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def _tag_expr(path: str) -> str:
-    """Convert a dotted Argo tag path to expression syntax, using bracket
-    access for segments that are not bare identifiers (task and param names
-    routinely carry hyphens: tasks.compose-and-validate.outputs...)."""
-    segs = path.split(".")
-    out = segs[0]
-    for s in segs[1:]:
-        out += "." + s if _IDENT.match(s) else "['%s']" % s
-    return out
-
-
-_TASK_OUTPUT = re.compile(r"^tasks\.([A-Za-z0-9_-]+)\.outputs\.parameters\.([A-Za-z0-9_.-]+)$")
-
-
-def _pair_expr(task: str, param: str, provider: str) -> str:
-    """Expression for a routed upstream's output: exactly one twin ran, the
-    other is Skipped and its outputs resolve to their defaults — pick the
-    twin that ran."""
-    return ("tasks['%s'].status == 'Skipped' ? tasks['%s-%s'].outputs."
-            "parameters['%s'] : tasks['%s'].outputs.parameters['%s']"
-            % (task, task, provider, param, task, param))
-
-
-def _cmd_json(cmd: list, routed=(), provider: str = "") -> str:
-    """Render the step-command as a JSON array that STAYS valid JSON after
-    Argo's parameter substitution.
-
-    References to a routed upstream's outputs are pair-aware (`_pair_expr`):
-    a twin whose upstream ALSO ran on HPC must read the upstream twin, not
-    the Skipped in-cluster task (observed at run time: a GPU step on
-    MeluXina got --training-result "" and fine-tuned the base weights).
-
-    A naive json.dumps breaks at run time (observed at run time): Argo
-    substitutes {{workflow.parameters.X}} / {{tasks.X.outputs.parameters.Y}}
-    INSIDE the already-serialized string, and a multi-line value (the
-    compose-and-validate params.yaml output is a whole YAML doc) lands raw
-    newlines/quotes inside a JSON string — the submit pod's json.loads dies
-    on 'invalid control character'. Fix: tokens carrying substitutable tags
-    are emitted as {{=toJson(...)}} expressions, so Argo itself JSON-escapes
-    the substituted value; literal tokens stay json.dumps'd. Mixed tokens
-    rebuild the full string inside the expression via single-quoted
-    concatenation."""
-    parts = []
-    for tok in cmd:
-        if not _SUBST_TAG.search(tok):
-            parts.append(json.dumps(tok))
-            continue
-        exprs, pos = [], 0
-        for m in _SUBST_TAG.finditer(tok):
-            if m.start() > pos:
-                exprs.append("'%s'" % tok[pos:m.start()].replace("\\", "\\\\").replace("'", "\\'"))
-            ref = _TASK_OUTPUT.match(m.group(1))
-            if ref and ref.group(1) in routed:
-                exprs.append(("(%s)", _pair_expr(ref.group(1), ref.group(2), provider)))
-            else:
-                exprs.append(_tag_expr(m.group(1)))
-            pos = m.end()
-        if pos < len(tok):
-            exprs.append("'%s'" % tok[pos:].replace("\\", "\\\\").replace("'", "\\'"))
-        # a ternary needs parentheses only when concatenated with literals
-        exprs = [(e[0] % e[1] if len(exprs) > 1 else e[1]) if isinstance(e, tuple) else e
-                 for e in exprs]
-        parts.append("{{=toJson(%s)}}" % " + ".join(exprs))
-    return "[" + ", ".join(parts) + "]"
+from kubecore.step_contract import (
+    CLUSTER_ONLY_KINDS,
+    DATASET_PRODUCER_LABEL,
+    DATASET_PRODUCERS_STAY_ON_CLUSTER,
+    CONTEXT_ENV,
+    CONTEXT_PARAM,
+    RESULT_PARAM,
+    pair_results,
+)
 
 
 DEFAULT_TIME_LIMIT_MINUTES = 240
@@ -127,11 +67,11 @@ HPC_SUBMITTER_SA = "hpc-submitter"
 HPC_TWIN_TEMPLATE = "hpc-follower"
 # The twin task of a step is `<step>-hpc` on every site (PRD-HPC-1461 D-06, D-82): no site name in a run's graph.
 HPC_TWIN_SUFFIX = "hpc"
-# The platform's own first step. It composes the config and pins the run's data: it never runs on HPC.
-COMPOSE_STEP = "compose-and-validate"
-# The compose step's output that holds the run's dataset as one object, {"repo","version","commit","owner"}, or
-# `{}` when the run reads none (kubecore/authoring.py, kubecore/compose.py). The follower creates the job from it.
-DATASET_PIN_PARAM = "dataset-pin"
+STEP_KIND_LABEL = "platform.kubecore.io/step-kind"
+# Where the follower writes the step's result for the workflow: the job's result, or the sentinel when the
+# job handed none back. It always writes the file, so the output has no default: a follower that ends well
+# without it fails the step.
+FOLLOWER_RESULT_PATH = "/tmp/outputs/kaos-result.json"
 HPC_ANNOTATION = "platform.kubecore.io/hpc"
 # step(resumable=...): how long before its wall time the step is told to save (D-44 as amended
 # 2026-11-05). Only resumable steps get the signal and continue.
@@ -142,8 +82,12 @@ HPC_RESUMABLE_ANNOTATION = "platform.kubecore.io/hpc-resumable"
 POD_LOSS_MESSAGES = ("imminent node shutdown|node is shutting down|node is draining"
                      "|The node was low on resource|The node had condition"
                      "|Pod was rejected|Evicted|evicted|pod deleted|Pod was deleted")
-POD_LOSS_RETRY = ("lastRetry.status == 'Error' or lastRetry.message matches '.*(%s).*'"
-                  % POD_LOSS_MESSAGES)
+# A step that ends well without writing its result is an Error of the executor ("no such file ...
+# kaos-result.json"). It is deterministic: the same step ends the same way again, and a re-run would
+# spend the GPU twice. It is not retried; a node lost with the step is.
+NO_RESULT_MESSAGE = "kaos-result.json"
+POD_LOSS_RETRY = ("(lastRetry.status == 'Error' or lastRetry.message matches '.*(%s).*')"
+                  " and not (lastRetry.message contains '%s')" % (POD_LOSS_MESSAGES, NO_RESULT_MESSAGE))
 
 
 def sharing_env(ctx: dict) -> list:
@@ -167,7 +111,7 @@ def controller_serves(ctx: dict) -> bool:
 
 def follower_template(ctx: dict, tpl: dict) -> dict:
     """The `hpc-follower` template as the follower (PRD-HPC-1461 D-59): it creates the step's
-    HPCArgoWorkflowJob, prints its progress and writes the Argo outputs from its status. It holds no
+    HPCArgoWorkflowJob, prints its progress and writes the step's result from its status. It holds no
     Slurm, staging or MLflow credential and no Secret volume: the controller's runner Job carries them,
     and the endpoints come from the runner's trusted ConfigMap, not from here. Inputs, outputs, deadline,
     retry and labels are `tpl`'s (the shared base from enhance_hpc)."""
@@ -194,16 +138,10 @@ def follower_template(ctx: dict, tpl: dict) -> dict:
         # to the job's idleTimeoutMinutes. The same annotation drives the in-cluster idle watchdog.
         {"name": "HPC_IDLE_TIMEOUT_MINUTES", "value": "{{inputs.parameters.idle-timeout}}"},
         {"name": "HPC_MAX_CONTINUATIONS", "value": str(HPC_MAX_CONTINUATIONS)},
-        {"name": "STEP_OUTPUTS", "value": "{{inputs.parameters.step-outputs}}"},
-        # The run's dataset, pinned to a commit by the compose step: the job is created from exactly this, so an
-        # HPC step reads what every other step of the run reads, and neither the follower nor the runner ever
-        # resolves a version (D-81). Empty: the run reads no dataset.
-        {"name": "DATASET_PIN", "value": "{{inputs.parameters.%s}}" % DATASET_PIN_PARAM},
-        # The only spec env the controller admits (allowlist).
-        {"name": "OUTPUTS_REPO", "value": outputs_repo(ctx)},
-        {"name": "OUTPUTS_REF", "value": OUTPUTS_REF},
-        {"name": "CHECKPOINT_BUCKET", "value": outputs_repo(ctx)},
-        {"name": "CHECKPOINT_PREFIX", "value": checkpoint_prefix()},
+        # The step's context, exactly as its pod would get it: the follower puts it in the job unchanged
+        # (spec.context) and fills the job's inputs from it (every read of its ledger, every dataset an
+        # upstream step wrote). Neither the follower nor the runner ever resolves a version.
+        {"name": CONTEXT_ENV, "value": "{{inputs.parameters.%s}}" % CONTEXT_PARAM},
     ] + ([{"name": KAOS_LIB_SUPPORT_ENV, "value": support_value(ctx)}] if support_value(ctx) else []) \
       + sharing_env(ctx)
     follower = dict(tpl)
@@ -280,6 +218,16 @@ def step_time_limit(step: dict) -> int:
 HPC_CLASS_PREFIX_FMT = "%s-"  # class names are provider-prefixed: meluxina-gpu
 
 
+def runs_on_hpc(step: dict) -> bool:
+    """False for a step whose kind never runs on an HPC class (ingest, publish, control), and for one that
+    produces a dataset (DATASET_PRODUCERS_STAY_ON_CLUSTER): it is offered no HPC class and gets no HPC
+    variant. The one predicate."""
+    labels = (step.get("metadata") or {}).get("labels") or {}
+    if DATASET_PRODUCERS_STAY_ON_CLUSTER and labels.get(DATASET_PRODUCER_LABEL) == "true":
+        return False
+    return labels.get(STEP_KIND_LABEL) not in CLUSTER_ONLY_KINDS
+
+
 def hpc_classes(ctx: dict) -> list:
     """The HPC compute classes the account can use, from the pipeline
     context (k8smlapp composition, gated on hpcReady). Each entry:
@@ -321,7 +269,6 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
         return
     provider = (ctx.get("hpc") or {}).get("provider", "meluxina")
     prefix = HPC_CLASS_PREFIX_FMT % provider
-    by_class = {c["name"]: c for c in classes}
 
     # The global `target` switch is gone: placement is per step.
     parameters = spec["arguments"]["parameters"]
@@ -338,24 +285,13 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
     def _routable(task):
         step = by_tpl.get(task.get("template"))
         annots = ((step or {}).get("metadata") or {}).get("annotations") or {}
-        # pinned to one in-cluster class: no HPC twin. The compose step never has one either.
-        return (step is not None and step.get("name") != COMPOSE_STEP
+        # pinned to one in-cluster class: no HPC twin. Nor a step whose kind never runs on HPC (the
+        # compose step is one: its kind is control).
+        return (step is not None and runs_on_hpc(step)
                 and "platform.kubecore.io/compute-class" not in annots)
 
     routable = {t["name"] for t in tasks if _routable(t)}
-    # The follower is told the run's dataset by the compose step, never by a raw run parameter: what the
-    # compose step pinned is what every step reads.
-    compose = by_tpl.get(COMPOSE_STEP) or {}
-    compose_outputs = {o.get("name") for o in ((compose.get("outputs") or {}).get("parameters") or [])}
-    has_compose_task = any(t.get("name") == COMPOSE_STEP for t in tasks)
-    dataset_pin = ("{{tasks.%s.outputs.parameters.%s}}" % (COMPOSE_STEP, DATASET_PIN_PARAM)
-                   if has_compose_task and DATASET_PIN_PARAM in compose_outputs else "{}")
-    # The compose step is placed on the cluster only: its class choice offers no HPC class.
-    for p in parameters:
-        if p.get("name") == COMPOSE_STEP + "-class" and p.get("enum"):
-            p["enum"] = [c for c in p["enum"] if c not in by_class]
     routed = []
-    outputs_union: set = set()
     for task in list(tasks):
         if task["name"] not in routable:
             continue
@@ -366,15 +302,13 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
         task["when"] = "{{=%s!%s}}" % ("(%s) && " % own if own else "", hpc_gate)
         twin_when = "{{=%s%s}}" % ("(%s) && " % own if own else "", hpc_gate)
         container = step.get("container") or {}
-        argmap = {p.get("name"): str(p.get("value", ""))
-                  for p in ((task.get("arguments") or {}).get("parameters")
-                            or [])}
-        cmd = [re.sub(r"\{\{\s*inputs\.parameters\.([A-Za-z0-9_.-]+)\s*\}\}",
-                      lambda m: argmap.get(m.group(1), ""), tok)
-               for tok in ((container.get("command") or [])
-                           + (container.get("args") or []))]
-        cmd = [t for t in cmd
-               if t and "{{inputs." not in t and "{{item" not in t]
+        # The step's command, the same on HPC as in its pod: `python -m app.entry`, no arguments.
+        cmd = list(container.get("command") or []) + list(container.get("args") or [])
+        context = next((p.get("value") for p in ((task.get("arguments") or {}).get("parameters") or [])
+                        if p.get("name") == CONTEXT_PARAM), None)
+        if context is None:
+            raise ValueError("meluxina: task %r passes no %s, so step %r cannot get its HPC variant"
+                             % (task["name"], CONTEXT_PARAM, step["name"]))
         minutes = step_time_limit(step)
         lead = step_resumable_lead(step)
         if lead >= minutes:
@@ -385,9 +319,6 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
         # again, so the waiter's Argo deadline must cover all of them or Argo would cut a continuing step.
         # Only an opted-out step runs one job and keeps a one-job deadline.
         jobs = 1 if step_resumable_opt_out(step) else 1 + HPC_MAX_CONTINUATIONS
-        step_outputs = [o["name"] for o in
-                        ((step.get("outputs") or {}).get("parameters") or [])]
-        outputs_union.update(step_outputs)
         if any(t["name"] == task["name"] + "-" + HPC_TWIN_SUFFIX for t in tasks):
             raise ValueError("meluxina: a task named %r already exists, so step %r cannot get its HPC variant"
                              % (task["name"] + "-" + HPC_TWIN_SUFFIX, task["name"]))
@@ -398,8 +329,8 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
             "arguments": {"parameters": [
                 {"name": "step-name", "value": task["name"]},
                 {"name": "image", "value": container.get("image", "")},
-                {"name": "step-command",
-                 "value": _cmd_json(cmd, routed=routable, provider=HPC_TWIN_SUFFIX)},
+                {"name": "step-command", "value": json.dumps(cmd, separators=(",", ":"))},
+                {"name": "step-kind", "value": ((step.get("metadata") or {}).get("labels") or {}).get(STEP_KIND_LABEL, "")},
                 {"name": "time-limit", "value": str(minutes)},
                 {"name": "deadline-seconds",
                  "value": str(jobs * (minutes + QUEUE_ALLOWANCE_MINUTES) * 60)},
@@ -407,9 +338,8 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
                 # "0" = resumable=False; "auto" lets the controller discover resumability (D-74)
                 {"name": "resumable", "value": "0" if step_resumable_opt_out(step) else "auto"},
                 {"name": "idle-timeout", "value": step_idle_timeout(step)},
-                {"name": "step-outputs", "value": ",".join(step_outputs)},
                 {"name": "hpc-class", "value": "{{workflow.parameters.%s-class}}" % step["name"]},
-                {"name": DATASET_PIN_PARAM, "value": dataset_pin},
+                {"name": CONTEXT_PARAM, "value": context},
             ]},
         }
         if task.get("depends"):
@@ -423,20 +353,14 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
     if not routed:
         return
 
-    # F-05: downstream steps consume {{tasks.<routed>.outputs.parameters.P}}.
-    # Exactly one twin ran; the other is Skipped and its outputs resolve to
-    # their declared defaults ("{}"). Pick the twin that actually ran.
-    def _pick(m):
-        return "{{=%s}}" % _pair_expr(m.group(1), m.group(2), HPC_TWIN_SUFFIX)
-    ref_re = re.compile(r"\{\{\s*tasks\.(%s)\.outputs\.parameters\.([A-Za-z0-9_.-]+)\s*\}\}"
-                        % "|".join(re.escape(r) for r in routed))
+    # A step that needs a routed step reads its result from the pair: exactly one of the two tasks ran,
+    # the other was skipped and has no result. Twins included: a twin whose upstream also ran on HPC
+    # must read the upstream twin, not the skipped in-cluster task.
     for task in tasks:
-        if task.get("template") == HPC_TWIN_TEMPLATE:
-            continue
         for p in ((task.get("arguments") or {}).get("parameters") or []):
-            v = p.get("value")
-            if isinstance(v, str) and ref_re.fullmatch(v.strip()):
-                p["value"] = ref_re.sub(_pick, v.strip())
+            if p.get("name") == CONTEXT_PARAM and isinstance(p.get("value"), str):
+                for r in routed:
+                    p["value"] = pair_results(p["value"], r, r + "-" + HPC_TWIN_SUFFIX)
 
     # A bare task token in Argo depends grammar means Succeeded; a routed dep
     # is now a twin pair where exactly one twin runs and the other is Skipped.
@@ -473,12 +397,12 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
     tpl = {
         "name": HPC_TWIN_TEMPLATE,
         "inputs": {"parameters": [
-            {"name": "step-name"}, {"name": "image"}, {"name": "step-command"},
+            {"name": "step-name"}, {"name": "image"}, {"name": "step-command"}, {"name": "step-kind"},
             {"name": "time-limit"}, {"name": "deadline-seconds"},
-            {"name": "step-outputs", "value": ""}, {"name": "hpc-class"},
+            {"name": "hpc-class"},
             {"name": "resumable-lead", "value": "0"}, {"name": "resumable", "value": "auto"},
             {"name": "idle-timeout", "value": ""},
-            {"name": DATASET_PIN_PARAM, "value": "{}"}]},
+            {"name": CONTEXT_PARAM}]},
         # Per-step: Slurm time limit + queue/prep allowance (see
         # QUEUE_ALLOWANCE_MINUTES). Argo resolves the parameter here.
         "activeDeadlineSeconds": "{{inputs.parameters.deadline-seconds}}",
@@ -490,14 +414,12 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
         "retryStrategy": {"limit": "2", "retryPolicy": "Always",
                           "expression": POD_LOSS_RETRY},
         "metadata": {"labels": {"platform.kubecore.io/compute-type": "hpc",
-                                "platform.kubecore.io/hpc-class": "{{inputs.parameters.hpc-class}}"}},
-        # slurm-job-id plus the union of every routed step's declared outputs
-        # (one shared template; each twin fills its own, the rest default).
+                                "platform.kubecore.io/hpc-class": "{{inputs.parameters.hpc-class}}",
+                                STEP_KIND_LABEL: "{{inputs.parameters.step-kind}}"}},
+        # slurm-job-id, and the step's one result (the same output its pod would have).
         "outputs": {"parameters": [{"name": "slurm-job-id",
-                                    "valueFrom": {"path": "/tmp/slurm-job-id"}}]
-                    + [{"name": n, "valueFrom": {"path": "/tmp/outputs/%s.json" % n,
-                                                 "default": "{}"}}
-                       for n in sorted(outputs_union)]},
+                                    "valueFrom": {"path": "/tmp/slurm-job-id"}},
+                                   {"name": RESULT_PARAM, "valueFrom": {"path": FOLLOWER_RESULT_PATH}}]},
     }
     # F-35: the controller's follower, or a refusal; never an in-pod submitter.
     tpl = follower_template(ctx, tpl) if controller_serves(ctx) else refusal_template(tpl)

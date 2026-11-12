@@ -26,9 +26,9 @@ PRELUDE_HEAD = ["sh", "-c", enhance.GPU_PRELUDE_SCRIPT, enhance.GPU_PRELUDE_NAME
 
 def _render(ctx):
     with authoring.pipeline("t") as p:
-        authoring.step("prep")
-        authoring.step("train", gpu=True)
-        authoring.step("pinned", gpu=True, hpc_time_limit="30m")
+        authoring.step("prep", kind="train")
+        authoring.step("train", kind="train", gpu=True)
+        authoring.step("pinned", kind="train", gpu=True, walltime="30m")
     wf = enhance.enhance(yaml.safe_load(p.wt.to_yaml()), ctx)
     return {t["name"]: t for t in wf["spec"]["templates"]}
 
@@ -44,7 +44,7 @@ def test_should_wrap_the_gpu_step_command_and_keep_the_original_after_it(tpls):
     c = tpls["train"]["container"]
     assert c["command"][:4] == PRELUDE_HEAD
     assert c["command"][5:] == ORIGINAL_COMMAND
-    assert c["args"][:2] == ["--params", "{{inputs.parameters.params}}"]
+    assert "args" not in c, "a step runs python -m app.entry with no arguments"
 
 
 def test_should_pass_the_runtime_gpu_count_so_a_cpu_class_skips_the_check(tpls):

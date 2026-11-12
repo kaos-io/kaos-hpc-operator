@@ -47,10 +47,16 @@ the job's class. Every `Reason` the operator writes, what it means and what the 
 | `Refused` / `BudgetBlocked` | It can never fit this period within the project's own share (policy `block`; `warn` admits it and raises `OverShare`) |
 | `Refused` / `SiteLimit` | It can never fit this period because the site's own monthly limit on the account is what runs out (same policy rule). A submitted job queued behind that limit (Slurm `AssocGrp...Minutes`) shows `SiteLimit` as well |
 | `Failed` / `InsufficientQuota` | Staging the dataset or image would exceed the project's scratch quota (space or files) even after evicting everything unused: the runner stops before any copy and submits nothing |
+| `Failed` / `StagingMismatch` | The runner and the site's staging tool speak different staging contracts (the two ship separately; one was updated first). The runner stops before it stages or submits anything, so no partial copy of a dataset is ever built or served; the job ends in seconds and costs no node time. It ends when the other side is updated. Also when the staging tool is not installed for the project after 20 minutes of asking; the message says which |
+| `Failed` / `ReservedName` | The dataset version holds an object whose name is reserved for the platform on the site: a file name ending in `.kaos-part` (the staging tool's half-downloaded files). The same reason covers an object whose path could leave the dataset's folder (a `..`, `.` or empty part, a leading `/`, a NUL byte), a name too long for the site, and a file that is also a folder. The runner stops before it stages or submits anything; its message names the object and which of the two it is. Rename or remove it and commit a new version |
+| `Refused` / `NoContext` | The job carries no step context (`spec.context`): it was created by a follower from before the step contract, or stored before the job definition changed (the definition requires the field, so only a stored job can lack it). Nothing is booked. A job that was already booked ends `Failed` / `NoContext` instead of starting an attempt, or reporting success, without its context and data |
+| `Refused` / `SharedInput` | An entry of `spec.inputs` names an `owner`: a dataset another project shares cannot be staged on an HPC site yet. The follower refuses it first, with the same sentence |
+| `Failed` / `ResultNotHandedBack` | The step ended well, but its result could not be brought from the site to `status.result`: the job could not read or upload the result file (job exit 243), the runner could not fetch it, or the run has no way to hand a result back (no data-plane token, lakeFS endpoint or app), in which case nothing is submitted. Never a success with an empty result |
+| `Failed` / `InvalidResult` | The result file reached the runner but is not a result of the step contract (not a JSON object, not version 1 with status `ok` and `values`, `reads`, `writes`, or over 8 KiB by cost). Runner exit 244 |
 | `Refused` / `TooLongNotResumable` | The declared limit is above the longest run the class or site allows (2 days on MeluXina `default`) and the step is not resumable (declared or verified, D-74), so it would be cut. The message gives the declared limit, the maximum and the two fixes: make it resumable or shorten it. Never cut silently |
 | `Refused` / `TooLongBeyondContinuations` | The step is resumable, but its declared limit needs more runs than the continuation cap allows (cap 5: 6 runs, 12 days on MeluXina `default`) |
 | `Refused` / `InvalidImage` | The step's image is not `<registry-host>/<repository>:<tag>` (or `@sha256:` digest), so it can never be pulled (a half-rendered `:app-latest`). Nothing is booked, no runner starts, no site job is submitted. The runner checks the same before it stages or submits and reports exit 239 (`Failed` / `InvalidImage`); a bad reference never triggers the fresh-credentials resubmit |
-| `Refused` / `MultiNodeUnsupported`, `WallTimeOverLimit` (the class's limit is unknown), `ClassNotAllowed`, `NoProject`, `NoSite`, `InvalidSpec` (an `env` name outside the allowlist) | It can never run as asked |
+| `Refused` / `MultiNodeUnsupported`, `WallTimeOverLimit` (the class's limit is unknown), `ClassNotAllowed`, `NoProject`, `NoSite`, `InvalidSpec` (an `env` name other than `KAOS_LIB_SUPPORT`) | It can never run as asked |
 
 The ledger is derived from the jobs themselves every time, never kept as a counter, and admission
 runs one job at a time, so concurrent jobs never overbook. A job running as a guest on a node
@@ -161,17 +167,58 @@ One image holds everything; the entrypoint is chosen by `command`:
 | Entrypoint | Who runs it |
 |---|---|
 | `/manager` | the controller (chart Deployment) |
-| `/follower` | the credential-free pipeline step: creates the job (`hpc-<20 hex of sha256(WF_UID/NODE_KEY)>`, owned by the Workflow), prints changes (the lane and time limit while it waits, and one `HPC: dataset <repo>@<commit> staged (first copy | delta | already cached), <size>, <seconds>s` line from `status.run.staging`; see `docs/reasons.md`), writes `/tmp/outputs/<n>.json` and `/tmp/slurm-job-id`, exits 0 only on `Succeeded` |
+| `/follower` | the credential-free pipeline step: reads the step context from `KAOS_STEP_CONTEXT`, creates the job (`hpc-<20 hex of sha256(WF_UID/NODE_KEY)>`, owned by the Workflow, labelled `platform.kubecore.io/step-kind`) with the context unchanged in `spec.context`, prints changes (the lane and time limit while it waits, and one `HPC: dataset <repo>@<commit> staged (first copy | delta | already cached), <size>, <seconds>s` line per record of `status.run.staged`; see `docs/reasons.md`), and exits 0 only on `Succeeded`, after writing `/tmp/outputs/kaos-result.json` (the job's `status.result`) and `/tmp/slurm-job-id`. A job that ended any other way, or that succeeded without a result, writes no result file and the step fails |
 | `python3 -u /runner/main.py` | the runner Job (source in `runner/`) |
 
 The runner's environment is built **only by the controller**: from the spec (`IMAGE_REF`,
-`STEP_COMMAND`, `SLURM_TIME_LIMIT`, `STEP_OUTPUTS`, `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `DATASET_REPO`/`DATASET_VERSION`/`DATASET_COMMIT`/`DATASET_OWNER` (the dataset as the pipeline pinned it, from `spec.dataset`),
-`HPC_SCOPE`, resume info `KAOS_RESUME_REF`, and the allowlisted `spec.env`: `OUTPUTS_REPO`,
-`OUTPUTS_REF`, `CHECKPOINT_BUCKET`, `CHECKPOINT_PREFIX`, `KAOS_LIB_SUPPORT`), from the HPCSite
+`STEP_COMMAND`, `SLURM_TIME_LIMIT`, `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `WF_NAME`, `KAOS_APP` (`spec.app`),
+`KAOS_STEP_CONTEXT` (`spec.context`, unchanged), `HPC_INPUTS` (`spec.inputs` as JSON: name, repository, commit, ref),
+`HPC_SCOPE`, resume info `KAOS_RESUME_REF`, and the allowlisted `spec.env`: `KAOS_LIB_SUPPORT`), from the HPCSite
 (`HPC_ACCOUNT`, `HPC_USER`, `HPC_SCRATCH`, `HPC_HOME`, `HPC_CLASSES_JSON`, `HPC_ENDPOINT`), and
 from the operator-rendered ConfigMap `hpc-runner-config` (`envFrom`). The CRD (CEL) and the
 controller both refuse any other `spec.env` name. Secrets `meluxina-jwt`, `meluxina-staging` and
 `mlflow-svc` are mounted from the HPC namespace.
+
+### The step contract on HPC (PRD kaos#1911)
+
+An HPC step runs on the same contract as a cluster step ([docs/step-contract.md](docs/step-contract.md), section 8):
+`python -m app.entry`, one value in (`KAOS_STEP_CONTEXT`), one file out (`/work/output/kaos-result.json`).
+
+| Part | What it does with the contract |
+|---|---|
+| Job definition | `spec.app` and `spec.context` (required, at most 98304 characters), `spec.inputs[]` (at most 16: `name`, `repo`, `commit`, optional `ref`, `owner`, `line`), `status.result` (at most 8192). `spec.dataset`, `spec.datasetRef`, `spec.outputs` and `status.outputs` are gone, with no alias |
+| Follower | Refuses a context that costs over 96 KiB (its length as a JSON string). Reads from it only `app`, `kind`, `ledger.reads` and the `dataset` entries of `upstream.*.writes`, which become `spec.inputs`; a read with an `owner` is refused. Never rewrites the context |
+| Controller | Refuses a job without `spec.context` (`NoContext`) or with a shared input (`SharedInput`); passes the context and the inputs to the runner; keeps `status.result` only on a job that `Succeeded` |
+| Runner | Hands the context to the step unchanged: in the Slurm environment for a job alone on its node, as an export line of the job script on a shared node. Stages every input whole and presents each as `$KAOS_STAGED_ROOT/<input>/`, holding the dataset's files and nothing else (on the site both caches keep them under `<copy>/data/`, beside the files of the platform), with the record `<input>.kaos-ready` beside it. Brings the step's result back, checks it and writes it in wire form into `status.result`, in the same report as the end of the step |
+
+**The result's way back.** When the step exits 0 the job script uploads the result file, unread, to
+`hpc-outputs/<workflow uid>/<step>/<site job id>/kaos-result.json` on the hand-off branch `hpc-<workflow uid>-<step>` of
+the app's outputs repository (`outputs-<app>`), or the object `kaos-result.absent` when the step wrote no file (so
+that "the step wrote none" is told apart from "nothing arrived"). The runner fetches it, checks it (`version` 1, `status` `ok`, `values`, `reads`, `writes`, at most 8 KiB by cost), writes it
+again in wire form and deletes the branch. Every way this can go wrong fails the job with a sentence naming the cause:
+`ResultNotHandedBack` (the file cannot be read or uploaded, job exit 243; nothing arrived; lakeFS cannot be asked) or
+`InvalidResult` (exit 244). A step that did not exit 0 hands nothing back and publishes nothing. A step that exits 0
+without a result file fails the job too (`ResultNotHandedBack`: "the step ended well but wrote no result"), as a
+cluster step does; nothing stands in for a missing result, and the follower writes a result file only for a job
+that `Succeeded` with one. The site job id is in the object's path and the job removes a result file left in its
+work folder before the step starts, so a result of an earlier attempt, or of a requeued run, is never taken for this
+one's.
+
+**Rolling the step contract out.** The job definition is a chart template, rewritten in place by every chart upgrade,
+and there is one version: a stored job reads back without the fields that were removed. The order is:
+
+1. Publish the engine and the operator chart at one version (they are built together), with no effect yet.
+2. Freeze pipeline runs that use HPC classes and **drain HPC jobs**: wait until no `HPCArgoWorkflowJob` is in a
+   non-terminal phase. A job still running when the definition changes loses `spec.dataset`; the new controller ends
+   it `NoContext` (before it books it, before it starts a runner for a booked one, and when one that ran under the
+   old runner reports success), so nothing runs or succeeds without its data, but its run fails.
+3. Upgrade the pool's operator chart: definition, controller, runner and follower image move together. From here a
+   follower of before is refused (`unknown field "spec.dataset"`, or `spec.context: Required value`).
+4. Move the engine pin (the pipelines are rendered with the template that passes `kaos-context` and reads
+   `/tmp/outputs/kaos-result.json`). A pipeline rendered before this cannot start an HPC step; one rendered after it
+   cannot run against a controller of before (the create is refused: unknown field `spec.context`).
+5. The site staging tool that stages whole datasets must already be on the site (staging contract 2), or the first
+   step with an input ends `StagingMismatch`.
 
 Cancel (D-04): the finalizer `hpc.kaos.io/cancel` holds the job until its runner Job is deleted
 (Foreground, so the runner's SIGTERM handler cancels the Slurm job). It fires when the job is
@@ -309,7 +356,6 @@ inside KAOS:
 make test       # unit tests and envtest (a real API server)
 make lint       # golangci-lint
 make test-engine lint-engine  # the pipeline engine's Python tests and ruff (also run by building engine/Dockerfile.engine)
-make engine-corpus  # render every historical template state and the lab apps with the engine (needs network)
 make manifests  # CRDs and RBAC from the Go types
 make build      # the manager binary
 make scale-test # load test of the real controller against fake Slurm sites (about 10 minutes, test/scale/README.md)

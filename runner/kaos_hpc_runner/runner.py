@@ -8,7 +8,6 @@ exits. A continuation is the controller's decision (D-44): a new attempt gets a 
 
 import calendar
 import json
-import os
 import signal
 import sys
 import time
@@ -17,14 +16,15 @@ import urllib.parse
 import urllib.request
 
 from . import image as imagemod
-from . import jobscript, payloads, settings, staging, wallet
+from . import jobscript, payloads, result, settings, staging, wallet
 from .logs import LogStreamer
-from .reporter import OutputsTooLarge, Reporter, checkpoint_uri
+from .reporter import Reporter, checkpoint_uri
 from .sharing import inputs_in_script
 from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_site_down, lane_refusal,
                     share_state, site_time, submit_limit_refusal)
-from .settings import (CHECKPOINT_EXIT, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT, INVALID_IMAGE_EXIT, OFFER_S, ROLE_POLL_S,
-                       SUBMIT_LIMIT_EXIT, Settings, image_problem)
+from .settings import (CHECKPOINT_EXIT, CONTEXT_ENV, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT,
+                       INVALID_IMAGE_EXIT, INVALID_RESULT_EXIT, OFFER_S, ROLE_POLL_S, RESERVED_NAME_EXIT,
+                       RESULT_NOT_HANDED_BACK_EXIT, STAGING_MISMATCH_EXIT, SUBMIT_LIMIT_EXIT, Settings, image_problem)
 
 POLL_S = 30
 # --cancel-only (the controller's orphan sweep, PRD AC-08): how long one such runner works before it gives up
@@ -58,6 +58,10 @@ LOST_HOST_RESUBMITS = 3
 SITE_RETRY_FIRST_S = 5
 SITE_RETRY_MAX_S = 60
 SITE_UNAVAILABLE = 'SiteUnavailable'   # the pending reason the controller shows, and the prefix of the failure message
+# The step's result on its way back (payload/handback.py): fetched this often before the runner gives up.
+RESULT_FETCH_TRIES = 4
+RESULT_FETCH_WAIT_S = 15
+HANDBACK_PREFIX = 'result hand-back: '   # what the job's hand-back program says in the job log before it fails
 
 
 def parse_time(text):
@@ -121,7 +125,7 @@ class Runner:
         self.submitted_at = 0.0      # when the current site job was submitted (its queue time starts here)
         self.replacing = None        # the queued job being replaced, noted into the next report
         self.wallet, self.wallet_exp = '', 0.0
-        self.staged, self.stage_tried = '', False
+        self.staged, self.stage_tried = {}, False   # input name -> its resident path on the site ('' = the job stages it)
         self.resubmits = 0
         self.lost_hosts = 0
         self.reported = None
@@ -144,10 +148,12 @@ class Runner:
             # Once per runner: a resubmit reuses the staged copy (or the in-job fallback) instead of
             # spending the staging budget again.
             self.stage_tried = True
-            cfg.check_dataset()
-            info = {}
-            self.staged = staging.stage_dataset(cfg, self.stager, self._mint, info=info)
-            self.reporter.note_staging(info)    # carried by every later report; the follower prints it
+            cfg.check_job()
+            self.prepare_handback()
+            for inp in cfg.inputs:
+                info = {}
+                self.staged[inp['name']] = staging.stage_dataset(cfg, inp, self.stager, self._mint, info=info)
+                self.reporter.note_staging(info)    # carried by every later report; the follower prints it
         reg = ''
         try:
             r = urllib.request.Request(
@@ -158,81 +164,10 @@ class Runner:
             print('no registry token from metadata server (anonymous pull):', e, flush=True)
         # After the token is minted, as late as possible: the layers move now, the job pulls nothing.
         image_staged = imagemod.stage_image(cfg.image, reg, self.stager, strict=first)
+        batch, env, commits, job_limit = self.site_job(reg, image_staged)
         ident = cfg.identity()
-        batch = '\n'.join(jobscript.batch_lines(cfg.scope if cfg.sharing else '-', ident['scratch']))
-        env = ['PATH=/usr/bin:/bin:/usr/local/bin', 'HOME=' + ident['home'],
-               'USER=' + ident['user'], 'IMAGE_REF=' + cfg.image, 'REG_TOKEN=' + reg,
-               'HPC_GPUS=' + str(hpc.get('gpus') or 0),
-               'STEP_CMD=' + cfg.command, 'STEP_WORKDIR=' + wallet.fetch_workdir(cfg.image, reg),
-               'WF_UID=' + cfg.wf_uid, 'STEP_NAME=' + cfg.step,
-               'STEP_OUTPUTS=' + ','.join(cfg.output_names),
-               'DATASET_STAGED=' + self.staged, 'IMAGE_STAGED=' + image_staged,
-               'KAOS_ATTEMPT=%d' % cfg.attempt]
-        if cfg.resumable_lead:
-            env.append('KAOS_RESUMABLE=1')
-            # AC-73: a host reads a waiting guest's lead from its script (a step on a shared node is signalled
-            # by the slot manager, not by Slurm).
-            env.append('KAOS_RESUMABLE_LEAD_MIN=%d' % cfg.resumable_lead)
-        # D-72: the idle watchdog the job script starts beside the step (its window; 0 = none).
-        env.append('KAOS_IDLE_TIMEOUT_MIN=%d' % cfg.idle_timeout)
-        if cfg.idle_timeout > 0:
-            env.append('IDLEWATCH_B64=' + payloads.b64(payloads.IDLEWATCH))
-        if cfg.resume:
-            env += ['KAOS_RESUME_REF=' + cfg.resume[0], 'KAOS_RESUME_PREFIX=' + cfg.resume[1]]
-        # D-74, D-75: the checkpoint copier every job carries (the step's KAOS_CHECKPOINT_DIR). Quota ids: the
-        # project's Lustre project id is the digits of its account.
-        env += ['CKPT_B64=' + payloads.b64(payloads.CKPT), 'KAOS_CKPT_BUDGET_PCT=%d' % cfg.ckpt_budget_pct,
-                'KAOS_PROJID=' + ''.join(c for c in ident['account'] if c.isdigit())]
-        # Same outputs location + run id as the in-cluster copy (outputs-<app>). Only when set: step
-        # code reads os.environ.get(..., default), so an empty value would override its own default.
-        env += [k + '=' + cfg.env[k] for k in
-                ('CHECKPOINT_BUCKET', 'CHECKPOINT_PREFIX', 'KUBECORE_RUN_ID', 'KUBECORE_WORKFLOW_NAME',
-                 'KAOS_LIB_SUPPORT')
-                if cfg.env.get(k)]
-        w = self.wallet = self._mint()
-        self.wallet_exp = wallet.wallet_exp(w)
-        if w:
-            # Public endpoints only, short-lived bearer only (T-03). MLflow's client honors
-            # MLFLOW_TRACKING_TOKEN natively; the stage-in and any in-step lakeFS API calls ride the
-            # same bearer through oauth2-proxy.
-            if cfg.mlflow_url:
-                env += ['MLFLOW_TRACKING_URI=' + cfg.mlflow_url, 'MLFLOW_TRACKING_TOKEN=' + w]
-            if cfg.lakefs_url:
-                env += ['LAKEFS_ENDPOINT=' + cfg.lakefs_url,
-                        'LAKEFS_BEARER_TOKEN=' + w,
-                        'DATASET_REPO=' + cfg.dataset_repo, 'DATASET_COMMIT=' + cfg.dataset_commit,
-                        'OUTPUTS_REPO=' + cfg.outputs_repo, 'OUTPUTS_REF=' + cfg.outputs_ref,
-                        'STAGEIN_B64=' + payloads.b64(payloads.STAGEIN),
-                        'STAGEOUT_B64=' + payloads.b64(payloads.STAGEOUT)]
-        if cfg.dataset_commit:
-            env.append('KAOS_COMMIT=' + cfg.dataset_commit)   # fail() keeps the dataset lease
-            # The step's kaos-lib reads the pinned commit (Apptainer passes the job's environment on).
-            env.append('KAOS_LIB_LOCK=' + cfg.data_lock())
-        step_limit = cfg.time_limit
-        job_limit = step_limit
         class_qos = hpc.get('qos') or 'default'
         hosting = cfg.sharing and int(hpc.get('gpus') or 0) > 0
-        if hosting:
-            # F-03: the batch step becomes the host (slot manager); one slot per GPU.
-            env += ['KAOS_SLOTS_B64=' + payloads.b64(payloads.SLOTS),
-                    'KAOS_SCOPE=' + cfg.scope, 'KAOS_SCR=' + ident['scratch'],
-                    'KAOS_STEP_LIMIT_MIN=%d' % step_limit]
-            # A host can only take steps that end before its own time limit, so with equal limits
-            # nothing would ever fit: the job asks Slurm for twice its step's time, capped by the
-            # class's maximum (partition/QOS). Every step still runs with its own limit, and the
-            # host releases the node 2 minutes after its last step. No known maximum: no padding (a
-            # request above the QOS cap would pend forever).
-            cap = cfg.lane_cap(hpc)
-            # AC-73: a resumable host's job is not padded: its guests are resumable steps that fit by their lead,
-            # and the job must end soon after its own step (it is reported when its job ends).
-            if cap and not cfg.resumable_lead:
-                job_limit = max(step_limit, min(2 * step_limit, cap))
-            if cfg.share_job_limit:
-                job_limit = cfg.share_job_limit      # a guest planned again as a host: the controller's figure
-            if self.wallet_exp:
-                env.append('KAOS_TOKEN_EXP=%d' % self.wallet_exp)   # the host's fit rule (D-07)
-        if cfg.sharing:
-            batch, env = inputs_in_script(batch, env)
         self.job_limit_min = job_limit
         body = {'job': {'name': cfg.job_site_name, 'partition': hpc['partition'],
                         'account': ident['account'],
@@ -241,11 +176,8 @@ class Runner:
                         'current_working_directory': ident['home'],
                         'environment': env, 'tasks': 1, 'nodes': '1'},
                 'script': batch}
-        # Leases (the stager never evicts what a queued or running job names here, squeue %k):
-        # kaos-commit= for the dataset commit (PRD-1541 D-06), kaos-image= for the staged image tar (D-62).
-        lease = []
-        if cfg.dataset_commit:
-            lease.append('kaos-commit=' + cfg.dataset_commit)
+        # The leases: every input's commit (above), and kaos-image= for the staged image tar (D-62).
+        lease = list(commits)
         # AC-65: always. The SIF has the tar's key, so the lease also keeps the SIF (staged or not) from the
         # stager's cleanup while this job queues or runs.
         lease.append('kaos-image=' + imagemod.image_key(cfg.image))
@@ -291,6 +223,84 @@ class Runner:
         self.reporter.report(siteJobID=str(j), state='PENDING')
         return j
 
+    def site_job(self, reg, image_staged):
+        """The site job of this attempt as it is submitted: (job script, Slurm environment, dataset leases, job
+        time limit in minutes). The step's inputs and its context are in the environment for a job alone on its
+        node, and in the script (export lines) for a shared node, where a host can read a waiting job's script
+        but never its environment. reg: the registry token; image_staged: the staged image tar ('' = none)."""
+        cfg = self.cfg
+        hpc = cfg.hpc_class()
+        ident = cfg.identity()
+        batch = '\n'.join(jobscript.batch_lines(cfg.scope if cfg.sharing else '-', ident['scratch']))
+        env = ['PATH=/usr/bin:/bin:/usr/local/bin', 'HOME=' + ident['home'],
+               'USER=' + ident['user'], 'IMAGE_REF=' + cfg.image, 'REG_TOKEN=' + reg,
+               'HPC_GPUS=' + str(hpc.get('gpus') or 0),
+               'STEP_CMD=' + cfg.command, 'STEP_WORKDIR=' + wallet.fetch_workdir(cfg.image, reg),
+               'WF_UID=' + cfg.wf_uid, 'STEP_NAME=' + cfg.step,
+               # The step's inputs, one word each: name|repository|commit|resident path ('' = stage in the job).
+               'KAOS_INPUTS=' + ' '.join('|'.join((i['name'], i['repo'], i['commit'], self.staged.get(i['name']) or ''))
+                                         for i in cfg.inputs),
+               'IMAGE_STAGED=' + image_staged,
+               'KAOS_ATTEMPT=%d' % cfg.attempt,
+               # The step context, exactly as the job carries it: the one value the step receives.
+               CONTEXT_ENV + '=' + cfg.context]
+        if cfg.resumable_lead:
+            env.append('KAOS_RESUMABLE=1')
+            # AC-73: a host reads a waiting guest's lead from its script (a step on a shared node is signalled
+            # by the slot manager, not by Slurm).
+            env.append('KAOS_RESUMABLE_LEAD_MIN=%d' % cfg.resumable_lead)
+        # D-72: the idle watchdog the job script starts beside the step (its window; 0 = none).
+        env.append('KAOS_IDLE_TIMEOUT_MIN=%d' % cfg.idle_timeout)
+        if cfg.idle_timeout > 0:
+            env.append('IDLEWATCH_B64=' + payloads.b64(payloads.IDLEWATCH))
+        if cfg.resume:
+            env += ['KAOS_RESUME_REF=' + cfg.resume[0], 'KAOS_RESUME_PREFIX=' + cfg.resume[1]]
+        # D-74, D-75: the checkpoint copier every job carries (the step's KAOS_CHECKPOINT_DIR). Quota ids: the
+        # project's Lustre project id is the digits of its account.
+        env += ['CKPT_B64=' + payloads.b64(payloads.CKPT), 'KAOS_CKPT_BUDGET_PCT=%d' % cfg.ckpt_budget_pct,
+                'KAOS_PROJID=' + ''.join(c for c in ident['account'] if c.isdigit())]
+        if cfg.env.get('KAOS_LIB_SUPPORT'):      # the one variable a job's spec.env may hand to the step
+            env.append('KAOS_LIB_SUPPORT=' + cfg.env['KAOS_LIB_SUPPORT'])
+        w = self.wallet      # minted by prepare_handback, before anything was staged or cancelled
+        # Public endpoints only, short-lived bearer only (T-03). MLflow's client honors MLFLOW_TRACKING_TOKEN
+        # natively; the stage-in, the result hand-back and any in-step lakeFS API calls ride the same bearer.
+        if cfg.mlflow_url:
+            env += ['MLFLOW_TRACKING_URI=' + cfg.mlflow_url, 'MLFLOW_TRACKING_TOKEN=' + w]
+        env += ['LAKEFS_ENDPOINT=' + cfg.lakefs_url, 'LAKEFS_BEARER_TOKEN=' + w,
+                'KAOS_OUTPUTS_REPO=' + cfg.outputs_repo,     # for the result hand-back only
+                'STAGEIN_B64=' + payloads.b64(payloads.STAGEIN),
+                'HANDBACK_B64=' + payloads.b64(payloads.HANDBACK)]
+        # Leases (the stager never evicts what a queued or running job names in its comment, squeue %k):
+        # kaos-commit= for every input's commit (PRD-1541 D-06). fail() keeps them when the comment is unreadable.
+        commits = ['kaos-commit=' + i['commit'] for i in cfg.inputs]
+        if commits:
+            env.append('KAOS_LEASES=' + ' '.join(commits))
+        step_limit = cfg.time_limit
+        job_limit = step_limit
+        hosting = cfg.sharing and int(hpc.get('gpus') or 0) > 0
+        if hosting:
+            # F-03: the batch step becomes the host (slot manager); one slot per GPU.
+            env += ['KAOS_SLOTS_B64=' + payloads.b64(payloads.SLOTS),
+                    'KAOS_SCOPE=' + cfg.scope, 'KAOS_SCR=' + ident['scratch'],
+                    'KAOS_STEP_LIMIT_MIN=%d' % step_limit]
+            # A host can only take steps that end before its own time limit, so with equal limits
+            # nothing would ever fit: the job asks Slurm for twice its step's time, capped by the
+            # class's maximum (partition/QOS). Every step still runs with its own limit, and the
+            # host releases the node 2 minutes after its last step. No known maximum: no padding (a
+            # request above the QOS cap would pend forever).
+            cap = cfg.lane_cap(hpc)
+            # AC-73: a resumable host's job is not padded: its guests are resumable steps that fit by their lead,
+            # and the job must end soon after its own step (it is reported when its job ends).
+            if cap and not cfg.resumable_lead:
+                job_limit = max(step_limit, min(2 * step_limit, cap))
+            if cfg.share_job_limit:
+                job_limit = cfg.share_job_limit      # a guest planned again as a host: the controller's figure
+            if self.wallet_exp:
+                env.append('KAOS_TOKEN_EXP=%d' % self.wallet_exp)   # the host's fit rule (D-07)
+        if cfg.sharing:
+            batch, env = inputs_in_script(batch, env)
+        return batch, env, commits, job_limit
+
     def submit_in_lane(self, body, class_qos):
         """POST the job in its lane. A site that refuses the lane (QoS limit, reservation, a limit above
         the lane's maximum) gets the same job once more on the class's own QoS with no reservation: a
@@ -331,6 +341,35 @@ class Runner:
                              endTime=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), message=msg[:500])
         sys.exit(0)   # reported: the pod ends cleanly, the controller ends the job SubmitLimit
 
+    def prepare_handback(self):
+        """Everything the way back needs, found first: the lakeFS endpoint, the app, and the data-plane token (minted
+        here, used by the site job). Before any staging, and before a resubmit cancels the queued job: a run that
+        cannot hand its result back ends the attempt with nothing staged, submitted or cancelled."""
+        self.check_handback()
+        w = self.wallet = self._mint()
+        self.wallet_exp = wallet.wallet_exp(w)
+        if not w:
+            self.fail_handback('no data-plane token could be minted for this job')
+
+    def check_handback(self):
+        """A step must be able to hand its result back, or it can never end well (PRD kaos#1911 CON-04: fail
+        closed, before GPU). The way back is the hand-off branch of the app's outputs repository in lakeFS."""
+        missing = [what for what, have in (('the project\'s lakeFS endpoint', self.cfg.lakefs_url),
+                                           ('the app\'s outputs repository (the job names no app)', self.cfg.outputs_repo)) if not have]
+        if missing:
+            self.fail_handback('the job has no ' + ' and no '.join(missing))
+
+    def fail_handback(self, why):
+        """The run has no way to hand a result back: one terminal report (FAILED, exit 243, reason
+        ResultNotHandedBack) and nothing is submitted to the site."""
+        msg = ('the step\'s result could not be handed back from the site: %s. Nothing was submitted to the site: a '
+               'step that cannot hand back its result cannot end well' % why)
+        print('ERROR: ResultNotHandedBack:', msg, flush=True)
+        self.write_termination('ResultNotHandedBack: ' + msg)
+        self.reporter.report(must=True, state='FAILED', exitCode=RESULT_NOT_HANDED_BACK_EXIT, terminal=True,
+                             endTime=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), message=msg[:500])
+        sys.exit(0)   # reported: the pod ends cleanly, the controller ends the job ResultNotHandedBack
+
     def submit_limit_message(self, err):
         """The sentence of a SubmitLimit failure: the site's cap (from the profile) and how many jobs it
         counts now (read from the site; left out when the site cannot be asked)."""
@@ -353,7 +392,8 @@ class Runner:
         if queue_lost and self.jid:
             self.replacing = {'old': str(self.jid), 'reason': queue_lost,
                               'queued': max(0, int(time.time() - self.submitted_at)) if self.submitted_at else 0}
-        self.cfg.check_dataset()         # before the cancel: a job that cannot be replaced is not cancelled for it
+        self.cfg.check_job()             # before the cancel: a job that cannot be replaced is not cancelled for it
+        self.prepare_handback()          # likewise: no token, no cancel
         self.logs.finish()               # what the old job wrote, before its offset is replaced
         self.slurm.cancel(self.jid)
         self.jid = self.submit()
@@ -372,33 +412,70 @@ class Runner:
 
     # ------------------------------------------------------------------ outputs and checkpoints
 
-    def fetch_outputs(self):
-        """F-05: the step's staged-out outputs, as {name: JSON text} for status.outputs."""
-        base = self.cfg.lakefs_url
-        repo = self.cfg.outputs_repo
-        names = self.cfg.output_names
-        got = {}
-        if not (names and base and repo and self.wallet):
-            return got
-        wf, step = self.cfg.wf_uid, self.cfg.step
-        branch = 'hpc-%s-%s' % (wf, step)
-        for n in names:
-            q = urllib.parse.urlencode({'path': 'hpc-outputs/%s/%s/%s.json' % (wf, step, n)})
+    def handoff(self, method, path):
+        """One call on the hand-off branch of the app's outputs repository (payload/handback.py writes there)."""
+        base = '%s/api/v1/repositories/%s/branches/hpc-%s-%s' % (
+            self.cfg.lakefs_url, urllib.parse.quote(self.cfg.outputs_repo, safe=''), self.cfg.wf_uid, self.cfg.step)
+        return urllib.request.urlopen(urllib.request.Request(
+            base + path, method=method, headers={'Authorization': 'Bearer ' + self.wallet}), timeout=60).read()
+
+    def handed_back(self, name):
+        """The bytes of one object the job handed back for THIS site job, or None when it is not there. Anything
+        but a clear "not there" is asked again, then it is ResultNotHandedBack: never "no result"."""
+        q = urllib.parse.urlencode({'path': 'hpc-outputs/%s/%s/%s/%s' % (self.cfg.wf_uid, self.cfg.step, self.jid, name)})
+        err = None
+        for n in range(RESULT_FETCH_TRIES):
             try:
-                data = urllib.request.urlopen(urllib.request.Request(
-                    base + '/api/v1/repositories/%s/refs/%s/objects?%s' % (repo, branch, q),
-                    headers={'Authorization': 'Bearer ' + self.wallet}), timeout=60).read()
-                got[n] = data.decode('utf-8')
-                print('output', n, ':', len(data), 'bytes', flush=True)
+                return self.handoff('GET', '/objects?' + q)
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return None
+                err = 'lakeFS answered HTTP %d' % e.code
             except Exception as e:
-                print('output', n, 'not staged out (default {}):', e, flush=True)
-        try:   # the hand-off branch has done its job
-            urllib.request.urlopen(urllib.request.Request(
-                base + '/api/v1/repositories/%s/branches/%s' % (repo, branch), method='DELETE',
-                headers={'Authorization': 'Bearer ' + self.wallet}), timeout=60).read()
+                err = str(e)
+            print('result: %s not read (%s)%s' % (name, err, ', asking again' if n < RESULT_FETCH_TRIES - 1 else ''), flush=True)
+            if n < RESULT_FETCH_TRIES - 1:
+                self.sleep(RESULT_FETCH_WAIT_S)
+        raise result.ResultNotHandedBack('the step ended well, but its result could not be fetched from lakeFS after %d '
+                                         'tries (%s). No result was published' % (RESULT_FETCH_TRIES, err))
+
+    def fetch_result(self):
+        """The result of a step that ended well, as the text for status.result (wire form). The job handed back
+        the result file's bytes, or the record that the step wrote none (payload/handback.py); the bytes are
+        checked and written again here. Raises ResultNotHandedBack when the step wrote no result or nothing
+        arrived, InvalidResult when the file is not a result: the job then fails. A step that ended well always
+        has a result; nothing stands in for a missing one (PRD kaos#1911 CON-04)."""
+        self.fresh_wallet()
+        if not self.wallet:
+            raise result.ResultNotHandedBack('the step ended well, but no data-plane token could be minted to fetch its '
+                                             'result. No result was published')
+        raw = self.handed_back('kaos-result.json')
+        if raw is not None:
+            return result.check(raw)
+        if self.handed_back('kaos-result.absent') is None:
+            raise result.ResultNotHandedBack(
+                'the step ended well, but the job handed back neither a result nor the record that the step wrote '
+                'none (site job %s). No result was published' % self.jid)
+        raise result.ResultNotHandedBack(
+            'the step ended well but wrote no result (%s): a step hands back its result before it ends '
+            '(kaos_lib.step.result()). No result was published' % result.RESULT_FILE)
+
+    def drop_handoff(self):
+        """Delete the hand-off branch, once the terminal report was accepted. Never before: a runner that dies
+        between the fetch and the report leaves the branch, and the next runner of the attempt reads the result
+        from it. A branch left behind is harmless (the result's path names the site job) and goes with the next
+        terminal report of the same step, which deletes the whole branch."""
+        try:
+            self.handoff('DELETE', '')
         except Exception as e:
-            print('hand-off branch', branch, 'not deleted:', e, flush=True)
-        return got
+            print('hand-off branch not deleted:', e, flush=True)
+
+    def handback_failure(self):
+        """What the job's hand-back program said in the job log before the job ended 243, as the sentence of the
+        report; a general one when the log does not show it."""
+        said = [line.split(HANDBACK_PREFIX, 1)[1] for line in self.logs.tail if HANDBACK_PREFIX in line]
+        return ('the step ended well, but the job on the site could not hand back its result: %s. No result was published'
+                % (said[-1].strip() if said else 'the job log says why'))
 
     def checkpoint_of(self, job, tries=4):
         """The newest checkpoint copy this job reported ({'sha', 'rel', 'info'}), or None. The copier writes
@@ -548,6 +625,10 @@ class Runner:
         except staging.InsufficientQuota as e:
             imagemod.cleanup_images(self.stager)   # AC-65: free what no job names before the next attempt
             return self.end_no_quota(e)
+        except staging.StagingMismatch as e:
+            return self.end_before_staging('StagingMismatch', STAGING_MISMATCH_EXIT, e)
+        except staging.ReservedName as e:
+            return self.end_before_staging('ReservedName', RESERVED_NAME_EXIT, e)
         if adopted:
             print('adopting existing job', jid, flush=True)
         self.jid = jid
@@ -581,6 +662,19 @@ class Runner:
         print('ERROR: InsufficientQuota:', msg, flush=True)
         self.write_termination('InsufficientQuota: ' + msg)
         self.reporter.report(must=True, state='FAILED', exitCode=INSUFFICIENT_QUOTA_EXIT, terminal=True,
+                             endTime=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), message=msg[:500])
+        return 0
+
+    def end_before_staging(self, reason, code, err):
+        """Staging was refused before it began (PRD kaos#1911 F-04): the site's staging tool speaks another staging
+        contract than this runner (StagingMismatch, exit code 241), or the dataset holds an object whose name is
+        reserved for the platform (ReservedName, exit code 242). Nothing was staged and no site job was submitted.
+        The one terminal report says so (FAILED, a plain message); the controller ends the job with the reason and
+        settles nothing."""
+        msg = str(err)
+        print('ERROR: %s:' % reason, msg, flush=True)
+        self.write_termination('%s: %s' % (reason, msg))
+        self.reporter.report(must=True, state='FAILED', exitCode=code, terminal=True,
                              endTime=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), message=msg[:500])
         return 0
 
@@ -954,16 +1048,28 @@ class Runner:
                       '"checkpoint: copy NNNNNN", the copy exists on scratch and only its entry in the job comment '
                       'is missing; if it does not, no copy was made in time (a longer resumable= lead leaves the '
                       'copy more time)', flush=True)
-        if 'COMPLETED' in st:
-            self.fresh_wallet()
-            outputs = self.fetch_outputs()
+        if rc == RESULT_NOT_HANDED_BACK_EXIT and 'COMPLETED' not in st:
+            fields['message'] = self.handback_failure()[:500]
+            print('ERROR: ResultNotHandedBack:', fields['message'], flush=True)
+        if 'COMPLETED' in st and not rc:
+            # The step ended well: its result goes into the same report, or the job fails saying why. A step
+            # that ended any other way publishes nothing, whatever it wrote.
             try:
-                self.reporter.report(must=True, outputs=outputs, **fields)
-            except OutputsTooLarge as e:
-                # An output the job cannot carry is a failed step, not a silently empty one.
-                print('ERROR:', e, flush=True)
-                self.write_termination('step outputs too large: %s' % e)
-                self.reporter.report(must=True, **dict(fields, state='FAILED', exitCode=1))
+                handed = self.fetch_result()
+            except (result.ResultNotHandedBack, result.InvalidResult) as e:
+                lost = isinstance(e, result.ResultNotHandedBack)
+                reason = 'ResultNotHandedBack' if lost else 'InvalidResult'
+                msg = str(e) if lost else '%s. No result was published' % e
+                print('ERROR: %s:' % reason, msg, flush=True)
+                self.write_termination('%s: %s' % (reason, msg))
+                self.reporter.report(must=True, **dict(
+                    fields, state='FAILED', message=msg[:500],
+                    exitCode=RESULT_NOT_HANDED_BACK_EXIT if lost else INVALID_RESULT_EXIT))
+                self.drop_handoff()
+                return 0
+            print('result: %d bytes' % len(handed), flush=True)
+            self.reporter.report(must=True, result=handed, **fields)
+            self.drop_handoff()
             return 0
         self.reporter.report(must=True, **fields)
         return 0

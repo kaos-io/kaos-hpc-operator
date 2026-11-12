@@ -20,8 +20,10 @@ import (
 )
 
 const (
-	outputsDir  = "/tmp/outputs"
+	resultPath  = "/tmp/outputs/kaos-result.json"
 	slurmIDPath = "/tmp/slurm-job-id"
+	// terminationLog is the pod's termination message: the workflow shows it as the step's message.
+	terminationLog = "/dev/termination-log"
 )
 
 func main() { os.Exit(run()) }
@@ -31,7 +33,7 @@ func run() int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "follower:", err)
 		// The step's message in the run is the pod's termination message: say why there, not only in the log.
-		_ = os.WriteFile("/dev/termination-log", []byte(err.Error()), 0o644)
+		_ = os.WriteFile(terminationLog, []byte(err.Error()), 0o644)
 		return follower.ExitFailed
 	}
 	scheme := runtime.NewScheme()
@@ -52,6 +54,6 @@ func run() int {
 	defer stop()
 	return follower.Run(ctx, c, cfg, follower.Options{
 		Poll: follower.DefaultPoll, Recheck: follower.DefaultRecheck,
-		OutputsDir: outputsDir, SlurmIDPath: slurmIDPath, Out: os.Stdout,
+		ResultPath: resultPath, SlurmIDPath: slurmIDPath, TerminationPath: terminationLog, Out: os.Stdout,
 	})
 }

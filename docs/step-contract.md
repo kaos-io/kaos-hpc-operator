@@ -40,7 +40,7 @@ runner's hand-back and its checks. Where a section says "the engine refuses" or 
 ## 1. Authoring keywords
 
 ```python
-step(name, *, kind, reads=, inputs=, needs=, produces=, gpu=, disk=, when=, walltime=,
+step(name, *, kind, reads=, inputs=, needs=, produces=, gpu=, when=, walltime=,
      resumable=, checkpoint_every=, idle_timeout=)
 ```
 
@@ -53,19 +53,40 @@ Everything after `name` is keyword-only.
 | `reads=` | The config sections the step reads. They are the step's `params`. |
 | `inputs=` | The names of the config values that hold a dataset reference. An input name is a top-level config key: no dotted paths. Compose pins each to one commit when the run starts. Step code names the input, never a version. |
 | `needs=` | The steps this step runs after, at most ten. Each one's result reaches this step in `upstream`. |
-| `produces=` | What the step writes: `model("name")`, `artifact("name")`, `dataset("name")`. `dataset("clean")` names the dataset whose repository is `dataset-clean`. |
-| `gpu=`, `disk=`, `when=` | Unchanged. |
+| `produces=` | What the step writes: `model("name")`, `artifact("name")`, `dataset("name")`. A dataset an app produces is the repository `dataset-<app>-<name>`: `dataset("clean")` in the app `hera1` is `dataset-hera1-clean`. The name is per app because every app made from a template declares the same names and a dataset has exactly one producer; two apps of a project never share one. |
+| `gpu=`, `when=` | Unchanged. |
 | `walltime=` | The run limit on an HPC class: `'90m'`, `'12h'` or `'720'` (minutes). |
 | `resumable=`, `checkpoint_every=`, `idle_timeout=` | Unchanged. |
 
-Removed, with no alias: `outputs=` (the result replaces it) and `hpc_time_limit=` (`walltime=` replaces it).
+Removed, with no alias: `outputs=` (the result replaces it), `hpc_time_limit=` (`walltime=` replaces it) and
+`disk=`: a step is not told its disk, it gets the disk of the machine its class runs on (the usable disk of that
+class, less a fixed reserve for the container images, or 10Gi where the platform does not say). A step that
+passes `disk=` is refused.
+
+**Placement of a step that produces a dataset.** A step whose `produces=` holds a `dataset(...)` is not
+offered an HPC class and has no HPC variant, the way `ingest`, `publish` and `control` steps are not: a job on
+HPC holds a token the lake treats as admin, which would bypass the rule that only the producing app writes a
+produced dataset. The step runs on the cluster until jobs there hold the app's own rights (PRD kaos#1911 F-40).
+A step that produces a dataset and is pinned to an HPC class is refused. A step that produces only a model or
+an artifact is not affected.
+
+**Apps made before the current pipelines.** An app that still uses a keyword the contract removed (a pipeline
+in which no step has a `kind=`, `outputs=`, `hpc_time_limit=`, `disk=`), lists the `platform` config group or defines a
+top-level `platform` section, or carries a `kubecore/` folder of its own, is not moved to this contract. The
+render refuses it with a message that ends: "This app was made before the current pipelines. Create it again
+from the template." A step without `kind=` in a pipeline where other steps have one forgot it: its message ends at
+the list of kinds, without that sentence.
 
 **Names.** A step name, an input name and a `produces` name match `[a-z0-9]([a-z0-9-]*[a-z0-9])?` and are at
-most 40 characters. A dataset name must also make `dataset-<name>` a valid repository id. Names that start
-with `kaos-` are the platform's (section 9).
+most 40 characters; a dataset name is also at least 3. The lake allows 3 to 48 characters after `dataset-`, so
+`<app>-<name>` of a produced dataset may not exceed 48: the engine refuses it when it renders the pipeline,
+naming the step, both names and the limit. Names that start with `kaos-` are the platform's (section 9).
 
 **Dataset references.** A reference names the repository, as the dataset picker and `kaosctl` write it:
 `dataset-<name>@<ref>`, for example `dataset-raw-images@latest`. The config value an input names holds one.
+A dataset another app produced is referenced by its repository, `dataset-<app>-<name>@<ref>`. Within the app that
+produces it the engineer writes the short name: `dataset("clean")`, `step.output("clean")`, `step.input("clean")`,
+`plan.promote.clean`.
 
 **What the engine refuses when it renders the pipeline**, each time naming the step and the rule:
 
@@ -130,7 +151,7 @@ under the run's work folder.
 | `step` | string | This step's name. |
 | `kind` | string | This step's kind (section 1). |
 | `experiment` | string | The experiment the run belongs to: the config value `experiment.name`, else the app's name. It is the `<experiment>` folder of the run's artifacts, `<name>/<experiment>/<run>/`. |
-| `params` | object | The config sections this step names in `reads=`, as compose resolved them, and nothing else. It never holds a `plan` section. It never holds a `platform` section either, because the wave removes the `platform` config group altogether: an app whose config still names it fails with the migration message. |
+| `params` | object | The config sections this step names in `reads=`, as compose resolved them, and nothing else. It never holds a `plan` section. It never holds a `platform` section either, because the wave removes the `platform` config group altogether: an app whose config still names it is refused as an app made before the current pipelines. |
 | `ledger` | object | A [ledger](#5-the-ledger) with one read for each input this step declares in `inputs=`, at the commit compose pinned. `writes` is empty. |
 | `produces` | array | What this step declares in `produces=`: `{"name", "type", "repo"}` each, in that order. `type` is `model`, `artifact` or `dataset`; `repo` is the repository it is written to. A `dataset` entry may carry `promote` (boolean; absent means `false`) after `repo`. |
 | `upstream` | object | One entry for each step in `needs=`, keyed by step name, in the order of `needs=`: that step's [result](#4-the-result), or the sentinel `{"version":1,"status":"absent"}` when it did not run. Empty when the step needs none. Always the last field. |
@@ -147,7 +168,8 @@ Rules:
 - `promote` says whether this run moves the dataset's `latest` (the head of its `main` branch) to the version
   the step seals. The run asks for it: compose sets `promote` from the reserved config key
   `plan.promote.<dataset>` of the run request, where `<dataset>` is the `produces` name and the value is
-  `true` or `false` in any letter case; compose refuses anything else. The step never decides and step code
+  a YAML boolean (`true`, `false`, and the forms YAML reads as booleans, such as `yes` and `no`); the text
+  `"true"` or `"false"` in any letter case is read the same way. Anything else is refused. The step never decides and step code
   cannot set it. With `promote` false or absent the step still seals its version; `latest` stays where it
   was (PRD D-06).
 
@@ -180,7 +202,10 @@ A step that fails hands back nothing: the steps that need it do not run.
 
 **Who checks a result.** In the cluster nothing between two steps does: kaos-lib writes it, and the `start()`
 of each step that needs it checks the shape of the entry and fails naming the upstream step. On HPC the
-runner checks it before it is handed back (section 8).
+runner checks it before it is handed back (section 8): the whole shape, not the top level. `version` is the
+integer 1, `values` is an object, every entry of `reads` and `writes` has the fields and types of section 5, every
+number is finite, no object holds a key twice, and a field the contract does not give is refused. A result that
+fails any of this fails the job and the message names what is wrong.
 
 Fixtures: `result-ok` (one read, one write), `result-model`, `result-absent`.
 
@@ -198,7 +223,7 @@ A read, with its fields in this order:
 | Field | Type | Content |
 |---|---|---|
 | `name` | string | The input's name: the name in `inputs=`, or the name of the dataset an upstream step wrote. |
-| `repo` | string | The repository that was read: `dataset-<name>`. |
+| `repo` | string | The repository that was read: `dataset-<name>` for a dataset people uploaded, `dataset-<app>-<name>` for one an app produced. |
 | `owner` | string or null | The project that shares the dataset; `null` for the run's own project. |
 | `ref` | string | The version that was asked for (`latest`, a name, a commit). For a dataset produced in this run it is the commit. |
 | `commit` | string | The commit that was read: 64 hex characters. |
@@ -210,7 +235,7 @@ A write, with its fields in this order:
 |---|---|---|
 | `name` | string | The name declared in `produces=`. |
 | `type` | string | `model`, `artifact` or `dataset`. |
-| `repo` | string | The repository written to: `dataset-<name>` for a dataset, `outputs-<app>` for a model or an artifact. |
+| `repo` | string | The repository written to: `dataset-<app>-<name>` for a dataset, `outputs-<app>` for a model or an artifact. |
 | `commit` | string | The commit that holds it: 64 hex characters. |
 | `line` | string, optional | Reserved, as above. |
 | `path` | string, optional | Reserved for Use (after the wave): where the model or artifact lives when it comes from an earlier run. Absent means `<name>/<experiment>/<run>/` of this run. |
@@ -242,6 +267,7 @@ that every hop carries them unchanged and counts them the same:
 5. Numbers are written as the reference writer writes them. NaN and Infinity are refused.
 6. Fields are written in the order the tables of sections 3, 4, 5 and 8 give, with `upstream` last in a
    context. A reader does not rely on the order.
+7. Inside strings, keys included, `$` is written `\u0024`. The wire form never holds a `$`.
 
 Rule 3 is not optional. The workflow engine evaluates `{{...}}` wherever it meets it, also inside a value
 that passes through: check 3(a) shows a string `{{=1+1}}` arriving as `2`. With rule 3 the text never
@@ -251,6 +277,12 @@ Rule 4 is not optional either. When the workflow engine puts a value into a step
 `&`, `<` and `>` as those six-byte escapes itself, so a value that held them raw would take more room there
 than its cost says (section 7). Check 3(c) shows a context that is within every cap by count and does not
 start because its base holds 2000 raw `&`.
+
+Rule 7 is not optional either. Kubernetes changes a container's environment value: `$(NAME)` becomes the
+value of the earlier variable `NAME` of that container, and `$$` becomes `$`. The context travels as an
+environment value (in a step's pod, and in the runner's job), so a run parameter holding `$$` or
+`$(HPC_JOB_NAME)` would arrive different, and nothing would notice. With rule 7 the text never holds a `$`,
+so nothing can expand. Check 3(d) shows both on a real cluster.
 
 Any JSON parser reads the wire form. Writers: compose (the context, `kaos-ledger`), kaos-lib (the result)
 and, on HPC, the runner (the result it hands back). The reference writer is
@@ -368,7 +400,9 @@ Anything else fails the job, naming the cause: a missing file, a file that canno
 is not such a result. The result is never replaced by the sentinel. A job that Failed never publishes a
 result, whatever the step wrote.
 
-The follower writes `status.result` of a Succeeded job as the step's `kaos-result` output.
+The follower writes `status.result` of a Succeeded job as the step's `kaos-result` output. The follower's template
+declares that output with no default either: it always writes the file, and a follower that ended without it fails
+the twin the same way a step does.
 
 Fixture: `hpc-job` (its `spec.context` is `context-one-upstream.wire`, its `status.result` is
 `result-model.wire`).
@@ -406,8 +440,21 @@ The checks ran on v4.0.6. An earlier version of checks 3(a), 3(b) and 3(c) was a
    wire form, as one output: `kaos-context-<step>`. Compose is the only writer of these fields, so every
    string is escaped in one place and the cap is checked on the real text. It also writes `kaos-ledger`
    (section 5).
-2. **Each step's result is one output**, `kaos-result`, read from `/work/output/kaos-result.json` with the
-   sentinel as the default when the file is missing.
+2. **Each step's result is one output**, `kaos-result`, read from `/work/output/kaos-result.json`, **with no
+   default**. A step that ends well without writing the file fails, loudly. On Argo Workflows v4.0.6 the step
+   ends `Error` with the message
+
+   ```
+   wait: Error (exit code 64): open /var/run/argo/outputs/parameters/work/output/kaos-result.json: no such file or directory
+   ```
+
+   and so does the run (checked on the lab, 2026-11-12). A step that did not run (skipped by `when=`, omitted,
+   or the other variant of a pair) has an empty output, which the `sprig.default(<sentinel>, ...)` of the
+   expression in item 3 turns into the sentinel: the sentinel comes from there and from nowhere else.
+   **Retries.** The retry rule of the engine's step templates retries a step lost with its node, not one that
+   ends `Error` for a missing result: it is deterministic, so a re-run would only spend the GPU again. The rule
+   excludes a message that names `kaos-result.json`; on the lab the step ran once and the run ended `Error`.
+   Every step of the wave uses kaos-lib, which exits 1 in this case, and a step that exits 1 is not retried.
 3. **The DAG task argument `kaos-context` joins them** with one expression. Task names are always written
    as `tasks["<name>"]`: step names usually hold hyphens.
 
@@ -467,6 +514,7 @@ again. Results of 2026-11-12, on Argo Workflows v4.0.6:
 | 3(a) | Does one expression assemble the context as one JSON value from task outputs, as a DAG task argument and as a container env value? | Pass, also for a step with no `needs=`. The same value without the wire form's escapes is changed by the engine: asserted |
 | 3(b) | Does a skipped upstream yield the sentinel inside that expression? | Pass, with `sprig.default`: the engine yields an empty string by itself. Pass for steps with an HPC variant: the cluster twin ran, the HPC twin ran, neither ran |
 | 3(c) | Does a 96 KiB env value reach the container intact? | Pass when its cost fits. The ceiling is 131057 bytes for the step's whole definition. The caps of section 7 keep every step under it: shown for a step that needs three steps and one that needs ten, all at their caps, with plain filler and with the characters that cost more |
+| 3(d) | Does Kubernetes change `$$` and `$(NAME)` in a container's env value, and does the wire form arrive unchanged? | Pass on kind: `a $$ b $(HPC_JOB_NAME) c` arrives as `a $ b abc c`; the same text in wire form (`$` as `\u0024`) arrives byte for byte |
 | 4 | Does a 96 KiB value survive follower, job object, runner and job environment? | Pass on the fake site, with a control run. Needs a live site: the list below |
 | 5 | Do stored HPC jobs stay readable when fields are removed from the definition? | Pass. They read back without the removed fields, and can still be ended, released and deleted |
 

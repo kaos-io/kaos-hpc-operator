@@ -54,7 +54,7 @@ func TestShouldReattachAfterPodLossAgainstTheRealAPIServer(t *testing.T) {
 		{"should_reattach_when_resumable_opted_out", func(c *Config) { c.ResumableOptOut = true }},
 		{"should_reattach_when_sharing_and_env_are_set", func(c *Config) {
 			c.Scope = "abcdef12"
-			c.Env = []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "outputs-app"}, {Name: "OUTPUTS_REF", Value: "main"}}
+			c.Env = []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: "{}"}}
 		}},
 	}
 	for i, tc := range cases {
@@ -73,7 +73,7 @@ func TestShouldReattachAfterPodLossAgainstTheRealAPIServer(t *testing.T) {
 			if err := c.Get(ctx, key, &stored); err != nil {
 				t.Fatal(err)
 			}
-			stored.Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed"}
+			stored.Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed", Result: testResult}
 			if err := c.Status().Update(ctx, &stored); err != nil {
 				t.Fatal(err)
 			}
@@ -81,7 +81,7 @@ func TestShouldReattachAfterPodLossAgainstTheRealAPIServer(t *testing.T) {
 			out := &bytes.Buffer{}
 			dir := t.TempDir()
 			code := Run(ctx, c, cfg, Options{Poll: 10 * time.Millisecond, Recheck: 50 * time.Millisecond,
-				OutputsDir: filepath.Join(dir, "o"), SlurmIDPath: filepath.Join(dir, "id"), Out: out})
+				ResultPath: filepath.Join(dir, "o", "kaos-result.json"), SlurmIDPath: filepath.Join(dir, "id"), Out: out})
 			if code != ExitSucceeded || !strings.Contains(out.String(), "re-attached") {
 				t.Fatalf("exit %d, want a re-attach to the existing job:\n%s", code, out)
 			}

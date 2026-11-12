@@ -67,7 +67,7 @@ func TestShouldPublishTheLedgerAgainOnceTheCacheShowsAJobsEnd(t *testing.T) {
 	zero := int32(0)
 	job := &hpcv1alpha1.HPCArgoWorkflowJob{
 		ObjectMeta: metav1.ObjectMeta{Name: "j", Namespace: "p-train", UID: "uid-1"},
-		Spec:       hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "gpu", Image: "reg.example/img:1", WallTimeMinutes: 60},
+		Spec:       hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "gpu", Image: "reg.example/img:1", WallTimeMinutes: 60},
 		Status: hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseRunning, Attempt: 1,
 			Site:    &hpcv1alpha1.SiteRef{Name: "site", Namespace: "p-ml"},
 			Booking: &hpcv1alpha1.Booking{Site: "meluxina", SiteName: "site", SiteNamespace: "p-ml", Tier: hpcv1alpha1.TierGPU, NodeMinutes: 60, At: start},

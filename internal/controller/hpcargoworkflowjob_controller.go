@@ -131,6 +131,9 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 	var site *hpcv1alpha1.HPCSite
 	defer func() { r.observePhase(&job, site) }()
 
+	if reason, err := r.offContract(&job); err != nil {
+		return ctrl.Result{}, r.setPhase(ctx, &job, hpcv1alpha1.PhaseRefused, reason, err.Error(), nil)
+	}
 	if serve {
 		if res, done, err := r.serveGate(ctx, &job); done {
 			return res, err
@@ -399,6 +402,18 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		}
 	}
 
+	if reason == hpcv1alpha1.ReasonStagingMismatch || reason == hpcv1alpha1.ReasonReservedName {
+		msg = strings.TrimSpace(run.Message)
+		if msg == "" {
+			msg = "staging was refused before it began; nothing was staged or submitted to the site"
+		}
+		if r.Recorder != nil {
+			r.Recorder.Event(job, corev1.EventTypeWarning, reason, msg)
+		}
+	}
+
+	phase, reason, msg = r.resultEnd(job, run, phase, reason, msg)
+
 	if reason == hpcv1alpha1.ReasonSubmitLimit {
 		msg = submitLimitMessage(run, site)
 		if r.Recorder != nil {
@@ -431,6 +446,7 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		msg += hostOpenNote
 	}
 	job.Status.Phase, job.Status.Reason, job.Status.Message = phase, reason, msg
+	keepResultOnlyOnSuccess(job)
 	if phase.Terminal() {
 		var total int64
 		for _, a := range job.Status.Attempts {
@@ -450,25 +466,35 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 	return next, nil
 }
 
+// failedExitReasons are the exit codes the job script and the runner reserve for an attempt that FAILED, each
+// with the reason it means.
+var failedExitReasons = map[int32]string{
+	hpcv1alpha1.ExitCodeIdle:                hpcv1alpha1.ReasonIdle,
+	hpcv1alpha1.ExitCodeInsufficientQuota:   hpcv1alpha1.ReasonInsufficientQuota,
+	hpcv1alpha1.ExitCodeInvalidImage:        hpcv1alpha1.ReasonInvalidImage,
+	hpcv1alpha1.ExitCodeStagingMismatch:     hpcv1alpha1.ReasonStagingMismatch,
+	hpcv1alpha1.ExitCodeReservedName:        hpcv1alpha1.ReasonReservedName,
+	hpcv1alpha1.ExitCodeResultNotHandedBack: hpcv1alpha1.ReasonResultNotHandedBack,
+	hpcv1alpha1.ExitCodeInvalidResult:       hpcv1alpha1.ReasonInvalidResult,
+	hpcv1alpha1.ExitCodeSubmitLimit:         hpcv1alpha1.ReasonSubmitLimit,
+	hpcv1alpha1.ExitCodeGPUViolation:        hpcv1alpha1.ReasonGPUViolation,
+}
+
 // outcome maps the site's final state and exit code of one attempt to the job's phase.
 func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 	state := strings.ToUpper(run.State)
-	failed := state == "FAILED"
-	switch {
-	case strings.HasPrefix(state, "CANCELLED"):
+	if strings.HasPrefix(state, "CANCELLED") {
 		return hpcv1alpha1.PhaseCancelled, "Cancelled"
-	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeContinue:
-		return hpcv1alpha1.PhaseFailed, "Continued"
-	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeIdle && failed:
-		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonIdle
-	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeInsufficientQuota && failed:
-		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonInsufficientQuota
-	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeInvalidImage && failed:
-		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonInvalidImage
-	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeSubmitLimit && failed:
-		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonSubmitLimit
-	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeGPUViolation && failed:
-		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonGPUViolation
+	}
+	if run.ExitCode != nil {
+		if *run.ExitCode == hpcv1alpha1.ExitCodeContinue {
+			return hpcv1alpha1.PhaseFailed, "Continued"
+		}
+		if reason, ok := failedExitReasons[*run.ExitCode]; ok && state == "FAILED" {
+			return hpcv1alpha1.PhaseFailed, reason
+		}
+	}
+	switch {
 	case state == "COMPLETED" && (run.ExitCode == nil || *run.ExitCode == 0):
 		return hpcv1alpha1.PhaseSucceeded, "Completed"
 	case state == "TIMEOUT":
@@ -477,6 +503,59 @@ func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 		return hpcv1alpha1.PhaseFailed, "Ended"
 	default:
 		return hpcv1alpha1.PhaseFailed, "Site" + state
+	}
+}
+
+// offContract says why a job that is not booked yet cannot run on the step contract (the reason and the
+// sentence), or nothing: a job without its step context, or with an input that cannot be staged, is refused
+// with its own reason before anything is booked, never run without its data (PRD kaos#1911 T-04).
+func (r *HPCArgoWorkflowJobReconciler) offContract(job *hpcv1alpha1.HPCArgoWorkflowJob) (string, error) {
+	if job.Status.Phase.Terminal() || job.Status.Booking != nil || r.isPending(string(job.UID)) {
+		return "", nil
+	}
+	return runnerjob.ValidateContract(&job.Spec)
+}
+
+// resultEnd is the end of an attempt as the step contract sees it (PRD kaos#1911 CON-04): an attempt whose
+// result was not handed back, or is not a result, ends with that reason and its sentence; and an attempt that
+// "succeeded" without a step context is not a success.
+func (r *HPCArgoWorkflowJobReconciler) resultEnd(job *hpcv1alpha1.HPCArgoWorkflowJob, run *hpcv1alpha1.RunStatus,
+	phase hpcv1alpha1.Phase, reason, msg string) (hpcv1alpha1.Phase, string, string) {
+	if reason == hpcv1alpha1.ReasonResultNotHandedBack || reason == hpcv1alpha1.ReasonInvalidResult {
+		msg = resultMessage(reason, run)
+		if r.Recorder != nil {
+			r.Recorder.Event(job, corev1.EventTypeWarning, reason, msg)
+		}
+	}
+	if phase == hpcv1alpha1.PhaseSucceeded && job.Spec.Context == "" {
+		// A job stored before the definition changed and read back without its context ran to its end under
+		// an older runner: what it handed back is not a result of the step contract. It is not a success.
+		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonNoContext,
+			"the job carries no step context (spec.context): it was created before the platform update that changed " +
+				"how a step is given its inputs and hands back its result, so its result cannot be handed on. Run the pipeline again"
+	}
+	return phase, reason, msg
+}
+
+// resultMessage is the sentence of an attempt whose step ended well but handed back nothing usable: the
+// runner's own words when it reported them, else what the exit code alone says (the job script ended with it
+// on the node, where only the step's log says why).
+func resultMessage(reason string, run *hpcv1alpha1.RunStatus) string {
+	if msg := strings.TrimSpace(run.Message); msg != "" {
+		return msg
+	}
+	if reason == hpcv1alpha1.ReasonInvalidResult {
+		return "the step ended well, but the result it handed back is not a result of the step contract; no result was published"
+	}
+	return "the step ended well, but the job on the site could not read or upload the step's result file " +
+		"(/work/output/kaos-result.json), so no result was published; the step's log says why"
+}
+
+// keepResultOnlyOnSuccess enforces that status.result is set only on a job that Succeeded (docs/step-contract.md,
+// section 8): whatever the step wrote, a job in any other phase publishes no result.
+func keepResultOnlyOnSuccess(job *hpcv1alpha1.HPCArgoWorkflowJob) {
+	if job.Status.Phase != hpcv1alpha1.PhaseSucceeded {
+		job.Status.Result = ""
 	}
 }
 
@@ -565,6 +644,7 @@ func (r *HPCArgoWorkflowJobReconciler) setPhasePlaced(ctx context.Context, job *
 		job.Status.Placement = placement
 	}
 	job.Status.Phase, job.Status.Reason, job.Status.Message = phase, reason, msg
+	keepResultOnlyOnSuccess(job)
 	if booking != nil {
 		job.Status.Booking = booking
 		if job.Status.Site == nil {

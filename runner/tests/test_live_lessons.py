@@ -254,19 +254,23 @@ def test_the_gcp_token_goes_to_gar_hosts_only__live_job_5140432(tmp_path, ref, t
 
 # ------------------------------------------------ in-job stage-in failure is exit 232, never silent
 
-def _stagein(tmp_path, stagein_py, staged_ready=False):
+def _inputs_block():
+    """The job script from its inputs loop to the line after it (the staged root of the step)."""
     lines = _lines()
-    block = lines[lines.index('DATASET_DIR=""'):lines.index('BIND=""')]
+    return lines[lines.index('BIND=""; KAOS_IN_ROOT=$SCR/kaos-tmp/in-$KAOS_JOB_ID; rm -rf "$KAOS_IN_ROOT"'):lines.index('done') + 2]
+
+
+def _stagein(tmp_path, stagein_py, staged_ready=False):
     import base64
-    staged = tmp_path / 'staged'
-    staged.mkdir()
+    staged = tmp_path / 'staged' / 'data'      # the path the staging tool reports: the data/ folder of the copy
+    staged.mkdir(parents=True)
     if staged_ready:
-        (staged / '.kaos-ready').write_text('')
+        (staged.parent / '.kaos-ready').write_text('{}')
     env = dict(os.environ, SCR=str(tmp_path / 'scr'), KAOS_JOB_ID='9', LAKEFS_BEARER_TOKEN='w', LAKEFS_ENDPOINT='http://x',
-               DATASET_REPO='r', DATASET_COMMIT='c0ffee12', DATASET_STAGED=str(staged),
+               KAOS_INPUTS='raw|dataset-r|c0ffee12|%s' % staged,
                STAGEIN_B64=base64.b64encode(stagein_py.encode()).decode())
     (tmp_path / 'scr' / 'kaos-tmp').mkdir(parents=True)
-    script = 'fail(){ echo "$1" > failed; exit "$1"; }\n' + '\n'.join(block) + '\necho "DIR=$DATASET_DIR"\n'
+    script = 'fail(){ echo "$1" > failed; exit "$1"; }\n' + '\n'.join(_inputs_block()) + '\necho "BIND=$BIND"\n'
     p = subprocess.run([BASH, '-c', script], env=env, cwd=tmp_path, capture_output=True, text=True)
     return p, staged
 
@@ -274,47 +278,62 @@ def _stagein(tmp_path, stagein_py, staged_ready=False):
 def test_a_failed_in_job_stage_in_ends_the_job_232_instead_of_running_without_data(tmp_path):
     p, _ = _stagein(tmp_path, 'import sys; sys.exit(3)')
     assert p.returncode == 232 and (tmp_path / 'failed').read_text().strip() == '232'
-    assert 'DIR=' not in p.stdout, 'the step must never start after a failed stage-in'
+    assert 'BIND=' not in p.stdout, 'the step must never start after a failed stage-in'
     assert 'downloading in-job' in p.stdout, 'the not-ready staged copy is said to be replaced by the download'
 
 
 def test_a_successful_in_job_stage_in_binds_the_downloaded_copy(tmp_path):
-    ok = 'import os; open(os.environ["DATASET_DIRFILE"], "w").write("/scr/data/r/c0ffee12")'
+    copy = tmp_path / 'data' / 'dataset-r' / 'c0ffee12'
+    ok = ('import os, pathlib; d = pathlib.Path(%r); (d / "data").mkdir(parents=True); (d / ".kaos-complete").touch(); '
+          'assert os.environ["DATASET_REPO"] == "dataset-r" and os.environ["DATASET_COMMIT"] == "c0ffee12"; '
+          'open(os.environ["DATASET_DIRFILE"], "w").write(str(d))' % str(copy))
     p, _ = _stagein(tmp_path, ok)
-    assert p.returncode == 0 and 'DIR=/scr/data/r/c0ffee12' in p.stdout
+    root = tmp_path / 'scr' / 'kaos-tmp' / 'in-9'
+    assert p.returncode == 0 and 'BIND=-B %s:/kaos/inputs:ro -B %s:/kaos/inputs/raw:ro' % (root, copy / 'data') in p.stdout, p.stdout + p.stderr
+    # The record the step finds the input by is BESIDE the folder the copy is bound onto, never inside it.
+    assert json.loads((root / 'raw.kaos-ready').read_text()) == {'repo': 'dataset-r', 'commit': 'c0ffee12', 'full': True}
+    assert (root / 'raw').is_dir() and list((root / 'raw').iterdir()) == []
+
+
+def test_an_in_job_stage_in_that_leaves_no_complete_copy_ends_the_job_232(tmp_path):
+    """The stage-in program ended well but its folder has no record that it is whole: never bound as it is."""
+    p, _ = _stagein(tmp_path, 'import os; open(os.environ["DATASET_DIRFILE"], "w").write("%s")' % (tmp_path / 'nowhere'))
+    assert p.returncode == 232 and 'BIND=' not in p.stdout
+    assert 'is not complete' in p.stdout
+    assert not (tmp_path / 'scr' / 'kaos-tmp' / 'in-9' / 'raw.kaos-ready').exists(), 'no record for a copy that is not whole'
 
 
 def test_a_ready_staged_copy_skips_the_in_job_download_and_is_marked_used(tmp_path):
     p, staged = _stagein(tmp_path, 'import sys; sys.exit(3)', staged_ready=True)
-    assert p.returncode == 0 and 'DIR=%s' % staged in p.stdout
-    assert (staged / '.kaos-used').exists()
+    assert p.returncode == 0 and '-B %s:/kaos/inputs/raw:ro' % staged in p.stdout
+    assert (staged.parent / '.kaos-used').exists() and not (staged / '.kaos-used').exists(), 'beside data/, never in it'
+    assert (tmp_path / 'scr' / 'kaos-tmp' / 'in-9' / 'raw.kaos-ready').exists()
 
 
 # ------------------------------------------------ dataset-commit lease vs the 24 h eviction rule
 
-def test_a_queued_job_names_its_dataset_commit_where_the_stagers_lease_pattern_finds_it():
+def test_a_queued_job_names_its_dataset_commits_where_the_stagers_lease_pattern_finds_them():
     """The stager evicts copies unused for 24 h EXCEPT those a queued/running job names in `squeue -o %k`
-    (PRD-1541 D-06). The lease word must therefore be a lowercase hex commit the stager's LEASE_RE finds,
-    next to the image and checkpoint leases that must not hide it."""
+    (PRD-1541 D-06). Each lease word must therefore be a lowercase hex commit the stager's LEASE_RE finds,
+    next to the image and checkpoint leases that must not hide it: one word per input."""
     src = (Path(__file__).resolve().parents[1] / 'kaos_hpc_runner' / 'runner.py').read_text()
-    assert "lease.append('kaos-commit=' + cfg.dataset_commit)" in src
-    comment = 'kaos-commit=c0ffee12 kaos-image=0123456789abcdef kaos-ckpt-lease=wf1/train'
-    assert LEASE_RE.findall(comment) == ['c0ffee12']
+    assert "commits = ['kaos-commit=' + i['commit'] for i in cfg.inputs]" in src and "lease = list(commits)" in src
+    comment = 'kaos-commit=c0ffee12 kaos-commit=deadbeef kaos-image=0123456789abcdef kaos-ckpt-lease=wf1/train'
+    assert LEASE_RE.findall(comment) == ['c0ffee12', 'deadbeef']
 
 
 def test_a_resident_copy_is_marked_used_by_the_job_that_starts_on_it_so_the_24h_clock_restarts(tmp_path):
     """The stager evicts copies unused for 24 h; the job that starts on a ready copy refreshes its marker."""
-    staged = tmp_path / 'staged'
-    staged.mkdir()
-    (staged / '.kaos-ready').write_text('')
-    marker = staged / '.kaos-used'
+    staged = tmp_path / 'staged' / 'data'
+    staged.mkdir(parents=True)
+    (staged.parent / '.kaos-ready').write_text('')
+    marker = staged.parent / '.kaos-used'
     marker.write_text('')
     old = time.time() - 30 * 3600
     os.utime(marker, (old, old))
-    lines = _lines()
-    block = lines[lines.index('DATASET_DIR=""'):lines.index('BIND=""')]
-    env = dict(os.environ, KAOS_JOB_ID='9', DATASET_STAGED=str(staged))
-    subprocess.run([BASH, '-c', 'fail(){ exit "$1"; }\n' + '\n'.join(block)], env=env, check=True)
+    (tmp_path / 'kaos-tmp').mkdir()
+    env = dict(os.environ, SCR=str(tmp_path), KAOS_JOB_ID='9', KAOS_INPUTS='raw|dataset-r|c0ffee12|%s' % staged)
+    subprocess.run([BASH, '-c', 'fail(){ exit "$1"; }\n' + '\n'.join(_inputs_block())], env=env, check=True)
     assert time.time() - marker.stat().st_mtime < 60
 
 

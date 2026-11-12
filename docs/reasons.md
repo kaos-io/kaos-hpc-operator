@@ -30,7 +30,9 @@ Phases: `Pending` (not judged yet, or the next attempt is about to be judged), `
 | `NoSite` | Refused | The project's HPCSite offers no such class, or the project has no HPCSite offering it. | Message naming the class (and the project). |
 | `InvalidImage` | Refused, or Failed | The step's image is not `<registry-host>/<repository>:<tag>` (or `@sha256:` digest), so it can never be pulled (live 2026-11-10: a half-rendered `:probe-learn-latest`). Refused at admission with nothing booked and no runner; or Failed when the runner finds it (exit 239, no site job, settled 0). No credential retry is made for it: the fresh-credentials resubmit applies to a failed pull (exit 231) of a valid reference only. | Message: the reference and what is missing; `InvalidImage` Warning event on the Failed form. |
 | `NoProject` | Refused | The job's namespace has no `hpc.kaos.io/project` label. | Message. |
-| `InvalidSpec` | Refused | The spec asks for something the API does not allow: an `env` name outside the allowlist (the CRD refuses it too). | Message naming the variable. |
+| `InvalidSpec` | Refused | The spec asks for something the API does not allow: an `env` name other than `KAOS_LIB_SUPPORT` (the CRD refuses it too). | Message naming the variable. |
+| `NoContext` | Refused, or Failed | The job carries no step context (`spec.context`, PRD kaos#1911): it was created by a follower from before the step contract, or stored before the job definition changed and read back without the fields that were removed. The definition requires the field, so a new job without it is not even stored. Refused before anything is booked. Failed for a job that was already booked: when its next runner would start, or when it ran to its end under a runner of before and reports success. | Message: "the job carries no step context ... Run the pipeline again". |
+| `SharedInput` | Refused | An entry of `spec.inputs` names an `owner`: a dataset another project shares cannot be staged on an HPC site yet. The follower refuses the step first, with the same sentence, so this is the second lock. | Message naming the input, the dataset and the project: run the step on a cluster class, or copy the dataset into this project. |
 | `HPCSiteMissing` | unchanged while it runs, then `Cancelled` | A booked job's HPCSite (or its namespace's project label) is gone. The job and its booking are kept for a grace period (`--site-missing-grace`, default 15 min); if it is still missing the job is cancelled, and when the HPCSite comes back the reason returns to `Admitted`. | Message "HPCSiteMissing since <time>: ...; the job is cancelled if it stays missing for 15m0s"; `HPCSiteMissing` Warning event. |
 
 ## Node sharing plan (not a reason: `status.placement.share`)
@@ -63,6 +65,10 @@ Phases: `Pending` (not judged yet, or the next attempt is about to be judged), `
 | `TimeLimitRetry` | Pending | The attempt hit a learned time limit (below the declared cap); it runs once more at the declared limit (D-67). A guest on a shared node stopped by its own learned limit is retried the same way. | Follower: "hit its learned time limit; retrying once with the full limit". |
 | `Idle` | Failed | The on-node idle watchdog ended the step: GPU (CPU on a CPU class) use below 5 % and no log growth for `spec.idleTimeoutMinutes` (default 20; 0 = off). Exit 236. The node-minutes it saved are recorded. | Follower: "stopped: no GPU use and no output for N min", then the step's last lines. `Idle` Warning event, `kaos_hpc_idle_kills_total`. |
 | `InsufficientQuota` | Failed | Staging the dataset or image would exceed the project's scratch quota (space or files) even after evicting everything unused. The runner stops before any copy and submits nothing (exit 237, no site job). | Message: what did not fit, "nothing was copied and nothing in use was deleted", free space or raise the quota. `InsufficientQuota` Warning event. |
+| `StagingMismatch` | Failed | The runner and the site's staging tool speak different staging contracts: the two ship separately and one was updated first. The runner asks the tool before it stages; on any difference it stages nothing and submits nothing (exit 241, no site job, settled 0), because a copy made under another contract may hold only part of the dataset. Not a fallback to the in-job copy. The same reason, with its own sentence, when the staging tool is not installed for the project or the login node cannot run it: the runner asks for 20 minutes (the project's credential refresh installs the tool every 15), then stops. This is where a failed install shows: the refresh itself only logs a warning. | Message: both contract numbers, "nothing was staged and nothing was submitted", run again when the update is complete. Or: "the site's staging tool is not installed for this project, or cannot be run", what installs it, run again for a new project, else the refresh's log says why. `StagingMismatch` Warning event. |
+| `ReservedName` | Failed | The dataset version holds an object whose name cannot be copied to the site. A file name ending in `.kaos-part` is reserved for the platform (the staging tool's half-downloaded files, named beside their target); the dataset's files live under `<copy>/data/` and the markers of a copy beside that folder, so no other name can collide with one (a `.kaos/` folder or a `.kaos-*` name is data). The runner checks the suffix while it plans the copy; it stages nothing and submits nothing (exit 242, no site job, settled 0). The in-job stage-in checks the names again and ends the job 232 before any download. The same reason covers an object whose path could be written outside the dataset's folder on the site (a `..`, `.` or empty part, a leading `/`, a NUL byte), a file name longer than 245 bytes or a folder name longer than 255, and a file that is also a folder (`a` and `a/b`). A zero-byte folder marker (`docs/`) is none of these: it is skipped. With the staging key every name is checked while the copy is planned; when the job is about to stage in-job (no key, no ssh client, a staging tool not reached within the budget) the runner lists the commit once before it submits. The in-job stage-in applies the same rule before any download and never writes through a folder of its copy that is a symbolic link to elsewhere. | Message: the dataset, the object's name, and the rule it breaks ("a file name ending in .kaos-part is reserved for the platform", or that the path could be written outside the dataset's folder), rename or remove it and commit a new version. `ReservedName` Warning event. |
+| `ResultNotHandedBack` | Failed | The step ended well, but no result of it reached `status.result` (PRD kaos#1911 CON-04). The job on the site hands the result file back when the step exits 0, and ends 243 when it cannot: no token, endpoint or hand-back program, a result file that is not a regular file, cannot be read or is far too large, lakeFS refusing the upload. The runner reports 243 when the step wrote no result, when neither the result nor the record that there is none arrived, or when lakeFS does not answer after four tries; and before it submits anything when the run could never hand a result back (no data-plane token, no lakeFS endpoint, no app). Never a success with an empty result. | Message with the cause, for example "the step ended well but wrote no result (/work/output/kaos-result.json) ...", "... could not hand back its result: lakeFS did not take the step's result (...)", "... could not be fetched from lakeFS after 4 tries (...)". `ResultNotHandedBack` Warning event; the follower prints the reason and the message and the step fails. |
+| `InvalidResult` | Failed | The result file reached the runner but is not a result of the step contract: not JSON, not an object, not `version` 1, a `status` other than `ok`, `values`, `reads` or `writes` missing, or a cost over 8 KiB. Exit 244. Nothing is published. | Message naming what is wrong, for example "the step's result costs 9000 bytes, more than the 8192 (8 KiB) a result may cost ...". `InvalidResult` Warning event. |
 | `SubmitLimit` | Failed | The site itself refused a submit for its per-user cap (`QOSMaxSubmitJobPerUserLimit`, `AssocMaxSubmitJobLimit`, ...). The runner reports exit 238 with the cap and the count it read from the site. See the Refused form above. | Message with the cap and the count, "resubmit when the count is below the cap". `SubmitLimit` Warning event. |
 | `GPUViolation` | Failed | On a node shared by several steps (AC-57 / D-29), the step computed on a GPU outside its own set and the slot manager stopped that step alone; neighbouring steps keep running. The slot manager writes `kaos-state=done rc=N reason=GPUViolation` into the host job's Slurm comment and `gpu: step ... outside its set: stopping it` into the job log; the runner reports exit 240 (live 2026-11-11, job 5447505, read `SiteFAILED` exit 137 before). Prevention first: where `nvidia-container-cli` works the step cannot see the other GPUs (`gpu fence: nvccli` in the job log). | Reason `GPUViolation`; the guest settles 0 node-minutes (its host pays). |
 
@@ -92,30 +98,32 @@ place in the site's queue is lost, so the runner records each replacement (PRD-H
 | `status.attempts[].queueReplaced`, `.queueReplacedCount` | The same, copied when the attempt is settled. |
 | `HPCSite.status.recentJobs[].queueReplacedCount` | The total over the job's attempts, for the console to say "queue place lost N times (token refresh)". A count only, so the list stays bounded. |
 
-## Dataset staging (not a reason: `status.run.staging`)
+## Dataset staging (not a reason: `status.run.staged`)
 
-Before it submits the site job the runner stages the pinned dataset commit on the project's scratch (PRD-HPC-1461,
-PRD-HPC-1541). It reports one bounded record, and the follower prints one line from it in the step's own log, in the
-`HPC: ...` style, so a user does not have to read the runner Job's log:
+Before it submits the site job the runner stages every input of the step (`spec.inputs`), each at its pinned commit,
+on the project's scratch (PRD-HPC-1461, PRD-HPC-1541, PRD kaos#1911). It reports one bounded record per input, and the
+follower prints one line from each in the step's own log, in the `HPC: ...` style, so a user does not have to read the
+runner Job's log:
 
 ```
 HPC: dataset <repo>@<short commit> staged (first copy | delta | already cached), <size>, <seconds>s
 ```
 
-(an already cached copy has no size or seconds). The line appears once, as soon as the runner has reported the record
+(an already cached copy has no size or seconds). A line appears once, as soon as the runner has reported its record
 (with its first status report, while the site job queues); a resubmit that finds the copy resident does not print it again.
 
 | Field | Meaning |
 |---|---|
-| `status.run.staging.repo` | The dataset repository. |
-| `status.run.staging.commit` | The pinned commit, the first 12 characters. |
-| `status.run.staging.kind` | `first` (no earlier version on scratch: the whole commit was copied), `delta` (only what differs from an earlier version was copied) or `cached` (already on scratch, or finished by another runner while this one waited: nothing copied). |
-| `status.run.staging.files`, `.bytes` | What this staging copied (0 when `cached`; a delta counts the files it fetched, not the ones it hard-linked). |
-| `status.run.staging.seconds` | How long it took, including a resumed attempt (0 when `cached`). |
+| `status.run.staged[].repo` | The dataset repository. |
+| `status.run.staged[].commit` | The pinned commit, the first 12 characters. |
+| `status.run.staged[].kind` | `first` (no earlier version on scratch: the whole commit was copied), `delta` (only what differs from an earlier version was copied) or `cached` (already on scratch, or finished by another runner while this one waited: nothing copied). |
+| `status.run.staged[].files`, `.bytes` | What this staging copied (0 when `cached`; a delta counts the files it fetched, not the ones it hard-linked). |
+| `status.run.staged[].seconds` | How long it took, including a resumed attempt (0 when `cached`). |
 
-The record holds no path and no site identity, and is absent when the step has no dataset or the job stages it itself
-(the runner says so in its log). A runner restarted within the same attempt keeps the record its predecessor reported
-(its own staging finds the copy resident and would otherwise overwrite "first copy" with "already cached").
+A record holds no path and no site identity. There is none for an input the job stages itself (the runner says so in
+its log), and none at all when the step has no input. A runner restarted within the same attempt keeps the records its
+predecessor reported (its own staging finds the copies resident and would otherwise overwrite "first copy" with
+"already cached").
 
 ## Cancelling
 

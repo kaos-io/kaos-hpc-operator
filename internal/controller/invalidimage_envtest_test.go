@@ -45,7 +45,7 @@ var _ = Describe("HPC invalid image", func() {
 
 	newJob := func(name, image string) *hpcv1alpha1.HPCArgoWorkflowJob {
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: image, WallTimeMinutes: 10,
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: image, WallTimeMinutes: 10,
 				StepName: "train", Command: []string{"x"}}}
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		return j
@@ -71,6 +71,36 @@ var _ = Describe("HPC invalid image", func() {
 
 	It("should_admit_a_good_reference", func() {
 		Expect(reconcileOnce(newJob("good-ref", "zot.example/proj/app:v1")).Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
+	})
+
+	// PRD kaos#1911 F-04: the runner and the site's staging tool ship separately; when their staging contracts
+	// differ the runner stops before it stages or submits, and the job says why.
+	It("should_end_a_job_whose_runner_met_another_staging_contract_as_failed_staging_mismatch_and_settle_nothing", func() {
+		j := reconcileOnce(newJob("contract", "zot.example/proj/app:v1"))
+		orig := j.DeepCopy()
+		code := hpcv1alpha1.ExitCodeStagingMismatch
+		j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, State: "FAILED", ExitCode: &code, Terminal: true,
+			Message: "the site's staging tool and this runner speak different staging contracts (staging tool: 1, runner: 2)"}
+		Expect(k8sClient.Status().Patch(ctx, j, client.MergeFrom(orig))).To(Succeed())
+		got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonStagingMismatch))
+		Expect(got.Status.Message).To(ContainSubstring("different staging contracts"))
+		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(0))))
+	})
+
+	It("should_end_a_job_whose_dataset_holds_a_reserved_name_as_failed_reserved_name_and_settle_nothing", func() {
+		j := reconcileOnce(newJob("reserved", "zot.example/proj/app:v1"))
+		orig := j.DeepCopy()
+		code := hpcv1alpha1.ExitCodeReservedName
+		j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, State: "FAILED", ExitCode: &code, Terminal: true,
+			Message: "dataset d@c0ffee has an object named 'a.kaos-part': a file name ending in .kaos-part is reserved for the platform"}
+		Expect(k8sClient.Status().Patch(ctx, j, client.MergeFrom(orig))).To(Succeed())
+		got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonReservedName))
+		Expect(got.Status.Message).To(ContainSubstring("a.kaos-part"))
+		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(0))))
 	})
 
 	It("should_end_a_job_the_runner_found_invalid_as_failed_invalid_image_and_settle_nothing", func() {

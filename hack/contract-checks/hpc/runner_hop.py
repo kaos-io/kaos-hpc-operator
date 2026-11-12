@@ -2,8 +2,8 @@
 """Check 4, the runner's part: from the runner's environment to the step's environment in the job.
 
 Started by hops_test.go with the environment of the runner Job's container, as the API server stored
-it, plus KAOS_STEP_CONTEXT. With the runner's own modules it builds the site job twice, the way
-Runner.submit does: alone (the inputs in the Slurm environment) and for a shared node (the inputs as
+it, plus KAOS_STEP_CONTEXT. With the runner's own code (Runner.site_job, what Runner.submit sends) it
+builds the site job twice: alone (the inputs in the Slurm environment) and for a shared node (the inputs as
 export lines in the job script). Each is submitted to the fake Slurm site with the runner's client and
 then run with bash and a stand-in for Apptainer. The step is a program that records what it finds in
 KAOS_STEP_CONTEXT.
@@ -12,20 +12,24 @@ Prints one JSON object: for each mode the site job's name, the request and scrip
 count and sha256 the step saw.
 """
 import hashlib
+import http.server
 import json
 import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+import threading
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "runner"))
 
-from kaos_hpc_runner import jobscript, payloads  # noqa: E402
-from kaos_hpc_runner.settings import Settings  # noqa: E402
-from kaos_hpc_runner.sharing import inputs_in_script  # noqa: E402
+from kaos_hpc_runner import wallet  # noqa: E402
+from kaos_hpc_runner.runner import Runner  # noqa: E402
+from kaos_hpc_runner.settings import CONTEXT_ENV, Settings  # noqa: E402
 from kaos_hpc_runner.slurm import Slurm  # noqa: E402
+
+wallet.fetch_workdir = lambda image, token: ''   # no registry in this check: the step starts where the script does
 
 STEP = '''import hashlib, json, os, sys
 v = os.environ.get("KAOS_STEP_CONTEXT", "").encode()
@@ -41,25 +45,7 @@ esac
 '''
 
 
-def job_env(cfg, context, step_cmd, shared):
-    """The site job's environment as Runner.submit builds it (a job without a data-plane token), plus the context."""
-    ident = cfg.identity()
-    env = ['PATH=/usr/bin:/bin:/usr/local/bin', 'HOME=' + ident['home'], 'USER=' + ident['user'],
-           'IMAGE_REF=' + cfg.image, 'REG_TOKEN=', 'HPC_GPUS=' + str(cfg.hpc_class().get('gpus') or 0),
-           'STEP_CMD=' + step_cmd, 'STEP_WORKDIR=', 'WF_UID=' + cfg.wf_uid, 'STEP_NAME=' + cfg.step,
-           'STEP_OUTPUTS=', 'DATASET_STAGED=', 'IMAGE_STAGED=', 'KAOS_ATTEMPT=%d' % cfg.attempt,
-           'KAOS_IDLE_TIMEOUT_MIN=%d' % cfg.idle_timeout, 'IDLEWATCH_B64=' + payloads.b64(payloads.IDLEWATCH),
-           'CKPT_B64=' + payloads.b64(payloads.CKPT), 'KAOS_CKPT_BUDGET_PCT=%d' % cfg.ckpt_budget_pct,
-           'KAOS_PROJID=1', 'STAGEIN_B64=' + payloads.b64(payloads.STAGEIN),
-           'STAGEOUT_B64=' + payloads.b64(payloads.STAGEOUT),
-           'KAOS_STEP_CONTEXT=' + context]
-    if shared:
-        env += ['KAOS_SLOTS_B64=' + payloads.b64(payloads.SLOTS), 'KAOS_SCOPE=' + cfg.scope,
-                'KAOS_SCR=' + ident['scratch'], 'KAOS_STEP_LIMIT_MIN=%d' % cfg.time_limit]
-    return env
-
-
-def one(cfg, context, mode, work):
+def one(context, mode, work, lakefs):
     shared = mode == 'shared'
     scratch = work / mode / 'scratch'
     bindir = work / mode / 'bin'
@@ -74,10 +60,16 @@ def one(cfg, context, mode, work):
     for tool in ('apptainer', 'squeue', 'scontrol'):
         (bindir / tool).chmod(0o755)
 
-    env = job_env(cfg, context, 'python3 %s %s' % (step, out), shared)
-    batch = '\n'.join(jobscript.batch_lines(cfg.scope if shared else '-', str(scratch)))
-    if shared:
-        batch, env = inputs_in_script(batch, env)
+    # The site job exactly as the runner submits it (Runner.site_job): alone, the context rides in the Slurm
+    # environment; for a shared node, in the script. The step's command is this check's recorder.
+    env_in = dict(os.environ, HPC_SCRATCH=str(scratch), STEP_COMMAND=json.dumps(['python3', str(step), str(out)]),
+                  LAKEFS_EXTERNAL_URL=lakefs, HPC_SHARING='on' if shared else '0', HPC_SCOPE='a1b2c3d4e5' if shared else '')
+    env_in[CONTEXT_ENV] = context
+    cfg = Settings(env_in)
+    cfg.check_job()
+    runner = Runner(cfg, slurm=object(), stager=object(), reporter=object(), logs=object(), mint=lambda: 'check-wallet')
+    runner.prepare_handback()
+    batch, env, _, _ = runner.site_job('', '')
     name = cfg.job_site_name + '-' + mode + ('-control' if os.environ.get('CONTRACT_CHECK_DAMAGE') else '')
     body = {'job': {'name': name, 'partition': cfg.hpc_class()['partition'],
                     'account': cfg.identity()['account'], 'qos': cfg.hpc_class().get('qos') or 'default',
@@ -104,14 +96,32 @@ def one(cfg, context, mode, work):
             'script_output_tail': run.stdout.decode(errors='replace')[-600:] if not saw else ''}
 
 
+class TakesAnything(http.server.BaseHTTPRequestHandler):
+    """Stands in for lakeFS: the job hands the step's (missing) result back when the step ends, and this check
+    is about the context, not about that hand-back (runner/tests/test_step_contract.py is)."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('Content-Length') or 0))
+        self.send_response(201)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    do_DELETE = do_POST
+
+
 def main():
     context = os.environ['KAOS_STEP_CONTEXT']
-    cfg = Settings(dict(os.environ))
     # The control run of the check: one character of what the job is given differs from what the runner
     # received. The step must then report another sha256, or the comparison proves nothing.
     handed = context.replace('contract-4', 'contract-X', 1) if os.environ.get('CONTRACT_CHECK_DAMAGE') else context
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), TakesAnything)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
     with tempfile.TemporaryDirectory() as tmp:
-        result = {mode: one(cfg, handed, mode, pathlib.Path(tmp)) for mode in ('alone', 'shared')}
+        result = {mode: one(handed, mode, pathlib.Path(tmp), 'http://127.0.0.1:%d' % srv.server_address[1])
+                  for mode in ('alone', 'shared')}
     result['runner_saw'] = {'bytes': len(context.encode()), 'sha256': hashlib.sha256(context.encode()).hexdigest()}
     json.dump(result, sys.stdout)
 

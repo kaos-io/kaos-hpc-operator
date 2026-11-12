@@ -20,8 +20,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"os"
@@ -114,4 +116,16 @@ func loadTestPKI(dir string) (*testPKI, error) {
 		return nil, err
 	}
 	return &testPKI{caPEM: ca, certPEM: cert, keyPEM: key}, nil
+}
+
+// machineKeyJSON is a machine key as the identity provider issues it (user, key id, RSA private key): what the
+// runner signs its token request with. The fake site's identity provider accepts any.
+func machineKeyJSON() (string, error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", err
+	}
+	pemKey := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	out, err := json.Marshal(map[string]string{"userId": "e2e-machine", "keyId": "e2e-key", "key": string(pemKey)})
+	return string(out), err
 }

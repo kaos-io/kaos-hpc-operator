@@ -6,7 +6,7 @@
     wire.py check-fixtures           fail when a fixture, its .wire file or a cap is out of step
 
 The wire form is what crosses a process boundary: the value of KAOS_STEP_CONTEXT, the content of the
-result file, spec.context and status.result of an HPC job. It is JSON with four extra rules, so that
+result file, spec.context and status.result of an HPC job. It is JSON with five extra rules, so that
 every hop (the workflow engine's templating, an environment value, a Slurm job script) carries it
 unchanged:
 
@@ -16,7 +16,9 @@ unchanged:
     "{{", which the workflow engine would evaluate as a template;
   * inside strings "&", "<" and ">" are written as \\u0026, \\u003c and \\u003e: the workflow engine
     writes them that way when it puts the value into a step's definition, so they would cost six bytes
-    there and one here.
+    there and one here;
+  * inside strings "$" is written as \\u0024: Kubernetes expands "$(NAME)" and reduces "$$" in a container's
+    environment value, so a context or result put there as text would arrive changed. No "$" is ever written.
 
 Any JSON parser reads it. This module is the reference writer; it has no dependency.
 """
@@ -47,7 +49,7 @@ FIXTURES = pathlib.Path(__file__).resolve().parents[2] / "docs" / "step-contract
 
 
 # What is written as a \\uXXXX escape inside a string although JSON does not ask for it.
-ESCAPED = "{}&<>"
+ESCAPED = "{}&<>$"
 
 
 def _string(text):
@@ -142,6 +144,8 @@ def shape_of_read(e):
         return "name, repo (dataset-...) or commit (64 hex) is not valid"
     if not (e["owner"] is None or isinstance(e["owner"], str)) or not isinstance(e["ref"], str) or not e["ref"]:
         return "owner must be a project or null, ref a non-empty string"
+    if not isinstance(e.get("line", ""), str):
+        return "line must be a string"
     return ""
 
 
@@ -150,9 +154,15 @@ def shape_of_write(e):
         return "fields must be %s (and optionally line, path), in that order" % ", ".join(WRITE_FIELDS)
     if not _name(e["name"]) or e["type"] not in TYPES or not COMMIT.match(str(e["commit"])):
         return "name, type or commit is not valid"
-    want_repo = "dataset-" + e["name"] if e["type"] == "dataset" else "outputs-"
-    if not str(e["repo"]).startswith(want_repo):
-        return "repo must be dataset-<name> for a dataset and outputs-<app> otherwise"
+    if not all(isinstance(e.get(k, ""), str) for k in ("line", "path")):
+        return "line and path must be strings"
+    repo = str(e["repo"])
+    if e["type"] == "dataset":
+        # dataset-<app>-<name>: the app is named in the repository, the ledger does not know it, so only the shape is checked
+        if not (repo.startswith("dataset-") and repo.endswith("-" + e["name"]) and len(repo) > len("dataset-") + len(e["name"]) + 1):
+            return "repo must be dataset-<app>-<name> for a dataset"
+    elif not repo.startswith("outputs-"):
+        return "repo must be outputs-<app> for anything else"
     return ""
 
 
@@ -175,7 +185,7 @@ def shape_of_ledger(v):
 def shape_of_result(v):
     if v == ABSENT:
         return ""
-    if not isinstance(v, dict) or list(v) != RESULT_FIELDS or v["version"] != 1 or v["status"] != "ok":
+    if not isinstance(v, dict) or list(v) != RESULT_FIELDS or type(v["version"]) is not int or v["version"] != 1 or v["status"] != "ok":
         return "a result is {version: 1, status: ok, values, reads, writes} or the sentinel"
     if not isinstance(v["values"], dict) or any(k.startswith("kaos-") for k in v["values"]):
         return "values must be an object without kaos- keys"
@@ -217,7 +227,7 @@ def check_fixtures():
         want(wire.decode("ascii", "replace") == dumps(value), "%s: the .wire file is not its wire form" % name)
         want(json.loads(wire) == value, "%s: the .wire file does not parse back to the fixture" % name)
         want(b"{{" not in wire and all(b < 128 for b in wire), "%s: the wire form holds {{ or a non-ASCII byte" % name)
-        want(not any(c in wire for c in b"&<>"), "%s: the wire form holds &, < or >" % name)
+        want(not any(c in wire for c in b"&<>$"), "%s: the wire form holds &, <, > or $" % name)
         if name.startswith("context-"):
             want(cost(wire.decode("ascii")) <= CONTEXT_CAP, "%s is over the context cap" % name)
             want(not shape_of_context(value), "%s: %s" % (name, shape_of_context(value)))

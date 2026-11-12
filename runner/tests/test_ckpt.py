@@ -64,7 +64,7 @@ class Node:
     def run(self, mode, **env):
         e = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"], KAOS_WORK=str(self.work),
                  KAOS_CKPT_ROOT=str(self.root), KAOS_SCR=str(self.scr), WF_UID=WF, STEP_NAME=STEP, KAOS_ATTEMPT="1",
-                 KAOS_JOB_ID="77", SCONTROL_LOG=str(self.scontrol_log), KAOS_COMMIT="c0ffee12", KAOS_PROJID="201342",
+                 KAOS_JOB_ID="77", SCONTROL_LOG=str(self.scontrol_log), KAOS_LEASES="kaos-commit=c0ffee12", KAOS_PROJID="201342",
                  USER="u1", KAOS_CKPT_BUDGET_PCT="10")
         e.update(env, COMMENT_FILE=str(self.comment_file))
         # The copier runs under the job script's exported kaos_comment, as on the node.

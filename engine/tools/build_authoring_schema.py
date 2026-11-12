@@ -24,22 +24,27 @@ sys.path.insert(0, str(ENGINE))
 def _described(authoring) -> dict[str, dict]:
     """The hand-written part: {option: {type, doc, ...live constraints}}."""
     return {
-        "name": {"type": "string", "pattern": authoring._STEP_NAME_RE.pattern,
-                 "doc": "DNS-label step name: the Argo template, the steps/<dir> folder and the image-<step> parameter."},
+        "name": {"type": "string", "pattern": authoring._STEP_NAME_RE.pattern, "maxLength": authoring.MAX_NAME,
+                 "doc": "DNS-label step name: the step's folder under steps/ and part of its image name."},
+        "kind": {"type": "string", "enum": list(authoring.KINDS),
+                 "doc": "Required. What the step does; the platform labels the step's pod and HPC job with it. "
+                        "ingest, publish and control steps never run on an HPC class."},
         "reads": {"type": "array", "items": "string",
-                  "doc": "Config sections (top-level keys of the config/ tree) the step reads; checked at render."},
-        "gpu": {"type": "boolean", "doc": "The step needs one GPU."},
+                  "doc": "Config sections (top-level keys of the config/ tree) the step reads; checked at render. "
+                         "They are the step's params: it gets these sections and no other."},
+        "inputs": {"type": "array", "items": "string", "pattern": authoring._STEP_NAME_RE.pattern,
+                   "maxLength": authoring.MAX_NAME,
+                   "doc": "Names of the top-level config values that hold a dataset reference. Each is pinned to "
+                          "one commit when the run starts; step code names the input, never a version."},
         "needs": {"type": "array", "items": "step",
-                  "doc": "Steps this one depends on; their declared outputs become inputs of this step."},
-        "outputs": {"type": "array", "items": "string",
-                    "doc": "Names of small result files the step writes to /work/output/<name>.json."},
-        "when": {"type": "string", "doc": "An Argo `when` expression; the step is skipped when it is false."},
-        "disk": {"type": "string", "pattern": authoring._DISK_QUANTITY_RE.pattern,
-                 "doc": "Ephemeral-storage request as a Kubernetes quantity, e.g. '20Gi'."},
-        "hpc_time_limit": {"type": "string", "pattern": authoring._HPC_TIME_LIMIT_RE.pattern,
-                           "doc": "Slurm wall-clock limit of the step when it runs on an HPC class: '90m', '12h' or "
-                                  "'720' (minutes)."},
-        "resumable": {"type": ["boolean", "string"], "pattern": authoring._HPC_TIME_LIMIT_RE.pattern,
+                  "doc": "Steps this one runs after; each one's result reaches this step (kaos_lib.step.upstream)."},
+        "produces": {"type": "array", "items": "produced",
+                     "doc": "What the step writes: model('name'), artifact('name') or dataset('name')."},
+        "gpu": {"type": "boolean", "doc": "The step needs one GPU."},
+        "when": {"type": "string", "doc": "A condition on the run's form values; the step is skipped when it is false."},
+        "walltime": {"type": "string", "pattern": authoring._WALLTIME_RE.pattern,
+                     "doc": "The step's run limit when it runs on an HPC class: '90m', '12h' or '720' (minutes)."},
+        "resumable": {"type": ["boolean", "string"], "pattern": authoring._WALLTIME_RE.pattern,
                       "doc": "True or a lead time ('20m', '1h'): how long before the HPC wall time "
                              "the step is told to save its checkpoint; False opts out.",
                       "true_means": authoring.DEFAULT_RESUMABLE_LEAD},
@@ -54,14 +59,18 @@ def _described(authoring) -> dict[str, dict]:
 
 def build() -> dict:
     from kubecore import authoring
+    from kubecore.step_contract import OLD_APP_MARKER
 
     described = _described(authoring)
     params = []
     for name, p in inspect.signature(authoring.step).parameters.items():
+        if p.kind is inspect.Parameter.VAR_KEYWORD:   # only there to answer a removed keyword with its message
+            continue
         if name not in described:
             raise SystemExit(f"step() option {name!r} has no entry in build_authoring_schema._described")
         default = None if p.default is inspect.Parameter.empty else p.default
-        params.append({"name": name, "required": p.default is inspect.Parameter.empty, "default": default,
+        required = p.default is inspect.Parameter.empty or name == "kind"   # kind= is keyword-only and has no valid default
+        params.append({"name": name, "required": required, "default": default,
                        **described[name]})
     extra = set(described) - {p["name"] for p in params}
     if extra:
@@ -71,13 +80,18 @@ def build() -> dict:
         "function": "kubecore.authoring.step",
         "doc": inspect.getdoc(authoring).split("\n\n")[0],
         "params": params,
+        # Keywords the step contract removed, with the reason the render gives (it fails on them).
+        "removed": dict(authoring._REMOVED_KEYWORDS),
+        "produced": {"model": "a trained model, stored with the run", "artifact": "any other files of the run",
+                     "dataset": "a new version of a dataset this step alone writes"},
+        "old_app_marker": OLD_APP_MARKER,
         "annotations": {
-            "hpc_time_limit": "platform.kubecore.io/hpc",
+            "walltime": authoring.WALLTIME_ANNOTATION,
             "resumable": authoring.HPC_RESUMABLE_ANNOTATION,
             "checkpoint_every": authoring.CHECKPOINT_EVERY_ANNOTATION,
             "idle_timeout": authoring.IDLE_TIMEOUT_ANNOTATION,
         },
-        "constants": {"compose_step": authoring.COMPOSE_STEP, "params_path": authoring.PARAMS_PATH},
+        "constants": {"compose_step": authoring.COMPOSE_STEP},
     }
 
 

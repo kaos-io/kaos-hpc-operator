@@ -38,7 +38,7 @@ var _ = Describe("HPCSite recentJobs", func() {
 		r := &HPCArgoWorkflowJobReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 		for i := range 2 {
 			j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("step-%d", i), Namespace: envNS},
-				Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: 240}}
+				Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: 240}}
 			Expect(k8sClient.Create(ctx, j)).To(Succeed())
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(j)})
 			Expect(err).NotTo(HaveOccurred())

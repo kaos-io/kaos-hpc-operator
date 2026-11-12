@@ -29,7 +29,7 @@ func recentSite() *hpcv1alpha1.HPCSite {
 func recentJob(name string, age time.Duration, phase hpcv1alpha1.Phase) hpcv1alpha1.HPCArgoWorkflowJob {
 	return hpcv1alpha1.HPCArgoWorkflowJob{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "p-train", CreationTimestamp: metav1.NewTime(recentT0.Add(-age))},
-		Spec:       hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", WallTimeMinutes: 60, StepName: name},
+		Spec:       hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", WallTimeMinutes: 60, StepName: name},
 		Status:     hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: phase},
 	}
 }

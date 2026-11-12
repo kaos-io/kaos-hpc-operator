@@ -64,14 +64,15 @@ def tree(tmp_path, monkeypatch):
     (cfg / "model" / "small.yaml").write_text("size: 8\n")
     (cfg / "model" / "named.yaml").write_text("size: tiny\n")
     monkeypatch.setattr(derive_tree, "CONFIG_DIR", cfg)
-    monkeypatch.setattr(derive_tree, "PLATFORM_SEARCHPATH", tmp_path)
     return cfg
 
 
 def resolved(tokens, render_defaults=None):
     """Full compose path; returns the params.yaml text parsed back (the
     downstream steps' view)."""
-    text = compose.compose_and_validate(tokens, render_defaults=render_defaults or {})
+    from omegaconf import OmegaConf
+    config = compose.compose_config(tokens, None, None, render_defaults or {})
+    text = OmegaConf.to_yaml(OmegaConf.create(config), resolve=True)   # what kaosctl's local run reads
     return text, yaml.safe_load(text)
 
 

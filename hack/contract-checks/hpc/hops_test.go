@@ -16,15 +16,12 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
-	"sigs.k8s.io/yaml"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 	"github.com/kaos-io/kaos-hpc-operator/internal/follower"
@@ -51,14 +48,14 @@ func repoRoot(t *testing.T) string {
 
 // largeContext is a step context in wire form of exactly size bytes. Its strings hold what a shell or
 // a template engine could change: quotes, a dollar, backticks, a backslash, a semicolon, spaces.
-func largeContext(t *testing.T, size int) string {
+func largeContext(t *testing.T, cost int) string {
 	t.Helper()
 	head := `{"version":1,"run":"contract-4","app":"hera-demo","project":"vision","step":"train","kind":"train",` +
 		`"experiment":"it's $HOME ` + "`x`" + ` ; done \\n \"q\" ` +
 		`\u007b\u007bworkflow.name\u007d\u007d","params":{"blob":"`
-	tail := `"},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[],
-		"upstream":{"prepare":{"version":1,"status":"absent"}}}`
-	fill := size - len(head) - len(tail)
+	tail := `"},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[],` +
+		`"upstream":{"prepare":{"version":1,"status":"absent"}}}`
+	fill := cost - follower.Cost(head+tail)
 	var b strings.Builder
 	h := "contract-4"
 	for b.Len() < fill {
@@ -68,8 +65,8 @@ func largeContext(t *testing.T, size int) string {
 	}
 	text := head + b.String()[:fill] + tail
 	var parsed map[string]any
-	if err := json.Unmarshal([]byte(text), &parsed); err != nil || len(text) != size {
-		t.Fatalf("the test context is not %d bytes of JSON: %d bytes, %v", size, len(text), err)
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil || follower.Cost(text) != cost {
+		t.Fatalf("the test context does not cost %d as JSON: it costs %d, %v", cost, follower.Cost(text), err)
 	}
 	return text
 }
@@ -79,56 +76,17 @@ func sha(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// crdsWithContractFields loads the repository's definitions and adds the contract's fields to the HPC
-// job: spec.context, spec.app, status.result (section 8). Nothing else of the definition changes, so
-// its other rules (the immutable spec among them) are checked with the large field in place.
-func crdsWithContractFields(t *testing.T, root string) []*apiextensionsv1.CustomResourceDefinition {
-	t.Helper()
-	files, err := filepath.Glob(filepath.Join(root, "config", "crd", "bases", "*.yaml"))
-	if err != nil || len(files) == 0 {
-		t.Fatalf("no definitions under config/crd/bases: %v", err)
-	}
-	out := make([]*apiextensionsv1.CustomResourceDefinition, 0, len(files))
-	patched := false
-	for _, f := range files {
-		raw, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		crd := &apiextensionsv1.CustomResourceDefinition{}
-		if err := yaml.Unmarshal(raw, crd); err != nil {
-			t.Fatalf("%s: %v", f, err)
-		}
-		if crd.Spec.Names.Kind == "HPCArgoWorkflowJob" {
-			schema := crd.Spec.Versions[0].Schema.OpenAPIV3Schema
-			spec := schema.Properties["spec"]
-			spec.Properties["context"] = apiextensionsv1.JSONSchemaProps{Type: "string",
-				MaxLength: ptr.To(int64(contextCap))}
-			spec.Properties["app"] = apiextensionsv1.JSONSchemaProps{Type: "string", MaxLength: ptr.To(int64(55))}
-			schema.Properties["spec"] = spec
-			status := schema.Properties["status"]
-			status.Properties["result"] = apiextensionsv1.JSONSchemaProps{Type: "string",
-				MaxLength: ptr.To(int64(resultCap))}
-			schema.Properties["status"] = status
-			patched = true
-		}
-		out = append(out, crd)
-	}
-	if !patched {
-		t.Fatal("the HPCArgoWorkflowJob definition was not found")
-	}
-	return out
-}
-
 func TestA96KiBContextSurvivesEveryHop(t *testing.T) {
 	root := repoRoot(t)
 	value := largeContext(t, contextCap)
-	t.Logf("the context: %d bytes, sha256 %s", len(value), sha(value))
+	t.Logf("the context: it costs %d (the cap), %d bytes, sha256 %s", follower.Cost(value), len(value), sha(value))
 
-	env := &envtest.Environment{CRDs: crdsWithContractFields(t, root), ErrorIfCRDPathMissing: true}
+	// The repository's own definitions, as the chart installs them.
+	env := &envtest.Environment{CRDDirectoryPaths: []string{filepath.Join(root, "config", "crd", "bases")},
+		ErrorIfCRDPathMissing: true}
 	cfg, err := env.Start()
 	if err != nil {
-		t.Fatalf("the API server did not take the definitions with the contract's fields: %v", err)
+		t.Fatalf("the API server did not take the definitions: %v", err)
 	}
 	defer func() { _ = env.Stop() }()
 	s := runtime.NewScheme()
@@ -176,12 +134,6 @@ func followerToJobObject(
 	}
 	job = &unstructured.Unstructured{Object: obj}
 	job.SetGroupVersionKind(hpcv1alpha1.GroupVersion.WithKind("HPCArgoWorkflowJob"))
-	if err := unstructured.SetNestedField(job.Object, followerEnv[contextEnv], "spec", "context"); err != nil {
-		t.Fatal(err)
-	}
-	if err := unstructured.SetNestedField(job.Object, "hera-demo", "spec", "app"); err != nil {
-		t.Fatal(err)
-	}
 	if err := c.Create(ctx, job, client.FieldValidation("Strict")); err != nil {
 		t.Fatalf("hop 1, follower to job object: the API server refused the job: %v", err)
 	}
@@ -210,12 +162,14 @@ func capsOfTheDefinition(
 	over := job.DeepCopy()
 	over.SetName("hpc-over-the-cap")
 	over.SetResourceVersion("")
-	_ = unstructured.SetNestedField(over.Object, value+" ", "spec", "context")
+	// The follower refuses by cost before this; the definition is the last line and counts characters.
+	tooLong := value + strings.Repeat(" ", contextCap+1-len(value))
+	_ = unstructured.SetNestedField(over.Object, tooLong, "spec", "context")
 	if err := c.Create(ctx, over, client.FieldValidation("Strict")); err == nil {
 		t.Fatal("a context one byte over the cap was accepted")
 	} else {
 		t.Logf("PASS  a context of %d bytes is refused by the job definition: "+
-			"%s", len(value)+1, firstLine(err.Error()))
+			"%s", len(tooLong), firstLine(err.Error()))
 	}
 
 	// The spec stays immutable with the large field in it (the rule compares the whole spec).
@@ -239,10 +193,10 @@ func capsOfTheDefinition(
 		t.Fatalf("status.result of %d bytes was refused: %v", len(result), err)
 	}
 	t.Logf("PASS  status.result takes a result of %d bytes", len(result))
-	tooLong := withResult.DeepCopy()
-	_ = unstructured.SetNestedField(tooLong.Object, head+strings.Repeat("r",
+	longResult := withResult.DeepCopy()
+	_ = unstructured.SetNestedField(longResult.Object, head+strings.Repeat("r",
 		resultCap-len(head)-len(tail)+1)+tail, "status", "result")
-	if err := c.Status().Update(ctx, tooLong); err == nil {
+	if err := c.Status().Update(ctx, longResult); err == nil {
 		t.Fatalf("status.result of %d bytes was accepted", len(result)+1)
 	} else {
 		t.Logf("PASS  status.result of %d bytes is refused by the job definition: "+
@@ -275,10 +229,6 @@ func jobObjectToRunnerJob(
 	if err != nil {
 		t.Fatal(err)
 	}
-	// What the controller will add for the contract: the job's context, under the same name.
-	stored2, _, _ := unstructured.NestedString(stored.Object, "spec", "context")
-	rj.Spec.Template.Spec.Containers[0].Env = append(rj.Spec.Template.Spec.Containers[0].Env,
-		corev1.EnvVar{Name: contextEnv, Value: stored2})
 	if err := c.Create(ctx, rj); err != nil {
 		t.Fatalf("hop 2, job object to runner Job: the API server refused the runner Job: %v", err)
 	}

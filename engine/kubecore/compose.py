@@ -2,10 +2,10 @@
 
 Invoked in-cluster as `python -m kubecore.compose`. Takes Hydra override
 tokens (argv) plus the optional ADVANCED override YAML, composes the config
-tree + overrides via the Hydra Compose API, validates, and emits the single
-resolved params.yaml that determines the entire experiment. Downstream steps
-receive this file's content as an input parameter; they never see override
-tokens.
+tree + overrides via the Hydra Compose API, validates, pins every declared
+input, and writes each step's context (docs/step-contract.md): the resolved
+configuration, the step's inputs at their commit, and what it produces.
+Downstream steps receive that one value; they never see override tokens.
 
 Override semantics (group swap vs touched leaves):
 - GROUP tokens (key contains '/', or names a top-level config/<group>/
@@ -30,21 +30,33 @@ Failure modes concentrated here, all before any GPU time:
                                    ComposeError for an int/float/bool leaf
 - step reads= section missing   -> --require check below
 - ADVANCED override with unknown keys -> struct-mode merge rejects it
-- ADVANCED override touching platform.* -> hard error (below)
-- params.yaml too large         -> explicit size check (>200KB)
-- a data input a step reads does not resolve (no such dataset or version, lakeFS
-  unreachable, no credentials)  -> hard error naming the form field (below)
+- a declared input that does not resolve (empty, no such dataset or version,
+  lakeFS unreachable, no credentials) -> hard error naming the input (below)
+- the ADVANCED override is over 16 KiB, or a dataset reference has a version over 255 characters or a
+  repository id over 63 -> hard error
+- the app's config uses a resolver, or defines a key the platform reserves -> hard error naming it
+- a step's context is over its size cap -> hard error naming the step,
+  the size and the limit
 
-The run's data lock: every data input a step reads (today the `dataset` leaf, when a
-step declares reads=["dataset"]) is resolved ONCE here, with kaos-lib, to a commit,
-and written as --lock-output in kaos-lib's lock format. Every step receives it as
-$KAOS_LIB_LOCK, an HPC step as its job's dataset commit, so the whole run reads one
-commit whatever happens to the dataset meanwhile. Nothing is skipped: a reference
-that cannot be resolved fails the run here. --offline (for a laptop without the
-platform; never in a rendered pipeline) resolves nothing and writes an empty lock.
+Pinned inputs: every config value a step names in inputs= holds a dataset reference
+(`<dataset>@<version>`; no version means `latest`, the head of the dataset's `main`).
+Each is resolved ONCE here, with kaos-lib, to a commit. The step's context carries its
+own inputs as a ledger (version 2, named reads), and --ledger-output holds all of them:
+the first part of the run's ledger. The whole run reads those commits whatever happens
+to a dataset meanwhile. Nothing is skipped: a reference that cannot be resolved fails
+the run here.
+
+Config never reads the environment: a value that uses a resolver (`${oc.env:NAME}`) is refused, and the
+config is resolved with an empty environment besides, because this pod holds the platform's credentials.
+
+The run's own keys: the ADVANCED override may carry `plan`, which the platform reads
+and the app's config never defines. `plan.promote.<dataset>: true` asks the run to
+promote the dataset it produces; the step that produces it finds `promote` on that
+entry of its context.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -57,12 +69,28 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from omegaconf.nodes import BooleanNode, EnumNode, FloatNode, IntegerNode, StringNode
 
 from kubecore import derive_tree
+from kubecore.step_contract import (
+    CONTEXT_CAP,
+    CONTEXT_VERSION,
+    DATASET_PREFIX,
+    LEDGER_VERSION,
+    MAX_OVERRIDE,
+    MAX_REF_VERSION,
+    MAX_REPO,
+    RESERVED_CONFIG_KEYS,
+    RESULT_CAP,
+    base_context_cap,
+    base_cost,
+    cost,
+    dataset_name_problem,
+    produced_repo,
+    wire,
+)
 
-MAX_PARAMS_BYTES = 200 * 1024
-DATASET_FIELD = "dataset"          # the top-level config leaf and form field that names the run's dataset
-EMPTY_LOCK = '{"version":1,"reads":[]}'
-NO_PIN = "{}"   # the dataset pin of a run without a dataset: never an empty value (an empty output parameter is
-                # the one thing a workflow engine may treat as "not set")
+LATEST = "latest"                  # no version asked: the head of the dataset's main when the run starts
+EXPERIMENT_SECTION = "experiment"  # config `experiment.name` names the run's experiment
+PLAN_KEY = "plan"                  # the run's own key in the ADVANCED override
+PLAN_PROMOTE = "promote"           # plan.promote.<dataset>: true
 STEP_IMAGES_ENV = "KAOS_STEP_IMAGES"   # {"<step>": "<the image the run resolved for it>"}, set by the enhancer
 # registry[:port]/repository[/...] then :tag or @digest. A reference without a registry and a repository is what
 # the image record holds for a step whose image was never built (":<step>-latest").
@@ -70,8 +98,6 @@ STEP_IMAGES_ENV = "KAOS_STEP_IMAGES"   # {"<step>": "<the image the run resolved
 _IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?(/[A-Za-z0-9][A-Za-z0-9._-]*)+"
                         r"(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}(@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})\Z")
 
-HERE = Path(__file__).parent  # kubecore/
-DEFAULT_OUTPUT = HERE.parent / "out" / "params.yaml"
 
 
 class ComposeError(Exception):
@@ -242,9 +268,9 @@ def order_overrides(overrides: list, render_defaults: dict, base_cfg=None) -> li
 
 
 def _plain(value):
-    """Enum members (from structured schemas) -> their plain values."""
+    """Enum members (from structured schemas) -> their plain values; keys -> text (the context is JSON)."""
     if isinstance(value, dict):
-        return {k: _plain(v) for k, v in value.items()}
+        return {k if isinstance(k, str) else str(k): _plain(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_plain(v) for v in value]
     if isinstance(value, Enum):
@@ -252,33 +278,79 @@ def _plain(value):
     return value
 
 
-def compose_and_validate(overrides: list, advanced: str = "", required: list = None,
-                         render_defaults: dict = None) -> str:
-    """Returns the resolved params.yaml text."""
+def split_plan(advanced: str) -> tuple:
+    """(the ADVANCED override without the run's own keys, the run's plan).
+
+    `plan` and `pipeline-version` are the platform's: they aim the run and are never part of the app's
+    config, so they are taken out before the override is merged into it. Only what this platform version
+    acts on is accepted: a key it would silently ignore fails the run instead.
+    """
+    if len(advanced.encode()) > MAX_OVERRIDE:
+        raise ComposeError("the override is too large; put the values in the app's config")
+    parsed = yaml.safe_load(advanced) if advanced.strip() else None
+    if not isinstance(parsed, dict):
+        return parsed, {}
+    for key in RESERVED_CONFIG_KEYS:
+        if key != PLAN_KEY and key in parsed:
+            raise ComposeError(f"'{key}' is reserved for the platform and is not available yet; remove it "
+                               f"from the ADVANCED override")
+    plan = parsed.pop(PLAN_KEY, None)
+    if plan is None:
+        return parsed, {}
+    if not isinstance(plan, dict):
+        raise ComposeError(f"'{PLAN_KEY}' must be a mapping, for example {PLAN_KEY}: {{{PLAN_PROMOTE}: {{<dataset>: true}}}}")
+    unknown = sorted(str(k) for k in plan if k != PLAN_PROMOTE)
+    if unknown:
+        raise ComposeError(f"'{PLAN_KEY}.{unknown[0]}' is reserved for the platform and is not available yet; "
+                           f"this version reads {PLAN_KEY}.{PLAN_PROMOTE}.<dataset> only")
+    promote = plan.get(PLAN_PROMOTE) or {}
+    refusal = ComposeError(f"'{PLAN_KEY}.{PLAN_PROMOTE}' must map a produced dataset to true or false, for example "
+                           f"{PLAN_KEY}: {{{PLAN_PROMOTE}: {{<dataset>: true}}}}")
+    if not isinstance(promote, dict):
+        raise refusal
+    flags = {}
+    for name, value in promote.items():
+        if isinstance(value, str) and value.lower() in ("true", "false"):   # any letter case
+            value = value.lower() == "true"
+        if not isinstance(value, bool):
+            raise refusal
+        flags[str(name)] = value
+    return parsed, {PLAN_PROMOTE: flags}
+
+
+@contextlib.contextmanager
+def _no_environment():
+    """The config is resolved with an empty environment. The compose pod holds the platform's credentials
+    (the lake's key pair among them); whatever a config value might do, it cannot read them here. The
+    environment is back when the block ends: the run's inputs are pinned with it."""
+    saved = dict(os.environ)
+    os.environ.clear()
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def compose_config(overrides: list, advanced=None, required: list = None, render_defaults: dict = None) -> dict:
+    """The resolved config as plain values. `advanced` is the ADVANCED override, parsed (split_plan)."""
     cfg = derive_tree.compose_tree(order_overrides(overrides, render_defaults or {}))
 
-    if advanced.strip():
-        parsed = yaml.safe_load(advanced)
-        if isinstance(parsed, dict) and "platform" in parsed:
-            raise ComposeError("ADVANCED override may not modify platform.*")
+    if advanced:
         # ADVANCED override merged LAST. Struct mode: unknown keys fail.
-        cfg = OmegaConf.merge(cfg, OmegaConf.create(parsed))
+        cfg = OmegaConf.merge(cfg, OmegaConf.create(advanced))
 
-    resolved = _plain(OmegaConf.to_container(cfg, resolve=True))
+    derive_tree.refuse_resolvers(OmegaConf.to_container(cfg, resolve=False))
+    with _no_environment():
+        resolved = _plain(OmegaConf.to_container(cfg, resolve=True))
+    derive_tree.refuse_reserved_keys(resolved)
     for section in required or []:
         if section not in resolved:
             raise ComposeError(
                 f"a step declares reads=['{section}'] but the composed config has no "
                 f"'{section}' section (top-level sections: {', '.join(resolved)})"
             )
-
-    text = OmegaConf.to_yaml(OmegaConf.create(resolved), resolve=True)
-    if len(text.encode()) > MAX_PARAMS_BYTES:
-        raise ComposeError(
-            f"resolved params.yaml is {len(text.encode())} bytes — exceeds the "
-            f"{MAX_PARAMS_BYTES}-byte Argo parameter budget; move bulk data out of config"
-        )
-    return text
+    return resolved
 
 
 def check_step_images(raw) -> None:
@@ -309,76 +381,163 @@ def check_step_images(raw) -> None:
 
 
 _COMMIT = re.compile(r"^[0-9a-f]{64}$")
-DATASET_PREFIX = "dataset-"   # a platform Dataset is a repository named dataset-<name>
 LAKEFS_TIMEOUT_S = 30     # per request; kaos-lib retries a failing GET a few times, so a dead lakeFS ends the run in minutes
 
 
 def _kaos_lib():
-    """kaos-lib's datasets and lock modules and a lakeFS client with a short per-request timeout."""
+    """kaos-lib's datasets module and a lakeFS client with a short per-request timeout."""
     try:
-        from kaos_lib import datasets, lock
+        from kaos_lib import datasets
         from kaos_lib.lakefs import LakeFS
     except ImportError as exc:
-        raise ComposeError(f"{DATASET_FIELD}: cannot resolve the dataset: kaos-lib is not installed in the "
-                           f"compose image ({exc}). The platform's compose image installs it.") from None
-    # A lock in this pod's own environment would be REPLAYED by kaos-lib: the resolve below would return its
-    # commit without asking lakeFS. This step is the one that decides the commit, so it never replays one.
-    os.environ.pop("KAOS_LIB_LOCK", None)
-    lock.reset()
+        raise ComposeError(f"cannot resolve the run's inputs: kaos-lib is not installed in the compose image "
+                           f"({exc}). The platform's compose image installs it.") from None
     try:
         client = LakeFS.connect()
         client.timeout = LAKEFS_TIMEOUT_S
     except Exception as exc:   # no endpoint or no credentials: the run cannot read its data either
-        raise ComposeError(f"{DATASET_FIELD}: cannot reach the project's data: {exc}") from None
-    return datasets, lock, client
+        raise ComposeError(f"cannot reach the project's data: {exc}") from None
+    return datasets, client
 
 
-def data_lock(resolved: dict, required: list, offline: bool = False, datasets=None, lock=None, client=None) -> tuple:
-    """(the run's data lock, the run's dataset pin, the dataset reference as the lock holds it); the first two
-    are JSON text, the third is "" when nothing was pinned.
+def pin_inputs(resolved: dict, steps: list, datasets=None, client=None) -> dict:
+    """{input name: its ledger read} for every input a step declares, each resolved once to a commit.
 
-    The lock (kaos-lib's format) holds the commit of every data input a step reads; every step gets it as
-    $KAOS_LIB_LOCK. The pin is the same fact for the run's dataset as one object,
-    `{"repo", "version", "commit", "owner"}` (`{}` when the run has none): an HPC step's job is created from it,
-    so a cluster step and an HPC step can never disagree about what the run reads. The reference is what the
-    caller writes into the params every step reads, so a step always asks the lock in the form the lock holds.
-
-    `resolved` is the composed config, `required` the sections steps declared with reads=. Only a `dataset`
-    some step reads is resolved, and only when it is a string: a config that carries a `dataset` no step reads,
-    or a `dataset` section that is a mapping of the app's own settings, costs nothing and cannot fail the run.
-    `datasets`/`lock`/`client` default to kaos-lib's (tests pass their own).
+    An input is the name of a top-level config value that holds a dataset reference,
+    `[<project>/]dataset-<name>[@<version>]`. The version comes from the run's config (the form), never
+    from step code; without one it is `latest`, the head of the dataset's `main` now. Anything that cannot
+    be pinned ends the run here, naming the input: an empty value, a value that is no reference, a dataset
+    or version that does not exist, a store that does not answer. `datasets`/`client` default to kaos-lib's
+    (tests pass their own).
     """
-    wanted = resolved.get(DATASET_FIELD) if DATASET_FIELD in (required or []) else None
-    if offline or wanted is None or (isinstance(wanted, str) and not wanted.strip()):
-        return EMPTY_LOCK, NO_PIN, ""
-    if not isinstance(wanted, str):
-        print(f"compose-and-validate: `{DATASET_FIELD}` is not a <dataset>@<version> string: nothing is pinned for "
-              "this run", file=sys.stderr)
-        return EMPTY_LOCK, NO_PIN, ""
-    if datasets is None or lock is None:
-        datasets, lock, client = _kaos_lib()
+    names = [name for step in steps for name in step["inputs"]]
+    names = list(dict.fromkeys(names))
+    if not names:
+        return {}
+    reads = {}
+    for name in names:
+        users = ", ".join(step["name"] for step in steps if name in step["inputs"])
+        wanted = resolved.get(name)
+        if not isinstance(wanted, str) or not wanted.strip():
+            raise ComposeError(
+                f"input '{name}' (step {users}): the config value '{name}' is "
+                f"{'empty' if wanted in (None, '') or isinstance(wanted, str) else 'not a dataset reference'}. "
+                f"Pick a dataset and a version for '{name}' on the form, for example dataset-default@{LATEST}")
+        wanted = wanted.strip()
+        reference, _, version = wanted.partition("@")
+        repo = reference.rpartition("/")[2]
+        if len(version) > MAX_REF_VERSION or len(repo) > MAX_REPO:
+            raise ComposeError(
+                f"input '{name}' (step {users}): the reference is not valid: "
+                + (f"the version is {len(version)} characters, at most {MAX_REF_VERSION}" if len(version) > MAX_REF_VERSION
+                   else f"the repository id '{repo}' is {len(repo)} characters, at most {MAX_REPO}"))
+        if datasets is None:
+            datasets, client = _kaos_lib()
+        try:
+            ref = datasets.DatasetRef.parse(wanted if "@" in wanted else f"{wanted}@{LATEST}")
+            if not str(ref.repo).startswith(DATASET_PREFIX):
+                raise ValueError(f"{ref.repo} is not a dataset: a dataset is a repository named {DATASET_PREFIX}<name> "
+                                 f"(for example {DATASET_PREFIX}default@{LATEST})")
+            ref, source = datasets.source(ref, client)   # an owner that is the run's own project is dropped
+            commit = datasets.resolve(ref, source)
+        except Exception as exc:   # no such dataset or version, lakeFS unreachable, no credentials: all end the run
+            raise ComposeError(f"input '{name}' (step {users}): cannot use {wanted!r}: {exc}") from None
+        if not isinstance(commit, str) or not _COMMIT.match(commit):
+            raise ComposeError(f"input '{name}' (step {users}): cannot use {wanted!r}: the data store answered "
+                               f"with {commit!r} where a commit id was expected")
+        reads[name] = {"name": name, "repo": ref.repo, "owner": ref.owner or None, "ref": ref.version,
+                       "commit": commit}
+    return reads
+
+
+def ledger(reads: list) -> dict:
+    """A ledger as compose writes it: the pinned reads, and no writes yet."""
+    return {"version": LEDGER_VERSION, "reads": reads, "writes": []}
+
+
+def experiment_of(resolved: dict, app: str) -> str:
+    """The experiment a run belongs to: config `experiment.name`, else the app's name."""
+    section = resolved.get(EXPERIMENT_SECTION)
+    name = section.get("name") if isinstance(section, dict) else None
+    return name.strip() if isinstance(name, str) and name.strip() else app
+
+
+def step_params(step: dict, resolved: dict) -> dict:
+    """What a step gets of the run's config: the sections it names in reads=, in that order."""
+    return {section: resolved[section] for section in step["reads"] if section in resolved}
+
+
+def base_context(step: dict, run: str, app: str, project: str, experiment: str, params: dict, reads: dict,
+                 promote: dict = None) -> dict:
+    """A step's context without `upstream` (the DAG task argument adds it), in the contract's field order.
+    `params` is the step's own (step_params)."""
+    produces = []
+    for entry in step["produces"]:
+        produced = {"name": entry["name"], "type": entry["type"],
+                    "repo": produced_repo(app, entry["type"], entry["name"])}
+        if entry["type"] == "dataset" and (promote or {}).get(entry["name"]):
+            produced["promote"] = True
+        produces.append(produced)
+    return {
+        "version": CONTEXT_VERSION, "run": run, "app": app, "project": project, "step": step["name"],
+        "kind": step["kind"], "experiment": experiment, "params": params,
+        "ledger": ledger([reads[name] for name in step["inputs"] if name in reads]),
+        "produces": produces,
+    }
+
+
+def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict, reads: dict,
+                  plan: dict = None) -> dict:
+    """{step: its base context in wire form}, each within its cap.
+
+    `params` holds the config sections the step names in reads=. The cap is checked on the real text,
+    before any step starts: a step's context may cost
+    96 KiB less one full result (8 KiB) for each step it needs, so whatever those steps hand back, the
+    step's definition stays under what a pod accepts and the step starts.
+    """
+    for step in steps:
+        for entry in step["produces"]:
+            problem = entry["type"] == "dataset" and dataset_name_problem(app, step["name"], entry["name"])
+            if problem:
+                raise ComposeError(problem)
+    promote = dict((plan or {}).get(PLAN_PROMOTE) or {})
+    produced = {e["name"] for step in steps for e in step["produces"] if e["type"] == "dataset"}
+    unknown = sorted(set(promote) - produced)
+    if unknown:
+        raise ComposeError(f"{PLAN_KEY}.{PLAN_PROMOTE}.{unknown[0]}: no step of this pipeline produces the dataset "
+                           f"'{unknown[0]}' (it produces: {', '.join(sorted(produced)) or 'none'})")
+    experiment = experiment_of(resolved, app)
+    out = {}
+    for step in steps:
+        try:
+            params = step_params(step, resolved)
+            text = wire(base_context(step, run, app, project, experiment, params, reads, promote))
+        except (TypeError, ValueError) as exc:   # a value JSON cannot hold (inf, nan)
+            raise ComposeError(f"the resolved config cannot be handed to the steps: {exc}") from None
+        cap, size = base_context_cap(len(step["needs"])), base_cost(text, step["needs"])
+        if size > cap:
+            raise ComposeError(
+                f"step '{step['name']}': its context costs {size} bytes; the limit is {cap} "
+                f"({CONTEXT_CAP} less {RESULT_CAP} for each of the {len(step['needs'])} steps it needs). The config "
+                f"sections it reads ({', '.join(params) or 'none'}) are {cost(wire(params))} of them. Move large "
+                f"values out of the config into a dataset or an artifact, or read fewer sections")
+        out[step["name"]] = text
+    return out
+
+
+def _steps(raw: str) -> list:
+    """The pipeline's steps as authoring wrote them into --steps."""
     try:
-        ref = datasets.DatasetRef.parse(wanted)
-        if not str(ref.repo).startswith(DATASET_PREFIX):
-            raise ValueError(f"{ref.repo} is not a dataset: a dataset is a repository named {DATASET_PREFIX}<name> "
-                             f"(for example {DATASET_PREFIX}default@latest)")
-        commit = datasets.resolve(ref, client)
-    except Exception as exc:   # no such dataset or version, lakeFS unreachable, no credentials: all end the run
-        raise ComposeError(f"{DATASET_FIELD}: cannot use {wanted!r}: {exc}") from None
-    if not isinstance(commit, str) or not _COMMIT.match(commit):
-        raise ComposeError(f"{DATASET_FIELD}: cannot use {wanted!r}: the data store answered with {commit!r} "
-                           "where a commit id was expected")
-    reads = json.loads(lock.current().to_json()).get("reads") or []
-    read = next((r for r in reads if r.get("repo") == ref.repo and r.get("ref") == ref.version
-                 and r.get("commit") == commit), None)
-    if read is None:
-        raise ComposeError(f"{DATASET_FIELD}: cannot use {wanted!r}: resolving it recorded no read "
-                           f"(the lock holds {reads!r})")
-    text = lock.current().to_json()
-    pin = json.dumps({"repo": read["repo"], "version": read["ref"], "commit": commit,
-                      "owner": read.get("owner") or ""}, separators=(",", ":"))
-    canonical = f"{read['owner']}/{read['repo']}@{read['ref']}" if read.get("owner") else f"{read['repo']}@{read['ref']}"
-    return text, pin, canonical
+        steps = json.loads(raw)
+        if not isinstance(steps, list) or not all(
+                isinstance(s, dict) and isinstance(s.get("name"), str) and isinstance(s.get("kind"), str)
+                and isinstance(s.get("reads"), list)
+                and isinstance(s.get("needs"), list)
+                and isinstance(s.get("inputs"), list) and isinstance(s.get("produces"), list) for s in steps):
+            raise ValueError("not a list of steps")
+    except ValueError as exc:
+        raise ComposeError(f"cannot read the pipeline's steps (--steps: {exc})") from None
+    return steps
 
 
 def main(argv=None) -> None:
@@ -388,36 +547,34 @@ def main(argv=None) -> None:
                         help="Top-level section a step declared via reads= (repeatable).")
     parser.add_argument("--render-defaults", default="{}",
                         help="JSON manifest {override_key: render-time default} for elision.")
-    parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
-    parser.add_argument("--lock-output", default="",
-                        help="Where to write the run's data lock (JSON). Without it nothing is resolved.")
-    parser.add_argument("--pin-output", default="",
-                        help="Where to write the run's dataset pin (JSON, empty when the run has no dataset).")
-    parser.add_argument("--offline", action="store_true",
-                        help="Resolve nothing and write an empty data lock (a laptop without the platform).")
+    parser.add_argument("--output", default="",
+                        help="Where to write the composed config as YAML (kaosctl's local run reads it); "
+                             "nothing is written without it.")
+    parser.add_argument("--steps", default="",
+                        help="The pipeline's steps (JSON): name, kind, reads, inputs, needs, produces. With it, every step's "
+                             "context is written; --run, --app, --project and --context-dir are then required.")
+    parser.add_argument("--run", default="", help="The run's name.")
+    parser.add_argument("--app", default="", help="The app.")
+    parser.add_argument("--project", default="", help="The project.")
+    parser.add_argument("--context-dir", default="", help="Where to write each step's context: <dir>/<step>.json.")
+    parser.add_argument("--ledger-output", default="", help="Where to write the run's ledger: every pinned input.")
     parser.add_argument("overrides", nargs="*", help="Hydra override tokens (key=value).")
     args = parser.parse_args(argv)
+    if args.steps:
+        missing = [flag for flag, value in (("--run", args.run), ("--app", args.app), ("--project", args.project),
+                                            ("--context-dir", args.context_dir)) if not value]
+        if missing:
+            parser.error(f"--steps needs {', '.join(missing)}")
 
+    contexts, reads = {}, {}
     try:
         check_step_images(os.environ.get(STEP_IMAGES_ENV))
-        text = compose_and_validate(
-            args.overrides, args.advanced, args.require, json.loads(args.render_defaults)
-        )
-        lock_text, pin_text = EMPTY_LOCK, NO_PIN
-        if args.lock_output or args.pin_output:
-            if args.offline:
-                print("compose-and-validate: OFFLINE - no data input was resolved; the data lock is empty",
-                      file=sys.stderr)
-            resolved = yaml.safe_load(text) or {}
-            lock_text, pin_text, canonical = data_lock(resolved, args.require, args.offline)
-            if canonical and resolved.get(DATASET_FIELD) != canonical:
-                # A reference that names the own project as owner resolves, and is locked, without one. Every
-                # step reads the dataset from these params: they get the reference exactly as the lock holds
-                # it, so the lock always answers, on a cluster and on HPC alike.
-                print(f"compose-and-validate: {DATASET_FIELD} {resolved[DATASET_FIELD]!r} is {canonical!r} for this run",
-                      file=sys.stderr)
-                resolved[DATASET_FIELD] = canonical
-                text = OmegaConf.to_yaml(OmegaConf.create(resolved), resolve=True)
+        advanced, plan = split_plan(args.advanced)
+        resolved = compose_config(args.overrides, advanced, args.require, json.loads(args.render_defaults))
+        if args.steps:
+            steps = _steps(args.steps)
+            reads = pin_inputs(resolved, steps)
+            contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, plan)
     except Exception as exc:  # any composition failure = hard error, pre-GPU
         message = str(exc)
         if exc.__cause__ is not None:  # e.g. enum ValidationError inside Hydra's wrapper
@@ -425,15 +582,23 @@ def main(argv=None) -> None:
         print(f"compose-and-validate FAILED: {message}", file=sys.stderr)
         sys.exit(1)
 
-    out = Path(args.output)
-    out.parent.mkdir(exist_ok=True)
-    out.write_text(text)
-    print(f"wrote {out} ({len(text.encode())} bytes)")
-    for target, body in ((args.lock_output, lock_text), (args.pin_output, pin_text)):
-        if target:
-            Path(target).parent.mkdir(exist_ok=True)
-            Path(target).write_text(body)
-            print(f"wrote {target} ({body})")
+    if args.output:
+        text = OmegaConf.to_yaml(OmegaConf.create(resolved), resolve=True)
+        out = Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text)
+        print(f"wrote {out} ({len(text.encode())} bytes)")
+    for name, read in reads.items():
+        print(f"input {name}: {read['repo']}@{read['ref']} is commit {read['commit']}")
+    for step, body in contexts.items():
+        target = Path(args.context_dir) / f"{step}.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body)
+        print(f"wrote {target} ({len(body)} bytes)")
+    if args.ledger_output:
+        Path(args.ledger_output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.ledger_output).write_text(wire(ledger(list(reads.values()))))
+        print(f"wrote {args.ledger_output}")
 
 
 if __name__ == "__main__":

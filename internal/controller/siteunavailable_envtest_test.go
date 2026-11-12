@@ -44,9 +44,9 @@ var _ = Describe("HPCArgoWorkflowJob waits for an unreachable site", func() {
 		seq++
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("hpc-su-%d", seq), Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/app:v1", WallTimeMinutes: 60,
-				Command: []string{"python", "train.py"}, StepName: "train", Outputs: []string{"model"},
-				Env: []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "outputs-app"}}},
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "reg.example/app:v1", WallTimeMinutes: 60,
+				Command: []string{"python", "train.py"}, StepName: "train",
+				Env: []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: "{}"}}},
 		}
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		return j

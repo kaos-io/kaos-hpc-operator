@@ -338,6 +338,9 @@ func (s *Site) chargedLocked(account string, now time.Time) float64 {
 // ---- request handling -------------------------------------------------------------------------
 
 func (s *Site) handle(w http.ResponseWriter, r *http.Request) {
+	if s.dataPlane(w, r) {
+		return
+	}
 	kind := kindOf(r)
 	s.mu.Lock()
 	s.stats.Calls[kind]++

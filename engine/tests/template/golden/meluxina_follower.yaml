@@ -4,10 +4,9 @@ inputs:
   - name: step-name
   - name: image
   - name: step-command
+  - name: step-kind
   - name: time-limit
   - name: deadline-seconds
-  - name: step-outputs
-    value: ''
   - name: hpc-class
   - name: resumable-lead
     value: '0'
@@ -15,28 +14,28 @@ inputs:
     value: auto
   - name: idle-timeout
     value: ''
-  - name: dataset-pin
-    value: '{}'
+  - name: kaos-context
 activeDeadlineSeconds: '{{inputs.parameters.deadline-seconds}}'
 retryStrategy:
   limit: '2'
   retryPolicy: Always
-  expression: lastRetry.status == 'Error' or lastRetry.message matches '.*(imminent
+  expression: (lastRetry.status == 'Error' or lastRetry.message matches '.*(imminent
     node shutdown|node is shutting down|node is draining|The node was low on resource|The
-    node had condition|Pod was rejected|Evicted|evicted|pod deleted|Pod was deleted).*'
+    node had condition|Pod was rejected|Evicted|evicted|pod deleted|Pod was deleted).*')
+    and not (lastRetry.message contains 'kaos-result.json')
 metadata:
   labels:
     platform.kubecore.io/compute-type: hpc
     platform.kubecore.io/hpc-class: '{{inputs.parameters.hpc-class}}'
+    platform.kubecore.io/step-kind: '{{inputs.parameters.step-kind}}'
 outputs:
   parameters:
   - name: slurm-job-id
     valueFrom:
       path: /tmp/slurm-job-id
-  - name: dataset-info
+  - name: kaos-result
     valueFrom:
-      path: /tmp/outputs/dataset-info.json
-      default: '{}'
+      path: /tmp/outputs/kaos-result.json
 container:
   image: registry.example/kaos-hpc-operator:v1.2.3
   command:
@@ -70,17 +69,7 @@ container:
     value: '{{inputs.parameters.idle-timeout}}'
   - name: HPC_MAX_CONTINUATIONS
     value: '5'
-  - name: STEP_OUTPUTS
-    value: '{{inputs.parameters.step-outputs}}'
-  - name: DATASET_PIN
-    value: '{{inputs.parameters.dataset-pin}}'
-  - name: OUTPUTS_REPO
-    value: outputs-PLACEHOLDER-app
-  - name: OUTPUTS_REF
-    value: main
-  - name: CHECKPOINT_BUCKET
-    value: outputs-PLACEHOLDER-app
-  - name: CHECKPOINT_PREFIX
-    value: main/checkpoints
+  - name: KAOS_STEP_CONTEXT
+    value: '{{inputs.parameters.kaos-context}}'
   terminationMessagePolicy: FallbackToLogsOnError
 serviceAccountName: hpc-submitter

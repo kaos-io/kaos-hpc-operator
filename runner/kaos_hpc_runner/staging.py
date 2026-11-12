@@ -2,12 +2,30 @@
 
 The runner stages the pinned dataset commit into the project's Lustre cache from a login node
 before the GPU job is submitted, so the job reads a resident copy instead of downloading on GPU
-time. It talks to the stager the platform installed (~/.kaos/stager.py) through a forced-command key
+time. It talks to the stager the platform installed (~/.kaos/stager-c2.py) through a forced-command key
 that can run nothing else (Secret meluxina-staging: key + verified host pin). The stager names a
 base (its newest ready commit of the repo); the runner lists only the lakeFS diff base..commit, or
-the whole dataset for a first copy, and streams one JSON line per file. Unchanged files are hard
-links of the base. Bytes come from the lakeFS API with the wallet bearer (sent once on stdin, held in
-memory only). Any failure returns '' and the job stages in-job as before, saying so (F-06).
+the whole commit for a first copy, and streams one JSON line per file: every object of the commit,
+whatever the dataset's shape (PRD kaos#1911 F-04). Unchanged files are hard links of the base. Bytes
+come from the lakeFS API with the wallet bearer (sent once on stdin, held in memory only). Any failure
+returns '' and the job stages in-job as before, saying so (F-06), with three exceptions that end the run
+before anything is submitted: no room in the quota (InsufficientQuota), a staging tool that speaks
+another staging contract (StagingMismatch), and a dataset object whose name is reserved for the
+platform (ReservedName).
+
+Names that are not copied. Reserved: the staging tool's half-downloaded files end in `.kaos-part`, beside the
+file they become; a dataset object with such a name would be refused by the staging tool mid-copy. (A copy on
+the site keeps the dataset's files under `<copy>/data/` and every file of the platform beside that folder, so
+no other name of a dataset can collide with one.) Unsafe: a path with a `..`, `.` or empty part, a leading `/` or a NUL byte could be
+written outside the dataset's folder. Too long: no room for the suffix of a half-downloaded file. A file that is
+also a folder (`a` and `a/b`). All are refused here, by name, before anything is copied or submitted (name_rule
+and Names; a zero-byte folder marker such as `docs/` is skipped, not refused):
+every name of the plan when the copy is made from the login node, and every name of the commit when the job is
+about to stage in-job. A `.kaos/` or `.kaos-*` name inside a dataset is staged like any other.
+
+The staging contract (CONTRACT) is what `status` and `stage` mean to the runner and to the staging tool,
+which ship separately. The runner asks the tool for its number (`version`) and sends its own with every
+`status` and `stage`; each side refuses the other on any difference.
 
 `Stager` is also what image staging, log streaming and the tar lease go through.
 """
@@ -27,13 +45,132 @@ import urllib.request
 from . import settings
 
 STAGE_BUDGET_S = 4 * 3600
-EX_RETRY, EX_NOSPACE, EX_USAGE = 75, 76, 2
+EX_RETRY, EX_NOSPACE, EX_USAGE, EX_CONTRACT = 75, 76, 2, 78
+CONTRACT = 2   # 2 = the whole tree of the commit, its files under <copy>/data/; the tool's CONTRACT is the same number
 
 
 class InsufficientQuota(Exception):
     """Staging stopped for want of scratch quota (space or files), after the stager evicted everything
     unused (PRD-HPC-1461 AC-33). The message is a plain sentence for the job's status and the pipeline
     log; the run ends InsufficientQuota instead of the job failing mid-copy on a full quota."""
+
+
+class StagingMismatch(Exception):
+    """The site's staging tool speaks another staging contract than this runner (one of the two was updated
+    first). Nothing is staged with it and the job does not stage in-job either: the run ends StagingMismatch
+    before anything is submitted. The message is a plain sentence for the job's status and the pipeline log."""
+
+
+class ReservedName(Exception):
+    """The dataset commit holds an object whose name cannot be copied to the site: it is reserved for the
+    platform there, or its path could leave the dataset's folder. Nothing is staged and the job does not stage
+    in-job either: the run ends ReservedName before anything is submitted. The message names the dataset, the
+    object and which of the two it is, for the job's status and the pipeline log."""
+
+
+def name_rule(path, size=0):
+    """Why a dataset object is not copied under its own name, or '' when it is.
+
+    ONE RULE IN THREE PLACES, kept the same line for line and tested against one table
+    (hack/staging-contract/names.json, and next to the staging tool):
+      here                                           runner/kaos_hpc_runner/staging.py           name_rule
+      this repository                                runner/kaos_hpc_runner/payload/stagein.py   name_rule
+      novelcore/kubecore-operator  images/meluxina-tokenmint/stager/stager.py                    name_rule
+    Here it is applied before anything is staged or submitted (ReservedName); the other two are the second line.
+
+      'marker'    a zero-byte object whose name ends in "/": a folder marker, skipped
+      'unsafe'    empty, a leading "/", an empty, "." or ".." part, a NUL byte: it could leave the folder
+      'reserved'  a file name ending in .kaos-part (the staging tool's half-downloaded files, named beside their
+                  target); the dataset's files live under data/, so no name can collide with a marker of a copy
+      'long'      a part longer than 255 bytes, or a file name longer than 245 (no room for .kaos-part)
+    """
+    if not isinstance(path, str):
+        return 'unsafe'
+    if path.endswith('/') and not size:
+        return 'marker'
+    parts = path.split('/')
+    if not path or '\x00' in path or path.startswith('/') or any(p in ('', '.', '..') for p in parts):
+        return 'unsafe'
+    if parts[-1].endswith('.kaos-part'):
+        return 'reserved'
+    sizes = [len(p.encode('utf-8', 'replace')) for p in parts]
+    if max(sizes) > 255 or sizes[-1] > 245:
+        return 'long'
+    return ''
+
+
+WHY = {
+    'unsafe': 'a path that is empty, starts with "/", or has an empty part, a "." or ".." part or a NUL byte could '
+              'be written outside the dataset\'s folder on the site',
+    'reserved': 'a file name ending in .kaos-part is reserved for the platform (half-downloaded files)',
+    'long': 'a file name longer than 245 bytes, or a folder name longer than 255, cannot be written on the site',
+}
+
+
+class Names:
+    """Judges the object names of one dataset commit as they come from a listing: take(path, size) is True for
+    an object to copy, False for a folder marker to skip, and raises ReservedName for a name that cannot be
+    copied (name_rule) or for a file that is also a folder (`a` and `a/b`: a file system holds one or the
+    other). lakeFS lists in path order, so the second is found by keeping the files the current path still
+    begins with; nothing else of the listing is held."""
+
+    def __init__(self, repo, commit):
+        self.repo, self.commit, self.files = repo, commit, []
+
+    def refuse(self, path, why):
+        raise ReservedName('dataset %s@%s has an object named %r: %s. Nothing was staged and nothing was submitted '
+                           'to the site. Rename or remove the object and commit a new version of the dataset.'
+                           % (self.repo, self.commit[:12], path, why))
+
+    def take(self, path, size=0):
+        why = name_rule(path, size)
+        if why == 'marker':
+            return False
+        if why:
+            self.refuse(path, WHY[why])
+        self.files = [f for f in self.files if path.startswith(f)]
+        for f in self.files:
+            if path.startswith(f + '/'):
+                self.refuse(f, 'the dataset also has %r, under a folder of the same name; a file system holds a '
+                               'file or a folder under one name, not both' % path)
+        self.files.append(path)
+        return True
+
+
+def refuse_names(api, repo, commit, wallet, prefix=''):
+    """Raise ReservedName for the first object of the commit (under prefix) that cannot be copied (Names). A
+    listing that cannot be read judges nothing: the stage plan and the in-job stage-in check the names again."""
+    names = Names(repo, commit)
+    try:
+        for o in lakefs_pages(api + '/refs/%s/objects/ls' % commit, wallet, {'prefix': prefix}):
+            names.take(o['path'], int(o.get('size_bytes') or 0))
+    except ReservedName:
+        raise
+    except Exception as e:
+        print('stage: object names not checked (%s)' % e, flush=True)
+
+
+class ToolAbsent(Exception):
+    """The login node could not run the staging tool at all (no file, not readable, no interpreter). Asked again
+    for TOOL_WAIT_S, then the run ends StagingMismatch with absent_message."""
+
+
+TOOL_WAIT_S = 20 * 60   # longer than one credential refresh (15 min), which is what installs the staging tool
+
+
+def absent_message(rc):
+    return ('the site\'s staging tool is not installed for this project, or cannot be run (the login node answered '
+            'exit %s for %d minutes). It is installed by the project\'s HPC credential refresh, which runs every 15 '
+            'minutes. Nothing was staged and nothing was submitted to the site. For a project bound to the site in '
+            'the last minutes, run again; otherwise the refresh is failing to install it and its log says why (a '
+            'platform operator can read it).' % (rc, TOOL_WAIT_S // 60))
+
+
+def mismatch_message(theirs):
+    return ('the site\'s staging tool and this runner speak different staging contracts (staging tool: %s, '
+            'runner: %d). Nothing was staged and nothing was submitted to the site. The platform is being updated: '
+            'run again when the update is complete.'
+            % ('an older one that does not report it' if theirs is None else theirs, CONTRACT))
 
 
 def human_bytes(n):
@@ -67,12 +204,6 @@ def lakefs_pages(url, wallet, params):
         after = pg.get('next_offset') or ''
 
 
-def is_dataset_path(path):
-    # The YOLO layout the steps read: data.yaml, images/, labels/ at the
-    # root of the dataset repository. README and notes are not staged.
-    return path == 'data.yaml' or path.split('/', 1)[0] in ('images', 'labels')
-
-
 def stage_plan(api, commit, base, prefix, wallet):
     # (kind, path, size) per file the stager applies: the two-dot diff against
     # the base (three-dot would be wrong when the base is not an ancestor), or
@@ -82,12 +213,12 @@ def stage_plan(api, commit, base, prefix, wallet):
                               {'prefix': prefix, 'type': 'two_dot'}):
             if d['type'] not in ('added', 'changed', 'removed'):
                 raise ValueError('unexpected diff entry %s for %s' % (d['type'], d['path']))
-            if is_dataset_path(d['path']):
-                yield d['type'], d['path'], int(d.get('size_bytes') or 0)
+            if d['type'] == 'removed' and d['path'].endswith('/'):
+                continue                      # a folder marker that is gone: it was never copied
+            yield d['type'], d['path'], int(d.get('size_bytes') or 0)
     else:
         for o in lakefs_pages(api + '/refs/%s/objects/ls' % commit, wallet, {'prefix': prefix}):
-            if is_dataset_path(o['path']):
-                yield 'added', o['path'], int(o.get('size_bytes') or 0)
+            yield 'added', o['path'], int(o.get('size_bytes') or 0)
 
 
 class Stager:
@@ -107,6 +238,7 @@ class Stager:
         self._home = None      # private HOME for ssh (the pod's may not be writable); holds the socket
         self._mux = None       # None: not tried; True: master up; False: multiplexing off for this runner
         self._mux_lock = threading.Lock()   # the log streamer thread and the runner call concurrently
+        self.last_error = ''
 
     def _ssh_home(self):
         if self._home is None:
@@ -216,6 +348,7 @@ class Stager:
         rc = p.wait()
         reader.join(30)
         err = p.stderr.read().strip()
+        self.last_error = err                 # of the last call: tells a missing tool from an older one (stage_once)
         if err:
             print('stager stderr:', err[-2000:], flush=True)
         if failed is not None:
@@ -224,15 +357,35 @@ class Stager:
 
 
 def staging_record(repo, commit, kind, files=0, nbytes=0, seconds=0):
-    """status.run.staging (bounded, no paths): how the dataset came to be on scratch. The follower prints it."""
+    """One record of status.run.staged (bounded, no paths): how a dataset came to be on scratch. The follower prints it."""
     return {'repo': repo, 'commit': commit[:12], 'kind': kind, 'files': int(files), 'bytes': int(nbytes),
             'seconds': int(seconds)}
+
+
+def refused(rc, ev):
+    # The staging tool refused this runner's contract (it was replaced after it answered `version`).
+    if rc == EX_CONTRACT:
+        raise StagingMismatch(mismatch_message(
+            next((e.get('contract') for e in reversed(ev) if e.get('event') == 'contract'), None)))
 
 
 def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
     # One staging attempt. Returns (path, retry): the ready path, or '' with
     # whether a later attempt can help. info (a dict) receives the staging record when the copy is ready.
-    rc, ev = stager(['status', '--repo', repo, '--commit', commit, '--ref', ref])
+    rc, ev = stager(['version'])
+    theirs = next((e.get('contract') for e in reversed(ev) if e.get('event') == 'version'), None)
+    if rc in (EX_USAGE, 126, 127) and theirs is None:
+        # Exit 2 with the tool's own usage error is a staging tool from before `version`. Anything else here is
+        # the login node failing to run the tool at all (python exits 2 for a file it cannot open).
+        if rc == EX_USAGE and 'kaos-stager' in (getattr(stager, 'last_error', '') or ''):
+            raise StagingMismatch(mismatch_message(None))
+        raise ToolAbsent(rc)
+    if rc == 0 and theirs != CONTRACT:
+        raise StagingMismatch(mismatch_message(theirs))
+    if rc != 0:
+        return '', rc in (EX_RETRY, 255)
+    rc, ev = stager(['status', '--contract', CONTRACT, '--repo', repo, '--commit', commit, '--ref', ref])
+    refused(rc, ev)
     st = next((e for e in reversed(ev) if e.get('event') == 'status'), None)
     if rc != 0 or st is None:
         return '', rc in (EX_RETRY, 255)
@@ -242,13 +395,17 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
             info.update(staging_record(repo, commit, 'cached'))
         return st['path'], False
     api = lakefs + '/api/v1/repositories/' + urllib.parse.quote(repo, safe='')
-    # The dataset sits at the repository root; is_dataset_path() keeps the rest out.
+    # The whole tree of the commit, from the repository root.
     prefix = ''
     base = st.get('base') if st.get('base') and st.get('base_prefix') == prefix else None
     need_bytes = need_files = added = removed = 0
-    for kind, _, size in stage_plan(api, commit, base, prefix, wallet):
+    names, skip = Names(repo, commit), set()
+    for kind, path, size in stage_plan(api, commit, base, prefix, wallet):
         if kind == 'removed':
             removed += 1
+            continue
+        if not names.take(path, size):
+            skip.add(path)                    # a folder marker: not sent, not counted
             continue
         need_bytes += size
         need_files += 1
@@ -263,16 +420,17 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
         for kind, path, size in stage_plan(api, commit, base, prefix, wallet):
             if kind == 'removed':
                 yield {'op': 'delete', 'path': path}
-            else:
+            elif path not in skip:
                 yield {'op': 'fetch', 'path': path, 'size': size,
                        'url': api + '/refs/' + commit + '/objects?'
                        + urllib.parse.urlencode({'path': path})}
         yield {'op': 'end', 'files': files, 'bytes': need_bytes, 'ref': ref, 'prefix': prefix}
-    words = ['stage', '--repo', repo, '--commit', commit, '--ref', ref,
+    words = ['stage', '--contract', CONTRACT, '--repo', repo, '--commit', commit, '--ref', ref,
              '--need-bytes', need_bytes, '--need-files', need_files]
     if base:
         words += ['--base', base]
     rc, ev = stager(words, feed())
+    refused(rc, ev)
     done = next((e for e in reversed(ev) if e.get('event') == 'done'), None)
     if rc == 0 and done:
         if info is not None:
@@ -295,32 +453,44 @@ def ssh_present():
     return shutil.which('ssh') is not None
 
 
-def stage_dataset(cfg, stager, mint_wallet, info=None):
-    """The resident path of the dataset's pinned commit, or '' (the job then stages in-job). The commit is
-    the one the pipeline pinned (spec.dataset); nothing is resolved here. Raises InsufficientQuota when
-    the dataset does not fit the project's scratch quota (AC-33): the one failure that is not a fallback.
+def stage_dataset(cfg, inp, stager, mint_wallet, info=None):
+    """The resident path of one input's pinned commit, or '' (the job then stages it in-job). inp is one entry
+    of cfg.inputs (spec.inputs): its repository, label and commit; nothing is resolved here. Three failures
+    are not a fallback:
+    InsufficientQuota when the dataset does not fit the project's scratch quota (AC-33), StagingMismatch
+    when the site's staging tool speaks another staging contract, and ReservedName when the dataset holds an
+    object whose name is reserved for the platform or whose path could leave the dataset's folder.
     info (a dict), when given, receives the staging record (staging_record) once the copy is resident; it stays
     empty when the job stages in-job."""
-    repo, ref, commit = cfg.dataset_repo, cfg.dataset_ref, cfg.dataset_commit
+    repo, ref, commit = inp['repo'], inp['ref'], inp['commit']
     lakefs = cfg.lakefs_url
-    if not (repo and lakefs and stager.have_key()):
-        print('stage: skipped (needs a dataset, the lakeFS endpoint and the staging key)'
-              ' - the job stages in-job', flush=True)
+    if not lakefs:
+        print('stage: skipped (needs the lakeFS endpoint) - the job stages in-job', flush=True)
         return ''
     wallet = mint_wallet()
     if not wallet:
         return ''
-    if not ssh_present():
-        print('stage: no ssh client - the job stages in-job', flush=True)
+    api = lakefs + '/api/v1/repositories/' + urllib.parse.quote(repo, safe='')
+    if not stager.have_key() or not ssh_present():
+        print('stage: skipped (needs the staging key and an ssh client) - the job stages in-job', flush=True)
+        refuse_names(api, repo, commit, wallet)     # the in-job copy joins every name to its folder: check them all
         return ''
     began = time.time()
-    deadline, attempt = began + STAGE_BUDGET_S, 0
+    deadline, attempt, absent_since = began + STAGE_BUDGET_S, 0, None
     while True:
         attempt += 1
         try:
             path, retry = stage_once(stager, repo, ref, commit, lakefs, wallet, info)
-        except InsufficientQuota:
+        except (InsufficientQuota, StagingMismatch, ReservedName):
             raise
+        except ToolAbsent as e:
+            if absent_since is None:
+                absent_since = time.time()      # the 20 minutes count from the first "absent", not from the start
+            if time.time() - absent_since > TOOL_WAIT_S:
+                raise StagingMismatch(absent_message(e))
+            print('stage: the staging tool is not installed or cannot be run (exit %s) - asking again' % e,
+                  flush=True)
+            path, retry = '', True
         except Exception as e:
             print('stage: attempt', attempt, 'failed:', e, flush=True)
             path, retry = '', True
@@ -332,4 +502,5 @@ def stage_dataset(cfg, stager, mint_wallet, info=None):
     if not path:
         print('stage: NOT STAGED - the job will download the dataset in-job on GPU time',
               flush=True)
+        refuse_names(api, repo, commit, wallet)     # before it is submitted, as above
     return path

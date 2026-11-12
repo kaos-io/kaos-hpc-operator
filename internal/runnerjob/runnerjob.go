@@ -67,8 +67,6 @@ const (
 	maxEnvValue = 2048
 )
 
-var outputsRepoPattern = regexp.MustCompile(`^outputs-[a-z0-9-]{1,55}$`)
-
 // Scheduling is where runner pods go (chart values pass it through, like the controller's own).
 type Scheduling struct {
 	NodeSelector map[string]string   `json:"nodeSelector,omitempty"`
@@ -122,15 +120,25 @@ func BuildCancel(cfg Config, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alp
 	return rj, nil
 }
 
-// ValidateDataset refuses a job that names a dataset without a pinned commit: one stored before the run's
-// data was pinned by the pipeline, or created by an older follower (spec.datasetRef). Running it would run
-// the step without its data.
-func ValidateDataset(spec *hpcv1alpha1.HPCArgoWorkflowJobSpec) error {
-	if spec.Dataset == nil && spec.DatasetRef != "" {
-		return fmt.Errorf("the job names dataset %s without a pinned commit: it was created before the platform "+
-			"update that pins a run's dataset. Run the pipeline again", spec.DatasetRef)
+// ValidateContract refuses a job that cannot run on the step contract (docs/step-contract.md, section 8),
+// with the reason to give. No context: the job was created by a follower from before the contract, or stored
+// before the definition changed and read back without the fields that were removed; running it would run the
+// step without its context and its data (PRD kaos#1911 T-04). An input with an owner: a dataset another
+// project shares cannot be staged on an HPC site yet.
+func ValidateContract(spec *hpcv1alpha1.HPCArgoWorkflowJobSpec) (string, error) {
+	if spec.Context == "" {
+		return hpcv1alpha1.ReasonNoContext, fmt.Errorf("the job carries no step context (spec.context): it was created " +
+			"before the platform update that changed how a step is given its inputs. Nothing was booked or submitted. " +
+			"Run the pipeline again")
 	}
-	return nil
+	for _, in := range spec.Inputs {
+		if in.Owner != "" {
+			return hpcv1alpha1.ReasonSharedInput, fmt.Errorf("input %s is the dataset %s shared by project %s: a dataset of "+
+				"another project cannot be read on HPC yet. Nothing was booked or submitted. Run this step on a cluster "+
+				"class, or copy the dataset into this project", in.Name, in.Repo, in.Owner)
+		}
+	}
+	return "", nil
 }
 
 var (
@@ -189,9 +197,6 @@ func ValidateEnv(env []hpcv1alpha1.NameValue) error {
 		seen[e.Name] = true
 		if len(e.Value) > maxEnvValue {
 			return fmt.Errorf("env %q is longer than %d bytes", e.Name, maxEnvValue)
-		}
-		if (e.Name == "OUTPUTS_REPO" || e.Name == "CHECKPOINT_BUCKET") && !outputsRepoPattern.MatchString(e.Value) {
-			return fmt.Errorf("env %q must be an outputs-<name> repository", e.Name)
 		}
 	}
 	return nil
@@ -324,24 +329,34 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 	if spec.Sharing != nil && site.Spec.Sharing {
 		sharing, scope = "1", spec.Sharing.Scope
 	}
-	// A job already running when the platform was updated names its dataset the old way (no commit). Its
-	// next attempt must not run without data: the runner is told, and refuses to start.
-	ds, unpinned := hpcv1alpha1.DatasetPin{}, ""
-	if spec.Dataset != nil {
-		ds = *spec.Dataset
-	} else {
-		unpinned = spec.DatasetRef
+	// What the runner stages: name, repository and commit of every input, in the job's order.
+	type input struct {
+		Name   string `json:"name"`
+		Repo   string `json:"repo"`
+		Commit string `json:"commit"`
+		Ref    string `json:"ref,omitempty"`
+	}
+	ins := make([]input, 0, len(spec.Inputs))
+	for _, in := range spec.Inputs {
+		ins = append(ins, input{in.Name, in.Repo, in.Commit, in.Ref})
+	}
+	inputs, err := json.Marshal(ins)
+	if err != nil {
+		return nil, fmt.Errorf("marshal inputs: %w", err)
 	}
 	kv := [][2]string{
 		{"HPC_JOB_NAMESPACE", job.Namespace}, {"HPC_JOB_NAME", job.Name},
 		{"KAOS_ATTEMPT", strconv.Itoa(int(attempt))},
 		{"IMAGE_REF", spec.Image}, {"STEP_COMMAND", string(cmd)},
 		{"SLURM_TIME_LIMIT", strconv.Itoa(int(job.EffectiveWallMinutes()))},
-		{"STEP_OUTPUTS", strings.Join(spec.Outputs, ",")}, {"HPC_CLASS", spec.Class},
+		{"HPC_CLASS", spec.Class},
 		{"STEP_NAME", spec.StepName}, {"WF_UID", wfUID},
-		{"KUBECORE_WORKFLOW_NAME", wfName}, {"KUBECORE_RUN_ID", wfName},
-		{"DATASET_REPO", ds.Repo}, {"DATASET_VERSION", ds.Version}, {"DATASET_COMMIT", ds.Commit},
-		{"DATASET_OWNER", ds.Owner}, {"DATASET_UNPINNED", unpinned}, {"HPC_SHARING", sharing}, {"HPC_SCOPE", scope},
+		// For the runner itself: the Workflow's name labels the step's log lines, the app names the outputs
+		// repository (outputs-<app>) the step's result is handed back through. Neither reaches the step.
+		{"WF_NAME", wfName}, {"KAOS_APP", spec.App},
+		// The step context, as the job carries it: the runner hands it to the step unchanged, under this name.
+		{hpcv1alpha1.ContextEnv, spec.Context}, {"HPC_INPUTS", string(inputs)},
+		{"HPC_SHARING", sharing}, {"HPC_SCOPE", scope},
 		{"HPC_SITE", site.Spec.Site}, {"HPC_ACCOUNT", site.Spec.Identity.Account}, {"HPC_USER", site.Spec.Identity.User},
 		{"HPC_SCRATCH", site.Spec.Profile.ScratchRoot}, {"HPC_HOME", homeOf(site)},
 		{"HPC_CLASSES_JSON", classes}, {"HPC_ENDPOINT", site.Spec.Profile.Endpoint},

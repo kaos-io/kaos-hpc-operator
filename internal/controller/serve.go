@@ -68,7 +68,7 @@ func jobOfRunner(_ context.Context, o client.Object) []reconcile.Request {
 		Namespace: a[runnerjob.AnnotationJobNamespace], Name: a[runnerjob.AnnotationJobName]}}}
 }
 
-// serveGate runs before everything else for a serve-mode job. It keeps the cancel finalizer,
+// serveGate runs first for a serve-mode job that carries its step context. It keeps the cancel finalizer,
 // refuses a spec outside the env allowlist, and cancels the job when it is deleted or its Workflow
 // ended. done is true when the reconcile is finished.
 func (r *HPCArgoWorkflowJobReconciler) serveGate(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob) (ctrl.Result, bool, error) {
@@ -90,9 +90,6 @@ func (r *HPCArgoWorkflowJobReconciler) serveGate(ctx context.Context, job *hpcv1
 		return res, true, err
 	}
 	if job.Status.Booking == nil {
-		if err := runnerjob.ValidateDataset(&job.Spec); err != nil {
-			return ctrl.Result{}, true, r.setPhase(ctx, job, hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonInvalidSpec, err.Error(), nil)
-		}
 		if err := runnerjob.ValidateEnv(job.Spec.Env); err != nil {
 			return ctrl.Result{}, true, r.setPhase(ctx, job, hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonInvalidSpec, err.Error(), nil)
 		}
@@ -289,6 +286,13 @@ func (r *HPCArgoWorkflowJobReconciler) driveRunner(ctx context.Context, job *hpc
 		// for a dead site until the verdict, which a starved poller delays (PRD-HPC-1461 AC-106).
 		if r.Health.Failing(client.ObjectKeyFromObject(site).String()) {
 			return &requeueError{after: FailingSiteResync}
+		}
+		if job.Spec.Context == "" {
+			// Booked before the definition changed and read back without its context: its next runner would
+			// start the step without its context and its data. It ends here instead (PRD kaos#1911 T-04).
+			return r.failAttempt(ctx, job, site, hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonNoContext, hpcv1alpha1.ReasonNoContext,
+				"the job carries no step context (spec.context): it was created before the platform update that changed how "+
+					"a step is given its inputs. Nothing was submitted for this attempt. Run the pipeline again")
 		}
 		return r.createRunnerJob(ctx, job, site, attempt)
 	}
@@ -511,6 +515,7 @@ func (r *HPCArgoWorkflowJobReconciler) failAttempt(ctx context.Context, job *hpc
 	job.Status.Booking = nil
 	job.Status.Sweep, job.Status.SiteMissingSince = nil, nil
 	job.Status.Phase, job.Status.Reason, job.Status.Message = phase, reason, msg
+	keepResultOnlyOnSuccess(job)
 	var total int64
 	for _, a := range job.Status.Attempts {
 		total += a.SettledNodeMinutes

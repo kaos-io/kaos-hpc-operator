@@ -9,7 +9,16 @@ spec:
   # In practice a pipeline step creates this object; the namespace carries the hpc.kaos.io/project label.
   class: example-gpu
   image: registry.example.org/team/train:v1
-  command: [python, train.py]
+  command: [python, -m, app.entry]
   wallTimeMinutes: 120
   stepName: train
+  # The step contract (docs/step-contract.md): the app, the step context exactly as the workflow assembled it,
+  # and the datasets it pins. The follower fills all three from the context.
+  app: train-demo
+  context: '{"version":1,"run":"wf-1","app":"train-demo","project":"team","step":"train","kind":"train","experiment":"baseline","params":{},"ledger":{"version":2,"reads":[{"name":"dataset","repo":"dataset-raw","owner":null,"ref":"latest","commit":"1111111111111111111111111111111111111111111111111111111111111111"}],"writes":[]},"produces":[],"upstream":{}}'
+  inputs:
+    - name: dataset
+      repo: dataset-raw
+      commit: "1111111111111111111111111111111111111111111111111111111111111111"
+      ref: latest
   workflow: {name: wf-1, uid: 5b0c3e5e-0000-4000-8000-000000000000}

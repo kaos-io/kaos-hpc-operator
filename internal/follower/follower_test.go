@@ -26,9 +26,19 @@ import (
 
 func testConfig() Config {
 	return Config{Namespace: "ns", WorkflowName: "wf-1", WorkflowUID: "uid-1", StepName: "train", NodeKey: "wf-1-train",
-		Image: "img:1", Command: []string{"python", "train.py"}, WallTimeMinutes: 60, Class: "meluxina-gpu",
-		Outputs: []string{"model", "metrics"}}
+		Image: "img:1", Command: []string{"python", "-m", "app.entry"}, WallTimeMinutes: 60, Class: "meluxina-gpu",
+		App: "hera-demo", Kind: testKind, Context: testContext}
 }
+
+// testKind is the kind of the step in the test contexts.
+const testKind = "train"
+
+// testResult is a small result, as a job that succeeded carries it.
+const testResult = `{"version":1,"status":"ok","values":{},"reads":[],"writes":[]}`
+
+// testContext is a small step context: enough for the tests that do not look at it.
+const testContext = `{"version":1,"run":"wf-1","app":"hera-demo","project":"vision","step":"train","kind":"train",` +
+	`"experiment":"e","params":{},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[],"upstream":{}}`
 
 func newScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -66,7 +76,8 @@ func newHarness(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) *h
 	h.c = interceptor.NewClient(base, funcs)
 	dir := t.TempDir()
 	h.opts = Options{Poll: 5 * time.Millisecond, Recheck: 10 * time.Millisecond,
-		OutputsDir: filepath.Join(dir, "outputs"), SlurmIDPath: filepath.Join(dir, "slurm-job-id"), Out: h.out}
+		ResultPath: filepath.Join(dir, "outputs", "kaos-result.json"), SlurmIDPath: filepath.Join(dir, "slurm-job-id"),
+		TerminationPath: filepath.Join(dir, "termination-log"), Out: h.out}
 	return h
 }
 
@@ -110,7 +121,7 @@ func TestJobNameIsDeterministicAndPerNode(t *testing.T) {
 	}
 }
 
-func TestShouldCreateTheJobOwnedByTheWorkflowAndWriteOutputsOnSuccess(t *testing.T) {
+func TestShouldCreateTheJobOwnedByTheWorkflowAndHandOnItsResultOnSuccess(t *testing.T) {
 	cfg := testConfig()
 	h := newHarness(t, interceptor.Funcs{})
 	go func() {
@@ -118,7 +129,7 @@ func TestShouldCreateTheJobOwnedByTheWorkflowAndWriteOutputsOnSuccess(t *testing
 			Run: &hpcv1alpha1.RunStatus{SiteJobID: "4242"}, PendingReason: "Priority"})
 		time.Sleep(30 * time.Millisecond)
 		h.setStatus(cfg, hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed",
-			Run: &hpcv1alpha1.RunStatus{SiteJobID: "4242"}, Outputs: map[string]string{"model": `{"uri":"lakefs://x"}`}})
+			Run: &hpcv1alpha1.RunStatus{SiteJobID: "4242"}, Result: fixture(t, "result-model.wire")})
 	}()
 	if code := h.run(context.Background(), cfg); code != ExitSucceeded {
 		t.Fatalf("exit %d, output:\n%s", code, h.out)
@@ -135,11 +146,11 @@ func TestShouldCreateTheJobOwnedByTheWorkflowAndWriteOutputsOnSuccess(t *testing
 	if job.Spec.StepName != "train" || job.Spec.Workflow.UID != "uid-1" || job.Spec.Class != "meluxina-gpu" {
 		t.Fatalf("spec %+v", job.Spec)
 	}
-	if got := read(t, filepath.Join(h.opts.OutputsDir, "model.json")); got != `{"uri":"lakefs://x"}` {
-		t.Errorf("model.json = %q", got)
+	if job.Labels[hpcv1alpha1.StepKindLabel] != testKind || job.Spec.App != "hera-demo" || job.Spec.Context != testContext {
+		t.Fatalf("the job must carry the kind label, the app and the context: labels %v, app %q", job.Labels, job.Spec.App)
 	}
-	if got := read(t, filepath.Join(h.opts.OutputsDir, "metrics.json")); got != "{}" {
-		t.Errorf("a declared output the runner did not fill must be {}, got %q", got)
+	if got := read(t, h.opts.ResultPath); got != fixture(t, "result-model.wire") {
+		t.Errorf("kaos-result.json = %q", got)
 	}
 	if got := read(t, h.opts.SlurmIDPath); got != "4242" {
 		t.Errorf("slurm-job-id = %q", got)
@@ -154,7 +165,7 @@ func TestShouldCreateTheJobOwnedByTheWorkflowAndWriteOutputsOnSuccess(t *testing
 func TestShouldReattachToTheExistingJobWithoutCreatingAnother(t *testing.T) {
 	cfg := testConfig()
 	existing := cfg.Job()
-	existing.Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed"}
+	existing.Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed", Result: testResult}
 	h := newHarness(t, interceptor.Funcs{}, existing)
 	if code := h.run(context.Background(), cfg); code != ExitSucceeded {
 		t.Fatalf("exit %d:\n%s", code, h.out)
@@ -181,7 +192,7 @@ func TestShouldFailWhenTheExistingJobHasAnotherSpec(t *testing.T) {
 	}
 }
 
-func TestShouldExitOneAndStillWriteDefaultsWhenTheJobFails(t *testing.T) {
+func TestShouldExitOneAndHandOnNoResultWhenTheJobFails(t *testing.T) {
 	cfg := testConfig()
 	h := newHarness(t, interceptor.Funcs{})
 	go h.setStatus(cfg, hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseFailed, Reason: "RunnerFailed", Message: "pod oom"})
@@ -191,11 +202,8 @@ func TestShouldExitOneAndStillWriteDefaultsWhenTheJobFails(t *testing.T) {
 	if !strings.Contains(h.out.String(), "pod oom") {
 		t.Errorf("the failure message must be printed:\n%s", h.out)
 	}
-	if got := read(t, filepath.Join(h.opts.OutputsDir, "model.json")); got != "{}" {
-		t.Errorf("model.json = %q", got)
-	}
-	if read(t, h.opts.SlurmIDPath) != "" {
-		t.Error("no site job id expected")
+	if _, err := os.Stat(h.opts.ResultPath); !os.IsNotExist(err) {
+		t.Errorf("a failed job hands on no result file, got err=%v", err)
 	}
 }
 
@@ -226,7 +234,7 @@ func TestShouldSurviveAPIBlipsOnCreateAndGet(t *testing.T) {
 			return c.Get(ctx, key, obj, o...)
 		},
 	})
-	go h.setStatus(cfg, hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded})
+	go h.setStatus(cfg, hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Result: testResult})
 	if code := h.run(context.Background(), cfg); code != ExitSucceeded {
 		t.Fatalf("exit %d, blips must not fail the step:\n%s", code, h.out)
 	}
@@ -279,7 +287,7 @@ func TestShouldExitOneWhenTheJobDisappears(t *testing.T) {
 
 func TestConfigFromEnv(t *testing.T) {
 	base := map[string]string{"HPC_JOB_NAMESPACE": "ns", "WF_NAME": "wf", "WF_UID": "u", "STEP_NAME": "s", "NODE_KEY": "n",
-		"IMAGE_REF": "img", "HPC_CLASS": "c", "SLURM_TIME_LIMIT": "90"}
+		"IMAGE_REF": "img", "HPC_CLASS": "c", "SLURM_TIME_LIMIT": "90", "KAOS_STEP_CONTEXT": testContext}
 	with := func(kv ...string) func(string) string {
 		m := map[string]string{}
 		for k, v := range base {
@@ -306,13 +314,13 @@ func TestConfigFromEnv(t *testing.T) {
 				t.Errorf("resumable=False must set spec.resumableOptOut: %+v", c)
 			}
 		}},
-		{"should_read_resumable_sharing_outputs_command_and_allowlisted_env",
-			with("HPC_RESUMABLE_LEAD", "20", "HPC_MAX_CONTINUATIONS", "3", "HPC_SCOPE", "abcdef123456", "STEP_OUTPUTS", "a, b,",
+		{"should_read_resumable_sharing_command_and_allowlisted_env",
+			with("HPC_RESUMABLE_LEAD", "20", "HPC_MAX_CONTINUATIONS", "3", "HPC_SCOPE", "abcdef123456",
 				"STEP_COMMAND", `["x","y"]`, "OUTPUTS_REPO", "outputs-app", "HOME", "/root", "KAOS_LIB_SUPPORT", "{}"), "",
 			func(t *testing.T, c Config) {
 				s := c.Job().Spec
 				if s.Resumable.LeadMinutes != 20 || s.Resumable.MaxContinuations != 3 || s.Sharing.Scope != "abcdef123456" ||
-					len(s.Outputs) != 2 || len(s.Command) != 2 || len(s.Env) != 2 {
+					len(s.Command) != 2 || len(s.Env) != 1 || s.Env[0].Name != "KAOS_LIB_SUPPORT" {
 					t.Errorf("%+v", s)
 				}
 			}},
@@ -333,6 +341,7 @@ func TestConfigFromEnv(t *testing.T) {
 		}},
 		{"should_fail_on_a_bad_idle_timeout", with("HPC_IDLE_TIMEOUT_MINUTES", "soon"), "HPC_IDLE_TIMEOUT_MINUTES", nil},
 		{"should_fail_when_a_required_variable_is_missing", with("NODE_KEY", ""), "NODE_KEY", nil},
+		{"should_fail_without_a_step_context", with("KAOS_STEP_CONTEXT", ""), "KAOS_STEP_CONTEXT", nil},
 		{"should_fail_on_a_bad_wall_time", with("SLURM_TIME_LIMIT", "abc"), "SLURM_TIME_LIMIT", nil},
 		{"should_fail_on_a_command_that_is_not_json", with("STEP_COMMAND", "python x"), "STEP_COMMAND", nil},
 		{"should_fail_on_sharing_without_a_scope", with("HPC_SHARING", "1"), "HPC_SCOPE", nil},
@@ -359,10 +368,9 @@ func TestConfigFromEnv(t *testing.T) {
 func podEnv(extra map[string]string) func(string) string {
 	m := map[string]string{
 		"HPC_JOB_NAMESPACE": "ns", "WF_NAME": "wf-1", "WF_UID": "uid-1", "STEP_NAME": "train", "NODE_KEY": "train-meluxina",
-		"IMAGE_REF": "img:1", "STEP_COMMAND": `["python","train.py"]`, "SLURM_TIME_LIMIT": "60", "HPC_CLASS": "meluxina-gpu",
+		"IMAGE_REF": "img:1", "STEP_COMMAND": `["python","-m","app.entry"]`, "SLURM_TIME_LIMIT": "60", "HPC_CLASS": "meluxina-gpu",
 		"HPC_RESUMABLE_LEAD": "0", "HPC_RESUMABLE": "auto", "HPC_IDLE_TIMEOUT_MINUTES": "", "HPC_MAX_CONTINUATIONS": "5",
-		"STEP_OUTPUTS": "model,metrics", "DATASET_PIN": "", "OUTPUTS_REPO": "outputs-app", "OUTPUTS_REF": "main",
-		"CHECKPOINT_BUCKET": "outputs-app", "CHECKPOINT_PREFIX": "main/checkpoints",
+		"KAOS_STEP_CONTEXT": testContext,
 	}
 	for k, v := range extra {
 		m[k] = v
@@ -414,7 +422,7 @@ func TestShouldReattachToTheJobAsTheAPIServerStoredItAndRefuseRealConflicts(t *t
 			existing := cfg.Job()
 			existing.Spec = withCRDDefaults(existing.Spec)
 			tc.mutate(existing)
-			existing.Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed"}
+			existing.Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed", Result: testResult}
 			h := newHarness(t, interceptor.Funcs{}, existing)
 			code := h.run(context.Background(), cfg)
 			if tc.refused && (code != ExitFailed || !strings.Contains(h.out.String(), "different spec")) {
@@ -424,111 +432,5 @@ func TestShouldReattachToTheJobAsTheAPIServerStoredItAndRefuseRealConflicts(t *t
 				t.Fatalf("want a re-attach, exit %d:\n%s", code, h.out)
 			}
 		})
-	}
-}
-
-func TestTheJobsDatasetIsExactlyWhatTheComposeStepPinned(t *testing.T) {
-	commit := strings.Repeat("c2", 32)
-	pin := `{"repo":"dataset-a","version":"latest","commit":"` + commit + `","owner":""}`
-	cfg, err := ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": pin}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d := cfg.Job().Spec.Dataset; d == nil || d.Repo != "dataset-a" || d.Version != "latest" || d.Commit != commit || d.Owner != "" {
-		t.Errorf("spec.dataset = %+v", d)
-	}
-	if cfg.Job().Spec.DatasetRef != "" {
-		t.Error("the deprecated datasetRef is never written")
-	}
-	branch := `{"repo":"dataset-a","version":"feature/x","commit":"` + commit + `","owner":""}`
-	if cfg, err = ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": branch})); err != nil || cfg.Dataset.Version != "feature/x" {
-		t.Errorf("a branch as version is fine: %+v, %v", cfg.Dataset, err)
-	}
-	for _, none := range []string{"", "  \n", "{}", " {}\n"} {
-		if cfg, err = ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": none})); err != nil || cfg.Job().Spec.Dataset != nil {
-			t.Errorf("no dataset: no pin and no error, got %+v, %v", cfg.Dataset, err)
-		}
-	}
-}
-
-// Nothing but a complete pin of the project's own dataset becomes a job: every other value fails the step
-// with a reason, and never yields a job without its data.
-func TestAPinThatIsNotCompleteAndOwnIsRefused(t *testing.T) {
-	commit := strings.Repeat("c2", 32)
-	for name, pin := range map[string]string{
-		"not json":         "{",
-		"an array":         "[]",
-		"two values":       `{"repo":"dataset-a","version":"v1","commit":"` + commit + `"} {}`,
-		"unknown field":    `{"repo":"dataset-a","version":"v1","commit":"` + commit + `","endpoint":"https://evil.example"}`,
-		"no commit":        `{"repo":"dataset-a","version":"v1"}`,
-		"short commit":     `{"repo":"dataset-a","version":"v1","commit":"abc123"}`,
-		"upper commit":     `{"repo":"dataset-a","version":"v1","commit":"` + strings.ToUpper(commit) + `"}`,
-		"no repo":          `{"version":"v1","commit":"` + commit + `"}`,
-		"one-letter repo":  `{"repo":"x","version":"v1","commit":"` + commit + `"}`,
-		"not a dataset":    `{"repo":"models-v2","version":"v1","commit":"` + commit + `"}`,
-		"outputs repo":     `{"repo":"outputs-app","version":"main","commit":"` + commit + `"}`,
-		"bare prefix":      `{"repo":"dataset-","version":"v1","commit":"` + commit + `"}`,
-		"repo with slash":  `{"repo":"a/b","version":"v1","commit":"` + commit + `"}`,
-		"repo upper case":  `{"repo":"Dataset-A","version":"v1","commit":"` + commit + `"}`,
-		"no version":       `{"repo":"dataset-a","commit":"` + commit + `"}`,
-		"version option":   `{"repo":"dataset-a","version":"--base=/etc","commit":"` + commit + `"}`,
-		"version shell":    `{"repo":"dataset-a","version":"x; rm -rf /","commit":"` + commit + `"}`,
-		"version dot-dot":  `{"repo":"dataset-a","version":"a/../b","commit":"` + commit + `"}`,
-		"version slashes":  `{"repo":"dataset-a","version":"a//b","commit":"` + commit + `"}`,
-		"version trailing": `{"repo":"dataset-a","version":"a/","commit":"` + commit + `"}`,
-		"version too long": `{"repo":"dataset-a","version":"` + strings.Repeat("v", 256) + `","commit":"` + commit + `"}`,
-		"version subshell": `{"repo":"dataset-a","version":"$(id)","commit":"` + commit + `"}`,
-		"shared dataset":   `{"repo":"dataset-a","version":"v1","commit":"` + commit + `","owner":"other"}`,
-	} {
-		cfg, err := ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": pin}))
-		if err == nil {
-			t.Errorf("%s: expected an error, got dataset %+v", name, cfg.Dataset)
-		}
-	}
-	_, err := ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": `{"repo":"dataset-a","version":"v1","commit":"` + commit + `","owner":"other"}`}))
-	if err == nil || !strings.Contains(err.Error(), "cannot be read on HPC yet") {
-		t.Errorf("a shared dataset is refused with what to do instead, got %v", err)
-	}
-}
-
-// A pipeline released before the run's data was pinned names a dataset and no commit: the step fails and
-// says the pipeline is being re-released, instead of creating a job without data.
-func TestAPipelineReleasedBeforeThePinIsRefused(t *testing.T) {
-	_, err := ConfigFromEnv(podEnv(map[string]string{"DATASET": "dataset-a@latest"}))
-	if err == nil || !strings.Contains(err.Error(), "released before the platform update") {
-		t.Errorf("got %v", err)
-	}
-}
-
-// A cluster whose CRD is older than this follower would drop spec.dataset and run the step without its data.
-// The follower creates strictly (such a cluster refuses the create), and when a server stores the job without
-// the dataset anyway, the follower removes the job and fails the step.
-func TestAJobStoredWithoutItsDatasetIsRemovedAndTheStepFails(t *testing.T) {
-	pin := `{"repo":"dataset-a","version":"latest","commit":"` + strings.Repeat("c2", 32) + `","owner":""}`
-	cfg, err := ConfigFromEnv(podEnv(map[string]string{"DATASET_PIN": pin}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	strict := false
-	h := newHarness(t, interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, o ...client.CreateOption) error {
-		opts := &client.CreateOptions{}
-		opts.ApplyOptions(o)
-		strict = opts.FieldValidation == "Strict"
-		obj.(*hpcv1alpha1.HPCArgoWorkflowJob).Spec.Dataset = nil // what an older CRD does to the field
-		return c.Create(ctx, obj, o...)
-	}})
-	if code := h.run(context.Background(), cfg); code != ExitFailed {
-		t.Fatalf("exit %d, want the step to fail", code)
-	}
-	if !strict {
-		t.Error("the job must be created with strict field validation")
-	}
-	if !strings.Contains(h.out.String(), "without its dataset dataset-a@latest") {
-		t.Errorf("the reason must be printed:\n%s", h.out)
-	}
-	var left hpcv1alpha1.HPCArgoWorkflowJob
-	key := client.ObjectKey{Namespace: cfg.Namespace, Name: JobName(cfg.WorkflowUID, cfg.NodeKey)}
-	if err := h.c.Get(context.Background(), key, &left); !apierrors.IsNotFound(err) {
-		t.Errorf("the job without its data must be gone, got err=%v", err)
 	}
 }

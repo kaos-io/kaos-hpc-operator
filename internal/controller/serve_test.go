@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -14,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -68,9 +70,9 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		seq++
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("hpc-%d", seq), Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/app:v1", WallTimeMinutes: 60,
-				Command: []string{"python", "train.py"}, StepName: "train", Outputs: []string{"model"},
-				Env: []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "outputs-app"}}},
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "reg.example/app:v1", WallTimeMinutes: 60,
+				Command: []string{"python", "train.py"}, StepName: "train",
+				Env: []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: "{}"}}},
 		}
 		if wf != nil {
 			j.Spec.Workflow = &hpcv1alpha1.WorkflowRef{Name: wf.GetName(), UID: string(wf.GetUID())}
@@ -143,7 +145,10 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		wf := newWorkflow()
 		j := newServeJob(wf, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
 			j.Spec.Sharing = &hpcv1alpha1.Sharing{Scope: "abcdef12"}
-			j.Spec.Dataset = &hpcv1alpha1.DatasetPin{Repo: "dataset-ds", Version: "v1", Commit: "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}
+			j.Spec.Context = contractFixture("context-one-upstream.wire")
+			j.Spec.Inputs = []hpcv1alpha1.StepInput{
+				{Name: "labels", Repo: "dataset-labels", Ref: "v3", Commit: strings.Repeat("2", 64)},
+				{Name: "embeddings", Repo: "dataset-embeddings", Commit: strings.Repeat("3", 64)}}
 		})
 		res, got := reconcileOnce(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
@@ -177,8 +182,18 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(env).To(HaveKeyWithValue("STEP_NAME", "train"))
 		Expect(env).To(HaveKeyWithValue("WF_UID", string(wf.GetUID())))
 		Expect(env).To(HaveKeyWithValue("STEP_COMMAND", `["python","train.py"]`))
-		Expect(env).To(HaveKeyWithValue("OUTPUTS_REPO", "outputs-app"))
+		Expect(env).To(HaveKeyWithValue("KAOS_LIB_SUPPORT", "{}"))
+		// For the runner itself: the Workflow's name (log labels) and the app (its outputs repository).
+		Expect(env).To(HaveKeyWithValue("WF_NAME", wf.GetName()))
+		Expect(env).To(HaveKeyWithValue("KAOS_APP", "app"))
+		for _, gone := range []string{"KUBECORE_WORKFLOW_NAME", "KUBECORE_RUN_ID", "OUTPUTS_REPO", "STEP_OUTPUTS", "DATASET_REPO"} {
+			Expect(env).NotTo(HaveKey(gone))
+		}
 		Expect(env).To(HaveKeyWithValue("HPC_SCOPE", "abcdef12"))
+		// The step contract: the context as the job stores it, byte for byte, and every input to stage.
+		Expect(env["KAOS_STEP_CONTEXT"]).To(Equal(contractFixture("context-one-upstream.wire")))
+		Expect(env["HPC_INPUTS"]).To(Equal(`[{"name":"labels","repo":"dataset-labels","commit":"` + strings.Repeat("2", 64) + `","ref":"v3"},` +
+			`{"name":"embeddings","repo":"dataset-embeddings","commit":"` + strings.Repeat("3", 64) + `"}]`))
 		// Site-derived, never from the tenant.
 		Expect(env).To(HaveKeyWithValue("HPC_ENDPOINT", "https://slurm-api.site.example"))
 		Expect(env).To(HaveKeyWithValue("HPC_ACCOUNT", "p1"))
@@ -198,16 +213,95 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(all.Items).To(HaveLen(1))
 	})
 
+	It("should_refuse_a_job_with_a_dataset_another_project_shares_and_book_nothing", func() {
+		j := newServeJob(newWorkflow(), func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+			j.Spec.Inputs = []hpcv1alpha1.StepInput{{Name: "raw", Repo: "dataset-raw", Commit: strings.Repeat("c2", 32), Owner: "other"}}
+		})
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonSharedInput))
+		Expect(got.Status.Message).To(ContainSubstring("shared by project other"))
+		Expect(got.Status.Booking).To(BeNil())
+		Expect(runnerJob(got, 1)).To(BeNil())
+	})
+
+	It("should_refuse_a_job_without_a_step_context_at_the_definition", func() {
+		bare := &hpcv1alpha1.HPCArgoWorkflowJob{
+			ObjectMeta: metav1.ObjectMeta{Name: "hpc-bare", Namespace: envNS},
+			Spec:       hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Class: "meluxina-gpu", Image: "reg.example/app:v1", WallTimeMinutes: 60, StepName: "train"},
+		}
+		err := k8sClient.Create(ctx, bare)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.context"))
+	})
+
+	// PRD kaos#1911 CON-04: status.result is set only on a job that Succeeded.
+	It("should_keep_the_result_of_a_step_that_ended_well_and_publish_none_for_any_other_end", func() {
+		result := contractFixture("result-model.wire")
+		end := func(run hpcv1alpha1.RunStatus) *hpcv1alpha1.HPCArgoWorkflowJob {
+			j := newServeJob(newWorkflow(), nil)
+			_, got := reconcileOnce(j)
+			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
+			// The runner's terminal report: the run and the result in one patch.
+			orig := got.DeepCopy()
+			got.Status.Run, got.Status.Result = &run, result
+			Expect(k8sClient.Status().Patch(ctx, got, client.MergeFrom(orig))).To(Succeed())
+			_, got = reconcileOnce(j)
+			return got
+		}
+		now := metav1.Now()
+		ok := end(hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "1", State: "COMPLETED", ExitCode: ptr.To(int32(0)), StartTime: &now, EndTime: &now, Terminal: true})
+		Expect(ok.Status.Phase).To(Equal(hpcv1alpha1.PhaseSucceeded))
+		Expect(ok.Status.Result).To(Equal(result))
+
+		failed := end(hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "2", State: "FAILED", ExitCode: ptr.To(int32(1)), StartTime: &now, EndTime: &now, Terminal: true})
+		Expect(failed.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(failed.Status.Result).To(BeEmpty(), "a failed job never publishes a result, whatever the step wrote")
+
+		cancelled := end(hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "3", State: "CANCELLED", StartTime: &now, EndTime: &now, Terminal: true})
+		Expect(cancelled.Status.Phase).To(Equal(hpcv1alpha1.PhaseCancelled))
+		Expect(cancelled.Status.Result).To(BeEmpty())
+	})
+
+	// PRD kaos#1911 X-2. Before: a step whose result could not be handed back ended Succeeded with empty outputs.
+	It("should_fail_the_job_with_its_own_reason_when_the_result_was_not_handed_back_or_is_not_a_result", func() {
+		now := metav1.Now()
+		end := func(code int32, message string) *hpcv1alpha1.HPCArgoWorkflowJob {
+			j := newServeJob(newWorkflow(), nil)
+			reconcileOnce(j)
+			report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "9", State: "FAILED", ExitCode: ptr.To(code),
+				StartTime: &now, EndTime: &now, Terminal: true, Message: message})
+			_, got := reconcileOnce(j)
+			return got
+		}
+		lost := end(hpcv1alpha1.ExitCodeResultNotHandedBack, "the step ended well, but its result could not be fetched: lakeFS answered 503")
+		Expect(lost.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(lost.Status.Reason).To(Equal(hpcv1alpha1.ReasonResultNotHandedBack))
+		Expect(lost.Status.Message).To(ContainSubstring("lakeFS answered 503"))
+		Expect(lost.Status.Result).To(BeEmpty())
+
+		// The job script ended 243 on the node: the runner has no sentence, the controller says what the code means.
+		onNode := end(hpcv1alpha1.ExitCodeResultNotHandedBack, "")
+		Expect(onNode.Status.Reason).To(Equal(hpcv1alpha1.ReasonResultNotHandedBack))
+		Expect(onNode.Status.Message).To(ContainSubstring("could not read or upload the step's result file"))
+
+		invalid := end(hpcv1alpha1.ExitCodeInvalidResult, "the step's result is not valid: it costs 9000 bytes, more than the 8192 a result may cost")
+		Expect(invalid.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(invalid.Status.Reason).To(Equal(hpcv1alpha1.ReasonInvalidResult))
+		Expect(invalid.Status.Message).To(ContainSubstring("costs 9000 bytes"))
+	})
+
 	It("refuses a spec.env outside the allowlist: the CRD rejects it", func() {
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: "evil", Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: 10, StepName: "s",
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: 10, StepName: "s",
 				Env: []hpcv1alpha1.NameValue{{Name: "HPC_ENDPOINT", Value: "https://evil.example"}}},
 		}
 		err := k8sClient.Create(ctx, j)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("env may only set"))
-		j.Spec.Env = []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "not-an-outputs-repo"}}
+		// What the engine set before the step contract is refused too: nothing reads it any more.
+		j.Spec.Env = []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "outputs-app"}}
 		Expect(k8sClient.Create(ctx, j)).NotTo(Succeed())
 	})
 
@@ -463,7 +557,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 	It("leaves a phase-0 job (no stepName) exactly as before: no runner Job, no finalizer, no polling", func() {
 		seq++
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("p0-%d", seq), Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: 60}}
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: 60}}
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		res, got := reconcileOnce(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))

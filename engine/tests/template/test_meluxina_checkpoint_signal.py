@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 def _render(**kw):
     from kubecore import authoring, enhance
     with authoring.pipeline("t") as p:
-        authoring.step("train", gpu=True, **kw)
+        authoring.step("train", kind="train", gpu=True, **kw)
     ctx = yaml.safe_load((ROOT / "kubecore" / "local-dev" / "pipeline-context.yaml").read_text())
     wft = enhance.enhance(yaml.safe_load(p.wt.to_yaml()), ctx)
     for t in wft["spec"]["templates"]:
@@ -37,7 +37,7 @@ def _render(**kw):
 def test_resumable_is_an_annotation(value, lead):
     from kubecore import authoring
     with authoring.pipeline("t") as p:
-        authoring.step("train", gpu=True, resumable=value)
+        authoring.step("train", kind="train", gpu=True, resumable=value)
     (tmpl,) = [t for t in yaml.safe_load(p.wt.to_yaml())["spec"]["templates"] if t["name"] == "train"]
     assert tmpl["metadata"]["annotations"][authoring.HPC_RESUMABLE_ANNOTATION] == lead
 
@@ -46,16 +46,16 @@ def test_resumable_is_an_annotation(value, lead):
 def test_a_bad_lead_is_refused(value):
     from kubecore import authoring
     with pytest.raises(authoring.AuthoringError), authoring.pipeline("t"):
-        authoring.step("train", gpu=True, resumable=value)
+        authoring.step("train", kind="train", gpu=True, resumable=value)
 
 
-def test_a_step_without_a_gpu_may_be_resumable_and_have_an_hpc_time_limit():
+def test_a_step_without_a_gpu_may_be_resumable_and_have_a_walltime():
     """Every step can be placed on an HPC class, and a CPU step on a spot machine is interrupted too."""
     from kubecore import authoring
     with authoring.pipeline("t") as p:
-        authoring.step("prep", resumable=True, hpc_time_limit="2h")
+        authoring.step("prep", kind="train", resumable=True, walltime="2h")
     step = p.steps[0]
-    assert step.resumable == authoring.DEFAULT_RESUMABLE_LEAD and step.hpc_time_limit == "2h" and not step.gpu
+    assert step.resumable == authoring.DEFAULT_RESUMABLE_LEAD and step.walltime == "2h" and not step.gpu
 
 
 def test_a_resumable_cpu_step_gets_its_checkpoint_copies():
@@ -74,12 +74,12 @@ def test_a_resumable_steps_follower_gets_its_lead_and_a_deadline_for_every_conti
     from kubecore import meluxina
     one_job = (120 + meluxina.QUEUE_ALLOWANCE_MINUTES) * 60
     all_jobs = (1 + meluxina.HPC_MAX_CONTINUATIONS) * one_job
-    plain = _render(hpc_time_limit="2h")      # not declared: resumability is discovered, so it may continue
+    plain = _render(walltime="2h")      # not declared: resumability is discovered, so it may continue
     assert plain["resumable-lead"] == "0"
     assert int(plain["deadline-seconds"]) == all_jobs
-    opted_out = _render(hpc_time_limit="2h", resumable=False)
+    opted_out = _render(walltime="2h", resumable=False)
     assert int(opted_out["deadline-seconds"]) == one_job
-    resumable = _render(hpc_time_limit="2h", resumable="20m")
+    resumable = _render(walltime="2h", resumable="20m")
     assert resumable["resumable-lead"] == "20"
     assert int(resumable["deadline-seconds"]) == \
         (1 + meluxina.HPC_MAX_CONTINUATIONS) * (120 + meluxina.QUEUE_ALLOWANCE_MINUTES) * 60
@@ -97,7 +97,7 @@ def test_idle_timeout_reaches_the_follower_as_minutes_and_unset_leaves_the_platf
 
 def test_a_lead_not_shorter_than_the_wall_time_is_refused():
     with pytest.raises(ValueError, match="not shorter than its wall time"):
-        _render(hpc_time_limit="30m", resumable="30m")
+        _render(walltime="30m", resumable="30m")
 
 
 def test_resumable_false_is_the_opt_out_the_follower_passes_on_as_hpc_resumable_zero():
@@ -109,7 +109,7 @@ def test_resumable_false_is_the_opt_out_the_follower_passes_on_as_hpc_resumable_
     assert _render()["resumable"] == "auto"
     assert _render(resumable="20m")["resumable"] == "auto"
     with authoring.pipeline("t") as p:
-        authoring.step("train", gpu=True, resumable=False)
+        authoring.step("train", kind="train", gpu=True, resumable=False)
     (tmpl,) = [t for t in yaml.safe_load(p.wt.to_yaml())["spec"]["templates"] if t["name"] == "train"]
     assert tmpl["metadata"]["annotations"][authoring.HPC_RESUMABLE_ANNOTATION] == "off"
 
@@ -117,4 +117,4 @@ def test_resumable_false_is_the_opt_out_the_follower_passes_on_as_hpc_resumable_
 def test_resumable_false_is_accepted_on_a_cpu_step():
     from kubecore import authoring
     with authoring.pipeline("t"):
-        authoring.step("prep", resumable=False)
+        authoring.step("prep", kind="train", resumable=False)

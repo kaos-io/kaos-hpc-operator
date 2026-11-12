@@ -29,11 +29,15 @@ var engineGoldenArgoValues = map[string]string{
 	"inputs.parameters.resumable-lead": "10",
 	"inputs.parameters.resumable":      "auto",
 	"inputs.parameters.idle-timeout":   "40",
-	"inputs.parameters.step-outputs":   "model,metrics",
-	// The run's dataset pin as the compose step writes it.
-	"inputs.parameters.dataset-pin": `{"repo":"dataset-default","version":"latest",` +
-		`"commit":"c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2","owner":""}`,
+	// The step context as the workflow assembles it, and the step's kind (the follower pod's own label).
+	"inputs.parameters.kaos-context": engineGoldenContext,
+	"inputs.parameters.step-kind":    testKind,
 }
+
+// engineGoldenContext stands in for the value of the kaos-context input: a step context with one input.
+const engineGoldenContext = `{"version":1,"run":"wf-1","app":"PLACEHOLDER-app","project":"p","step":"train","kind":"train",` +
+	`"experiment":"e","params":{},"ledger":{"version":2,"reads":[{"name":"dataset","repo":"dataset-default","owner":null,` +
+	`"ref":"latest","commit":"c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}],"writes":[]},"produces":[],"upstream":{}}`
 
 type goldenEnvVar struct {
 	Name      string `json:"name"`
@@ -46,6 +50,15 @@ type goldenEnvVar struct {
 }
 
 type goldenTemplate struct {
+	Outputs struct {
+		Parameters []struct {
+			Name      string `json:"name"`
+			ValueFrom struct {
+				Path    string  `json:"path"`
+				Default *string `json:"default"`
+			} `json:"valueFrom"`
+		} `json:"parameters"`
+	} `json:"outputs"`
 	Container struct {
 		Command []string       `json:"command"`
 		Env     []goldenEnvVar `json:"env"`
@@ -105,17 +118,36 @@ func TestEngineGoldenIsAValidFollowerEnvironment(t *testing.T) {
 	if cfg.IdleTimeout == nil || *cfg.IdleTimeout != 40 {
 		t.Errorf("HPC_IDLE_TIMEOUT_MINUTES did not come through: %v", cfg.IdleTimeout)
 	}
-	if len(cfg.Outputs) != 2 || len(cfg.Command) != 3 || cfg.Dataset == nil || cfg.Dataset.Repo != "dataset-default" || cfg.Dataset.Version != "latest" ||
-		len(cfg.Dataset.Commit) != 64 {
-		t.Errorf("outputs, command or dataset did not come through: %+v", cfg)
+	if len(cfg.Command) != 3 || cfg.Command[0] != "python" || cfg.Command[1] != "-m" || cfg.Command[2] != "app.entry" {
+		t.Errorf("the step's command is always python -m app.entry, got %v", cfg.Command)
+	}
+	if cfg.Context != engineGoldenContext || cfg.App != "PLACEHOLDER-app" || cfg.Kind != testKind ||
+		len(cfg.Inputs) != 1 || cfg.Inputs[0].Name != "dataset" || cfg.Inputs[0].Repo != "dataset-default" || len(cfg.Inputs[0].Commit) != 64 {
+		t.Errorf("the context, the app, the kind or the inputs did not come through: %+v", cfg)
+	}
+}
+
+// The follower hands on exactly the two files the engine's template reads, and the result has no default:
+// a follower that ends without writing it fails the step (PRD kaos#1911 CON-04).
+func TestEngineGoldenReadsTheFilesTheFollowerWrites(t *testing.T) {
+	want := map[string]string{"kaos-result": "/tmp/outputs/kaos-result.json", "slurm-job-id": "/tmp/slurm-job-id"}
+	got := map[string]string{}
+	for _, p := range loadEngineGolden(t).Outputs.Parameters {
+		got[p.Name] = p.ValueFrom.Path
+		if p.ValueFrom.Default != nil {
+			t.Errorf("output %s has a default (%q): a missing file must fail the step", p.Name, *p.ValueFrom.Default)
+		}
+	}
+	if len(got) != len(want) || got["kaos-result"] != want["kaos-result"] || got["slurm-job-id"] != want["slurm-job-id"] {
+		t.Errorf("the engine reads %v, the follower writes %v (cmd/follower/main.go)", got, want)
 	}
 }
 
 func TestEngineGoldenSetsNoVariableTheFollowerIgnores(t *testing.T) {
 	read := map[string]bool{
 		"HPC_JOB_NAMESPACE": true, "WF_NAME": true, "WF_UID": true, "STEP_NAME": true, "NODE_KEY": true,
-		"IMAGE_REF": true, "HPC_CLASS": true, "DATASET_PIN": true, "HPC_SCOPE": true, "STEP_COMMAND": true,
-		"SLURM_TIME_LIMIT": true, "HPC_IDLE_TIMEOUT_MINUTES": true, "STEP_OUTPUTS": true, "HPC_SHARING": true,
+		"IMAGE_REF": true, "HPC_CLASS": true, "KAOS_STEP_CONTEXT": true, "HPC_SCOPE": true, "STEP_COMMAND": true,
+		"SLURM_TIME_LIMIT": true, "HPC_IDLE_TIMEOUT_MINUTES": true, "HPC_SHARING": true,
 		"HPC_RESUMABLE_LEAD": true, "HPC_RESUMABLE": true, "HPC_MAX_CONTINUATIONS": true,
 	}
 	for _, n := range hpcv1alpha1.AllowedEnvNames {

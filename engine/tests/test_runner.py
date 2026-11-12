@@ -1,4 +1,4 @@
-"""The runner contract (engine/README.md): the engine renders; the app's copy never wins."""
+"""The runner contract (engine/README.md): the engine renders; code of the same name in the app never wins."""
 
 import textwrap
 
@@ -25,23 +25,20 @@ def test_should_render_the_fixture_app_and_print_the_engine_line(tmp_path):
     assert raw_template(repo)["kind"] == "WorkflowTemplate"
 
 
-@pytest.mark.parametrize("module", ["authoring", "derive_tree", "compose", "enhance", "meluxina", "resilience"])
-def test_should_render_when_a_vendored_module_raises_on_import(tmp_path, baseline, module):
+@pytest.mark.parametrize("profile", ["hera", "yolo", "legacy-v1", "yolo-v1", "bogus"])
+@pytest.mark.parametrize("content", ["", TRAP], ids=["empty-folder", "a-copy-of-the-engine"])
+def test_an_app_with_a_kubecore_folder_of_its_own_fails_the_render_as_an_old_app(tmp_path, profile, content):
+    """AC-01, whatever profile CI passes (the charts still know the two retired ones): the app is told what
+    to delete, and nothing of its folder is ever imported."""
+    from kubecore.step_contract import OLD_APP_NOTICE
     repo = copy_app(tmp_path / "app")
     (repo / "kubecore").mkdir()
-    (repo / "kubecore" / f"{module}.py").write_text(TRAP)
-    res = run_render(repo)
-    assert res.returncode == 0, res.stderr
-    assert raw_template(repo) == baseline
-
-
-def test_should_render_when_the_vendored_package_init_raises(tmp_path, baseline):
-    repo = copy_app(tmp_path / "app")
-    (repo / "kubecore").mkdir()
-    (repo / "kubecore" / "__init__.py").write_text(TRAP)
-    res = run_render(repo)
-    assert res.returncode == 0, res.stderr
-    assert raw_template(repo) == baseline
+    (repo / "kubecore" / "authoring.py").write_text(content)
+    res = run_render(repo, profile=profile)
+    assert res.returncode == 1 and not (repo / "out").exists()
+    assert ("kaos-engine: this app has a kubecore/ folder of its own, and an app carries no copy of the engine. "
+            + OLD_APP_NOTICE) in res.stderr
+    assert "the vendored copy was imported" not in res.stderr
 
 
 def test_should_render_when_a_toplevel_kubecore_alias_is_on_the_path(tmp_path, baseline):
@@ -54,26 +51,6 @@ def test_should_render_when_a_toplevel_kubecore_alias_is_on_the_path(tmp_path, b
     res = run_render(repo, extra_env={"PYTHONPATH": f"{ENGINE}:{alias.parent}"})
     assert res.returncode == 0, res.stderr
     assert raw_template(repo) == baseline
-
-
-def test_should_import_extra_client_modules_under_kubecore_but_never_let_them_win(tmp_path):
-    repo = copy_app(tmp_path / "app")
-    (repo / "kubecore").mkdir()
-    (repo / "kubecore" / "client_extra.py").write_text("VALUE = 'from-the-client'\n")
-    (repo / "kubecore" / "authoring.py").write_text(TRAP)
-    (repo / "pipeline.py").write_text(textwrap.dedent("""
-        from pathlib import Path
-        import kubecore.authoring as authoring
-        from kubecore import client_extra
-        assert client_extra.VALUE == "from-the-client"
-        assert "engine" in authoring.__file__, authoring.__file__
-        from kubecore.authoring import pipeline, step
-        with pipeline("x") as p:
-            step("hello-world", reads=["experiment"])
-        p.write(Path(__file__).parent / "out" / "raw-workflow-template.yaml")
-    """))
-    res = run_render(repo)
-    assert res.returncode == 0, res.stderr
 
 
 def test_should_exit_3_when_pipeline_py_swaps_an_engine_module(tmp_path):

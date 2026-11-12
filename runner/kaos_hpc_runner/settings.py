@@ -32,6 +32,20 @@ SUBMIT_LIMIT_EXIT = 238
 INVALID_IMAGE_EXIT = 239
 # The runner reports it for a step the slot manager stopped for computing on a GPU outside its set (reason GPUViolation).
 GPU_VIOLATION_EXIT = 240
+# The runner reports it (FAILED, no site job) when the site's staging tool speaks another staging contract.
+STAGING_MISMATCH_EXIT = 241
+# The runner reports it (FAILED, no site job) when the dataset holds an object whose name is reserved for the platform,
+# or whose path could leave the dataset's folder.
+RESERVED_NAME_EXIT = 242
+# The step ended well but its result could not be handed back: the job script exits with it when it cannot read or
+# upload the result file; the runner reports it (FAILED) when it cannot fetch what the job uploaded, or before it
+# submits anything when the run has no way to hand a result back (reason ResultNotHandedBack).
+RESULT_NOT_HANDED_BACK_EXIT = 243
+# The runner reports it (FAILED) when the result file the job handed back is not a result of the step contract
+# (reason InvalidResult).
+INVALID_RESULT_EXIT = 244
+# The one value a step receives: the step context (docs/step-contract.md).
+CONTEXT_ENV = 'KAOS_STEP_CONTEXT'
 DEFAULT_IDLE_TIMEOUT_MIN = 20
 # AC-28: a site that does not answer is waited for this long (the controller passes its --site-outage-max).
 DEFAULT_SITE_WAIT_MAX_S = 30 * 60
@@ -106,7 +120,7 @@ class Settings:
         self.step = g('STEP_NAME') or ''
         if not (self.wf_uid and self.step and g('IMAGE_REF')):
             fail_start('WF_UID / STEP_NAME / IMAGE_REF missing from the runner environment')
-        self.wf_name = g('KUBECORE_WORKFLOW_NAME') or ''
+        self.wf_name = g('WF_NAME') or ''     # labels the step's log lines; it is not passed to the step
         self.image = normalize_image(g('IMAGE_REF'))
         # strict=False tolerates control characters inside strings (belt and braces for any
         # substitution path the render-side toJson escaping did not cover).
@@ -131,16 +145,13 @@ class Settings:
         # AC-39: the site's cap on queued plus running jobs per user, when the profile knows it (0 = unknown).
         raw = (g('HPC_MAX_SUBMIT_JOBS') or '').strip()
         self.max_submit_jobs = int(raw) if raw.isdigit() else 0
-        self.output_names = [n for n in (g('STEP_OUTPUTS') or '').split(',') if n]
-        # The step's dataset, pinned by the pipeline's compose step (spec.dataset). The runner stages this
-        # commit; it never resolves a version.
-        self.dataset_repo = (g('DATASET_REPO') or '').strip()
-        self.dataset_version = (g('DATASET_VERSION') or '').strip()
-        self.dataset_commit = (g('DATASET_COMMIT') or '').strip()
-        self.dataset_owner = (g('DATASET_OWNER') or '').strip()
-        # A dataset named the way jobs did before the run's data was pinned (by an older controller as DATASET,
-        # or by this one for a job stored before the update): there is no commit to stage.
-        self.dataset_unpinned = (g('DATASET_UNPINNED') or g('DATASET') or '').strip()
+        # The step context, exactly as the job carries it (spec.context). The step in the site job gets it
+        # under the same name, unchanged; the runner never reads into it.
+        self.context = g(CONTEXT_ENV) or ''
+        # The step's inputs (spec.inputs): the datasets to stage, each pinned to one commit. The runner stages
+        # these commits; it never resolves a version. Read by check_job, never by the cancel-only runner.
+        self.inputs_raw = g('HPC_INPUTS') or '[]'
+        self.inputs = []
         # PRD-1609 node sharing: off unless the operator turned it on for this project and gave
         # its scope. A host on a shared node takes only jobs whose name and script header carry it.
         self.scope = g('HPC_SCOPE') or ''
@@ -179,8 +190,10 @@ class Settings:
         # Operator-rendered data-plane endpoints (hpc-runner-config).
         self.lakefs_url = (g('LAKEFS_EXTERNAL_URL') or '').rstrip('/')
         self.mlflow_url = g('MLFLOW_EXTERNAL_URL') or ''
-        self.outputs_repo = g('OUTPUTS_REPO') or ''
-        self.outputs_ref = g('OUTPUTS_REF') or ''
+        # The app's outputs repository, from the job's app (spec.app): the step's result is handed back through
+        # a hand-off branch of it.
+        app = g('KAOS_APP') or ''
+        self.outputs_repo = 'outputs-' + app if re.fullmatch('[a-z0-9]([-a-z0-9]*[a-z0-9])?', app) else ''
 
     def apply_plan(self, placement):
         """A guest that was planned again as a host: take the lane and job limit the controller chose. The
@@ -224,37 +237,40 @@ class Settings:
         caps = [c for c in (self.class_cap(cls), self.qos_max if self.qos else 0) if c > 0]
         return min(caps) if caps else 0
 
-    # ---- dataset
+    # ---- the step contract
 
-    def check_dataset(self):
-        """Refuse to start an attempt whose dataset cannot be staged as pinned. Called before staging and before
-        any submission, and never by the cancel-only runner (which must be able to clean up whatever the job
-        asks for)."""
-        if self.dataset_unpinned and not self.dataset_repo:
-            fail_start('this job names dataset %s without a pinned commit: it was created before the platform '
-                       'update that pins a run\'s dataset. Running it now would run the step without its data. '
-                       'Run the pipeline again.' % self.dataset_unpinned, 1)
-        if self.dataset_repo and not re.fullmatch('[0-9a-f]{64}', self.dataset_commit):
-            fail_start('dataset %s@%s has no pinned commit (got %r): the pipeline pins it before any step '
-                       'runs, the runner never resolves a version'
-                       % (self.dataset_repo, self.dataset_version, self.dataset_commit), 1)
-        if self.dataset_owner:
-            fail_start('dataset %s/%s@%s is shared by project %s: datasets of another project cannot be '
-                       'read on HPC yet. Run this step on a cluster class, or copy the dataset into this '
-                       'project.' % (self.dataset_owner, self.dataset_repo, self.dataset_version,
-                                     self.dataset_owner), 1)
+    def check_job(self):
+        """Refuse to start an attempt that cannot run on the step contract: no step context, or inputs that are
+        not pinned datasets. Called before staging and before any submission, and never by the cancel-only runner
+        (which must be able to clean up whatever the job asks for). Fills self.inputs. Every name, repository and
+        commit is checked here because each one becomes a word of the job script."""
+        if not self.context:
+            fail_start('this job carries no step context (%s): it was created before the platform update that '
+                       'changed how a step is given its inputs. Running it now would run the step without its '
+                       'context and its data. Run the pipeline again.' % CONTEXT_ENV, 1)
+        try:
+            inputs = json.loads(self.inputs_raw)
+            if not isinstance(inputs, list):
+                raise ValueError('not a list')
+            for i in inputs:
+                if not (re.fullmatch(INPUT_NAME, i['name']) and len(i['name']) <= 40):
+                    raise ValueError('input name %r' % (i['name'],))
+                if not re.fullmatch(INPUT_REPO, i['repo']):
+                    raise ValueError('input %s: %r is not a dataset repository' % (i['name'], i['repo']))
+                if not re.fullmatch('[0-9a-f]{64}', i['commit']):
+                    raise ValueError('input %s: dataset %s has no pinned commit (got %r)' % (i['name'], i['repo'], i['commit']))
+            if len({i['name'] for i in inputs}) != len(inputs):
+                raise ValueError('two inputs have the same name')
+        except (ValueError, KeyError, TypeError) as e:
+            fail_start('the job\'s inputs (HPC_INPUTS) are not a list of pinned datasets: %s. The pipeline pins every '
+                       'input before any step runs; the runner never resolves a version.' % e, 1)
+        self.inputs = [{'name': i['name'], 'repo': i['repo'], 'commit': i['commit'],
+                        # The label the site's staging tool files the copy under: `main` for `latest` (as
+                        # before), else what the run asked for; the commit for a dataset a needed step
+                        # wrote. The commit, not this label, decides what is copied.
+                        'ref': 'main' if i.get('ref') == 'latest' else (i.get('ref') or i['commit'])}
+                       for i in inputs]
 
-    @property
-    def dataset_ref(self):
-        """The label the site's stager files the copy under: `main` for `latest` (as before), else the
-        version. The commit, not this label, decides what is copied."""
-        return 'main' if self.dataset_version == 'latest' else self.dataset_version
 
-    def data_lock(self):
-        """The run's data lock for this step's dataset (kaos-lib's KAOS_LIB_LOCK, version 1): the step's
-        kaos-lib then reads the pinned commit. "" when the job has no dataset."""
-        if not self.dataset_repo:
-            return ''
-        return json.dumps({'version': 1, 'reads': [{
-            'repo': self.dataset_repo, 'owner': self.dataset_owner or None,
-            'ref': self.dataset_version, 'commit': self.dataset_commit}]}, separators=(',', ':'))
+INPUT_NAME = '[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?'
+INPUT_REPO = 'dataset-[a-z0-9][a-z0-9-]{0,54}'
