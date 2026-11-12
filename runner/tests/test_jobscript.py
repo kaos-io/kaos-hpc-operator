@@ -345,7 +345,7 @@ def test_per_job_paths_key_on_the_steps_own_job():
 
 @pytest.mark.parametrize("commit, expected_prefix", [("c0ffee12", "kaos-commit=c0ffee12 err7:"), ("", "err7:")])
 def test_a_failure_comment_keeps_the_dataset_lease(tmp_path, commit, expected_prefix):
-    fail = "\n".join(jobscript.COMMENT_HELPER + [next(l for l in _job_script_lines() if l.startswith("fail(){"))])
+    fail = "\n".join(jobscript.COMMENT_HELPER + jobscript.REDACT_HELPER + [next(l for l in _job_script_lines() if l.startswith("fail(){"))])
     bindir = tmp_path / "bin"
     bindir.mkdir()
     (bindir / "scontrol").write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$OUT"\n')

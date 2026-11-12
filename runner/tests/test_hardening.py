@@ -387,6 +387,63 @@ def test_the_script_sets_the_umask_before_it_makes_anything():
     assert lines.index("umask 077") == 3, "right after the header, so the sharing exports still follow line 3"
 
 
+# ---------------------------------------------------------------- 4. the failure tail
+
+def _redact(text):
+    helper = "\n".join(jobscript.REDACT_HELPER)
+    return subprocess.run(["bash", "-c", helper + "\nkaos_redact"], input=text, capture_output=True, text=True).stdout
+
+
+JWT = "eyJhbGciOiJSUzI1NiIsImtpZCI6IjEifQ.eyJzdWIiOiJ1c2VyIiwiZXhwIjo5OTl9.c2lnbmF0dXJlX3ZhbHVlXzEyMw"
+
+
+@pytest.mark.parametrize("secret,text", [
+    ("abc123def456", "Authorization: Bearer abc123def456"),
+    ("abc123def456", "authorization: bearer abc123def456 and more"),
+    ("ya29.a0AfH6SMBx-1_zz", "token ya29.a0AfH6SMBx-1_zz expired"),
+    (JWT, "got " + JWT + " from the server"),
+    ("eyJhbGciOiJub25lIn0", "bare eyJhbGciOiJub25lIn0 header"),
+    ("hunter2", "password=hunter2"),
+    ("s3cr3tvalue", "LAKEFS_BEARER_TOKEN=s3cr3tvalue"),
+    ("s3cr3tvalue", "MLFLOW_TRACKING_TOKEN=s3cr3tvalue&x=1"),
+    ("zzz999", "api_key=zzz999;next"),
+    ("zzz999", 'client_secret=zzz999,other'),
+    ("abc123", '{"access_token": "abc123", "n": 1}'),
+    ("dXNlcjpwYXNzd29yZDEyMzQ=", "Authorization: Basic dXNlcjpwYXNzd29yZDEyMzQ="),
+    ("TOKEN-VALUE", "Token=TOKEN-VALUE"),
+])
+def test_what_looks_like_a_credential_is_redacted(secret, text):
+    out = _redact(text + "\n")
+    assert secret not in out and "[redacted]" in out, out
+
+
+def test_ordinary_output_is_not_changed():
+    text = "epoch 3 loss=0.25 lr=1e-05\nTraceback (most recent call last):\n  File \"a.py\", line 3\nValueError: boom\n"
+    assert _redact(text) == text
+
+
+def test_the_comment_of_a_failed_job_holds_no_credential(tmp_path):
+    """fail() copies the tail of the job's output into the job comment: redacted first, and a token cut by the
+    700-byte window is redacted whole because the window is taken after redaction."""
+    fail = "\n".join(jobscript.COMMENT_HELPER + jobscript.REDACT_HELPER
+                     + [next(l for l in jobscript.batch_lines("-", "/scr") if l.startswith("fail(){"))])
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "scontrol").write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$OUT"\n')
+    (bindir / "scontrol").chmod(0o755)
+    long_jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1In0." + "A" * 400      # a signature of 400 characters
+    (tmp_path / "slurm-4242.out").write_text(
+        "B" * 500 + long_jwt + "z" * 150 + "\nERROR Authorization: Bearer BEARERVALUE123\nLAKEFS_BEARER_TOKEN=" + WALLET + "\nboom\n")
+    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], OUT=str(tmp_path / "args"),
+               KAOS_JOB_ID="4242", KAOS_COMMENT_RETRY_SLEEP="0")
+    assert subprocess.run(["bash", "-c", fail + "\nfail 7"], cwd=str(tmp_path), env=env).returncode == 7
+    comment = (tmp_path / "args").read_text().split("\n")[2]
+    assert comment.startswith("Comment=err7:") and "boom" in comment and "[redacted]" in comment
+    for secret in (WALLET, "BEARERVALUE123", "eyJhbGci", "A" * 40):
+        assert secret not in comment, "a credential or a piece of one is in the job comment"
+    assert len(comment) < 800
+
+
 def test_the_two_places_that_run_the_step_name_the_same_variables():
     # The allow-list is one tuple; the script's loop and the contract text read it.
     line = next(l for l in jobscript.batch_lines("-", "/scr") if l.startswith("KAOS_STEP_ENV="))

@@ -33,6 +33,19 @@ STEP_ENV = (CONTEXT_ENV, 'LAKEFS_ENDPOINT', 'LAKEFS_BEARER_TOKEN', 'MLFLOW_TRACK
             'KUBECORE_SLOT_CPUS', 'KUBECORE_SLOT_MEM_GIB', 'KUBECORE_SLOT_SHARED', 'KAOS_STEP_GPUS',
             'SLURM_JOB_ID', 'SLURM_STEP_ID', 'SLURM_CPUS_ON_NODE')
 
+# Anything that looks like a credential is replaced before a line of job output is copied anywhere (the job
+# comment, which the controller and the console read). Bearer/Basic values, Google access tokens, JWTs, and the value
+# of a key=/token=/password=/secret= word or JSON member (the word may be a longer name: MLFLOW_TRACKING_TOKEN=).
+REDACT_HELPER = [
+    'kaos_redact(){ sed -E'
+    ' -e \'s#[Bb][Ee][Aa][Rr][Ee][Rr] +[A-Za-z0-9._~+/=-]+#Bearer [redacted]#g\''
+    ' -e \'s#[Bb][Aa][Ss][Ii][Cc] +[A-Za-z0-9+/=]{16,}#Basic [redacted]#g\''
+    ' -e \'s#ya29\\.[A-Za-z0-9._-]+#[redacted]#g\''
+    ' -e \'s#eyJ[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]*){0,2}#[redacted]#g\''
+    ' -e \'s#("[A-Za-z0-9_.-]*([Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt])[A-Za-z0-9_.-]*" *: *)"[^"]*"#\\1"[redacted]"#g\''
+    ' -e \'s#([A-Za-z0-9_.-]*([Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt])[A-Za-z0-9_.-]*)=[^[:space:]&,;|]+#\\1=[redacted]#g\'; }',
+]
+
 
 # The ONLY code that writes this job's comment from the node (fail(), the checkpoint copier). It never
 # overwrites blindly: it reads the live comment, drops the words being set and any old err tail, appends the
@@ -86,6 +99,7 @@ def batch_lines(scope, scratch):
         # The one writer of the job comment (see COMMENT_HELPER), exported for the copier.
         *COMMENT_HELPER,
         'export -f kaos_comment',
+        *REDACT_HELPER,
         'SCR=' + scratch,
         # The job's private folder, only a shared-node host makes one. It is removed on every way out of this
         # script: the end, fail(), a signal (Slurm's TERM at cancel or at the time limit).
@@ -96,7 +110,7 @@ def batch_lines(scope, scratch):
         # see WHY): on any failure, tail this job's own output file into its
         # job COMMENT — readable over REST from the waiter and by operators.
         # The dataset lease (kaos-commit=, PRD-1541 D-06) stays first.
-        'fail(){ KAOS_NOTE=$(cat "$KAOS_WORK/.kaos-note" 2>/dev/null); kaos_comment -e "err$1:$(tail -c 700 slurm-$KAOS_JOB_ID.out 2>/dev/null | tr "\\n" "|")" $KAOS_NOTE; exit $1; }',
+        'fail(){ KAOS_NOTE=$(cat "$KAOS_WORK/.kaos-note" 2>/dev/null); kaos_comment -e "err$1:$(tail -c 4096 slurm-$KAOS_JOB_ID.out 2>/dev/null | kaos_redact | tail -c 700 | tr "\\n" "|")" $KAOS_NOTE; exit $1; }',
         # PRD-1609 F-03: with sharing on, the job's batch step is the host. It runs
         # this same script as one Slurm job step per slot (its own step and taken
         # guests' scripts), each with KAOS_IN_STEP=1 and that step's KAOS_JOB_ID.
