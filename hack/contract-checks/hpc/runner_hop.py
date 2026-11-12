@@ -68,6 +68,7 @@ def one(context, mode, work, lakefs):
     cfg = Settings(env_in)
     cfg.check_job()
     runner = Runner(cfg, slurm=object(), stager=object(), reporter=object(), logs=object(), mint=lambda: 'check-wallet')
+    runner.prepare_handback()
     batch, env, _, _ = runner.site_job('', '')
     name = cfg.job_site_name + '-' + mode + ('-control' if os.environ.get('CONTRACT_CHECK_DAMAGE') else '')
     body = {'job': {'name': name, 'partition': cfg.hpc_class()['partition'],
