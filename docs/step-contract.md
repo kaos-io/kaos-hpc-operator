@@ -85,6 +85,17 @@ Each rule has one sentence, naming the step, what its kind requires and what to 
 and, for `control`, `step 'x': a control step steers the run and handles no data, so it takes no inputs= and no produces=. ...`.
 (An ingest step that produces a dataset runs on the cluster either way: section "Placement of a step that produces a dataset".)
 
+**The run form.** The form speaks to the developer, in this order: `pipeline-info` (how to fill the form, the machine
+classes, the developer's steps; no account, provider or platform step), the `experiment-*` fields, the other settings
+in the order of `config/`, the dataset fields (the config values `inputs=` names), then for each step, in pipeline order,
+`<step>-class`, `<step>-walltime` and `<step>-checkpoint-every`, then the `promote-<dataset>` choices, `config`
+("Extra settings for this run, as YAML. They replace the values above.") and last the `image-<step>` fields, each
+described "Set by the platform. Do not change." (the delivery pipeline reads them to check each step has its folder).
+A setting's description is the comment written next to it in `config/*.yaml`: the `# ...` at the end of its line, else
+the comment lines directly above it with no blank line between; with no comment the description is empty. The
+platform's own compose step has no class field (it runs on the default class, fixed in the template) and the platform
+endpoints are not form fields.
+
 **Time limit and checkpoint interval on the run form.** Every step of the developer's pipeline has one time limit,
 wherever it runs, and the run form shows it: a field `<step>-walltime` for every step, with the description "The
 longest the step may run, as minutes or hours: 90m, 12h. Default from pipeline.py." Its default is the step's

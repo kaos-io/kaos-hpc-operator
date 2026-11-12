@@ -108,7 +108,7 @@ def test_the_compose_step_has_no_hpc_twin_and_its_class_choice_offers_no_hpc_cla
     params = {p["name"]: p for p in out["spec"]["arguments"]["parameters"]}
     hpc = [c for c in params["model-training-class"]["enum"] if c.startswith("meluxina-")]
     assert hpc, "the fixture context has HPC classes"
-    assert not [c for c in params["compose-and-validate-class"]["enum"] if c.startswith("meluxina-")]
+    assert "compose-and-validate-class" not in params, "the compose step's class is fixed in the template"
 
 
 def test_a_task_without_a_context_cannot_get_an_hpc_variant():

@@ -305,6 +305,11 @@ def step_templates(spec: dict) -> list:
 # ----------------------------------------------------------------- arguments
 
 
+# The description of a field the developer does not choose: the platform stamps the step's image (the CI chart reads
+# this field to check every step has a folder).
+PLATFORM_OWNED = "Set by the platform. Do not change."
+
+
 def enhance_arguments(spec: dict, ctx: dict, steps: list) -> None:
     args = spec.setdefault("arguments", {})
     parameters = args.setdefault("parameters", [])
@@ -316,10 +321,6 @@ def enhance_arguments(spec: dict, ctx: dict, steps: list) -> None:
             parameters.append(param)
             existing.add(param["name"])
 
-    add({"name": "mlflow-endpoint", "value": ctx["mlflow"]["trackingUri"]})
-    add({"name": "lakefs-endpoint", "value": ctx["lakefs"]["endpoint"]})
-    add({"name": "lakefs-repo", "value": ctx["lakefs"]["repository"]})
-
     for step in steps:
         annots = platform_annotations(step)
         if "image" in annots:
@@ -329,6 +330,7 @@ def enhance_arguments(spec: dict, ctx: dict, steps: list) -> None:
         add(
             {
                 "name": f"image-{step_name}",
+                "description": PLATFORM_OWNED,
                 "valueFrom": {
                     "configMapKeyRef": {
                         "name": cm,
@@ -664,7 +666,6 @@ def enhance_class_param(spec: dict, step: dict, ctx: dict, annots: dict, offer: 
     param_name = f"{step_name}-class"
     if param_name in existing:
         return
-    tier = step_tier(step)
     default = tier_default(ctx, step)["name"]
     node_sizes(ctx)   # refuses a pool with a class that cannot be sized, so none is offered unsized
     options = offer["offered"]
@@ -674,11 +675,10 @@ def enhance_class_param(spec: dict, step: dict, ctx: dict, annots: dict, offer: 
         "value": default,
         "enum": options,
         "description": (
-            f"Compute class for the '{step_name}' step "
-            f"(the KubePool's class catalog; default = its {tier} tier"
-            + ("; meluxina-* classes run the step as a Slurm job on MeluXina — "
-               "queue time applies, see pipeline-info" if hpc_names else "")
-            + ")."
+            f"The machine class the '{step_name}' step runs on. Default: {default}."
+            + (" Classes that start with "
+               f"'{hpc_names[0].split('-')[0]}-' run the step as a job on HPC (Slurm): queue time applies."
+               if hpc_names else "")
         ),
     }
     parameters.append(param)
@@ -1185,17 +1185,17 @@ def enhance_image_guard(steps: list) -> None:
 
 
 def enhance_pipeline_info(spec: dict, ctx: dict, steps: list) -> None:
-    """Read-only documentation parameter, first in the form (like the
-    live WFT's pipeline-info)."""
+    """The text at the top of the run form: how to run, the machine classes, the developer's steps. It is a
+    field because the form shows nothing else; it speaks about the developer's pipeline, not the platform."""
     parameters = spec["arguments"]["parameters"]
     if "pipeline-info" in _param_names(parameters):
         return
+    own = [s for s in steps if s["name"] != COMPOSE_STEP]
     lines = [
-        "HOW TO RUN: defaults are runnable as-is — just press Submit.",
-        "PER-STEP COMPUTE: {step}-class picks the node class; the step gets that node "
-        "(what it offers a pod, less the platform's reserve). Only a step that declares gpu=True is offered "
-        "the GPU classes; any other step is offered the CPU classes.",
-        "COMPUTE CLASSES on this pool:",
+        "The defaults run as they are: press Submit.",
+        "Each step has a class (the machine it runs on) and a time limit (the longest it may run, as minutes or "
+        "hours). Only a step that declares gpu=True is offered the GPU classes.",
+        "Machine classes:",
     ]
     for cls in ctx["computeClasses"]["all"]:
         acc = cls.get("guestAccelerator")
@@ -1203,28 +1203,78 @@ def enhance_pipeline_info(spec: dict, ctx: dict, steps: list) -> None:
         lines.append(f"  - {cls['name']} ({cls.get('tier', 'cpu')}) — {cls['machineType']}{acc_txt}")
     hpc = hpc_classes(ctx)
     if hpc:
-        account = (ctx.get("hpc") or {}).get("account") or ""
         lines.append(
-            "MELUXINA (HPC): pick a meluxina-* class in any {step}-class dropdown and "
-            "that step runs as a Slurm job on MeluXina"
-            + (f" (account {account})" if account else "")
-            + " — queue time applies; the pipeline waits, stages the dataset in and the "
-            "step's result back; walltime= in pipeline.py caps the job. Classes:")
+            "HPC (Slurm) classes: pick one in a step's class field and the step runs there as a job. Queue time "
+            "applies; the step's time limit is the job's limit. Classes:")
         for c in hpc:
             lines.append(f"  - {c['name']} ({c.get('tier', 'cpu')}) — partition {c.get('partition')}"
                          f"{', ' + str(c.get('gpus')) + ' GPUs' if c.get('gpus') else ''}"
                          f", {c.get('cpus', '?')} cores, {c.get('memoryGiB', '?')} GiB"
                          f"{' — ' + c['description'] if c.get('description') else ''}")
-    lines.append("STEPS: " + " -> ".join(s["name"] for s in steps))
-    lines.append("(This field is informational — leave it unchanged.)")
-    parameters.insert(
-        0,
-        {
-            "name": "pipeline-info",
-            "value": "\n".join(lines),
-            "description": "Read-only: live pool compute classes + how to fill this form. Leave unchanged.",
-        },
-    )
+    lines.append("Steps: " + " -> ".join(s["name"] for s in own))
+    parameters.insert(0, {"name": "pipeline-info", "value": "\n".join(lines),
+                          "description": "How to fill this form."})
+
+
+def enhance_compose_class(spec: dict, steps: list, ctx: dict) -> None:
+    """The platform's own compose step runs on the default class, fixed in the template: it is not a field the
+    developer chooses. Its class parameter is replaced by that class's name wherever the template reads it."""
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
+    if compose is None:
+        return
+    field = class_field(COMPOSE_STEP)
+    chosen = tier_default(ctx, compose)["name"]
+    replacements = (("{{workflow.parameters.%s}}" % field, chosen),
+                    ("workflow.parameters['%s']" % field, "'%s'" % chosen))
+
+    def fixed(node):      # in place: the templates are shared with the passes that follow
+        items = node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ()
+        for key, value in list(items):
+            if isinstance(value, str):
+                for old, new in replacements:
+                    value = value.replace(old, new)
+                node[key] = value
+            else:
+                fixed(value)
+
+    fixed(spec["templates"])
+    parameters = spec["arguments"]["parameters"]
+    parameters[:] = [p for p in parameters if p["name"] != field]
+
+
+def order_form(spec: dict, steps: list) -> None:
+    """The form in the order a developer reads it: the text, the experiment fields, the settings in config
+    order, the dataset fields, then each step's class, time limit and checkpoint interval, the promote ticks,
+    the extra YAML, and last what the platform owns."""
+    parameters = spec["arguments"]["parameters"]
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
+    table = json.loads(compose["container"]["args"][compose["container"]["args"].index("--steps") + 1]) \
+        if compose and "--steps" in compose["container"]["args"] else []
+    inputs = [name for entry in table for name in entry["inputs"]]
+    own = [e["name"] for e in table]
+    rank = {}
+
+    def place(name: str, group: int, index: int = 0) -> None:
+        rank[name] = (group, index)
+
+    for p in parameters:
+        name = p["name"]
+        if name == "pipeline-info":
+            place(name, 0)
+        elif name.startswith("experiment-"):
+            place(name, 1)
+        elif name in inputs:
+            place(name, 3)
+        elif name.startswith("promote-"):
+            place(name, 5)
+        elif name == "config":
+            place(name, 6)
+        elif name.startswith("image-"):
+            place(name, 7)
+    for i, step in enumerate(own):
+        for suffix in ("class", "walltime", "checkpoint-every"):
+            place(f"{step}-{suffix}", 4, i * 3 + ("class", "walltime", "checkpoint-every").index(suffix))
+    parameters.sort(key=lambda p: rank.get(p["name"], (2, 0)))     # sort is stable: config order within a group
 
 
 def connection_env_from(ctx: dict) -> list:
@@ -1317,7 +1367,9 @@ def enhance(wft: dict, ctx: dict) -> dict:
     enhance_workspace_pvc(spec, steps)
     enhance_compose_identity(steps, ctx)
     enhance_run_form(spec, steps, offers)
+    enhance_compose_class(spec, steps, ctx)
     enhance_pipeline_info(spec, ctx, steps)
+    order_form(spec, steps)
     # PRD-1016: the MeluXina leg — must run LAST (twin tasks copy each routed
     # step's FINAL container image/command, and the depends rewrite needs the
     # final DAG). See kubecore/meluxina.py.

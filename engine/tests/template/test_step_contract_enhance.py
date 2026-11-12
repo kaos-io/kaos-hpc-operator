@@ -44,16 +44,15 @@ def test_a_kind_that_never_runs_on_hpc_is_offered_no_hpc_class_and_gets_no_hpc_v
     choice = next(p for p in wft["spec"]["arguments"]["parameters"] if p["name"] == "one-class")
     offered = [c for c in choice["enum"] if c.startswith("meluxina-")]
     assert bool(offered) is on_hpc
-    assert ("meluxina-* classes" in choice["description"]) is on_hpc
+    assert ("run the step as a job on HPC (Slurm)" in choice["description"]) is on_hpc
     assert ("one-hpc" in _tasks(wft)) is on_hpc
     if not on_hpc:
         assert "when" not in _tasks(wft)["one"], "it always runs on the cluster"
 
 
-def test_the_compose_step_is_offered_no_hpc_class():
+def test_the_compose_step_has_no_class_field_and_no_hpc_variant():
     wft = _enhanced(lambda: authoring.step("one", kind="evaluate"))
-    choice = next(p for p in wft["spec"]["arguments"]["parameters"] if p["name"] == "compose-and-validate-class")
-    assert not [c for c in choice["enum"] if c.startswith("meluxina-")]
+    assert "compose-and-validate-class" not in [p["name"] for p in wft["spec"]["arguments"]["parameters"]]
     assert "compose-and-validate-hpc" not in _tasks(wft)
 
 
@@ -378,7 +377,7 @@ def test_a_step_that_produces_a_dataset_is_offered_no_hpc_class_and_gets_no_hpc_
     wft = _enhanced(lambda: authoring.step("prep", kind="transform", produces=[authoring.dataset("clean")]))
     choice = next(p for p in wft["spec"]["arguments"]["parameters"] if p["name"] == "prep-class")
     assert not [c for c in choice["enum"] if c.startswith("meluxina-")]
-    assert "meluxina-* classes" not in choice["description"]
+    assert "HPC (Slurm)" not in choice["description"]
     assert "prep-hpc" not in _tasks(wft)
     assert "when" not in _tasks(wft)["prep"], "it always runs on the cluster"
 
@@ -443,9 +442,11 @@ def test_a_step_without_gpu_is_offered_only_the_cpu_classes_of_the_cluster_and_i
     assert choice["value"] == "cpu-standard"
 
 
-def test_the_compose_step_is_offered_only_the_cpu_classes_of_the_cluster():
+def test_the_compose_step_runs_on_the_default_class_fixed_in_the_template():
     wft = _enhanced(lambda: authoring.step("one", kind="evaluate", gpu=True))
-    assert _cluster_classes(_class_choice(wft, "compose-and-validate")) == ["cpu-standard", "kubecorecpu"]
+    compose = _template(wft, "compose-and-validate")
+    assert compose["nodeSelector"]["platform.kubecore.io/nodegroup-type"] == "cpu-standard"
+    assert "compose-and-validate-class" not in yaml.safe_dump(wft)
 
 
 def test_a_gpu_step_is_still_offered_the_gpu_and_the_cpu_classes_with_its_default_unchanged():
