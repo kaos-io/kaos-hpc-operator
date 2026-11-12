@@ -41,7 +41,7 @@ def _described(authoring) -> dict[str, dict]:
         "produces": {"type": "array", "items": "produced",
                      "doc": "What the step writes: model('name'), artifact('name') or dataset('name')."},
         "gpu": {"type": "boolean", "doc": "The step needs one GPU."},
-        "when": {"type": "string", "doc": "A condition on the run's form values; the step is skipped when it is false."},
+        "when": {"type": "string", "doc": "A condition in plain words, a run-form field compared with a value: 'mode != off', joined with and / or; the step is skipped when it is false."},
         "walltime": {"type": "string", "pattern": authoring._WALLTIME_RE.pattern,
                      "doc": "The step's run limit when it runs on an HPC class: '90m', '12h' or '720' (minutes)."},
         "resumable": {"type": ["boolean", "string"], "pattern": authoring._WALLTIME_RE.pattern,

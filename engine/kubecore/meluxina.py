@@ -239,23 +239,9 @@ def hpc_classes(ctx: dict) -> list:
 
 
 def _when_expr(when: str) -> str:
-    """Translate a simple-tag `when` ({{workflow.parameters.X}} == Y / != Y)
-    into an Argo expression; an expression `when` ({{=...}}) is passed
-    through. Anything else fails the render loudly: a silently dropped gate
-    would run a step the author disabled."""
+    """The expression inside a task's `when` ({{=...}}, written by authoring.py); "" when the task has none."""
     w = (when or "").strip()
-    if not w:
-        return ""
-    if w.startswith("{{=") and w.endswith("}}"):
-        return w[3:-2].strip()
-    m = re.match(r"^\{\{\s*workflow\.parameters\.([A-Za-z0-9_.-]+)\s*\}\}\s*(==|!=)\s*(\S+)$", w)
-    if not m:
-        raise ValueError(
-            "meluxina: cannot combine the step's when %r with the HPC class gate — "
-            "use {{workflow.parameters.X}} == Y / != Y or an {{= expression }}" % when)
-    param, op, value = m.groups()
-    value = value.strip("'\"")
-    return "workflow.parameters['%s'] %s '%s'" % (param, op, value)
+    return w[3:-2].strip() if w else ""
 
 
 def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None:

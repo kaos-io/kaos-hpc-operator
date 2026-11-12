@@ -195,6 +195,46 @@ def dataset(name, **options) -> Produced:
     return _produced("dataset", name)
 
 
+_WHEN_NAME = r"[A-Za-z0-9_.-]+"
+_WHEN_COMPARE = rf"({_WHEN_NAME})\s*(==|!=)\s*(\"[^\"]*\"|'[^']*'|{_WHEN_NAME})"
+_WHEN_ALL = re.compile(rf"\s*{_WHEN_COMPARE}(?:\s+(?:and|or)\s+{_WHEN_COMPARE})*\s*")
+_WHEN_TOKEN = re.compile(rf"{_WHEN_COMPARE}|\s+(and|or)\s+")
+_WHEN_EXAMPLE = 'when="mode != off"'
+
+
+def _parse_when(name, when):
+    """when= in plain words: `<field> == <value>` or `!=`, joined by `and` / `or` (`and` binds tighter, no
+    parentheses). Returns the (field, operator, value) comparisons and the joiners between them."""
+    if isinstance(when, str) and ("{{" in when or "}}" in when):
+        raise AuthoringError(
+            f"step {name!r}: when= is written with the name of a run-form field, for example {_WHEN_EXAMPLE}. "
+            f"Write the field's name instead of {{{{workflow.parameters.<field>}}}}."
+        )
+    if not (isinstance(when, str) and _WHEN_ALL.fullmatch(when)):
+        raise AuthoringError(
+            f"step {name!r}: when={when!r} is not a run-form field compared with a value, for example "
+            f"{_WHEN_EXAMPLE}. Join comparisons with and / or; no parentheses."
+        )
+    compares, joiners = [], []
+    for m in _WHEN_TOKEN.finditer(when):
+        if m.group(4):
+            joiners.append(m.group(4))
+        else:
+            value = m.group(3)
+            compares.append((m.group(1), m.group(2), value[1:-1] if value[0] in "\"'" else value))
+    return compares, joiners
+
+
+def _when_condition(compares, joiners):
+    """The workflow engine's expression for the parsed `when=`; values are text, as run-form values are."""
+    def one(field, op, value):
+        return "workflow.parameters['%s'] %s '%s'" % (field, op, value.replace("\\", "\\\\").replace("'", "\\'"))
+    parts = [one(*compares[0])]
+    for joiner, compare in zip(joiners, compares[1:]):
+        parts += ["&&" if joiner == "and" else "||", one(*compare)]
+    return "{{=" + " ".join(parts) + "}}"
+
+
 class Step:
     def __init__(self, name, kind, reads, inputs, needs, produces, gpu, when, walltime, resumable,
                  checkpoint_every, idle_timeout):
@@ -360,8 +400,10 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
     # machine is interrupted too. A resumable step gets its checkpoint copies wherever it runs (resilience.py).
     checkpoint_every = _checkpoint_every_minutes(name, checkpoint_every)
     idle_timeout = _idle_timeout_minutes(name, idle_timeout)
+    parsed_when = _parse_when(name, when) if when is not None else None
     s = Step(name, kind, reads, inputs, needs, produces, gpu, when, walltime, resumable, checkpoint_every,
              idle_timeout)
+    s.parsed_when = parsed_when
     _current.steps.append(s)
     return s
 
@@ -410,6 +452,14 @@ class pipeline:
         derive_tree.validate_reads(
             {s.name: s.reads for s in self.steps}, form.sections
         )  # render gate: reads= sections must exist in the tree
+        fields = [p.name for p in form.parameters if p.name != derive_tree.ADVANCED_PARAM_KWARGS["name"]]
+        for s in self.steps:
+            for field, _, _ in (s.parsed_when[0] if s.parsed_when else []):
+                if field not in fields:
+                    raise AuthoringError(
+                        f"step {s.name!r}: when={s.when!r} names {field!r}, which is not a field of the run "
+                        f"form. The fields are: {', '.join(fields)}."
+                    )
         derive_tree.validate_inputs({s.name: s.inputs for s in self.steps}, form.tree)
         required = sorted({sec for s in self.steps for sec in s.reads})
 
@@ -475,7 +525,7 @@ class pipeline:
                     )
                     containers[s.name](
                         arguments={CONTEXT_PARAM: context_expression(COMPOSE_STEP, s.name, [n.name for n in s.needs])},
-                        when=s.when, depends=depends,
+                        when=_when_condition(*s.parsed_when) if s.parsed_when else None, depends=depends,
                     )
         self.wt = wt
 

@@ -54,7 +54,8 @@ Everything after `name` is keyword-only.
 | `inputs=` | The names of the config values that hold a dataset reference. An input name is a top-level config key: no dotted paths. Compose pins each to one commit when the run starts. Step code names the input, never a version. |
 | `needs=` | The steps this step runs after, at most ten. Each one's result reaches this step in `upstream`. |
 | `produces=` | What the step writes: `model("name")`, `artifact("name")`, `dataset("name")`. A dataset an app produces is the repository `dataset-<app>-<name>`: `dataset("clean")` in the app `hera1` is `dataset-hera1-clean`. The name is per app because every app made from a template declares the same names and a dataset has exactly one producer; two apps of a project never share one. |
-| `gpu=`, `when=` | Unchanged. |
+| `gpu=` | Unchanged. |
+| `when=` | A condition in plain words: the name of a run-form field, `==` or `!=`, and a value: `when="quantization-mode != off"`. The field is a setting's path with dashes, as the run form shows it. The value is a bare word or number (`off`, `3`) or a quoted string (`"two words"`). Comparisons join with `and` / `or` (`and` binds tighter; no parentheses, no other operators). The engine writes it as one condition on the step's task and on its HPC variant, comparing the field's value as text: `quantization-mode != off` becomes `{{=workflow.parameters['quantization-mode'] != 'off'}}` (`and` becomes `&&`, `or` becomes a double bar, in the order written). The step is skipped when it is false. |
 | `walltime=` | The run limit on an HPC class: `'90m'`, `'12h'` or `'720'` (minutes). |
 | `resumable=`, `checkpoint_every=`, `idle_timeout=` | Unchanged. |
 
@@ -97,6 +98,9 @@ produces it the engineer writes the short name: `dataset("clean")`, `step.output
 **What the engine refuses when it renders the pipeline**, each time naming the step and the rule:
 
 - a name that breaks the rule above;
+- a `when=` that is not a run-form field compared with a value (an unknown operator, parentheses, a missing
+  value, `{{...}}` written in the workflow system's syntax), or that names a field the run form does not have
+  (the message lists the fields it has);
 - within one step, a name in `inputs=` that is also written by a step in `needs=`, or two steps in `needs=`
   that write the same name: all are read by name (section 2), so the message names both;
 - more than ten steps in `needs=` (section 7);

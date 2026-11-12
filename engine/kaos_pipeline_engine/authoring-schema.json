@@ -73,7 +73,7 @@
    "required": false,
    "default": null,
    "type": "string",
-   "doc": "A condition on the run's form values; the step is skipped when it is false."
+   "doc": "A condition in plain words, a run-form field compared with a value: 'mode != off', joined with and / or; the step is skipped when it is false."
   },
   {
    "name": "walltime",
