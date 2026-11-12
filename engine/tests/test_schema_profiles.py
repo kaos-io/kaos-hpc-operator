@@ -11,7 +11,8 @@ from paths import ENGINE
 
 
 def data_fields(profile):
-    code = "import json, dataclasses; from kubecore import derive_tree as d; print(json.dumps([f.name for f in dataclasses.fields(d.DataConfig)]))"
+    code = ("import json, dataclasses; from kubecore import derive_tree as d; "
+            "print(json.dumps([f.name for f in dataclasses.fields(d.DataConfig)]))")
     env = dict(os.environ, KUBECORE_SCHEMA_PROFILE=profile, PYTHONPATH=str(ENGINE))
     done = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr[-1500:]
