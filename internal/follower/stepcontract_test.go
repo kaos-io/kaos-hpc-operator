@@ -28,9 +28,9 @@ func fixture(t *testing.T, name string) string {
 	return string(raw)
 }
 
-func withContext(t *testing.T, context string) Config {
+func withContext(t *testing.T, wire string) Config {
 	t.Helper()
-	cfg, err := ConfigFromEnv(podEnv(map[string]string{"KAOS_STEP_CONTEXT": context}))
+	cfg, err := ConfigFromEnv(podEnv(map[string]string{"KAOS_STEP_CONTEXT": wire}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestTheJobIsBuiltFromTheContextAndFromNothingElse(t *testing.T) {
 	if !reflect.DeepEqual(job.Spec.Inputs, want.Spec.Inputs) {
 		t.Errorf("spec.inputs = %+v\nwant          %+v", job.Spec.Inputs, want.Spec.Inputs)
 	}
-	if job.Labels[hpcv1alpha1.StepKindLabel] != "train" {
+	if job.Labels[hpcv1alpha1.StepKindLabel] != testConfig().Kind { // the fixture context's kind
 		t.Errorf("the job must be labelled with the step's kind, got %v", job.Labels)
 	}
 }
@@ -169,7 +169,7 @@ func TestAContextThatCannotBeStagedIsRefused(t *testing.T) {
 	for i := 0; i < 17; i++ {
 		many = append(many, read1("in"+string(rune('a'+i)), "dataset-raw", "null", commit))
 	}
-	for name, context := range map[string]string{
+	for name, bad := range map[string]string{
 		"not json":           "{",
 		"an array":           "[]",
 		"no app":             `{"version":1,"kind":"train","ledger":{"reads":[]},"upstream":{}}`,
@@ -185,7 +185,7 @@ func TestAContextThatCannotBeStagedIsRefused(t *testing.T) {
 		"seventeen inputs":   contextWith(strings.Join(many, ","), ""),
 		"upstream no commit": contextWith("", `"prepare":{"version":1,"status":"ok","values":{},"reads":[],"writes":[{"name":"clean","type":"dataset","repo":"dataset-clean"}]}`),
 	} {
-		if cfg, err := ConfigFromEnv(podEnv(map[string]string{"KAOS_STEP_CONTEXT": context})); err == nil {
+		if cfg, err := ConfigFromEnv(podEnv(map[string]string{"KAOS_STEP_CONTEXT": bad})); err == nil {
 			t.Errorf("%s: expected an error, got inputs %+v", name, cfg.Inputs)
 		}
 	}

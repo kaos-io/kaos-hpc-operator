@@ -27,8 +27,11 @@ import (
 func testConfig() Config {
 	return Config{Namespace: "ns", WorkflowName: "wf-1", WorkflowUID: "uid-1", StepName: "train", NodeKey: "wf-1-train",
 		Image: "img:1", Command: []string{"python", "-m", "app.entry"}, WallTimeMinutes: 60, Class: "meluxina-gpu",
-		App: "hera-demo", Kind: "train", Context: testContext}
+		App: "hera-demo", Kind: testKind, Context: testContext}
 }
+
+// testKind is the kind of the step in the test contexts.
+const testKind = "train"
 
 // testContext is a small step context: enough for the tests that do not look at it.
 const testContext = `{"version":1,"run":"wf-1","app":"hera-demo","project":"vision","step":"train","kind":"train",` +
@@ -139,7 +142,7 @@ func TestShouldCreateTheJobOwnedByTheWorkflowAndHandOnItsResultOnSuccess(t *test
 	if job.Spec.StepName != "train" || job.Spec.Workflow.UID != "uid-1" || job.Spec.Class != "meluxina-gpu" {
 		t.Fatalf("spec %+v", job.Spec)
 	}
-	if job.Labels[hpcv1alpha1.StepKindLabel] != "train" || job.Spec.App != "hera-demo" || job.Spec.Context != testContext {
+	if job.Labels[hpcv1alpha1.StepKindLabel] != testKind || job.Spec.App != "hera-demo" || job.Spec.Context != testContext {
 		t.Fatalf("the job must carry the kind label, the app and the context: labels %v, app %q", job.Labels, job.Spec.App)
 	}
 	if got := read(t, h.opts.ResultPath); got != fixture(t, "result-model.wire") {

@@ -5,6 +5,8 @@ package hpc
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -18,89 +20,78 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/yaml"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
+	"github.com/kaos-io/kaos-hpc-operator/internal/controller"
 )
 
 const jobCRD = "hpcargoworkflowjobs.hpc.kaos.io"
 
 var jobGVK = hpcv1alpha1.GroupVersion.WithKind("HPCArgoWorkflowJob")
 
-// oldJob is a job as today's follower creates it and today's controller serves it: a dataset pin,
-// declared outputs, the cancel finalizer, and outputs in its status.
-func oldJob(t *testing.T, ctx context.Context, c client.Client, name string) {
+// oldJob is a job as the follower created it and the controller served it before the step contract: a
+// dataset pin, declared outputs, the cancel finalizer, and (when it ran) outputs in its status.
+func oldJob(ctx context.Context, t *testing.T, c client.Client, name string, running bool) {
 	t.Helper()
-	job := &hpcv1alpha1.HPCArgoWorkflowJob{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ml-vision-env",
-			Finalizers: []string{hpcv1alpha1.CancelFinalizer}},
-		Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "registry.example/app:v1",
-			Command: []string{"python", "-m", "app.entry"}, WallTimeMinutes: 120, StepName: "train",
-			Dataset:  &hpcv1alpha1.DatasetPin{Repo: "dataset-raw", Version: "v1", Commit: strings.Repeat("c2", 32)},
-			Outputs:  []string{"training-result"},
-			Workflow: &hpcv1alpha1.WorkflowRef{Name: "wf-1", UID: "wf-uid"}},
-	}
+	job := newJob(name, false)
+	job.SetFinalizers([]string{hpcv1alpha1.CancelFinalizer})
+	_ = unstructured.SetNestedMap(job.Object, map[string]any{"repo": "dataset-raw", "version": "v1",
+		"commit": strings.Repeat("c2", 32)}, "spec", "dataset")
+	_ = unstructured.SetNestedStringSlice(job.Object, []string{"training-result"}, "spec", "outputs")
+	_ = unstructured.SetNestedStringSlice(job.Object, []string{"python", "-m", "app.entry"}, "spec", "command")
+	_ = unstructured.SetNestedField(job.Object, "train", "spec", "stepName")
 	if err := c.Create(ctx, job, client.FieldValidation("Strict")); err != nil {
 		t.Fatal(err)
 	}
-	job.Status.Phase = hpcv1alpha1.Phase("Running")
-	job.Status.Outputs = map[string]string{"training-result": `{"accuracy":0.9}`}
+	if !running {
+		return
+	}
+	_ = unstructured.SetNestedField(job.Object, "Running", "status", "phase")
+	_ = unstructured.SetNestedStringMap(job.Object, map[string]string{"training-result": `{"accuracy":0.9}`},
+		"status", "outputs")
 	if err := c.Status().Update(ctx, job); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// swapDefinition changes the stored definition in place, as a chart upgrade does: the old fields go, the
-// contract's fields come. It returns when the API server serves the new schema.
-func swapDefinition(t *testing.T, ctx context.Context, c client.Client, contextRequired bool) {
+// loadDefinition reads one definition file.
+func loadDefinition(t *testing.T, path string) *apiextensionsv1.CustomResourceDefinition {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	if err := yaml.Unmarshal(raw, crd); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return crd
+}
+
+// swapDefinition replaces the stored definition in place by the repository's own (config/crd/bases), as a
+// chart upgrade does: the old fields go, the contract's fields come, spec.context is required. It returns
+// when the API server serves the new schema.
+func swapDefinition(ctx context.Context, t *testing.T, c client.Client, root string) {
 	t.Helper()
 	crd := &apiextensionsv1.CustomResourceDefinition{}
 	if err := c.Get(ctx, types.NamespacedName{Name: jobCRD}, crd); err != nil {
 		t.Fatal(err)
 	}
-	schema := crd.Spec.Versions[0].Schema.OpenAPIV3Schema
-	spec := schema.Properties["spec"]
-	for _, gone := range []string{"dataset", "datasetRef", "outputs"} {
-		delete(spec.Properties, gone)
-	}
-	spec.Properties["context"] = apiextensionsv1.JSONSchemaProps{Type: "string", MaxLength: ptr.To(int64(contextCap))}
-	spec.Properties["app"] = apiextensionsv1.JSONSchemaProps{Type: "string", MaxLength: ptr.To(int64(55))}
-	spec.Properties["inputs"] = apiextensionsv1.JSONSchemaProps{Type: "array", MaxItems: ptr.To(int64(16)),
-		Items: &apiextensionsv1.JSONSchemaPropsOrArray{Schema: &apiextensionsv1.JSONSchemaProps{Type: "object",
-			Required: []string{"name", "repo", "commit"},
-			Properties: map[string]apiextensionsv1.JSONSchemaProps{
-				"name": {Type: "string", MaxLength: ptr.To(int64(63))}, "repo": {Type: "string",
-					MaxLength: ptr.To(int64(63))},
-				"commit": {Type: "string", MaxLength: ptr.To(int64(64))}, "ref": {Type: "string",
-					MaxLength: ptr.To(int64(255))},
-				"owner": {Type: "string", MaxLength: ptr.To(int64(63))}, "line": {Type: "string",
-					MaxLength: ptr.To(int64(255))}}}}}
-	required := []string{"class", "image", "wallTimeMinutes"}
-	if contextRequired {
-		required = append(required, "context")
-	}
-	spec.Required = required
-	schema.Properties["spec"] = spec
-	status := schema.Properties["status"]
-	delete(status.Properties, "outputs")
-	status.Properties["result"] = apiextensionsv1.JSONSchemaProps{Type: "string", MaxLength: ptr.To(int64(resultCap))}
-	schema.Properties["status"] = status
+	crd.Spec = loadDefinition(t, filepath.Join(root, "config", "crd", "bases", "hpc.kaos.io_hpcargoworkflowjobs.yaml")).Spec
 	if err := c.Update(ctx, crd); err != nil {
 		t.Fatalf("the API server refused the new definition: %v", err)
 	}
-	// Served when a job with spec.context is accepted under strict validation (and, with context required,
-	// one without it is refused).
+	// Served when a job with spec.context is accepted under strict validation and one without it is refused.
 	deadline := time.Now().Add(60 * time.Second)
 	for i := 0; ; i++ {
-		probe := newJob(fmt.Sprintf("probe-%v-%d", contextRequired, i), true)
+		probe := newJob(fmt.Sprintf("probe-%d", i), true)
 		err := c.Create(ctx, probe, client.FieldValidation("Strict"))
 		if err == nil {
 			_ = c.Delete(ctx, probe)
-			if !contextRequired {
-				return
-			}
 			bare := newJob(fmt.Sprintf("bare-%d", i), false)
 			if err := c.Create(ctx, bare, client.FieldValidation("Strict")); err != nil {
 				return
@@ -114,10 +105,10 @@ func swapDefinition(t *testing.T, ctx context.Context, c client.Client, contextR
 	}
 }
 
-func newJob(name string, withContext bool) *unstructured.Unstructured {
+func newJob(name string, contract bool) *unstructured.Unstructured {
 	spec := map[string]any{"class": "meluxina-gpu", "image": "registry.example/app:v1", "wallTimeMinutes": int64(120)}
-	if withContext {
-		spec["context"] = `{"version":1}`
+	if contract {
+		spec["context"], spec["app"] = `{"version":1}`, "hera-demo"
 	}
 	u := &unstructured.Unstructured{Object: map[string]any{"spec": spec}}
 	u.SetGroupVersionKind(jobGVK)
@@ -137,7 +128,7 @@ func keys(m map[string]any) string {
 
 // storedJobAfterSwap reads an old job under the new definition and does to it what the controller has
 // to be able to do: write its status, drop its finalizer, delete it.
-func storedJobAfterSwap(t *testing.T, ctx context.Context, c client.Client, name, label string) {
+func storedJobAfterSwap(ctx context.Context, t *testing.T, c client.Client, name, label string) {
 	t.Helper()
 	key := types.NamespacedName{Namespace: "ml-vision-env", Name: name}
 	got := &unstructured.Unstructured{}
@@ -196,34 +187,87 @@ func storedJobAfterSwap(t *testing.T, ctx context.Context, c client.Client, name
 }
 
 // oldFollower creates a job the way a follower released before the contract does: with spec.dataset and
-// spec.outputs, under strict field validation (internal/follower/run.go).
-func oldFollower(t *testing.T, ctx context.Context, c client.Client, label string, strict bool) {
+// spec.outputs. It creates under strict field validation; the same job without it is tried too. Under the
+// new definition neither may be stored: a stored one would be a job without its data (PRD kaos#1911 T-04).
+func oldFollower(ctx context.Context, t *testing.T, c client.Client, strict bool) {
 	t.Helper()
-	u := newJob("old-follower-"+strings.ReplaceAll(strings.ToLower(label), " "+
-		"", "-")+fmt.Sprintf("-%v", strict), false)
+	u := newJob(fmt.Sprintf("old-follower-%v", strict), false)
 	_ = unstructured.SetNestedMap(u.Object, map[string]any{"repo": "dataset-raw", "version": "v1",
 		"commit": strings.Repeat("c2", 32)}, "spec", "dataset")
 	_ = unstructured.SetNestedStringSlice(u.Object, []string{"training-result"}, "spec", "outputs")
 	var opts []client.CreateOption
 	how := "without strict field validation"
 	if strict {
-		opts, how = append(opts, client.FieldValidation("Strict")), "with strict field validation, as "+
-			"the follower does"
+		opts, how = append(opts, client.FieldValidation("Strict")), "with strict field validation, as the follower does"
 	}
 	err := c.Create(ctx, u, opts...)
-	if err != nil {
-		t.Logf("NOTE  %s: a job in the old shape, created %s, is refused: %s", label, how, firstLine(err.Error()))
+	if err == nil {
+		spec, _, _ := unstructured.NestedMap(u.Object, "spec")
+		t.Errorf("FAIL  a job in the old shape, created %s, is ACCEPTED and stored without its dataset. "+
+			"spec holds: %s", how, keys(spec))
+		_ = c.Delete(ctx, u)
 		return
 	}
-	spec, _, _ := unstructured.NestedMap(u.Object, "spec")
-	t.Logf("NOTE  %s: a job in the old shape, created %s, is ACCEPTED and stored without its dataset. "+
-		"spec holds: %s", label, how, keys(spec))
-	_ = c.Delete(ctx, u)
+	t.Logf("PASS  a job in the old shape, created %s, is refused: %s", how, firstLine(err.Error()))
+}
+
+// controllerRefuses runs the controller itself on a job stored before the change that it had not judged yet:
+// read back without its dataset, it is refused with its own reason and never booked, and it can then go.
+func controllerRefuses(ctx context.Context, t *testing.T, c client.Client, name string) {
+	t.Helper()
+	r := &controller.HPCArgoWorkflowJobReconciler{Client: c, Scheme: c.Scheme()}
+	key := types.NamespacedName{Namespace: "ml-vision-env", Name: name}
+	got := &hpcv1alpha1.HPCArgoWorkflowJob{}
+	for i := 0; i < 2; i++ { // the second pass lets a refused job go (it removes the cancel finalizer)
+		if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+			t.Fatalf("the controller could not handle the stored job: %v", err)
+		}
+		if err := c.Get(ctx, key, got); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			if got.Status.Phase != hpcv1alpha1.PhaseRefused || got.Status.Reason != hpcv1alpha1.ReasonNoContext ||
+				got.Status.Booking != nil {
+				t.Fatalf("FAIL  the controller left the stored job %s/%s (booking %v): it must be Refused/NoContext",
+					got.Status.Phase, got.Status.Reason, got.Status.Booking)
+			}
+			t.Logf("PASS  the controller refuses the stored job, booking nothing: phase %s, reason %s: %s",
+				got.Status.Phase, got.Status.Reason, firstLine(got.Status.Message))
+		}
+	}
+	if len(got.Finalizers) != 0 {
+		t.Errorf("FAIL  the refused job still holds %v", got.Finalizers)
+		return
+	}
+	if err := c.Delete(ctx, got); err != nil {
+		t.Errorf("FAIL  the refused job cannot be deleted: %v", err)
+		return
+	}
+	t.Logf("PASS  the controller let the refused job go (no finalizer) and it can be deleted")
 }
 
 func TestStoredJobsStayReadableWhenFieldsAreRemoved(t *testing.T) {
 	root := repoRoot(t)
-	env := &envtest.Environment{CRDDirectoryPaths: []string{root + "/config/crd/bases"}, ErrorIfCRDPathMissing: true}
+	// Before: the definition as it was (testdata), next to the repository's other definitions.
+	before := t.TempDir()
+	bases, err := filepath.Glob(filepath.Join(root, "config", "crd", "bases", "*.yaml"))
+	if err != nil || len(bases) == 0 {
+		t.Fatalf("no definitions under config/crd/bases: %v", err)
+	}
+	for _, f := range bases {
+		src := f
+		if filepath.Base(f) == "hpc.kaos.io_hpcargoworkflowjobs.yaml" {
+			src = filepath.Join(root, "hack", "contract-checks", "hpc", "testdata", "hpcargoworkflowjobs-before.yaml")
+		}
+		raw, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(before, filepath.Base(f)), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := &envtest.Environment{CRDDirectoryPaths: []string{before}, ErrorIfCRDPathMissing: true}
 	cfg, err := env.Start()
 	if err != nil {
 		t.Fatal(err)
@@ -241,21 +285,16 @@ func TestStoredJobsStayReadableWhenFieldsAreRemoved(t *testing.T) {
 	if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ml-vision-env"}}); err != nil {
 		t.Fatal(err)
 	}
-	oldJob(t, ctx, c, "hpc-stored-1")
-	oldJob(t, ctx, c, "hpc-stored-2")
-	t.Logf("two jobs stored under today's definition, each with spec.dataset, spec.outputs, " +
-		"status.outputs and the cancel finalizer")
+	oldJob(ctx, t, c, "hpc-stored-1", true)
+	oldJob(ctx, t, c, "hpc-stored-2", false)
+	t.Logf("two jobs stored under the definition of before the step contract, each with spec.dataset, " +
+		"spec.outputs and the cancel finalizer; the first is Running with status.outputs, the second not judged yet")
 
-	swapDefinition(t, ctx, c, false)
-	t.Logf("the definition was changed in place: dataset, datasetRef, outputs, status.outputs removed; " +
-		"context, app, inputs, status.result added; context optional")
-	storedJobAfterSwap(t, ctx, c, "hpc-stored-1", "context optional")
-	oldFollower(t, ctx, c, "context optional", true)
-	oldFollower(t, ctx, c, "context optional", false)
-
-	swapDefinition(t, ctx, c, true)
-	t.Logf("the definition was changed again: spec.context is now required")
-	storedJobAfterSwap(t, ctx, c, "hpc-stored-2", "context required")
-	oldFollower(t, ctx, c, "context required", true)
-	oldFollower(t, ctx, c, "context required", false)
+	swapDefinition(ctx, t, c, root)
+	t.Logf("the definition was replaced in place by the repository's own (config/crd/bases): dataset, datasetRef, " +
+		"outputs, status.outputs removed; context (required), app (required), inputs, status.result added")
+	storedJobAfterSwap(ctx, t, c, "hpc-stored-1", "after the change")
+	controllerRefuses(ctx, t, c, "hpc-stored-2")
+	oldFollower(ctx, t, c, true)
+	oldFollower(ctx, t, c, false)
 }

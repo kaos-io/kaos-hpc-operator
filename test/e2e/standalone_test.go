@@ -94,17 +94,17 @@ metadata: {name: hpc-runner, namespace: ` + e2eHPCNS + `}
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: hpc-runner-config, namespace: ` + e2eHPCNS + `}
-data: {KAOS_E2E: standalone}
+data:
+  KAOS_E2E: standalone
+  # The data plane the step's result is handed back through: the fake site stands in for the identity
+  # provider and for lakeFS too (test/scale/fakeslurm/dataplane.go).
+  ZITADEL_DOMAIN: ` + fakeSlurmHost + `
+  LAKEFS_EXTERNAL_URL: https://` + fakeSlurmHost + `/lakefs
 ---
 apiVersion: v1
 kind: Secret
 metadata: {name: meluxina-jwt, namespace: ` + e2eHPCNS + `}
 stringData: {token: ` + fakeSlurmTok + `}
----
-apiVersion: v1
-kind: Secret
-metadata: {name: mlflow-svc, namespace: ` + e2eHPCNS + `}
-stringData: {ZITADEL_MACHINE_KEY: "{}"}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -141,13 +141,20 @@ metadata: {name: ` + e2eJobName + `, namespace: ` + e2eEnvNS + `}
 spec:
   class: hpc-cpu
   image: registry.invalid/app:v1
-  command: [python, train.py]
+  command: [python, -m, app.entry]
   wallTimeMinutes: 15
   stepName: e2e-step
+  # The step contract: the app and the step context. No input: the fake site serves no dataset.
+  app: e2e-app
+  context: '` + e2eContext + `'
   # The runner needs the id of the run it belongs to. No Argo in this cluster: the controller reads
   # the Workflow only where its API exists, so any name and uid do.
   workflow: {name: e2e-wf, uid: e2e-wf-uid}
 `
+
+// e2eContext is the step context of the standalone job (docs/step-contract.md, section 3).
+const e2eContext = `{"version":1,"run":"e2e-wf","app":"e2e-app","project":"e2e","step":"e2e-step","kind":"train",` +
+	`"experiment":"e2e","params":{},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[],"upstream":{}}`
 
 // kubectlGet returns a jsonpath of one object, "" when it is absent.
 func kubectlGet(jsonpath string, args ...string) string {
@@ -189,6 +196,13 @@ func standaloneSpecs() {
 		out, err = kubectlApply(projectManifest)
 		Expect(err).NotTo(HaveOccurred(), out)
 
+		By("giving the runner a machine key to mint its data-plane token with")
+		key, err := machineKeyJSON()
+		Expect(err).NotTo(HaveOccurred())
+		_, err = utils.Run(execCommand("kubectl", "create", "secret", "generic", "mlflow-svc", "-n", e2eHPCNS,
+			"--from-literal=ZITADEL_MACHINE_KEY="+key))
+		Expect(err).NotTo(HaveOccurred())
+
 		By("creating the HPCArgoWorkflowJob")
 		out, err = kubectlApply(jobManifest)
 		Expect(err).NotTo(HaveOccurred(), out)
@@ -210,6 +224,11 @@ func standaloneSpecs() {
 		}, "5m", "3s").Should(Equal("Succeeded"), func() string {
 			return describe() + "\n" + diagnostics()
 		})
+
+		By("checking that the step's result was handed back: fetched, checked and written in wire form")
+		result := kubectlGet("{.status.result}", "hpcargoworkflowjob", e2eJobName, "-n", e2eEnvNS)
+		Expect(result).To(HavePrefix(`{"version":1,"status":"ok","values":{`), "status.result of a job that Succeeded")
+		Expect(result).To(HaveSuffix(`"reads":[],"writes":[]}`))
 
 		By("checking that the site ran it and the controller booked and settled it")
 		Expect(kubectlGet("{.status.run.siteJobID}", "hpcargoworkflowjob", e2eJobName, "-n", e2eEnvNS)).NotTo(BeEmpty())

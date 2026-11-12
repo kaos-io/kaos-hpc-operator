@@ -31,7 +31,7 @@ var engineGoldenArgoValues = map[string]string{
 	"inputs.parameters.idle-timeout":   "40",
 	// The step context as the workflow assembles it, and the step's kind (the follower pod's own label).
 	"inputs.parameters.kaos-context": engineGoldenContext,
-	"inputs.parameters.step-kind":    "train",
+	"inputs.parameters.step-kind":    testKind,
 }
 
 // engineGoldenContext stands in for the value of the kaos-context input: a step context with one input.
@@ -121,7 +121,7 @@ func TestEngineGoldenIsAValidFollowerEnvironment(t *testing.T) {
 	if len(cfg.Command) != 3 || cfg.Command[0] != "python" || cfg.Command[1] != "-m" || cfg.Command[2] != "app.entry" {
 		t.Errorf("the step's command is always python -m app.entry, got %v", cfg.Command)
 	}
-	if cfg.Context != engineGoldenContext || cfg.App != "PLACEHOLDER-app" || cfg.Kind != "train" ||
+	if cfg.Context != engineGoldenContext || cfg.App != "PLACEHOLDER-app" || cfg.Kind != testKind ||
 		len(cfg.Inputs) != 1 || cfg.Inputs[0].Name != "dataset" || cfg.Inputs[0].Repo != "dataset-default" || len(cfg.Inputs[0].Commit) != 64 {
 		t.Errorf("the context, the app, the kind or the inputs did not come through: %+v", cfg)
 	}
