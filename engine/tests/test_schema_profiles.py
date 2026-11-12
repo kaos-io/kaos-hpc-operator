@@ -19,9 +19,14 @@ def data_fields(profile):
     return json.loads(done.stdout)
 
 
+@pytest.mark.parametrize("profile", ["hera", "yolo"])
 @pytest.mark.parametrize("field", ["source", "path_override"])
-def test_the_yolo_data_config_has_no_field_that_no_step_reads(field):
-    assert field not in data_fields("yolo")
+def test_no_data_config_has_a_field_that_no_step_reads(profile, field):
+    assert field not in data_fields(profile)
+
+
+def test_the_hera_data_config_keeps_what_the_steps_read():
+    assert data_fields("hera") == ["ref", "sample_size", "seed"]
 
 
 def test_the_yolo_data_config_keeps_what_the_steps_read():

@@ -305,7 +305,7 @@ two places, so there are two profiles (default `hera`):
 
 | profile | DataConfig | QuantizationConfig.output_prefix |
 |---|---|---|
-| `hera` | `ref="main"` | `""` |
+| `hera` | `ref="main"`, no `source`, no `path_override` (no step reads them) | `""` |
 | `yolo` | no `ref`, no `source`, no `path_override` (no step reads them) | none |
 
 CI picks the profile from the app's config tree (`yolo` when it has a `quantization` section, else `hera`).

@@ -133,8 +133,6 @@ if SCHEMA_PROFILE == "hera":
     @dataclass
     class DataConfig:
         ref: str = "main"
-        source: DataSource = DataSource.lakefs
-        path_override: str = ""
         sample_size: str = ""
         seed: int = 42
 
