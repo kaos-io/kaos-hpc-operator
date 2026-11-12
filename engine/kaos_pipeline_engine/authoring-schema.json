@@ -137,7 +137,7 @@
   "artifact": "any other files of the run",
   "dataset": "a new version of a dataset this step alone writes"
  },
- "migration_guide": "https://kaos.invalid/guides/migrate-to-the-step-contract",
+ "migration_guide": "https://storage.googleapis.com/kaos-dev-511509-kaos-lib/docs/migrate-to-0.5.html",
  "annotations": {
   "walltime": "platform.kubecore.io/hpc",
   "resumable": "platform.kubecore.io/hpc-resumable",

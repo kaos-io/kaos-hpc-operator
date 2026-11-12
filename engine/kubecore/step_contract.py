@@ -39,8 +39,8 @@ MAX_OVERRIDE = 16 * 1024       # bytes of the run's ADVANCED override: compose r
 MAX_REF_VERSION = 255          # characters of the version in a dataset reference
 MAX_REPO = 63                  # characters of a repository id
 
-# Where the app's migration guide to the step contract lives. Placeholder: set when the guide is published.
-MIGRATION_GUIDE_URL = "https://kaos.invalid/guides/migrate-to-the-step-contract"
+# Where the app's migration guide to the step contract lives.
+MIGRATION_GUIDE_URL = "https://storage.googleapis.com/kaos-dev-511509-kaos-lib/docs/migrate-to-0.5.html"
 
 KINDS = ("ingest", "transform", "train", "evaluate", "publish", "control")
 # Kinds that never run on an HPC class: they move data in or out of the platform, or steer the run.

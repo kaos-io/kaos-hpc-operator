@@ -69,7 +69,7 @@ step("evaluate", kind="evaluate", inputs=["clean"])       # in the step: step.in
 
 Refused at render, each with a message that names the step and what to write: a missing or unknown `kind=`;
 `outputs=` and `hpc_time_limit=` (removed; the message says what replaces them and points at
-`authoring.MIGRATION_GUIDE_URL`, a placeholder until the guide has an address); a step or produced name that
+`authoring.MIGRATION_GUIDE_URL`, the address of the migration guide); a step or produced name that
 starts with `kaos-`; a config tree that defines `plan` or `pipeline-version`, or a leaf whose form field would
 get one of those names; a step (or the HPC follower) whose rendered definition is over 24 KiB, counted as the
 workflow engine encodes it (`&`, `<` and `>` cost six bytes each); an app name over 55 characters; a

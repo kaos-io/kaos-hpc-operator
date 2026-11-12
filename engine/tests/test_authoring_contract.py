@@ -92,7 +92,7 @@ def test_an_app_on_the_old_contract_fails_the_render_and_writes_nothing(tmp_path
     """))
     done = run_render(repo)
     assert done.returncode == 1
-    assert "outputs= was removed" in done.stderr and "/guides/migrate-to-the-step-contract" in done.stderr
+    assert "outputs= was removed" in done.stderr and "/docs/migrate-to-0.5.html" in done.stderr
     assert not (repo / "out").exists()
 
 
@@ -439,8 +439,8 @@ def test_an_app_may_not_define_a_top_level_platform_section_of_its_own(tmp_path)
 
 
 def test_the_migration_guide_has_a_real_address_in_a_release_build():
-    """One constant, step_contract.MIGRATION_GUIDE_URL. Until the guide is served it is a placeholder under
-    `.invalid`; a release build (KAOS_ENGINE_RELEASE=1) must not ship that."""
+    """One constant, step_contract.MIGRATION_GUIDE_URL. A release build (KAOS_ENGINE_RELEASE=1) must not ship an
+    address under `.invalid`."""
     import os
 
     from kubecore.step_contract import MIGRATION_GUIDE_URL
