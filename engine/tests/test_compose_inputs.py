@@ -443,7 +443,7 @@ def test_real_image_references_pass(ref):
 
 
 @pytest.mark.parametrize("ref", [":probe-learn-latest", "", "probe-learn-latest", "/proj/app:tag", "zot.example/proj/app",
-                                 "zot.example/:tag", "zot.example/proj/app:", "{{workflow.parameters.image-x}}", None, 7,
+                                 "zot.example/:tag", "zot.example/proj/app:", "{{inputs.parameters.image-x}}", None, 7,
                                  "r.example/p/a:" + "t" * 129, "r.example/p/a:v1\nextra"])
 def test_a_reference_without_registry_repository_or_tag_stops_the_run_naming_the_step(ref):
     with pytest.raises(compose.ComposeError) as exc:
@@ -465,17 +465,9 @@ def test_the_compose_entry_point_refuses_the_run_before_composing(tmp_path):
     assert not out.exists(), "a refused run publishes nothing"
 
 
-def test_the_enhancer_hands_the_compose_step_every_other_steps_image():
-    from kubecore import enhance
-    steps = [{"name": "compose-and-validate", "container": {"image": "{{workflow.parameters.image-compose-and-validate}}"}},
-             {"name": "train", "container": {"image": "{{workflow.parameters.image-train}}"}},
-             {"name": "util", "container": {"image": "busybox:1.36"}}]      # a verbatim image annotation: no parameter
-    enhance.enhance_image_guard(steps)
-    env = {e["name"]: e["value"] for e in steps[0]["container"]["env"]}
-    assert json.loads(env["KAOS_STEP_IMAGES"]) == {"train": "{{workflow.parameters.image-train}}"}
-    enhance.enhance_image_guard(steps)
-    assert len(steps[0]["container"]["env"]) == 1, "idempotent"
-    assert "env" not in steps[1]["container"]
+def test_check_step_images_returns_the_images_trimmed_for_the_output():
+    assert compose.check_step_images(json.dumps({"train": GOOD + "\n"})) == {"train": GOOD}
+    assert compose.check_step_images(None) == {}
 
 
 def test_the_engine_entry_point_says_so_when_the_engine_has_no_compose(tmp_path):

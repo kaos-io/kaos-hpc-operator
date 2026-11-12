@@ -72,12 +72,10 @@ def test_the_platform_endpoints_and_the_compose_class_are_not_fields():
         assert gone not in names
 
 
-def test_the_image_fields_stay_for_the_ci_but_are_last_and_say_the_platform_sets_them():
-    form = _form()
-    images = [p for p in form if p["name"].startswith("image-")]
-    assert [p["name"] for p in images] == ["image-compose-and-validate", "image-load", "image-train", "image-report"]
-    assert all(p["description"] == "Set by the platform. Do not change." for p in images)
-    assert form[-len(images):] == images
+def test_no_image_is_a_field_of_the_form():
+    """The step images are read from the image record by the template (kubecore/enhance.py enhance_images): no
+    parameter of the form, so no submit can set one."""
+    assert [p["name"] for p in _form() if "image" in p["name"]] == []
 
 
 # ------------------------------------------------------------------ order and the text at the top
@@ -89,8 +87,7 @@ def test_the_form_is_in_the_order_a_developer_reads_it():
         "load-class", "load-walltime",
         "train-class", "train-walltime", "train-checkpoint-every",
         "report-class", "report-walltime",
-        "promote-loaded", "config",
-        "image-compose-and-validate", "image-load", "image-train", "image-report"]
+        "promote-loaded", "config"]
 
 
 def test_pipeline_info_lists_the_developers_steps_only_and_names_no_account_or_provider():

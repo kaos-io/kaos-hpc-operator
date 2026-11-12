@@ -109,11 +109,15 @@ from kubecore.step_contract import (
     CONTEXT_PARAM,
     DATASET_PRODUCER_LABEL,
     DATASET_PRODUCERS_STAY_ON_CLUSTER,
+    IMAGE_INPUT,
+    IMAGES_PARAM,
+    IMAGES_PATH,
     MAX_APP_NAME,
     PROMOTE_PARAM,
     PROMOTE_STEP,
     TEMPLATE_CAP,
     dataset_name_problem,
+    image_of,
     result_of,
     template_bytes,
 )
@@ -307,42 +311,6 @@ def step_templates(spec: dict) -> list:
 
 
 # ----------------------------------------------------------------- arguments
-
-
-# The description of a field the developer does not choose: the platform stamps the step's image (the CI chart reads
-# this field to check every step has a folder).
-PLATFORM_OWNED = "Set by the platform. Do not change."
-
-
-def enhance_arguments(spec: dict, ctx: dict, steps: list) -> None:
-    args = spec.setdefault("arguments", {})
-    parameters = args.setdefault("parameters", [])
-    existing = _param_names(parameters)
-    cm = images_configmap(ctx)
-
-    def add(param: dict) -> None:
-        if param["name"] not in existing:
-            parameters.append(param)
-            existing.add(param["name"])
-
-    for step in steps:
-        annots = platform_annotations(step)
-        if "image" in annots:
-            continue  # verbatim utility image: no ConfigMap indirection, no parameter
-        step_name = step["name"]
-        configmap_key = annots.get("source", step_name)
-        add(
-            {
-                "name": f"image-{step_name}",
-                "description": PLATFORM_OWNED,
-                "valueFrom": {
-                    "configMapKeyRef": {
-                        "name": cm,
-                        "key": configmap_key,
-                    }
-                },
-            }
-        )
 
 
 # ------------------------------------------------------------------- compute
@@ -696,17 +664,6 @@ def enhance_class_param(spec: dict, step: dict, ctx: dict, annots: dict, offer: 
         ),
     }
     parameters.append(param)
-
-
-def enhance_image(step: dict, ctx: dict, annots: dict) -> None:
-    # Always overwritten: image is a supply-chain concern, not a developer
-    # choice (see module docstring). The `image` annotation is the sanctioned
-    # escape hatch (verbatim utility image).
-    if "image" in annots:
-        step["container"]["image"] = annots["image"]
-        return
-    step_name = step["name"]
-    step["container"]["image"] = f"{{{{workflow.parameters.image-{step_name}}}}}"
 
 
 def enhance_env(step: dict, ctx: dict, annots: dict) -> None:
@@ -1174,6 +1131,56 @@ def refuse_large_templates(spec: dict) -> None:
 
 
 STEP_IMAGES_ENV = "KAOS_STEP_IMAGES"
+IMAGE_RECORD_PARAM = "image"        # the compose-like template's own image: an input read from the image record
+
+
+def _record_input(name: str, cm: str, key: str) -> dict:
+    """A template input that the workflow engine reads from the image record when the task starts. It is an input of
+    the template, not an argument of the workflow: nobody can set it when a run is submitted."""
+    return {"name": name, "valueFrom": {"configMapKeyRef": {"name": cm, "key": key}}}
+
+
+def enhance_images(spec: dict, ctx: dict, steps: list) -> None:
+    """Where every image comes from. The image of a step is never a workflow parameter (no field on the run form, no
+    parameter a submit can set): the app's image record, the ConfigMap `<app>-pipeline-images` that CI writes after a
+    build, is read in two places.
+
+    - Compose's own template and the final task's have an input `image` read from the record (key `compose-and-validate`).
+    - Compose's template also has one input `image-<step>` for each step, read from the record when compose starts. They
+      go to compose as KAOS_STEP_IMAGES (compose refuses a step that was never built: kubecore/compose.py
+      check_step_images) and compose writes them as its output `kaos-images`.
+    - Every step (and its HPC variant) is given its image by its DAG task, from that output (step_contract.image_of): one
+      reading of the record for the whole run, the same string on the cluster and on HPC.
+
+    A step with a `platform.kubecore.io/image` annotation keeps that verbatim image and reads no record."""
+    cm = images_configmap(ctx)
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
+    images = {}
+    for step in steps:
+        annots = platform_annotations(step)
+        if "image" in annots:
+            step["container"]["image"] = annots["image"]      # the sanctioned escape hatch: a verbatim utility image
+        elif step is compose:
+            step["container"]["image"] = IMAGE_INPUT
+            step.setdefault("inputs", {}).setdefault("parameters", []).append(
+                _record_input(IMAGE_RECORD_PARAM, cm, annots.get("source", COMPOSE_STEP)))
+        else:
+            step["container"]["image"] = IMAGE_INPUT
+            step.setdefault("inputs", {}).setdefault("parameters", []).append({"name": "image"})
+            add_task_argument(spec, step["name"], "image", image_of(step["name"]))
+            images[step["name"]] = annots.get("source", step["name"])
+    if compose is None or not images:
+        return
+    inputs = compose["inputs"]["parameters"]
+    inputs += [_record_input(f"image-{name}", cm, key) for name, key in sorted(images.items())]
+    env = compose["container"].setdefault("env", [])
+    if not any(e.get("name") == STEP_IMAGES_ENV for e in env):
+        env.append({"name": STEP_IMAGES_ENV, "value": json.dumps(
+            {name: "{{inputs.parameters.image-%s}}" % name for name in sorted(images)}, separators=(",", ":"))})
+    args = compose["container"].setdefault("args", [])
+    args += ["--images-output", IMAGES_PATH]
+    compose.setdefault("outputs", {}).setdefault("parameters", []).append(
+        {"name": IMAGES_PARAM, "valueFrom": {"path": IMAGES_PATH}})
 
 
 PROMOTE_COMMAND = ["python", "-I", "-m", "kaos_engine.promote"]
@@ -1198,7 +1205,9 @@ def add_promote_task(spec: dict, steps: list) -> None:
         return
     tpl = copy.deepcopy(compose)
     tpl["name"] = PROMOTE_STEP
-    tpl.setdefault("inputs", {}).setdefault("parameters", []).append({"name": PROMOTE_PARAM})   # beside the class's
+    # Beside the class's and its own `image` (read from the image record): not compose's one input for each step.
+    tpl["inputs"]["parameters"] = [p for p in tpl["inputs"]["parameters"] if not p["name"].startswith("image-")]
+    tpl["inputs"]["parameters"].append({"name": PROMOTE_PARAM})
     tpl.pop("outputs", None)
     container = tpl["container"]
     container["command"], container["args"] = list(PROMOTE_COMMAND), []
@@ -1232,29 +1241,6 @@ def add_promote_task(spec: dict, steps: list) -> None:
         "name": PROMOTE_STEP, "template": PROMOTE_STEP, "depends": "%s && %s" % (COMPOSE_STEP, ends),
         "when": "{{=%s}}" % ticked,
         "arguments": {"parameters": given + [{"name": PROMOTE_PARAM, "value": "{{=toJSON([%s])}}" % plan}]}})
-
-
-def enhance_image_guard(steps: list) -> None:
-    """Hand the compose step the image every other step will run, as the run resolved it.
-
-    A step's image is a workflow parameter read from the app's image record when a run starts. A step that
-    was just added has no built image yet and its record is a reference without registry or repository;
-    the compose step (kubecore/compose.py check_step_images) refuses such a run before any step starts.
-    Steps with a verbatim `image` annotation have no parameter and are not listed.
-    """
-    compose = next((s for s in steps if s["name"] == "compose-and-validate"), None)
-    if compose is None:
-        return
-    images = {}
-    for step in steps:
-        image = (step.get("container") or {}).get("image") or ""
-        if step is not compose and image == f"{{{{workflow.parameters.image-{step['name']}}}}}":
-            images[step["name"]] = image
-    if not images:
-        return
-    env = compose["container"].setdefault("env", [])
-    if not any(e.get("name") == STEP_IMAGES_ENV for e in env):
-        env.append({"name": STEP_IMAGES_ENV, "value": json.dumps(images, separators=(",", ":"), sort_keys=True)})
 
 
 def enhance_pipeline_info(spec: dict, ctx: dict, steps: list) -> None:
@@ -1342,8 +1328,6 @@ def order_form(spec: dict, steps: list) -> None:
             place(name, 5)
         elif name == "config":
             place(name, 6)
-        elif name.startswith("image-"):
-            place(name, 7)
     for i, step in enumerate(own):
         for suffix in ("class", "walltime", "checkpoint-every"):
             place(f"{step}-{suffix}", 4, i * 3 + ("class", "walltime", "checkpoint-every").index(suffix))
@@ -1405,7 +1389,6 @@ def enhance(wft: dict, ctx: dict) -> dict:
     spec = wft["spec"]
     enhance_spec_top_level(spec, ctx)
     steps = step_templates(spec)
-    enhance_arguments(spec, ctx, steps)
     gpu_step_names: set = set()
     offers: dict = {}    # step -> what its {step}-class choice offers (None: pinned to one class)
     shared = shared_templates(spec)  # before enhance_hpc adds twin tasks
@@ -1416,7 +1399,6 @@ def enhance(wft: dict, ctx: dict) -> dict:
         gpu = is_gpu_step(step)
         if gpu:
             gpu_step_names.add(step["name"])
-        enhance_image(step, ctx, annots)
         enhance_env(step, ctx, annots)
         # Before enhance_gpu_routing strips the typed request, which class_offer reads.
         offer = class_offer(step, ctx, annots) if "compute-class" not in annots else None
@@ -1436,7 +1418,7 @@ def enhance(wft: dict, ctx: dict) -> dict:
         enhance_volumes(step, annots, ctx)
         enhance_resilience(spec, step, ctx, annots, gpu, inject_disabled(annots, "lakefs"), shared)
         enhance_connections(step, ctx)
-    enhance_image_guard(steps)
+    enhance_images(spec, ctx, steps)
     enhance_workspace_pvc(spec, steps)
     enhance_compose_identity(steps, ctx)
     enhance_run_form(spec, steps, offers)
