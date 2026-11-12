@@ -73,6 +73,17 @@ def test_the_wire_form_escapes_what_a_hop_could_change_and_keeps_numbers_as_writ
     assert result.cost(text) == len(json.dumps(text)) - 2 == len(text) + text.count('"') + text.count("\\")
 
 
+def test_the_fields_come_out_in_the_contracts_order_whatever_order_the_step_wrote():
+    """Wire form, rule 6. A step (or a JSON library that sorts keys) may write them in any order."""
+    want = json.loads(helpers.fixture("result-model.json"))
+    scrambled = json.dumps(want, sort_keys=True, indent=1).encode()
+    assert list(json.loads(scrambled)) != list(want)
+    assert result.check(scrambled) == helpers.fixture("result-model.wire")
+    extra = dict(want, later="a field of a later contract")
+    assert list(json.loads(result.check(json.dumps(extra, sort_keys=True).encode()))) == list(want) + ["later"], \
+        "a field this runner does not know is kept, after the ones it knows"
+
+
 def test_a_result_at_the_cap_passes_and_one_byte_over_does_not():
     def with_blob(n):
         return json.dumps({"version": 1, "status": "ok", "values": {"blob": "x" * n}, "reads": [], "writes": []},

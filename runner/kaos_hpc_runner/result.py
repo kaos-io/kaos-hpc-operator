@@ -66,6 +66,18 @@ def cost(wire_text):
     return len(wire_text) + wire_text.count('"') + wire_text.count('\\')
 
 
+RESULT_FIELDS = ('version', 'status', 'values', 'reads', 'writes')        # docs/step-contract.md, section 4
+READ_FIELDS = ('name', 'repo', 'owner', 'ref', 'commit', 'line')           # section 5, a read
+WRITE_FIELDS = ('name', 'type', 'repo', 'commit', 'line', 'path')          # section 5, a write
+
+
+def _ordered(obj, fields):
+    """obj with the contract's fields first, in the contract's order; a field it does not know stays, after them."""
+    out = {k: obj[k] for k in fields if k in obj}
+    out.update((k, v) for k, v in obj.items() if k not in out)
+    return out
+
+
 def check(raw):
     """The result file's bytes as the text for status.result (wire form), or InvalidResult saying what is wrong.
     A result is a JSON object with version 1, status "ok", an object `values` and the lists `reads` and
@@ -83,6 +95,10 @@ def check(raw):
     for field, kind, word in (('values', dict, 'an object'), ('reads', list, 'a list'), ('writes', list, 'a list')):
         if not isinstance(value.get(field), kind):
             raise InvalidResult('the step\'s result has no `%s` that is %s' % (field, word))
+    # Wire form, rule 6: the fields in the order the contract's tables give them, whatever order the step wrote.
+    value = _ordered(value, RESULT_FIELDS)
+    value['reads'] = [_ordered(e, READ_FIELDS) if isinstance(e, dict) else e for e in value['reads']]
+    value['writes'] = [_ordered(e, WRITE_FIELDS) if isinstance(e, dict) else e for e in value['writes']]
     text = wire(value)
     if cost(text) > RESULT_CAP:
         raise InvalidResult('the step\'s result costs %d bytes, more than the %d (8 KiB) a result may cost. Metrics '
