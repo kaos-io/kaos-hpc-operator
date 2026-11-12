@@ -1,6 +1,9 @@
 package runnerjob
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,15 +15,32 @@ import (
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 )
 
+// contractJob is the step contract's fixture job (docs/step-contract/fixtures/hpc-job.json): its context is
+// context-one-upstream.wire, its inputs the two datasets that context pins.
+func contractJob(t *testing.T) *hpcv1alpha1.HPCArgoWorkflowJob {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.FromSlash("../../docs/step-contract/fixtures/hpc-job.json"))
+	if err != nil {
+		t.Fatalf("the step contract's fixtures are part of this repository: %v", err)
+	}
+	job := &hpcv1alpha1.HPCArgoWorkflowJob{}
+	if err := json.Unmarshal(raw, job); err != nil {
+		t.Fatal(err)
+	}
+	job.UID = "11111111-2222"
+	return job
+}
+
 func fixtures() (*hpcv1alpha1.HPCArgoWorkflowJob, *hpcv1alpha1.HPCSite) {
 	job := &hpcv1alpha1.HPCArgoWorkflowJob{
 		ObjectMeta: metav1.ObjectMeta{Name: "hpc-abc", Namespace: "env-ns", UID: "11111111-2222"},
 		Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/app:v1", Command: []string{"python", "t.py"},
-			WallTimeMinutes: 120, Dataset: &hpcv1alpha1.DatasetPin{Repo: "dataset-ds", Version: "v1", Commit: "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}, Outputs: []string{"model", "m"}, StepName: "train",
+			WallTimeMinutes: 120, App: "app", Context: `{"version":1}`, StepName: "train",
+			Inputs:    []hpcv1alpha1.StepInput{{Name: "dataset", Repo: "dataset-ds", Ref: "v1", Commit: "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}},
 			Workflow:  &hpcv1alpha1.WorkflowRef{Name: "wf-1", UID: "wf-uid"},
 			Resumable: &hpcv1alpha1.Resumable{LeadMinutes: 20, MaxContinuations: 5},
 			Sharing:   &hpcv1alpha1.Sharing{Scope: "abcdef12"},
-			Env:       []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "outputs-app"}}},
+			Env:       []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: "{}"}}},
 	}
 	site := &hpcv1alpha1.HPCSite{
 		ObjectMeta: metav1.ObjectMeta{Name: "meluxina", Namespace: "ml-proj"},
@@ -104,9 +124,10 @@ func TestShouldSetTheRunnerEnvironmentFromSpecAndSite(t *testing.T) {
 		"HPC_JOB_NAMESPACE": "env-ns", "HPC_JOB_NAME": "hpc-abc", "KAOS_ATTEMPT": "2",
 		"KAOS_RESUME_REF": "ckpt-1", "KAOS_RESUME_FROM_ATTEMPT": "1",
 		"IMAGE_REF": "reg.example/app:v1", "STEP_COMMAND": `["python","t.py"]`, "SLURM_TIME_LIMIT": "120",
-		"HPC_RESUMABLE_LEAD": "20", "STEP_OUTPUTS": "model,m", "HPC_CLASS": "meluxina-gpu", "STEP_NAME": "train",
-		"WF_UID": "wf-uid", "KUBECORE_WORKFLOW_NAME": "wf-1", "KUBECORE_RUN_ID": "wf-1", "DATASET_REPO": "dataset-ds", "DATASET_VERSION": "v1", "DATASET_COMMIT": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2", "DATASET_OWNER": "", "DATASET_UNPINNED": "",
-		"HPC_SHARING": "1", "HPC_SCOPE": "abcdef12", "OUTPUTS_REPO": "outputs-app",
+		"HPC_RESUMABLE_LEAD": "20", "HPC_CLASS": "meluxina-gpu", "STEP_NAME": "train",
+		"WF_UID": "wf-uid", "WF_NAME": "wf-1", "KAOS_APP": "app", "KAOS_STEP_CONTEXT": `{"version":1}`,
+		"HPC_INPUTS":  `[{"name":"dataset","repo":"dataset-ds","commit":"c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2","ref":"v1"}]`,
+		"HPC_SHARING": "1", "HPC_SCOPE": "abcdef12", "KAOS_LIB_SUPPORT": "{}",
 		"HPC_SITE": "meluxina", "HPC_ACCOUNT": "p1", "HPC_USER": "u1", "HPC_SCRATCH": "/project/scratch/p1",
 		"HPC_HOME": "/home/users/u1", "HPC_ENDPOINT": "https://slurm-api.example", "HPC_REST_VERSION": "v0.0.44",
 		"ZITADEL_MACHINE_KEY_FILE": "/etc/mlflow-svc/ZITADEL_MACHINE_KEY",
@@ -114,6 +135,11 @@ func TestShouldSetTheRunnerEnvironmentFromSpecAndSite(t *testing.T) {
 	for k, v := range want {
 		if m[k] != v {
 			t.Errorf("%s = %q, want %q", k, m[k], v)
+		}
+	}
+	for _, gone := range []string{"KUBECORE_WORKFLOW_NAME", "KUBECORE_RUN_ID", "OUTPUTS_REPO", "STEP_OUTPUTS", "DATASET_REPO", "DATASET_VERSION", "DATASET_COMMIT", "DATASET_OWNER", "DATASET_UNPINNED"} {
+		if _, there := m[gone]; there {
+			t.Errorf("%s is still set: the context and HPC_INPUTS replaced it", gone)
 		}
 	}
 	if !strings.Contains(m["HPC_CLASSES_JSON"], `"name":"meluxina-gpu"`) || !strings.Contains(m["HPC_CLASSES_JSON"], `"partition":"gpu"`) {
@@ -149,7 +175,7 @@ func TestEveryEndpointAndIdentityComesFromTheSiteNotTheSpec(t *testing.T) {
 	// Every variable a tenant can influence is a spec field or the allowlist; none carries an
 	// endpoint, identity or path: those names must come from the site.
 	siteOnly := []string{"HPC_ACCOUNT", "HPC_USER", "HPC_SCRATCH", "HPC_HOME", "HPC_CLASSES_JSON", "HPC_ENDPOINT", "HPC_REST_VERSION"}
-	job.Spec.Image, job.Spec.Dataset = "x", nil
+	job.Spec.Image, job.Spec.Inputs = "x", nil
 	site.Spec.Identity.User = "other"
 	env2, _ := Env(job, site, 1)
 	m1, m2 := envOf(t, env), envOf(t, env2)
@@ -182,15 +208,13 @@ func TestValidateEnv(t *testing.T) {
 		env  []hpcv1alpha1.NameValue
 		bad  bool
 	}{
-		{"should_accept_the_allowlist", []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "outputs-a-b"}, {Name: "OUTPUTS_REF", Value: "main"},
-			{Name: "CHECKPOINT_BUCKET", Value: "outputs-a"}, {Name: "CHECKPOINT_PREFIX", Value: "p/"}, {Name: "KAOS_LIB_SUPPORT", Value: "{}"}}, false},
+		{"should_accept_the_allowlist", []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: "{}"}}, false},
 		{"should_refuse_a_slurm_endpoint", []hpcv1alpha1.NameValue{{Name: "HPC_ENDPOINT", Value: "https://evil"}}, true},
 		{"should_refuse_a_token_override", []hpcv1alpha1.NameValue{{Name: "SLURM_TOKEN", Value: "x"}}, true},
 		{"should_refuse_mlflow_and_lakefs_urls", []hpcv1alpha1.NameValue{{Name: "MLFLOW_EXTERNAL_URL", Value: "https://evil"}}, true},
-		{"should_refuse_an_outputs_repo_that_is_not_an_outputs_repo", []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "secrets"}}, true},
-		{"should_refuse_a_checkpoint_bucket_with_a_path", []hpcv1alpha1.NameValue{{Name: "CHECKPOINT_BUCKET", Value: "outputs-a/../x"}}, true},
-		{"should_refuse_a_duplicate", []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REF", Value: "a"}, {Name: "OUTPUTS_REF", Value: "b"}}, true},
-		{"should_refuse_a_long_value", []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REF", Value: long}}, true},
+		{"should_refuse_what_nothing_reads_any_more", []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "outputs-a"}}, true},
+		{"should_refuse_a_duplicate", []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: "a"}, {Name: "KAOS_LIB_SUPPORT", Value: "b"}}, true},
+		{"should_refuse_a_long_value", []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: long}}, true},
 		{"should_refuse_more_than_sixteen", many, true},
 	}
 	for _, tc := range cases {
@@ -375,30 +399,50 @@ func TestEnvCarriesTheSitesSubmitCapOnlyWhenKnown(t *testing.T) {
 	t.Fatal("HPC_MAX_SUBMIT_JOBS=5 missing")
 }
 
-// A job stored before the run's data was pinned (or created by an older follower) names its dataset
-// without a commit. It is refused before it is admitted, and an attempt of one that was already running
-// tells its runner so: it never gets an environment that looks like "no dataset".
-func TestAJobThatNamesADatasetWithoutACommitNeverLooksDataless(t *testing.T) {
-	job, site := fixtures()
-	job.Spec.Dataset, job.Spec.DatasetRef = nil, "dataset-a@latest"
-	if err := ValidateDataset(&job.Spec); err == nil || !strings.Contains(err.Error(), "without a pinned commit") {
-		t.Errorf("ValidateDataset = %v", err)
-	}
-	env, err := Env(job, site, 2)
+// The runner gets the job's context exactly as the job carries it, and the job's inputs in the job's order.
+func TestTheRunnerGetsTheContextUnchangedAndEveryInput(t *testing.T) {
+	_, site := fixtures()
+	job := contractJob(t)
+	env, err := Env(job, site, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := envOf(t, env)
-	if got["DATASET_UNPINNED"] != "dataset-a@latest" || got["DATASET_REPO"] != "" {
-		t.Errorf("env = DATASET_UNPINNED=%q DATASET_REPO=%q", got["DATASET_UNPINNED"], got["DATASET_REPO"])
+	if got["KAOS_STEP_CONTEXT"] != job.Spec.Context || len(job.Spec.Context) < 500 {
+		t.Errorf("KAOS_STEP_CONTEXT is not spec.context")
 	}
-	job.Spec.DatasetRef = ""
-	if err := ValidateDataset(&job.Spec); err != nil {
-		t.Errorf("a job without a dataset is fine: %v", err)
+	want := `[{"name":"labels","repo":"dataset-labels","commit":"` + strings.Repeat("2", 64) + `","ref":"v3"},` +
+		`{"name":"embeddings","repo":"dataset-embeddings","commit":"` + strings.Repeat("3", 64) + `"}]`
+	if got["HPC_INPUTS"] != want {
+		t.Errorf("HPC_INPUTS = %s\nwant         %s", got["HPC_INPUTS"], want)
 	}
-	pinned, _ := fixtures()
-	if err := ValidateDataset(&pinned.Spec); err != nil {
-		t.Errorf("a pinned dataset is fine: %v", err)
+	job.Spec.Inputs = nil
+	env, _ = Env(job, site, 1)
+	if got := envOf(t, env)["HPC_INPUTS"]; got != "[]" {
+		t.Errorf("a step without inputs gets an empty list, got %q", got)
+	}
+}
+
+// PRD kaos#1911 T-04: a job without its step context (created by a follower from before the contract, or stored
+// before the definition changed and read back without the removed fields) is refused with its own reason;
+// so is a job with a dataset another project shares.
+func TestAJobWithoutItsContextOrWithASharedInputIsRefused(t *testing.T) {
+	job := contractJob(t)
+	if reason, err := ValidateContract(&job.Spec); err != nil || reason != "" {
+		t.Fatalf("the fixture job is fine: %s, %v", reason, err)
+	}
+	bare := job.DeepCopy()
+	bare.Spec.Context, bare.Spec.Inputs = "", nil // what a job stored with spec.dataset reads back as
+	reason, err := ValidateContract(&bare.Spec)
+	if reason != hpcv1alpha1.ReasonNoContext || err == nil || !strings.Contains(err.Error(), "no step context") ||
+		!strings.Contains(err.Error(), "Run the pipeline again") {
+		t.Errorf("want NoContext with what to do, got %q, %v", reason, err)
+	}
+	shared := job.DeepCopy()
+	shared.Spec.Inputs[0].Owner = "other"
+	reason, err = ValidateContract(&shared.Spec)
+	if reason != hpcv1alpha1.ReasonSharedInput || err == nil || !strings.Contains(err.Error(), "shared by project other") {
+		t.Errorf("want SharedInput naming the project, got %q, %v", reason, err)
 	}
 }
 

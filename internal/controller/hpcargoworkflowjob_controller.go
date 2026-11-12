@@ -131,6 +131,13 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 	var site *hpcv1alpha1.HPCSite
 	defer func() { r.observePhase(&job, site) }()
 
+	if !job.Status.Phase.Terminal() && job.Status.Booking == nil && !r.isPending(string(job.UID)) {
+		// Before anything is booked: a job without its step context, or with an input that cannot be staged,
+		// is refused with its own reason, never run without its data (PRD kaos#1911 T-04).
+		if reason, err := runnerjob.ValidateContract(&job.Spec); err != nil {
+			return ctrl.Result{}, r.setPhase(ctx, &job, hpcv1alpha1.PhaseRefused, reason, err.Error(), nil)
+		}
+	}
 	if serve {
 		if res, done, err := r.serveGate(ctx, &job); done {
 			return res, err
@@ -409,6 +416,21 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		}
 	}
 
+	if reason == hpcv1alpha1.ReasonResultNotHandedBack || reason == hpcv1alpha1.ReasonInvalidResult {
+		msg = resultMessage(reason, run)
+		if r.Recorder != nil {
+			r.Recorder.Event(job, corev1.EventTypeWarning, reason, msg)
+		}
+	}
+
+	if phase == hpcv1alpha1.PhaseSucceeded && job.Spec.Context == "" {
+		// A job stored before the definition changed and read back without its context ran to its end under
+		// an older runner: what it handed back is not a result of the step contract. It is not a success.
+		phase, reason = hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonNoContext
+		msg = "the job carries no step context (spec.context): it was created before the platform update that changed " +
+			"how a step is given its inputs and hands back its result, so its result cannot be handed on. Run the pipeline again"
+	}
+
 	if reason == hpcv1alpha1.ReasonSubmitLimit {
 		msg = submitLimitMessage(run, site)
 		if r.Recorder != nil {
@@ -441,6 +463,7 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		msg += hostOpenNote
 	}
 	job.Status.Phase, job.Status.Reason, job.Status.Message = phase, reason, msg
+	keepResultOnlyOnSuccess(job)
 	if phase.Terminal() {
 		var total int64
 		for _, a := range job.Status.Attempts {
@@ -479,6 +502,10 @@ func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonStagingMismatch
 	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeReservedName && failed:
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonReservedName
+	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeResultNotHandedBack && failed:
+		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonResultNotHandedBack
+	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeInvalidResult && failed:
+		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonInvalidResult
 	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeSubmitLimit && failed:
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonSubmitLimit
 	case run.ExitCode != nil && *run.ExitCode == hpcv1alpha1.ExitCodeGPUViolation && failed:
@@ -491,6 +518,28 @@ func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 		return hpcv1alpha1.PhaseFailed, "Ended"
 	default:
 		return hpcv1alpha1.PhaseFailed, "Site" + state
+	}
+}
+
+// resultMessage is the sentence of an attempt whose step ended well but handed back nothing usable: the
+// runner's own words when it reported them, else what the exit code alone says (the job script ended with it
+// on the node, where only the step's log says why).
+func resultMessage(reason string, run *hpcv1alpha1.RunStatus) string {
+	if msg := strings.TrimSpace(run.Message); msg != "" {
+		return msg
+	}
+	if reason == hpcv1alpha1.ReasonInvalidResult {
+		return "the step ended well, but the result it handed back is not a result of the step contract; no result was published"
+	}
+	return "the step ended well, but the job on the site could not read or upload the step's result file " +
+		"(/work/output/kaos-result.json), so no result was published; the step's log says why"
+}
+
+// keepResultOnlyOnSuccess enforces that status.result is set only on a job that Succeeded (docs/step-contract.md,
+// section 8): whatever the step wrote, a job in any other phase publishes no result.
+func keepResultOnlyOnSuccess(job *hpcv1alpha1.HPCArgoWorkflowJob) {
+	if job.Status.Phase != hpcv1alpha1.PhaseSucceeded {
+		job.Status.Result = ""
 	}
 }
 
@@ -579,6 +628,7 @@ func (r *HPCArgoWorkflowJobReconciler) setPhasePlaced(ctx context.Context, job *
 		job.Status.Placement = placement
 	}
 	job.Status.Phase, job.Status.Reason, job.Status.Message = phase, reason, msg
+	keepResultOnlyOnSuccess(job)
 	if booking != nil {
 		job.Status.Booking = booking
 		if job.Status.Site == nil {

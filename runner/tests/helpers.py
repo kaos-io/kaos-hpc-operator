@@ -1,20 +1,31 @@
 """Shared test setup: a runner environment as the controller would set it."""
 import json
+import pathlib
 
 from kaos_hpc_runner.settings import Settings
 
 CLASSES = [{"name": "meluxina-gpu", "partition": "gpu", "qos": "default", "gpus": 4, "maxTimeLimitMinutes": 2880},
            {"name": "meluxina-cpu", "partition": "cpu", "gpus": 0}]
 
+# The step contract's fixtures (docs/step-contract/fixtures): loaded, never copied (PRD kaos#1911 CON-01).
+FIXTURES = pathlib.Path(__file__).resolve().parents[2] / "docs" / "step-contract" / "fixtures"
+
+
+def fixture(name):
+    return (FIXTURES / name).read_text()
+
+
+COMMIT = "c0ffee1200000000000000000000000000000000000000000000000000000000"
+INPUTS = [{"name": "dataset", "repo": "dataset-default", "commit": COMMIT, "ref": "latest"}]
+
 BASE_ENV = {
     "HPC_JOB_NAMESPACE": "ml-proj", "HPC_JOB_NAME": "hpc-0123456789abcdef0123", "KAOS_ATTEMPT": "1",
     "WF_UID": "0b7f6c1e-1111-2222-3333-444455556666", "STEP_NAME": "model-training",
-    "KUBECORE_WORKFLOW_NAME": "yolo-pipeline-x7k2p", "IMAGE_REF": "zot.example/proj/yolo:v0.0.0",
-    "STEP_COMMAND": json.dumps(["python", "-m", "train", "--epochs", "3"]),
+    "WF_NAME": "yolo-pipeline-x7k2p", "IMAGE_REF": "zot.example/proj/yolo:v0.0.0",
+    "STEP_COMMAND": json.dumps(["python", "-m", "app.entry"]),
     "SLURM_TIME_LIMIT": "720", "HPC_CLASS": "meluxina-gpu", "HPC_CLASSES_JSON": json.dumps(CLASSES),
     "HPC_USER": "u1", "HPC_ACCOUNT": "p1", "HPC_SCRATCH": "/scr", "HPC_HOME": "/home/u1",
-    "STEP_OUTPUTS": "training-result", "DATASET_REPO": "dataset-default", "DATASET_VERSION": "latest",
-    "DATASET_COMMIT": "c0ffee1200000000000000000000000000000000000000000000000000000000", "OUTPUTS_REPO": "outputs-yolo",
+    "KAOS_APP": "yolo", "KAOS_STEP_CONTEXT": fixture("context-one-upstream.wire"), "HPC_INPUTS": json.dumps(INPUTS),
     "LAKEFS_EXTERNAL_URL": "https://lakefs.example", "MLFLOW_EXTERNAL_URL": "https://mlflow.example",
 }
 

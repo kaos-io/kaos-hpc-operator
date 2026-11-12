@@ -67,7 +67,26 @@ const (
 	// folder (a ".." or "." or empty part, a leading "/", a NUL byte). Failed before anything is staged or
 	// submitted; the runner reports it with ExitCodeReservedName and its message names the object and which of
 	// the two it is. Terminal: it ends with a new version of the dataset.
-	ReasonReservedName         = "ReservedName"
+	ReasonReservedName = "ReservedName"
+	// ReasonNoContext: the job carries no step context (spec.context). It was created by a follower from before
+	// the step contract (PRD kaos#1911), or stored before the definition changed and read back without the
+	// fields that were removed. Refused before anything is booked; a job that was already booked ends Failed
+	// with this reason instead of starting, or publishing, without its data. Terminal: run the pipeline again.
+	ReasonNoContext = "NoContext"
+	// ReasonSharedInput: an entry of spec.inputs names an owner, a dataset another project shares. Such a dataset
+	// cannot be staged on an HPC site yet. Refused before anything is booked.
+	ReasonSharedInput = "SharedInput"
+	// ReasonResultNotHandedBack: the step ended well, but what it handed back could not be brought from the
+	// site to status.result: the job could not read or upload the result file, or the runner could not fetch
+	// it (PRD kaos#1911 CON-04). Also when the run has no way to hand a result back at all (no data-plane token,
+	// no lakeFS endpoint, no outputs repository): then nothing is submitted. The job is Failed and publishes no
+	// result; the message names the cause. The job script and the runner report ExitCodeResultNotHandedBack.
+	ReasonResultNotHandedBack = "ResultNotHandedBack"
+	// ReasonInvalidResult: the step ended well and its result file reached the runner, but it is not a result
+	// of the step contract: not a JSON object, not version 1 with status "ok" and the three fields values,
+	// reads and writes, or it costs more than 8 KiB. The job is Failed and publishes no result; the message
+	// names what is wrong. The runner reports ExitCodeInvalidResult.
+	ReasonInvalidResult        = "InvalidResult"
 	ReasonMultiNodeUnsupported = "MultiNodeUnsupported"
 	ReasonWallTimeOverLimit    = "WallTimeOverLimit"
 	// ReasonTooLongNotResumable: the declared limit is above the longest lane and the step is not
@@ -120,6 +139,24 @@ const (
 	// ExitCodeReservedName is the exit code the runner reports (state FAILED, no site job) when the dataset
 	// holds an object whose name is reserved for the platform or whose path could leave the dataset's folder.
 	ExitCodeReservedName = int32(242)
+	// ExitCodeResultNotHandedBack is the exit code of a job whose step ended well but whose result could not be
+	// handed back: the job script exits with it when it cannot read or upload the result file, and the runner
+	// reports it (state FAILED) when it cannot fetch what the job uploaded, or before it submits anything when
+	// the run has no way to hand a result back.
+	ExitCodeResultNotHandedBack = int32(243)
+	// ExitCodeInvalidResult is the exit code the runner reports (state FAILED) when the result file the job
+	// handed back is not a result of the step contract.
+	ExitCodeInvalidResult = int32(244)
+	// ContextMaxLength and ResultMaxLength are the caps of the step contract (docs/step-contract.md, section 7):
+	// what a step context and a result may cost. A value's length is never more than its cost, so the definition
+	// allows every value within its cap.
+	ContextMaxLength = 96 * 1024
+	ResultMaxLength  = 8 * 1024
+	// ContextEnv is the one value a step receives (docs/step-contract.md, section 2): the follower reads the
+	// step context from it, and the runner and the step in the job get it under the same name.
+	ContextEnv = "KAOS_STEP_CONTEXT"
+	// StepKindLabel is the label every pod and HPC job of a step carries: the step's kind (kind= in pipeline.py).
+	StepKindLabel = "platform.kubecore.io/step-kind"
 	// DefaultIdleTimeoutMinutes is the idle window of a step that does not set one (D-72).
 	DefaultIdleTimeoutMinutes = int32(20)
 	// ReasonSiteUnavailable: the site does not answer (connection errors, 5xx, timeouts, slurmctld down). The job
@@ -171,7 +208,7 @@ const CancelRequestedAnnotation = "hpc.kaos.io/cancel-requested"
 // (PRD-1461 phase 1 contract section 1). Everything that names an identity, a path, a class table
 // or an endpoint comes from the HPCSite and the operator-rendered ConfigMap, never from the
 // tenant (T-02). The CRD enforces the list with CEL; the controller enforces it again.
-var AllowedEnvNames = []string{"OUTPUTS_REPO", "OUTPUTS_REF", "CHECKPOINT_BUCKET", "CHECKPOINT_PREFIX", "KAOS_LIB_SUPPORT"}
+var AllowedEnvNames = []string{"KAOS_LIB_SUPPORT"}
 
 // WorkflowRef names the Argo Workflow a serve-mode job belongs to.
 type WorkflowRef struct {
@@ -221,20 +258,26 @@ type HPCArgoWorkflowJobSpec struct {
 	// +kubebuilder:default=1
 	// +optional
 	Nodes int32 `json:"nodes,omitempty"`
-	// DatasetRef is DEPRECATED and never read as a dataset: before the run's data was pinned by the
-	// pipeline, a job named its dataset as <dataset-repo>@<version> and the runner resolved it. The field
-	// stays in the schema so that a job stored with it, or created by an older follower, keeps it and is
-	// REFUSED with a clear reason instead of running without its data.
+	// App is the app the step belongs to, as the step context names it.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=55
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	App string `json:"app"`
+	// Context is the step context (docs/step-contract.md, section 3) in wire form, exactly as the follower
+	// received it in KAOS_STEP_CONTEXT. The step in the job gets it under the same name, unchanged. Nothing
+	// rewrites it. A job without it is refused.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=98304
+	Context string `json:"context"`
+	// Inputs are the datasets staged on the site before the step starts, each pinned to one commit: every
+	// read of the context's ledger and every dataset a needed step wrote. The follower fills it from the
+	// context and from nothing else; the runner stages exactly these commits and never resolves a version.
+	// Absent: the step reads no dataset.
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=map
+	// +listMapKey=name
 	// +optional
-	DatasetRef string `json:"datasetRef,omitempty"`
-	// Dataset is the dataset the step reads, pinned to one commit by the pipeline's compose step.
-	// The runner stages exactly this commit and never resolves a version itself. Absent: the step
-	// runs without a dataset.
-	// +optional
-	Dataset *DatasetPin `json:"dataset,omitempty"`
-	// Outputs the step declares.
-	// +optional
-	Outputs []string `json:"outputs,omitempty"`
+	Inputs []StepInput `json:"inputs,omitempty"`
 	// Resumable declares that the step continues across jobs: it gets the wall-time signal LeadMinutes before
 	// its wall time, saves a checkpoint (its checkpoint folder, or the KAOS library) and exits 85, and the job
 	// continues from that checkpoint in a new site job under this same HPCArgoWorkflowJob (D-38, D-44 as amended
@@ -269,34 +312,46 @@ type HPCArgoWorkflowJobSpec struct {
 	// +kubebuilder:default=20
 	// +optional
 	IdleTimeoutMinutes *int32 `json:"idleTimeoutMinutes,omitempty"`
-	// Env is extra environment for the runner, from a fixed allowlist: OUTPUTS_REPO, OUTPUTS_REF,
-	// CHECKPOINT_BUCKET, CHECKPOINT_PREFIX, KAOS_LIB_SUPPORT. Nothing else is accepted (T-02).
+	// Env is extra environment for the step, from a fixed allowlist: KAOS_LIB_SUPPORT. Nothing else is
+	// accepted (T-02).
 	// +kubebuilder:validation:MaxItems=16
-	// +kubebuilder:validation:XValidation:rule="self.all(e, e.name in ['OUTPUTS_REPO','OUTPUTS_REF','CHECKPOINT_BUCKET','CHECKPOINT_PREFIX','KAOS_LIB_SUPPORT'])",message="env may only set OUTPUTS_REPO, OUTPUTS_REF, CHECKPOINT_BUCKET, CHECKPOINT_PREFIX, KAOS_LIB_SUPPORT"
-	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['OUTPUTS_REPO','CHECKPOINT_BUCKET']) || e.value.matches('^outputs-[a-z0-9-]{1,55}$'))",message="OUTPUTS_REPO and CHECKPOINT_BUCKET must be an outputs-<name> repository"
+	// +kubebuilder:validation:XValidation:rule="self.all(e, e.name in ['KAOS_LIB_SUPPORT'])",message="env may only set KAOS_LIB_SUPPORT"
 	// +listType=map
 	// +listMapKey=name
 	// +optional
 	Env []NameValue `json:"env,omitempty"`
 }
 
-// DatasetPin is one dataset at one commit: what the run's data lock recorded for the step's dataset.
-type DatasetPin struct {
+// StepInput is one dataset the step reads, at one commit.
+type StepInput struct {
+	// Name is the input's name: what the step asks for (input("name")). On the site the staged copy is the
+	// folder of this name under the step's staged root.
+	// +kubebuilder:validation:MaxLength=40
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?$`
+	Name string `json:"name"`
 	// Repo is the dataset's repository: a platform Dataset is a repository named dataset-<name>.
+	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^dataset-[a-z0-9][a-z0-9-]{0,54}$`
 	Repo string `json:"repo"`
-	// Version is what the run asked for (latest, v3, a branch or a tag). It is a label: the commit decides
-	// what is read.
-	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`
-	// +kubebuilder:validation:MaxLength=255
-	Version string `json:"version"`
-	// Commit is the lakeFS commit the version was resolved to when the run started.
+	// Commit is the lakeFS commit that is staged and read.
+	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
 	Commit string `json:"commit"`
-	// Owner is the project that shares the dataset with this one. Absent: the project's own dataset.
+	// Ref is what the run asked for (latest, a name, a commit). It is a label: the commit decides what is read.
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`
+	// +optional
+	Ref string `json:"ref,omitempty"`
+	// Owner is the project that shares the dataset with this one. Absent: the project's own dataset. A job
+	// with an owner is refused: a dataset of another project cannot be staged on an HPC site yet.
+	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`
 	// +optional
 	Owner string `json:"owner,omitempty"`
+	// Line is reserved for the branch form of a dataset (PRD kaos#1911 D-01). Nothing reads it yet.
+	// +kubebuilder:validation:MaxLength=255
+	// +optional
+	Line string `json:"line,omitempty"`
 }
 
 // Resumable is a step's declaration that it saves and continues (step(..., resumable=...)).
@@ -356,7 +411,7 @@ const (
 	StagingCached = "cached" // the commit was already on scratch: nothing was copied
 )
 
-// StagingStatus says how the step's dataset was staged on the site's scratch before the site job was
+// StagingStatus says how one dataset of the step was staged on the site's scratch before the site job was
 // submitted. It is bounded (one short record, no paths) and set by the runner; the follower prints it
 // as one line in the step's log.
 type StagingStatus struct {
@@ -424,7 +479,8 @@ type RunStatus struct {
 	// ExitCode of the job's step; 85 means it saved and continues (D-44). Codes the job script and the runner
 	// reserve: 210 (no Apptainer), 231 (image pull), 232 (staging), 233 (batch script), 234 (no verified
 	// checkpoint to restore), 235 (checkpoint copy or job comment failed), 236 (Idle), 237 (InsufficientQuota),
-	// 238 (SubmitLimit).
+	// 238 (SubmitLimit), 239 (InvalidImage), 240 (GPUViolation), 241 (StagingMismatch), 242 (ReservedName),
+	// 243 (ResultNotHandedBack), 244 (InvalidResult).
 	// +optional
 	ExitCode *int32 `json:"exitCode,omitempty"`
 	// StartTime and EndTime as the site reports them.
@@ -470,11 +526,14 @@ type RunStatus struct {
 	// +listMapKey=gpu
 	// +optional
 	GPUUtilization []GPUUtilization `json:"gpuUtilization,omitempty"`
-	// Staging says how the dataset was staged before submit (first copy, delta or already cached; what was
-	// copied and how long it took). Absent when the step has no dataset or the job stages it itself. The
-	// follower prints it as one "HPC: dataset ... staged" line.
+	// Staged says how each of the step's inputs (spec.inputs) was staged before submit, one record per dataset
+	// commit (first copy, delta or already cached; what was copied and how long it took). Absent when the step
+	// has no input; an input the job stages itself has no record. The follower prints one "HPC: dataset ...
+	// staged" line per record.
+	// +kubebuilder:validation:MaxItems=16
+	// +listType=atomic
 	// +optional
-	Staging *StagingStatus `json:"staging,omitempty"`
+	Staged []StagingStatus `json:"staged,omitempty"`
 	// QueueReplaced lists the newest replacements of a queued site job of this attempt (at most
 	// QueueReplacedKept, oldest first); QueueReplacedCount counts all of them. A queued job is replaced
 	// before its credentials expire, which loses its place in the site's queue (AC-35).
@@ -781,12 +840,12 @@ type HPCArgoWorkflowJobStatus struct {
 	// Run is the submitter's report of the site job.
 	// +optional
 	Run *RunStatus `json:"run,omitempty"`
-	// Outputs are the step's declared outputs, JSON text each (at most 64 KiB in all), written by
-	// the runner after stage-out and before it reports run.terminal. The follower turns them into
-	// the Argo step's outputs.
-	// +kubebuilder:validation:MaxProperties=64
+	// Result is the step's result (docs/step-contract.md, section 4) in wire form, as the job handed it back:
+	// the runner writes it with its report of a step that ended well, after it checked it. Set only on a job
+	// that Succeeded; absent when the step wrote none. The follower hands it on as the step's kaos-result.
+	// +kubebuilder:validation:MaxLength=8192
 	// +optional
-	Outputs map[string]string `json:"outputs,omitempty"`
+	Result string `json:"result,omitempty"`
 	// PendingReason is the scheduler's pending reason while the site job is queued (runner's poll).
 	// +optional
 	PendingReason string `json:"pendingReason,omitempty"`
@@ -834,7 +893,7 @@ type SweepStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // HPCArgoWorkflowJob is one Argo Workflow step run on an HPC site. The step creates it and supplies what the job
-// needs from the platform and the run (image, command, dataset, outputs, credentials); it cannot run on its
+// needs from the platform and the run (image, command, step context, inputs, credentials); it cannot run on its
 // own. The controller admits and books it against the project's share before anything is submitted
 // (PRD-HPC-1461 F-01, F-26). The name HPCJob is kept for a future kind that runs without a workflow.
 type HPCArgoWorkflowJob struct {

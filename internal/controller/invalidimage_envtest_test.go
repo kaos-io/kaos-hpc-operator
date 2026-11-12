@@ -45,7 +45,7 @@ var _ = Describe("HPC invalid image", func() {
 
 	newJob := func(name, image string) *hpcv1alpha1.HPCArgoWorkflowJob {
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: image, WallTimeMinutes: 10,
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: image, WallTimeMinutes: 10,
 				StepName: "train", Command: []string{"x"}}}
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		return j

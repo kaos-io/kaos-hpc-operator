@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	outputsDir  = "/tmp/outputs"
+	resultPath  = "/tmp/outputs/kaos-result.json"
 	slurmIDPath = "/tmp/slurm-job-id"
 )
 
@@ -52,6 +52,6 @@ func run() int {
 	defer stop()
 	return follower.Run(ctx, c, cfg, follower.Options{
 		Poll: follower.DefaultPoll, Recheck: follower.DefaultRecheck,
-		OutputsDir: outputsDir, SlurmIDPath: slurmIDPath, Out: os.Stdout,
+		ResultPath: resultPath, SlurmIDPath: slurmIDPath, Out: os.Stdout,
 	})
 }

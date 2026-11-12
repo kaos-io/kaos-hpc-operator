@@ -77,10 +77,15 @@ class FakeSlurm:
 
 
 class Net:
-    """urllib.request.urlopen: the metadata server is absent, lakeFS has the staged outputs and checkpoint."""
+    """urllib.request.urlopen: the metadata server is absent; lakeFS has what the job handed back.
+
+    handed: site job id -> the bytes of the result file the job uploaded, or None for "the step wrote none" (the
+    record kaos-result.absent). A job that is not listed handed back the record of no result when
+    absent_by_default, else nothing at all. fail: HTTP codes answered to the next fetches."""
 
     def __init__(self):
         self.objects, self.commits, self.deleted = {}, set(), []
+        self.handed, self.absent_by_default, self.fail, self.fetched = {}, True, [], []
 
     def __call__(self, req, timeout=0, **kw):
         import io
@@ -97,6 +102,20 @@ class Net:
             return io.BytesIO(json.dumps({"id": cid}).encode())
         if "/objects?" in url:
             name = urllib.parse.unquote(url.split("path=", 1)[1])
+            if name.startswith("hpc-outputs/"):
+                assert "/repositories/outputs-yolo/branches/hpc-%s-model-training/objects?" % WF in url, url
+                assert req.get_header("Authorization", "").startswith("Bearer "), "fetched with the wallet"
+                self.fetched.append(name)
+                if self.fail:
+                    raise urllib.error.HTTPError(url, self.fail.pop(0), "x", {}, io.BytesIO(b"{}"))
+                wf, step, jid, what = name.split("/")[1:]
+                assert (wf, step) == (WF, "model-training")
+                raw = self.handed.get(jid, None if self.absent_by_default else "nothing")
+                if what == "kaos-result.json" and isinstance(raw, bytes):
+                    return io.BytesIO(raw)
+                if what == "kaos-result.absent" and raw is None:
+                    return io.BytesIO(b"absent\n")
+                raise urllib.error.HTTPError(url, 404, "nope", {}, io.BytesIO(b"{}"))
             if name not in self.objects:
                 raise urllib.error.HTTPError(url, 404, "nope", {}, io.BytesIO(b"{}"))
             return io.BytesIO(self.objects[name])
@@ -154,17 +173,17 @@ def rig(monkeypatch):
 
 # ---------------------------------------------------------------- the normal attempt
 
-def test_a_successful_attempt_submits_once_reports_each_state_and_the_outputs(rig):
+def test_a_successful_attempt_submits_once_reports_each_state_and_the_result(rig):
     slurm = FakeSlurm({"5001": [acc("PENDING", start=0), acc("RUNNING"), acc("COMPLETED")]},
                       live={"5001": {"state_reason": "Priority", "job_state": ["PENDING"]}})
     rig.make(slurm)
-    rig.net.objects["hpc-outputs/%s/model-training/training-result.json" % WF] = b'{"map50": 0.71}'
+    rig.net.handed["5001"] = helpers.fixture("result-model.json").encode()     # as kaos-lib might write it: any JSON
     assert rig.runner.run() == 0
     assert len(slurm.submitted) == 1 and rig.runner.jid == 5001
     run, status = rig.kube.run, rig.kube.status
     assert run == {"attempt": 1, "siteJobID": "5001", "state": "COMPLETED", "exitCode": 0, "terminal": True,
                    "startTime": "2025-11-05T00:00:00Z", "endTime": "2025-11-05T01:00:00Z", "qos": "default"}
-    assert status["outputs"] == {"training-result": '{"map50": 0.71}'}
+    assert status["result"] == helpers.fixture("result-model.wire"), "checked, and written again in wire form"
     assert "pendingReason" not in status, "cleared once the job left the queue"
     states = [c[2]["status"]["run"]["state"] for c in rig.kube.patches() if "run" in c[2]["status"]]
     assert states == ["PENDING", "PENDING", "RUNNING", "COMPLETED"]
@@ -197,7 +216,7 @@ def test_a_failed_job_is_reported_and_the_runner_still_exits_zero(rig):
     rig.make(slurm)
     assert rig.runner.run() == 0, "the controller decides what a failed attempt means; the Job must not retry"
     assert rig.kube.run["state"] == "FAILED" and rig.kube.run["exitCode"] == 2 and rig.kube.run["terminal"]
-    assert "outputs" not in rig.kube.status
+    assert "result" not in rig.kube.status and rig.net.fetched == [], "a failed step publishes nothing"
 
 
 def test_timeout_and_node_fail_are_terminal_states_too(rig):
@@ -210,8 +229,9 @@ def test_timeout_and_node_fail_are_terminal_states_too(rig):
 
 def test_the_submitted_job_is_the_proven_one(rig):
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    rig.make(slurm, KAOS_ATTEMPT="3", HPC_RESUMABLE_LEAD="20", CHECKPOINT_BUCKET="b", KUBECORE_RUN_ID="run-1",
-             KAOS_RESUME_REF=REF)
+    rig.make(slurm, KAOS_ATTEMPT="3", HPC_RESUMABLE_LEAD="20", KAOS_LIB_SUPPORT='{"a":1}', KAOS_RESUME_REF=REF,
+             # what the engine set before the step contract: nothing reads it, so nothing passes it on
+             CHECKPOINT_BUCKET="b", KUBECORE_RUN_ID="run-1", OUTPUTS_REPO="outputs-other")
     rig.runner.run()
     job = slurm.submitted[0]["job"]
     env = dict(e.split("=", 1) for e in job["environment"])
@@ -222,20 +242,39 @@ def test_the_submitted_job_is_the_proven_one(rig):
     assert env["KAOS_RESUME_PREFIX"] == "kaos-ckpt/%s/model-training/000002.tar" % WF and env["HPC_GPUS"] == "4"
     assert env["KAOS_PROJID"] == "1" and env["KAOS_CKPT_BUDGET_PCT"] == "10" and "CKPT_B64" in env
     assert env["MLFLOW_TRACKING_TOKEN"] == "wallet.jwt" and env["LAKEFS_BEARER_TOKEN"] == "wallet.jwt"
-    assert env["LAKEFS_ENDPOINT"] == "https://lakefs.example" and env["OUTPUTS_REPO"] == "outputs-yolo"
-    assert env["CHECKPOINT_BUCKET"] == "b" and env["KUBECORE_RUN_ID"] == "run-1" and "CKPT_B64" in env
+    assert env["LAKEFS_ENDPOINT"] == "https://lakefs.example" and env["KAOS_OUTPUTS_REPO"] == "outputs-yolo"
+    assert env["KAOS_LIB_SUPPORT"] == '{"a":1}' and "HANDBACK_B64" in env and "STAGEIN_B64" in env
+    # The step contract: the one value the step receives, unchanged; the inputs to present; nothing of before.
+    assert env["KAOS_STEP_CONTEXT"] == helpers.fixture("context-one-upstream.wire")
+    assert env["KAOS_INPUTS"] == "dataset|dataset-default|%s|" % helpers.COMMIT, "not staged from a login node: in-job"
+    gone = ("CHECKPOINT_BUCKET", "CHECKPOINT_PREFIX", "KUBECORE_RUN_ID", "KUBECORE_WORKFLOW_NAME", "OUTPUTS_REPO",
+            "OUTPUTS_REF", "STEP_OUTPUTS", "STAGEOUT_B64", "DATASET_REPO", "DATASET_COMMIT", "DATASET_STAGED",
+            "KAOS_COMMIT", "KAOS_LIB_LOCK")
+    assert not [k for k in gone if k in env], "after the wave nothing sets a variable nothing reads"
     assert "ZITADEL_MACHINE_KEY" not in " ".join(job["environment"]), "the machine key never reaches the site (T-03)"
     assert job["kill_warning_signal"] == "USR1" and job["kill_warning_delay"]["number"] == 20 * 60
     assert slurm.submitted[0]["script"].startswith("#!/bin/bash -l\n# kaos-job v2 scope=-\n")
     assert "SCR=/scr" in slurm.submitted[0]["script"]
 
 
-def test_without_a_wallet_the_job_runs_without_the_data_plane(rig):
+# PRD kaos#1911 CON-04 (fail closed, before GPU). Before: a job without a wallet was submitted without its
+# data-plane environment, ran, and its outputs were silently never staged out.
+@pytest.mark.parametrize("make, said", [
+    (dict(wallet=""), "no data-plane token could be minted"),
+    (dict(LAKEFS_EXTERNAL_URL=None), "no the project's lakeFS endpoint"),
+    (dict(KAOS_APP=None), "no the app's outputs repository"),
+])
+def test_a_run_that_cannot_hand_its_result_back_is_never_submitted(rig, capsys, make, said):
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    rig.make(slurm, wallet="")
-    rig.runner.run()
-    env = dict(e.split("=", 1) for e in slurm.submitted[0]["job"]["environment"])
-    assert not [k for k in env if k.startswith(("MLFLOW", "LAKEFS", "STAGE"))]
+    rig.make(slurm, **make)
+    with pytest.raises(SystemExit) as e:
+        rig.runner.run()
+    assert e.value.code == 0, "reported: the pod ends cleanly"
+    assert slurm.submitted == [], "nothing is submitted to the site"
+    run = rig.kube.run
+    assert (run["state"], run["exitCode"], run["terminal"]) == ("FAILED", 243, True) and not run.get("siteJobID")
+    assert said in run["message"] and "Nothing was submitted" in run["message"]
+    assert "ERROR: ResultNotHandedBack:" in capsys.readouterr().out and "result" not in rig.kube.status
 
 
 def test_a_refused_submit_stops_the_runner_with_the_reason_and_reports_nothing(rig, capsys):
@@ -254,7 +293,7 @@ def test_staging_that_does_not_fit_the_quota_ends_the_attempt_insufficient_quota
     slurm = FakeSlurm()
     rig.make(slurm)
 
-    def no_room(cfg, stager, mint, **kw):
+    def no_room(cfg, inp, stager, mint, **kw):
         raise staging_mod.InsufficientQuota("not enough room on the project's scratch for dataset d@c")
     rig.monkeypatch.setattr(runmod.staging, "stage_dataset", no_room)
     assert rig.runner.run() == 0
@@ -270,7 +309,7 @@ def test_a_staging_tool_of_another_contract_ends_the_attempt_staging_mismatch_wi
     slurm = FakeSlurm()
     rig.make(slurm)
 
-    def mismatch(cfg, stager, mint, **kw):
+    def mismatch(cfg, inp, stager, mint, **kw):
         raise staging_mod.StagingMismatch("the site's staging tool and this runner speak different staging contracts")
     rig.monkeypatch.setattr(runmod.staging, "stage_dataset", mismatch)
     assert rig.runner.run() == 0
@@ -286,7 +325,7 @@ def test_a_dataset_with_a_reserved_name_ends_the_attempt_reserved_name_without_s
     slurm = FakeSlurm()
     rig.make(slurm)
 
-    def reserved(cfg, stager, mint, **kw):
+    def reserved(cfg, inp, stager, mint, **kw):
         raise staging_mod.ReservedName("dataset d@c has an object named '.kaos-ready'")
     rig.monkeypatch.setattr(runmod.staging, "stage_dataset", reserved)
     assert rig.runner.run() == 0
@@ -300,7 +339,7 @@ def test_a_dataset_with_a_reserved_name_ends_the_attempt_reserved_name_without_s
 def test_an_image_that_does_not_fit_the_quota_also_ends_insufficient_quota(rig):
     slurm = FakeSlurm()
     rig.make(slurm)
-    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", lambda cfg, st, mint, **kw: "")
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", lambda cfg, inp, st, mint, **kw: "")
 
     def no_room(img, tok, st, strict=False):
         assert strict, "the first submit is strict"
@@ -340,13 +379,23 @@ def test_the_leases_ride_in_the_job_comment(rig, monkeypatch):
     assert slurm.submitted[0]["job"]["comment"] == \
         "kaos-commit=" + commit + " kaos-image=" + key + " kaos-ckpt-lease=%s/model-training" % WF
     env = dict(e.split("=", 1) for e in slurm.submitted[0]["job"]["environment"])
-    assert env["IMAGE_STAGED"] == "/scr/kaos/images/k.tar" and env["KAOS_COMMIT"] == commit
-    assert json.loads(env["KAOS_LIB_LOCK"])["reads"][0]["commit"] == commit, "the step's kaos-lib reads the pin"
+    assert env["IMAGE_STAGED"] == "/scr/kaos/images/k.tar" and env["KAOS_LEASES"] == "kaos-commit=" + commit
+    # Two inputs: two leases, one word each (the staging tool finds every commit with one pattern).
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    # no dataset, nothing staged (the SIF may be resident): the image lease is still there (AC-65)
-    rig.make(slurm, DATASET_REPO=None, DATASET_VERSION=None, DATASET_COMMIT=None)
+    rig.make(slurm, HPC_INPUTS=json.dumps([{"name": "labels", "repo": "dataset-labels", "ref": "v3", "commit": "2" * 64},
+                                           {"name": "embeddings", "repo": "dataset-embeddings", "commit": "3" * 64}]))
+    rig.runner.run()
+    assert slurm.submitted[0]["job"]["comment"] == \
+        "kaos-commit=%s kaos-commit=%s kaos-image=%s kaos-ckpt-lease=%s/model-training" % ("2" * 64, "3" * 64, key, WF)
+    env = dict(e.split("=", 1) for e in slurm.submitted[0]["job"]["environment"])
+    assert env["KAOS_LEASES"] == "kaos-commit=%s kaos-commit=%s" % ("2" * 64, "3" * 64)
+    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
+    # no input, nothing staged (the SIF may be resident): the image lease is still there (AC-65)
+    rig.make(slurm, HPC_INPUTS="[]")
     monkeypatch.setattr(runmod.imagemod, "stage_image", lambda img, tok, st, **kw: "")
     rig.runner.run()
+    env = dict(e.split("=", 1) for e in slurm.submitted[0]["job"]["environment"])
+    assert env["KAOS_INPUTS"] == "" and "KAOS_LEASES" not in env
     assert slurm.submitted[0]["job"]["comment"] == "kaos-image=%s kaos-ckpt-lease=%s/model-training" % (key, WF)
 
 
@@ -436,7 +485,7 @@ def test_a_checkpoint_copy_is_reported_and_the_runner_exits_without_submitting_t
     assert rig.kube.run["checkpointRef"] == "scratch://kaos-ckpt/%s/model-training/000003.tar#%s" % (WF, CID)
     assert rig.kube.run["checkpoint"] == {"progressValues": [3, 40], "progressText": "epoch=3 step=40", "digest": "dd",
                                           "bytes": 1000, "stepBytes": 2000, "projectBytes": 9000}
-    assert "outputs" not in rig.kube.status
+    assert "result" not in rig.kube.status and rig.net.fetched == [], "a failed step publishes nothing"
 
 
 @pytest.mark.parametrize("state,rc", [("TIMEOUT", None), ("NODE_FAIL", None), ("PREEMPTED", None), ("BOOT_FAIL", None),
@@ -535,10 +584,14 @@ def test_the_dataset_staging_record_is_reported_from_the_first_report_on(rig):
     slurm = FakeSlurm({"5001": [acc("PENDING"), acc("COMPLETED")]})
     rig.make(slurm)
     rec = {"repo": "ds", "commit": "c2" * 6, "kind": "delta", "files": 3, "bytes": 1234, "seconds": 12}
-    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", lambda cfg, st, mint, info=None: info.update(rec) or "/p")
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset",
+                            lambda cfg, inp, st, mint, info=None: info.update(rec) or "/scr/kaos/p/datasets/ds/c2")
     rig.runner.run()
     runs = [c[2]["status"]["run"] for c in rig.kube.patches() if "run" in c[2]["status"]]
-    assert runs[0]["state"] == "PENDING" and runs[0]["staging"] == rec and runs[-1]["staging"] == rec
+    assert runs[0]["state"] == "PENDING" and runs[0]["staged"] == [rec] and runs[-1]["staged"] == [rec]
+    env = dict(e.split("=", 1) for e in slurm.submitted[0]["job"]["environment"])
+    assert env["KAOS_INPUTS"] == "dataset|dataset-default|%s|/scr/kaos/p/datasets/ds/c2" % helpers.COMMIT, \
+        "the job is told where the resident copy of each input is"
 
 
 def test_a_queued_job_is_replaced_before_its_wallet_expires(rig, monkeypatch):
@@ -626,33 +679,141 @@ def test_a_resubmit_replaces_the_log_and_clears_its_offset(rig):
 
 # ---------------------------------------------------------------- outputs
 
-def test_outputs_above_the_cap_fail_the_attempt_loudly(rig, capsys):
+# ---------------------------------------------------------------- the result hand-back (PRD kaos#1911 CON-04, X-2)
+#
+# Before the step contract a step's outputs came back through four places that each turned a failure into
+# "no output": the job script ran the upload only when three variables were set and printed "stage-out failed"
+# when it failed (jobscript.py), the upload skipped a file it did not find (payload/stageout.py), the runner
+# skipped the fetch without a wallet or an endpoint and printed "not staged out (default {})" when a fetch
+# failed (runner.py fetch_outputs), and the follower wrote "{}" for whatever was missing (follower/run.go
+# writeOutputs). The job stayed COMPLETED and the next step read "{}". Each of these now fails the job.
+
+def _ended_well(rig, **handed):
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
     rig.make(slurm)
-    rig.net.objects["hpc-outputs/%s/model-training/training-result.json" % WF] = b"x" * (64 * 1024 + 1)
+    rig.net.handed.update(handed)
     assert rig.runner.run() == 0
-    assert rig.kube.run["state"] == "FAILED" and rig.kube.run["exitCode"] == 1 and rig.kube.run["terminal"]
-    assert "outputs" not in rig.kube.status and "ERROR:" in capsys.readouterr().out
+    return rig.kube.run, rig.kube.status
 
 
-def test_an_output_the_step_did_not_write_is_left_out_for_the_follower_to_default(rig):
+def test_a_step_that_wrote_no_result_publishes_none_and_still_succeeds(rig):
+    run, status = _ended_well(rig)      # the job handed back the record "the step wrote none"
+    assert (run["state"], run["exitCode"], run["terminal"]) == ("COMPLETED", 0, True) and "result" not in status
+    assert [n.rsplit("/", 1)[1] for n in rig.net.fetched] == ["kaos-result.json", "kaos-result.absent"]
+    assert rig.net.deleted, "the hand-off branch is deleted"
+
+
+def test_a_result_that_did_not_arrive_fails_the_job_and_is_never_no_result(rig, capsys):
+    rig.net.absent_by_default = False      # neither the file nor the record: the hand-back did not happen
+    run, status = _ended_well(rig)
+    assert (run["state"], run["exitCode"], run["terminal"]) == ("FAILED", 243, True) and "result" not in status
+    assert "handed back neither a result nor the record that the step wrote none" in run["message"]
+    assert "site job 5001" in run["message"] and "ERROR: ResultNotHandedBack:" in capsys.readouterr().out
+
+
+def test_a_result_that_cannot_be_fetched_is_asked_again_and_then_fails_the_job(rig, capsys):
+    rig.net.fail = [503] * 10
+    rig.net.handed["5001"] = helpers.fixture("result-ok.wire").encode()
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    rig.make(slurm, STEP_OUTPUTS="a,b")
-    rig.net.objects["hpc-outputs/%s/model-training/a.json" % WF] = b"[1]"
-    rig.runner.run()
-    assert rig.kube.status["outputs"] == {"a": "[1]"}
+    rig.make(slurm)
+    assert rig.runner.run() == 0
+    run = rig.kube.run
+    assert (run["state"], run["exitCode"]) == ("FAILED", 243) and "result" not in rig.kube.status
+    assert "could not be fetched from lakeFS after 4 tries (lakeFS answered HTTP 503)" in run["message"]
+    assert len(rig.net.fetched) == runmod.RESULT_FETCH_TRIES
+    # A blip is not a failure: the fourth try reads it.
+    rig.net.fail, rig.net.fetched[:] = [503, 500, 502], []
+    rig.make(FakeSlurm({"5001": [acc("COMPLETED")]}))
+    assert rig.runner.run() == 0
+    assert rig.kube.run["state"] == "COMPLETED" and rig.kube.status["result"] == helpers.fixture("result-ok.wire")
 
 
-def test_a_long_job_gets_a_fresh_wallet_for_its_outputs(rig, monkeypatch):
+@pytest.mark.parametrize("raw, said", [
+    (b"\xff\xfe not text", "is not JSON"),
+    (b'{"version":1,"status":"ok"', "is not JSON"),
+    (b"[]", "not a JSON object"),
+    (b"{}", "has version None"),                                  # the old silent default, as a result file
+    (b'{"version":2,"status":"ok","values":{},"reads":[],"writes":[]}', "has version 2"),
+    (helpers.fixture("result-absent.wire").encode(), "has status 'absent'"),   # a step never writes the sentinel
+    (b'{"version":1,"status":"ok","reads":[],"writes":[]}', "no `values`"),
+    (b'{"version":1,"status":"ok","values":{},"reads":{},"writes":[]}', "no `reads`"),
+    (b'{"version":1,"status":"ok","values":{},"reads":[]}', "no `writes`"),
+    (b'{"version":1,"status":"ok","values":{"x":NaN},"reads":[],"writes":[]}', "is not JSON"),
+    (json.dumps({"version": 1, "status": "ok", "values": {"blob": "x" * 9000}, "reads": [], "writes": []}).encode(),
+     "more than the 8192 (8 KiB) a result may cost"),
+])
+def test_a_result_file_that_is_not_a_result_fails_the_job_naming_what_is_wrong(rig, capsys, raw, said):
+    run, status = _ended_well(rig, **{"5001": raw})
+    assert (run["state"], run["exitCode"], run["terminal"]) == ("FAILED", 244, True) and "result" not in status
+    assert said in run["message"] and "No result was published" in run["message"]
+    assert "ERROR: InvalidResult:" in capsys.readouterr().out
+    assert rig.net.deleted, "the hand-off branch is deleted all the same"
+
+
+def test_a_result_is_published_in_wire_form_whatever_the_step_wrote(rig):
+    pretty = json.dumps(json.loads(helpers.fixture("result-ok.json")), indent=2, ensure_ascii=False).encode()
+    run, status = _ended_well(rig, **{"5001": pretty})
+    assert run["state"] == "COMPLETED" and status["result"] == helpers.fixture("result-ok.wire")
+
+
+@pytest.mark.parametrize("state, rc", [("FAILED", 1), ("FAILED", 243), ("TIMEOUT", None), ("CANCELLED", None),
+                                       ("OUT_OF_MEMORY", None)])
+def test_a_step_that_did_not_end_well_publishes_nothing_whatever_it_wrote(rig, state, rc):
+    slurm = FakeSlurm({"5001": [acc(state, rc=rc)]})
+    rig.make(slurm)
+    rig.net.handed["5001"] = helpers.fixture("result-ok.wire").encode()
+    assert rig.runner.run() == 0
+    assert rig.kube.run["state"] == state and "result" not in rig.kube.status
+    assert rig.net.fetched == [], "the result of a step that did not end well is not even read"
+
+
+def test_only_this_site_jobs_result_is_taken(rig):
+    """A resubmit replaces the site job of the attempt (5001 -> 5002). What 5001 handed back is not 5002's."""
+    rig.net.absent_by_default = False
+    rig.net.handed["4999"] = helpers.fixture("result-ok.wire").encode()     # an earlier attempt's or a replaced job's
+    run, status = _ended_well(rig)
+    assert (run["state"], run["exitCode"]) == ("FAILED", 243) and "result" not in status
+    assert all("/5001/" in n for n in rig.net.fetched)
+
+
+def test_a_job_that_ended_243_on_the_node_is_reported_with_what_its_hand_back_said(rig):
+    """The job script ends 243 when its hand-back program fails; that program's last line is in the job log."""
+    slurm = FakeSlurm({"5001": [acc("FAILED", rc=243)]})
+
+    class LogStager(NoStager):
+        def __call__(self, words, feed=None, quiet=False):
+            import base64
+            data = b"epoch 3 done\nresult hand-back: lakeFS did not take the step's result (POST https://l/x): HTTP 507 full\n"
+            return 0, [{"event": "log", "offset": len(data), "data": base64.b64encode(data[int(words[4]):]).decode()}]
+    rig.make(slurm, stager=LogStager())
+    assert rig.runner.run() == 0
+    run = rig.kube.run
+    assert (run["state"], run["exitCode"]) == ("FAILED", 243) and "result" not in rig.kube.status
+    assert "could not hand back its result: lakeFS did not take the step's result" in run["message"] and "HTTP 507" in run["message"]
+
+
+def test_a_guest_on_a_shared_node_hands_its_result_back_like_a_job_alone(rig):
+    """The host cancels the guest's job with the step's exit code in the comment; its result is under the guest's id."""
+    done = "kaos-state=done host=7000 slot=1 rc=0 start=1762300800"
+    slurm = FakeSlurm({"5001": [acc("PENDING", comment="kaos-state=taken host=7000 slot=1"), acc("CANCELLED", comment=done)]},
+                      live={"5001": {"comment": done}})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    rig.net.handed["5001"] = helpers.fixture("result-model.wire").encode()
+    rig.monkeypatch.setattr(runmod, "host_gone", lambda slurm, host: False)
+    assert rig.runner.run() == 0
+    assert rig.kube.run["state"] == "COMPLETED" and rig.kube.status["result"] == helpers.fixture("result-model.wire")
+
+
+def test_a_long_job_gets_a_fresh_wallet_for_its_result(rig, monkeypatch):
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
     minted = iter(["w1", "w2"])
     r = rig.make(slurm)
     r.runner._mint = lambda: next(minted)
     seen = []
     monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 100.0 if w == "w1" else 1e12)
-    monkeypatch.setattr(r.runner, "fetch_outputs", lambda: seen.append(r.runner.wallet) or {})
+    monkeypatch.setattr(r.runner, "handed_back", lambda name: seen.append(r.runner.wallet))
     r.runner.run()
-    assert seen == ["w2"], "the wallet minted at submit had expired by the end of the job"
+    assert set(seen) == {"w2"}, "the wallet minted at submit had expired by the end of the job"
 
 
 # ---------------------------------------------------------------- SIGTERM (the controller deleted the runner Job)

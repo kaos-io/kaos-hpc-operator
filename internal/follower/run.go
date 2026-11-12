@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -38,8 +37,9 @@ type Options struct {
 	Poll time.Duration
 	// Recheck is the longest a watch is held before the job is read again.
 	Recheck time.Duration
-	// OutputsDir receives <name>.json per output; SlurmIDPath receives the site job id.
-	OutputsDir  string
+	// ResultPath receives the step's result when the job succeeded (the workflow reads it as the step's
+	// kaos-result output); SlurmIDPath receives the site job id.
+	ResultPath  string
 	SlurmIDPath string
 	Out         io.Writer
 	Now         func() time.Time
@@ -68,8 +68,8 @@ type follower struct {
 	last view
 	// lastPlacement is the last placement text printed (see showPlacement).
 	lastPlacement string
-	// lastStaging is the dataset staging line already printed (see showStaging).
-	lastStaging string
+	// shownStaging are the dataset staging lines already printed (see showStaging).
+	shownStaging map[string]bool
 	// lastWarning is the time-limit warning already printed.
 	lastWarning string
 }
@@ -87,20 +87,21 @@ func (f *follower) say(format string, args ...any) {
 // every retry of the step is what makes a re-created pod re-attach instead of submitting twice.
 func (f *follower) attach(ctx context.Context) error {
 	for {
-		// Strict: a cluster whose CRD does not know a field this follower sets (an older CRD without
-		// spec.dataset) refuses the create instead of dropping the field, which would run the step without
-		// its data. The stored object is checked as well, for an API server that does not validate.
+		// Strict: a cluster whose job definition does not know a field this follower sets (one from before the
+		// step contract, without spec.context) refuses the create instead of dropping the field, which would
+		// run the step without its context and its data. The stored object is checked as well, for an API
+		// server that does not validate.
 		job := f.cfg.Job()
 		err := f.c.Create(ctx, job, client.FieldValidation("Strict"))
-		if err == nil && f.cfg.Dataset != nil && (job.Spec.Dataset == nil || *job.Spec.Dataset != *f.cfg.Dataset) {
-			// The job exists without its dataset: it must not be run. The Workflow owns it, so it would go
+		if err == nil && (job.Spec.Context != f.cfg.Context || !equality.Semantic.DeepEqual(job.Spec.Inputs, f.cfg.Inputs)) {
+			// The job exists without its context: it must not be run. The Workflow owns it, so it would go
 			// with the Workflow anyway; removing it now keeps the controller from starting it meanwhile.
 			if derr := f.c.Delete(ctx, job); derr != nil && !apierrors.IsNotFound(derr) {
 				f.say("could not remove %s: %v", f.key, derr)
 			}
-			return &droppedError{msg: fmt.Sprintf("the cluster stored %s without its dataset %s@%s: the platform's "+
-				"HPC controller is older than this pipeline. Run it again once the platform update is complete",
-				f.key, f.cfg.Dataset.Repo, f.cfg.Dataset.Version)}
+			return &droppedError{msg: fmt.Sprintf("the cluster stored %s without its step context or its inputs: the "+
+				"platform's HPC controller is older than this pipeline. Run it again once the platform update is complete",
+				f.key)}
 		}
 		if err == nil {
 			f.say("created %s", f.key)
@@ -169,7 +170,6 @@ func (f *follower) follow(ctx context.Context) int {
 			return ExitFailed
 		case apierrors.IsNotFound(err):
 			f.say("the job %s is gone (deleted or cancelled)", f.key)
-			f.writeOutputs(nil)
 			return ExitFailed
 		case err != nil:
 			f.say("API error, retrying: %v", err)
@@ -219,57 +219,39 @@ func orDash(s string) string {
 	return s
 }
 
-// finish writes the Argo outputs and the site job id, and maps the phase to the exit code.
+// AbsentResult is what stands in for a result that is missing (docs/step-contract.md, section 4): the step
+// ended well without writing one.
+const AbsentResult = `{"version":1,"status":"absent"}`
+
+// finish maps the phase to the exit code. Only a job that succeeded hands a result on: its status.result, or
+// the sentinel when the step wrote none. A job that ended any other way writes no result, so the workflow can
+// never take one from it; and a result that cannot be written for the workflow fails the step, naming why.
 func (f *follower) finish(job *hpcv1alpha1.HPCArgoWorkflowJob) int {
-	f.writeOutputs(job)
-	if job.Status.Phase == hpcv1alpha1.PhaseSucceeded {
-		f.say("the job succeeded")
-		return ExitSucceeded
+	if job.Status.Phase != hpcv1alpha1.PhaseSucceeded {
+		f.say("the job ended %s (%s): %s", job.Status.Phase, job.Status.Reason, job.Status.Message)
+		return ExitFailed
 	}
-	f.say("the job ended %s (%s): %s", job.Status.Phase, job.Status.Reason, job.Status.Message)
-	return ExitFailed
-}
-
-// writeOutputs writes <OutputsDir>/<name>.json for every declared output (and any the runner
-// filled), {} when missing, and the site job id. A nil job writes the empty defaults.
-func (f *follower) writeOutputs(job *hpcv1alpha1.HPCArgoWorkflowJob) {
-	out := map[string]string{}
+	result := job.Status.Result
+	if result == "" {
+		result = AbsentResult
+		f.say("the step ended well and handed back no result")
+	}
 	siteJob := ""
-	if job != nil {
-		for k, v := range job.Status.Outputs {
-			out[k] = v
+	if job.Status.Run != nil {
+		siteJob = job.Status.Run.SiteJobID
+	}
+	for path, body := range map[string]string{f.o.ResultPath: result, f.o.SlurmIDPath: siteJob} {
+		err := os.MkdirAll(filepath.Dir(path), 0o755)
+		if err == nil {
+			err = os.WriteFile(path, []byte(body), 0o644)
 		}
-		if job.Status.Run != nil {
-			siteJob = job.Status.Run.SiteJobID
+		if err != nil {
+			f.say("the job succeeded, but its result cannot be handed on to the workflow: %v", err)
+			return ExitFailed
 		}
 	}
-	for _, n := range f.cfg.Outputs {
-		if _, ok := out[n]; !ok {
-			out[n] = "{}"
-		}
-	}
-	if err := os.MkdirAll(f.o.OutputsDir, 0o755); err != nil {
-		f.say("cannot create %s: %v", f.o.OutputsDir, err)
-	}
-	for name, body := range out {
-		if !safeName(name) {
-			f.say("skipping output %q: not a plain name", name)
-			continue
-		}
-		if body == "" {
-			body = "{}"
-		}
-		if err := os.WriteFile(filepath.Join(f.o.OutputsDir, name+".json"), []byte(body), 0o644); err != nil {
-			f.say("cannot write output %s: %v", name, err)
-		}
-	}
-	if err := os.WriteFile(f.o.SlurmIDPath, []byte(siteJob), 0o644); err != nil {
-		f.say("cannot write %s: %v", f.o.SlurmIDPath, err)
-	}
-}
-
-func safeName(n string) bool {
-	return n != "" && n != "." && n != ".." && !strings.ContainsAny(n, `/\`)
+	f.say("the job succeeded")
+	return ExitSucceeded
 }
 
 // wait blocks until the job changes, Recheck passes or the context ends. It watches the one job;

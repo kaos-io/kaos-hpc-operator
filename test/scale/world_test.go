@@ -270,7 +270,7 @@ func (w *world) createJobs(p *project, specs []jobSpec) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.envNS, Annotations: map[string]string{}},
-				Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: s.class, Image: "reg.example/app:v1", WallTimeMinutes: s.wallMinutes,
+				Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: s.class, Image: "reg.example/app:v1", WallTimeMinutes: s.wallMinutes,
 					Command: []string{"python", "train.py"}, StepName: "step-" + name}}
 			if s.run != "" {
 				j.Annotations[annRunMinutes] = s.run

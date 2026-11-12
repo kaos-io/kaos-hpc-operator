@@ -1,7 +1,7 @@
 """The Slurm batch script of one attempt, as the in-pod waiter built it (PRD-HPC-1461 D-64).
 
 The script is the proven program: Lmod init, SIF cache (private part-file, atomic rename),
-dataset bind, checkpoint stage-in/out, USR1 pass-through to handlers only, failure tail into the
+input binds, the result hand-back, USR1 pass-through to handlers only, failure tail into the
 job comment, the PRD-1609 host hook. D-72 idle watchdog (payload/idlewatch.py) ends a hung step with exit 236. Phase-1 additions: a 30 s sampler writing ``KAOS_METRIC``
 lines into the job output (D-65) and deletion of the staged image tar after a successful SIF
 build (D-62).
@@ -14,7 +14,7 @@ build (D-62).
 # overwrites blindly: it reads the live comment, drops the words being set and any old err tail, appends the
 # new words (and the err text), writes, and reads back that every new word is there, up to 3 tries. Every
 # other word (kaos-commit=, kaos-image=, kaos-ckpt-lease=, kaos-ckpt*=, kaos-state=...) is kept. When the
-# comment cannot be read the dataset lease from the environment is still kept. Returns 1 when a word could
+# comment cannot be read the dataset leases from the environment (KAOS_LEASES) are still kept. Returns 1 when a word could
 # not be verified: the caller (the final copy) then fails loudly instead of leaving the controller blind.
 COMMENT_HELPER = [
     'kaos_comment(){',
@@ -22,7 +22,7 @@ COMMENT_HELPER = [
     '  if [ "$1" = "-e" ]; then err=$2; shift 2; fi',
     '  for try in 1 2 3; do',
     '    cur=$(squeue -h -j "$KAOS_JOB_ID" -o %k 2>/dev/null); [ "$cur" = "(null)" ] && cur=""',
-    '    [ -z "$cur" ] && [ -n "$KAOS_COMMIT" ] && cur="kaos-commit=$KAOS_COMMIT"',
+    '    [ -z "$cur" ] && [ -n "$KAOS_LEASES" ] && cur="$KAOS_LEASES"',
     '    cur=$(printf %s "$cur" | sed -E "s/(^| )err[0-9]+:.*$//")',
     '    read -r -a toks <<< "$cur"; new=""',
     '    for t in "${toks[@]}"; do',
@@ -83,36 +83,44 @@ def batch_lines(scope, scratch):
         'mkdir -p $APPTAINER_CACHEDIR $APPTAINER_TMPDIR $SCR/sif-cache',
         'KEY=$(printf %s "$IMAGE_REF" | sha256sum | cut -c1-16)',
         'SIF=$SCR/sif-cache/$KEY.sif',
-        # F-04 stage-in: only when the wallet minted AND the run pins a
-        # dataset. Fails LOUDLY (exit 232) — silently missing data would
-        # surface as a cryptic training error hours later.
-        'DATASET_DIR=""',
+        # The step's inputs (spec.inputs), each a whole dataset commit, each presented to the step as one folder
+        # named after the input under one root: $KAOS_STAGED_ROOT/<input>/ in the container, read-only, with
+        # the record .kaos-ready ({"repo","commit","full":true}) that kaos-lib finds the folder by. KAOS_INPUTS
+        # holds one word per input: name|repository|commit|resident path.
+        'BIND=""',
+        'for KAOS_IN in $KAOS_INPUTS; do',
+        '  IFS="|" read -r IN_NAME IN_REPO IN_COMMIT IN_STAGED <<< "$KAOS_IN"',
+        '  IN_DIR=""',
         # PRD-1541 F-06: the copy staged from a login node, when ready. The
         # marker is written last, so its presence means complete.
-        'if [ -n "$DATASET_STAGED" ] && [ -f "$DATASET_STAGED/.kaos-ready" ]; then',
-        '  DATASET_DIR=$DATASET_STAGED; touch "$DATASET_DIR/.kaos-used" 2>/dev/null',
-        '  echo "dataset: resident copy $DATASET_DIR"',
-        'elif [ -n "$LAKEFS_BEARER_TOKEN" ] && [ -n "$LAKEFS_ENDPOINT" ] &&'
-        ' [ -n "$DATASET_REPO" ] && [ -n "$DATASET_COMMIT" ] &&'
+        '  if [ -n "$IN_STAGED" ] && [ -f "$IN_STAGED/.kaos-ready" ]; then',
+        '    IN_DIR=$IN_STAGED; touch "$IN_DIR/.kaos-used" 2>/dev/null',
+        '    echo "input $IN_NAME: resident copy $IN_DIR"',
+        # F-04 stage-in, the kept fallback: the job downloads the commit itself. Fails LOUDLY (exit 232):
+        # silently missing data would surface as a cryptic training error hours later.
+        '  elif [ -n "$LAKEFS_BEARER_TOKEN" ] && [ -n "$LAKEFS_ENDPOINT" ] &&'
         ' [ -n "$STAGEIN_B64" ] && command -v python3 >/dev/null; then',
-        '  [ -n "$DATASET_STAGED" ] && echo "dataset: WARNING staged copy $DATASET_STAGED'
+        '    [ -n "$IN_STAGED" ] && echo "input $IN_NAME: WARNING staged copy $IN_STAGED'
         ' not ready - downloading in-job on GPU time"',
-        '  export DATASET_CACHE=$SCR/data-cache'
-        ' DATASET_DIRFILE=$SCR/kaos-tmp/ds-$KAOS_JOB_ID.dir',
-        '  printf %s "$STAGEIN_B64" | base64 -d | python3 - || fail 232',
-        '  DATASET_DIR=$(cat "$DATASET_DIRFILE" 2>/dev/null)',
-        'fi',
-        # Apptainer passes the host env through, so the wallet/endpoint vars
-        # reach the step; the bind gives it the staged version read-only.
-        'BIND=""',
-        'if [ -n "$DATASET_DIR" ]; then'
-        ' BIND="-B $DATASET_DIR:/kubecore/dataset:ro";'
-        ' export APPTAINERENV_KUBECORE_DATASET_DIR=/kubecore/dataset'
-        ' APPTAINERENV_KUBECORE_STAGED_DIR=/kubecore/dataset; fi',
+        '    export DATASET_REPO=$IN_REPO DATASET_COMMIT=$IN_COMMIT DATASET_CACHE=$SCR/data-cache'
+        ' DATASET_DIRFILE=$SCR/kaos-tmp/ds-$KAOS_JOB_ID-$IN_NAME.dir',
+        '    printf %s "$STAGEIN_B64" | base64 -d | python3 - || fail 232',
+        '    IN_DIR=$(cat "$DATASET_DIRFILE" 2>/dev/null); rm -f "$DATASET_DIRFILE"',
+        '    [ -n "$IN_DIR" ] && [ -f "$IN_DIR/.kaos-ready" ] || { echo "input $IN_NAME: the in-job copy is not complete"; fail 232; }',
+        '  else',
+        '    echo "input $IN_NAME: no staged copy and no way to download it in the job"; fail 232',
+        '  fi',
+        '  BIND="$BIND -B $IN_DIR:/kaos/inputs/$IN_NAME:ro"',
+        'done',
+        # Apptainer passes the host env through, so the step context and the wallet/endpoint vars reach the step.
+        '[ -n "$KAOS_INPUTS" ] && export APPTAINERENV_KAOS_STAGED_ROOT=/kaos/inputs',
         # Writable /work: the SIF is read-only, but steps write /work/output
         # (declared outputs), /work/runs, /work/dataset caches. Per-job scratch
         # on Lustre, removed after a successful stage-out.
         'export KAOS_WORK=$SCR/kaos-work/$KAOS_JOB_ID; mkdir -p $KAOS_WORK/output',
+        # A requeued job runs again under the same job id and folder: a result an earlier run left there must
+        # never be handed back as this run's.
+        'rm -f "$KAOS_WORK/output/kaos-result.json"',
         # D-74/D-75: every step gets a checkpoint folder (KAOS_CHECKPOINT_DIR in the container). The payload
         # keeps at most two copies of it on scratch, each ONE tar archive + manifest (file quota), and
         # restores the newest verified one here when the step is a continuation.
@@ -291,8 +299,17 @@ def batch_lines(scope, scratch):
         '  python3 $CKPTPY final || fail 235',
         '  rm -rf "$KAOS_WORK"; exit 85',
         'fi',
-        'if [ -n "$STEP_OUTPUTS" ] && [ -n "$STAGEOUT_B64" ] && [ -n "$LAKEFS_BEARER_TOKEN" ]; then'
-        ' printf %s "$STAGEOUT_B64" | base64 -d | python3 - || echo "stage-out failed (rc=$rc)"; fi',
+        # The result hand-back (docs/step-contract.md, section 8; PRD kaos#1911 CON-04). Only a step that ended
+        # well hands anything back: its result file, or the record that it wrote none. When that cannot be done
+        # (the file cannot be read, lakeFS does not take it, the job has no way to send it) the JOB FAILS with
+        # exit 243; the hand-back program's last line says why. A step that failed publishes nothing.
+        'if [ $rc -eq 0 ]; then',
+        '  if [ -n "$HANDBACK_B64" ] && command -v python3 >/dev/null; then',
+        '    printf %s "$HANDBACK_B64" | base64 -d | python3 - || rc=243',
+        '  else',
+        '    echo "result hand-back: the job has no hand-back program or the node has no python3"; rc=243',
+        '  fi',
+        'fi',
         # A step that succeeded needs no checkpoint copies: delete them (frees the project's scratch quota).
         '[ $rc -eq 0 ] && rm -rf "$KAOS_WORK" "$KAOS_CKPT_ROOT/$WF_UID/$STEP_NAME"',
         '[ $rc -ne 0 ] && fail $rc',

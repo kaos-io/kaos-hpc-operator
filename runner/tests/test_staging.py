@@ -59,11 +59,12 @@ class _Stager:
         return rc, ([{"event": "done", "path": "/scr/kaos/p/datasets/ds/" + COMMIT}] if rc == 0 else [])
 
 
-def _twin(monkeypatch, lakefs, stager, **env):
-    over = {"DATASET_REPO": "dataset-poulaki", "DATASET_VERSION": "latest", "DATASET_COMMIT": COMMIT,
+def _twin(monkeypatch, lakefs, stager, ref="latest", **env):
+    over = {"HPC_INPUTS": json.dumps([{"name": "dataset", "repo": "dataset-poulaki", "ref": ref, "commit": COMMIT}]),
             "LAKEFS_EXTERNAL_URL": "https://lakefs.example/"}
     over.update(env)
     cfg = helpers.settings(**over)
+    cfg.check_job()      # the job's one input is cfg.inputs[0]
     monkeypatch.setattr(urllib.request, "urlopen", lakefs)
     monkeypatch.setattr(staging, "ssh_present", lambda: True)
     monkeypatch.setattr(staging.time, "sleep", lambda s: None)
@@ -71,7 +72,7 @@ def _twin(monkeypatch, lakefs, stager, **env):
 
 
 def _stage(cfg, stager, wallet="wallet-jwt"):
-    return staging.stage_dataset(cfg, stager, lambda: wallet)
+    return staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: wallet)
 
 
 def _listings(lakefs):
@@ -111,7 +112,7 @@ def test_a_tree_without_data_yaml_images_or_labels_is_streamed_whole(monkeypatch
     stager = _Stager({"ready": False, "base": None})
     cfg = _twin(monkeypatch, _LakeFS(NOT_YOLO), stager)
     info = {}
-    assert staging.stage_dataset(cfg, stager, lambda: "wallet-jwt", info=info).endswith(COMMIT)
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", info=info).endswith(COMMIT)
     words, records = _stage_call(stager)
     assert {r["path"]: r["size"] for r in records if r["op"] == "fetch"} == NOT_YOLO
     assert records[-1] == {"op": "end", "files": 5, "bytes": 345, "ref": "main", "prefix": ""}, \
@@ -342,7 +343,7 @@ def test_a_stager_killed_mid_copy_is_resumed_by_the_next_attempt_with_the_whole_
     stager = _Stager({"ready": False, "base": None}, stage_rcs=[255, 0])
     cfg = _twin(monkeypatch, lakefs, stager)
     info = {}
-    assert staging.stage_dataset(cfg, stager, lambda: "wallet-jwt", info=info).endswith(COMMIT)
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", info=info).endswith(COMMIT)
     stages = [(w, r) for w, r in stager.calls if w[0] == "stage"]
     assert len(stages) == 2, "the killed copy is retried"
     assert stages[0][1] == stages[1][1] and stages[0][1][-1] == {"op": "end", "files": 3, "bytes": 34, "ref": "main",
@@ -357,7 +358,7 @@ def test_a_stager_that_keeps_dying_never_hands_the_job_a_half_copy(monkeypatch):
     monkeypatch.setattr(staging.time, "time", lambda: clock[0])
     monkeypatch.setattr(staging.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
     info = {}
-    assert staging.stage_dataset(cfg, stager, lambda: "wallet-jwt", info=info) == "" and info == {}, \
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", info=info) == "" and info == {}, \
         "no path (the job stages in-job and says so) and no staging record"
 
 
@@ -412,11 +413,11 @@ def test_the_stager_is_reached_on_the_sites_login_node_as_the_project_user(monke
 
 
 def test_the_runner_never_resolves_a_version(monkeypatch):
-    """The commit comes from the job (spec.dataset, pinned by the pipeline's compose step): staging asks
+    """The commit comes from the job (spec.inputs, pinned by the pipeline's compose step): staging asks
     lakeFS for that commit's objects only, never for what a version points at."""
     lakefs = _LakeFS({"images/a.jpg": 1})
     stager = _Stager({"ready": False, "base": None})
-    cfg = _twin(monkeypatch, lakefs, stager, DATASET_VERSION="v3")
+    cfg = _twin(monkeypatch, lakefs, stager, ref="v3")
     assert _stage(cfg, stager).endswith(COMMIT)
     assert lakefs.urls and not any("/commits" in u for u in lakefs.urls)
     assert all("/refs/%s/" % COMMIT in u for u in lakefs.urls)
@@ -480,11 +481,11 @@ def test_concurrent_calls_start_one_master(monkeypatch, tmp_path):
     assert len([c for c in calls if " -N -f " in " %s " % c]) == 1, calls
 
 
-# ---------------------------------------------------------------- the staging record (status.run.staging)
+# ---------------------------------------------------------------- the staging record (status.run.staged)
 
 def _stage_info(cfg, stager):
     info = {}
-    assert staging.stage_dataset(cfg, stager, lambda: "wallet-jwt", info=info)
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", info=info)
     return info
 
 
@@ -541,7 +542,7 @@ def test_nothing_is_recorded_when_the_job_stages_in_job(monkeypatch):
     stager = _Stager({"ready": True}, key=False)
     cfg = _twin(monkeypatch, _LakeFS({}), stager)
     info = {}
-    assert staging.stage_dataset(cfg, stager, lambda: "w", info=info) == "" and info == {}
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "w", info=info) == "" and info == {}
 
 
 def test_the_record_holds_no_path_and_no_site_identity(monkeypatch):

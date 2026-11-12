@@ -69,10 +69,10 @@ var _ = Describe("HPCArgoWorkflowJob extreme cases", func() {
 	// newJob creates a phase-0 job (no runner Job) or, with serve, a serve-mode job.
 	newJob := func(serve bool, wall int32) *hpcv1alpha1.HPCArgoWorkflowJob {
 		seq++
-		spec := hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: fmt.Sprintf("reg.example/x/app%d:v1", seq), WallTimeMinutes: wall}
+		spec := hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: fmt.Sprintf("reg.example/x/app%d:v1", seq), WallTimeMinutes: wall}
 		if serve {
 			spec.StepName, spec.Command = "train", []string{"python", "train.py"}
-			spec.Env = []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "outputs-app"}}
+			spec.Env = []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: "{}"}}
 		}
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("x-%d", seq), Namespace: envNS}, Spec: spec}
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())

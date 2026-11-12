@@ -83,14 +83,18 @@ def _stage_in(tmp_path, fake):
 
 def _tree(dest):
     return {str(f.relative_to(dest)): f.read_bytes() for f in dest.rglob("*")
-            if f.is_file() and f.name not in (".kaos-complete", ".kaos-commit")}
+            if f.is_file() and f.name not in (".kaos-complete", ".kaos-ready")}
 
 
 def test_a_tree_without_data_yaml_images_or_labels_is_downloaded_whole(tmp_path, lakefs):
     fake = lakefs(NOT_YOLO)
     dest, _ = _stage_in(tmp_path, fake)
     assert _tree(dest) == NOT_YOLO
-    assert (dest / ".kaos-complete").exists() and (dest / ".kaos-commit").read_text() == COMMIT
+    assert (dest / ".kaos-complete").exists()
+    # What the step finds the folder by (kaos-lib staged_dir): the repository, the commit, the whole tree.
+    assert json.loads((dest / ".kaos-ready").read_text()) == {"repo": "ds", "commit": COMMIT, "full": True}
+    assert not (dest / ".kaos-commit").exists()
+    assert [f.name for f in dest.iterdir() if "kaos-part" in f.name] == [], "the record is renamed into place"
 
 
 def test_an_old_partial_copy_is_completed_not_served(tmp_path, lakefs):

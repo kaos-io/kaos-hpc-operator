@@ -290,7 +290,7 @@ class Stager:
 
 
 def staging_record(repo, commit, kind, files=0, nbytes=0, seconds=0):
-    """status.run.staging (bounded, no paths): how the dataset came to be on scratch. The follower prints it."""
+    """One record of status.run.staged (bounded, no paths): how a dataset came to be on scratch. The follower prints it."""
     return {'repo': repo, 'commit': commit[:12], 'kind': kind, 'files': int(files), 'bytes': int(nbytes),
             'seconds': int(seconds)}
 
@@ -377,18 +377,19 @@ def ssh_present():
     return shutil.which('ssh') is not None
 
 
-def stage_dataset(cfg, stager, mint_wallet, info=None):
-    """The resident path of the dataset's pinned commit, or '' (the job then stages in-job). The commit is
-    the one the pipeline pinned (spec.dataset); nothing is resolved here. Three failures are not a fallback:
+def stage_dataset(cfg, inp, stager, mint_wallet, info=None):
+    """The resident path of one input's pinned commit, or '' (the job then stages it in-job). inp is one entry
+    of cfg.inputs (spec.inputs): its repository, label and commit; nothing is resolved here. Three failures
+    are not a fallback:
     InsufficientQuota when the dataset does not fit the project's scratch quota (AC-33), StagingMismatch
     when the site's staging tool speaks another staging contract, and ReservedName when the dataset holds an
     object whose name is reserved for the platform or whose path could leave the dataset's folder.
     info (a dict), when given, receives the staging record (staging_record) once the copy is resident; it stays
     empty when the job stages in-job."""
-    repo, ref, commit = cfg.dataset_repo, cfg.dataset_ref, cfg.dataset_commit
+    repo, ref, commit = inp['repo'], inp['ref'], inp['commit']
     lakefs = cfg.lakefs_url
-    if not (repo and lakefs):
-        print('stage: skipped (needs a dataset and the lakeFS endpoint) - the job stages in-job', flush=True)
+    if not lakefs:
+        print('stage: skipped (needs the lakeFS endpoint) - the job stages in-job', flush=True)
         return ''
     wallet = mint_wallet()
     if not wallet:

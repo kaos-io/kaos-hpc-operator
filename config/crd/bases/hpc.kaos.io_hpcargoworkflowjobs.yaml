@@ -38,7 +38,7 @@ spec:
       openAPIV3Schema:
         description: |-
           HPCArgoWorkflowJob is one Argo Workflow step run on an HPC site. The step creates it and supplies what the job
-          needs from the platform and the run (image, command, dataset, outputs, credentials); it cannot run on its
+          needs from the platform and the run (image, command, step context, inputs, credentials); it cannot run on its
           own. The controller admits and books it against the project's share before anything is submitted
           (PRD-HPC-1461 F-01, F-26). The name HPCJob is kept for a future kind that runs without a workflow.
         properties:
@@ -63,6 +63,13 @@ spec:
             description: HPCArgoWorkflowJobSpec is one pipeline step to run on an
               HPC site (D-01).
             properties:
+              app:
+                description: App is the app the step belongs to, as the step context
+                  names it.
+                maxLength: 55
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
               class:
                 description: Class is the site class the user picked, for example
                   meluxina-gpu.
@@ -73,50 +80,18 @@ spec:
                 items:
                   type: string
                 type: array
-              dataset:
+              context:
                 description: |-
-                  Dataset is the dataset the step reads, pinned to one commit by the pipeline's compose step.
-                  The runner stages exactly this commit and never resolves a version itself. Absent: the step
-                  runs without a dataset.
-                properties:
-                  commit:
-                    description: Commit is the lakeFS commit the version was resolved
-                      to when the run started.
-                    pattern: ^[0-9a-f]{64}$
-                    type: string
-                  owner:
-                    description: 'Owner is the project that shares the dataset with
-                      this one. Absent: the project''s own dataset.'
-                    pattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
-                    type: string
-                  repo:
-                    description: 'Repo is the dataset''s repository: a platform Dataset
-                      is a repository named dataset-<name>.'
-                    pattern: ^dataset-[a-z0-9][a-z0-9-]{0,54}$
-                    type: string
-                  version:
-                    description: |-
-                      Version is what the run asked for (latest, v3, a branch or a tag). It is a label: the commit decides
-                      what is read.
-                    maxLength: 255
-                    pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$
-                    type: string
-                required:
-                - commit
-                - repo
-                - version
-                type: object
-              datasetRef:
-                description: |-
-                  DatasetRef is DEPRECATED and never read as a dataset: before the run's data was pinned by the
-                  pipeline, a job named its dataset as <dataset-repo>@<version> and the runner resolved it. The field
-                  stays in the schema so that a job stored with it, or created by an older follower, keeps it and is
-                  REFUSED with a clear reason instead of running without its data.
+                  Context is the step context (docs/step-contract.md, section 3) in wire form, exactly as the follower
+                  received it in KAOS_STEP_CONTEXT. The step in the job gets it under the same name, unchanged. Nothing
+                  rewrites it. A job without it is refused.
+                maxLength: 98304
+                minLength: 1
                 type: string
               env:
                 description: |-
-                  Env is extra environment for the runner, from a fixed allowlist: OUTPUTS_REPO, OUTPUTS_REF,
-                  CHECKPOINT_BUCKET, CHECKPOINT_PREFIX, KAOS_LIB_SUPPORT. Nothing else is accepted (T-02).
+                  Env is extra environment for the step, from a fixed allowlist: KAOS_LIB_SUPPORT. Nothing else is
+                  accepted (T-02).
                 items:
                   description: NameValue is one environment variable.
                   properties:
@@ -137,13 +112,8 @@ spec:
                 - name
                 x-kubernetes-list-type: map
                 x-kubernetes-validations:
-                - message: env may only set OUTPUTS_REPO, OUTPUTS_REF, CHECKPOINT_BUCKET,
-                    CHECKPOINT_PREFIX, KAOS_LIB_SUPPORT
-                  rule: self.all(e, e.name in ['OUTPUTS_REPO','OUTPUTS_REF','CHECKPOINT_BUCKET','CHECKPOINT_PREFIX','KAOS_LIB_SUPPORT'])
-                - message: OUTPUTS_REPO and CHECKPOINT_BUCKET must be an outputs-<name>
-                    repository
-                  rule: self.all(e, !(e.name in ['OUTPUTS_REPO','CHECKPOINT_BUCKET'])
-                    || e.value.matches('^outputs-[a-z0-9-]{1,55}$'))
+                - message: env may only set KAOS_LIB_SUPPORT
+                  rule: self.all(e, e.name in ['KAOS_LIB_SUPPORT'])
               idleTimeoutMinutes:
                 default: 20
                 description: |-
@@ -157,6 +127,62 @@ spec:
                 description: Image of the step.
                 minLength: 1
                 type: string
+              inputs:
+                description: |-
+                  Inputs are the datasets staged on the site before the step starts, each pinned to one commit: every
+                  read of the context's ledger and every dataset a needed step wrote. The follower fills it from the
+                  context and from nothing else; the runner stages exactly these commits and never resolves a version.
+                  Absent: the step reads no dataset.
+                items:
+                  description: StepInput is one dataset the step reads, at one commit.
+                  properties:
+                    commit:
+                      description: Commit is the lakeFS commit that is staged and
+                        read.
+                      maxLength: 64
+                      pattern: ^[0-9a-f]{64}$
+                      type: string
+                    line:
+                      description: Line is reserved for the branch form of a dataset
+                        (PRD kaos#1911 D-01). Nothing reads it yet.
+                      maxLength: 255
+                      type: string
+                    name:
+                      description: |-
+                        Name is the input's name: what the step asks for (input("name")). On the site the staged copy is the
+                        folder of this name under the step's staged root.
+                      maxLength: 40
+                      pattern: ^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?$
+                      type: string
+                    owner:
+                      description: |-
+                        Owner is the project that shares the dataset with this one. Absent: the project's own dataset. A job
+                        with an owner is refused: a dataset of another project cannot be staged on an HPC site yet.
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$
+                      type: string
+                    ref:
+                      description: 'Ref is what the run asked for (latest, a name,
+                        a commit). It is a label: the commit decides what is read.'
+                      maxLength: 255
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$
+                      type: string
+                    repo:
+                      description: 'Repo is the dataset''s repository: a platform
+                        Dataset is a repository named dataset-<name>.'
+                      maxLength: 63
+                      pattern: ^dataset-[a-z0-9][a-z0-9-]{0,54}$
+                      type: string
+                  required:
+                  - commit
+                  - name
+                  - repo
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               nodes:
                 default: 1
                 description: Nodes the job asks for. Only 1 is admitted (D-41, CON-06);
@@ -164,11 +190,6 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
-              outputs:
-                description: Outputs the step declares.
-                items:
-                  type: string
-                type: array
               resumable:
                 description: |-
                   Resumable declares that the step continues across jobs: it gets the wall-time signal LeadMinutes before
@@ -246,7 +267,9 @@ spec:
                 - uid
                 type: object
             required:
+            - app
             - class
+            - context
             - image
             - wallTimeMinutes
             type: object
@@ -478,15 +501,6 @@ spec:
                 type: integer
               message:
                 type: string
-              outputs:
-                additionalProperties:
-                  type: string
-                description: |-
-                  Outputs are the step's declared outputs, JSON text each (at most 64 KiB in all), written by
-                  the runner after stage-out and before it reports run.terminal. The follower turns them into
-                  the Argo step's outputs.
-                maxProperties: 64
-                type: object
               pendingReason:
                 description: PendingReason is the scheduler's pending reason while
                   the site job is queued (runner's poll).
@@ -622,6 +636,13 @@ spec:
                   or pre-emption (tier 1, D-75), at most MaxReruns.
                 format: int32
                 type: integer
+              result:
+                description: |-
+                  Result is the step's result (docs/step-contract.md, section 4) in wire form, as the job handed it back:
+                  the runner writes it with its report of a step that ended well, after it checked it. Set only on a job
+                  that Succeeded; absent when the step wrote none. The follower hands it on as the step's kaos-result.
+                maxLength: 8192
+                type: string
               resume:
                 description: 'Resume is set for a continuation: the submitter passes
                   it to the new site job.'
@@ -735,7 +756,8 @@ spec:
                       ExitCode of the job's step; 85 means it saved and continues (D-44). Codes the job script and the runner
                       reserve: 210 (no Apptainer), 231 (image pull), 232 (staging), 233 (batch script), 234 (no verified
                       checkpoint to restore), 235 (checkpoint copy or job comment failed), 236 (Idle), 237 (InsufficientQuota),
-                      238 (SubmitLimit).
+                      238 (SubmitLimit), 239 (InvalidImage), 240 (GPUViolation), 241 (StagingMismatch), 242 (ReservedName),
+                      243 (ResultNotHandedBack), 244 (InvalidResult).
                     format: int32
                     type: integer
                   gpuUtilization:
@@ -878,54 +900,63 @@ spec:
                     description: Slot is the GPU slot the host gave this job.
                     format: int32
                     type: integer
-                  staging:
+                  staged:
                     description: |-
-                      Staging says how the dataset was staged before submit (first copy, delta or already cached; what was
-                      copied and how long it took). Absent when the step has no dataset or the job stages it itself. The
-                      follower prints it as one "HPC: dataset ... staged" line.
-                    properties:
-                      bytes:
-                        description: Bytes is the number of bytes copied in this staging
-                          (0 when cached).
-                        format: int64
-                        minimum: 0
-                        type: integer
-                      commit:
-                        description: Commit is the pinned commit, shortened to 12
-                          characters.
-                        maxLength: 12
-                        type: string
-                      files:
-                        description: Files is the number of files copied in this staging
-                          (0 when cached).
-                        format: int32
-                        minimum: 0
-                        type: integer
-                      kind:
-                        description: Kind is first, delta or cached.
-                        enum:
-                        - first
-                        - delta
-                        - cached
-                        type: string
-                      repo:
-                        description: Repo is the dataset repository's name.
-                        maxLength: 128
-                        type: string
-                      seconds:
-                        description: Seconds is how long the staging took (0 when
-                          cached).
-                        format: int32
-                        minimum: 0
-                        type: integer
-                    required:
-                    - bytes
-                    - commit
-                    - files
-                    - kind
-                    - repo
-                    - seconds
-                    type: object
+                      Staged says how each of the step's inputs (spec.inputs) was staged before submit, one record per dataset
+                      commit (first copy, delta or already cached; what was copied and how long it took). Absent when the step
+                      has no input; an input the job stages itself has no record. The follower prints one "HPC: dataset ...
+                      staged" line per record.
+                    items:
+                      description: |-
+                        StagingStatus says how one dataset of the step was staged on the site's scratch before the site job was
+                        submitted. It is bounded (one short record, no paths) and set by the runner; the follower prints it
+                        as one line in the step's log.
+                      properties:
+                        bytes:
+                          description: Bytes is the number of bytes copied in this
+                            staging (0 when cached).
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        commit:
+                          description: Commit is the pinned commit, shortened to 12
+                            characters.
+                          maxLength: 12
+                          type: string
+                        files:
+                          description: Files is the number of files copied in this
+                            staging (0 when cached).
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        kind:
+                          description: Kind is first, delta or cached.
+                          enum:
+                          - first
+                          - delta
+                          - cached
+                          type: string
+                        repo:
+                          description: Repo is the dataset repository's name.
+                          maxLength: 128
+                          type: string
+                        seconds:
+                          description: Seconds is how long the staging took (0 when
+                            cached).
+                          format: int32
+                          minimum: 0
+                          type: integer
+                      required:
+                      - bytes
+                      - commit
+                      - files
+                      - kind
+                      - repo
+                      - seconds
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: atomic
                   startTime:
                     description: StartTime and EndTime as the site reports them.
                     format: date-time

@@ -97,6 +97,18 @@ class FakeLakeFS:
                     return self._send(201, {"id": cid})
                 self._send(404, {})
 
+            def do_DELETE(self):
+                assert self.headers["Authorization"] == "Bearer wallet"
+                parts, q = self._parts()
+                if parts[2] == "branches" and parts[4:] == ["objects"]:
+                    return self._send(204 if srv.objects.pop((parts[3], q["path"]), None) is not None else 404, b"")
+                if parts[2] == "branches" and len(parts) == 4:
+                    srv.branches.discard(parts[3])
+                    for key in [k for k in srv.objects if k[0] == parts[3]]:
+                        del srv.objects[key]
+                    return self._send(204, b"")
+                self._send(404, {})
+
             def do_GET(self):
                 assert self.headers["Authorization"] == "Bearer wallet"
                 parts, q = self._parts()
@@ -108,7 +120,7 @@ class FakeLakeFS:
                     d = view.get(q["path"])
                     return self._send(200, {"size_bytes": len(d)}) if d is not None else self._send(404, {})
                 if parts[4:] == ["objects", "ls"]:
-                    keys = sorted(k for k in view if k.startswith(q["prefix"]) and k > q.get("after", ""))
+                    keys = sorted(k for k in view if k.startswith(q.get("prefix", "")) and k > q.get("after", ""))
                     page, more = keys[:2], len(keys) > 2          # tiny pages: pagination is exercised
                     return self._send(200, {"results": [{"path": k, "path_type": "object",
                                                          "size_bytes": len(view[k])} for k in page],
@@ -134,8 +146,8 @@ def lakefs():
 
 
 def _env(tmp_path, lakefs, **extra):
-    env = dict(os.environ, LAKEFS_ENDPOINT=lakefs.url, LAKEFS_BEARER_TOKEN="wallet", OUTPUTS_REPO="outputs-app",
-               OUTPUTS_REF="main", WF_UID="wf1", STEP_NAME="train", KAOS_ATTEMPT="2",
+    env = dict(os.environ, LAKEFS_ENDPOINT=lakefs.url, LAKEFS_BEARER_TOKEN="wallet", KAOS_OUTPUTS_REPO="outputs-app",
+               WF_UID="wf1", STEP_NAME="train", KAOS_ATTEMPT="2",
                KAOS_WORK=str(tmp_path / "work"), KAOS_CKPT_FILE=str(tmp_path / "ckpt.ref"))
     env.update(extra)
     return env
@@ -318,7 +330,7 @@ def test_per_job_paths_key_on_the_steps_own_job():
     assert len(uses) == 2 and any(l.startswith("export KAOS_JOB_ID=") for l in uses) \
         and any("SIF_TMP=" in l for l in uses), uses
     assert any("kaos-work/$KAOS_JOB_ID" in l for l in lines)
-    assert any("ds-$KAOS_JOB_ID.dir" in l for l in lines)
+    assert any("ds-$KAOS_JOB_ID-$IN_NAME.dir" in l for l in lines)
 
 
 @pytest.mark.parametrize("commit, expected_prefix", [("c0ffee12", "kaos-commit=c0ffee12 err7:"), ("", "err7:")])
@@ -330,7 +342,7 @@ def test_a_failure_comment_keeps_the_dataset_lease(tmp_path, commit, expected_pr
     (bindir / "scontrol").chmod(0o755)
     (tmp_path / "slurm-4242.out").write_text("pulling\nboom\n")
     env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], OUT=str(tmp_path / "args"),
-               KAOS_JOB_ID="4242", KAOS_COMMIT=commit)
+               KAOS_JOB_ID="4242", KAOS_LEASES=("kaos-commit=" + commit) if commit else "")
     rc = subprocess.run(["bash", "-c", fail + "\nfail 7"], cwd=tmp_path, env=env).returncode
     assert rc == 7
     args = (tmp_path / "args").read_text().split("\n")
@@ -466,7 +478,7 @@ def _ckpt_env(tmp_path, **extra):
     py.write_text(CKPT)
     # KAOS_JOB_ID is NOT in the environment: the script derives it from SLURM_JOB_ID, as on the node.
     env = dict(os.environ, PATH=str(_bin(tmp_path)) + os.pathsep + os.environ["PATH"],
-               SCONTROL_LOG=str(tmp_path / "scontrol.log"), SLURM_JOB_ID="4242", KAOS_COMMIT="c0ffee12",
+               SCONTROL_LOG=str(tmp_path / "scontrol.log"), SLURM_JOB_ID="4242", KAOS_LEASES="kaos-commit=c0ffee12",
                SITE_JOB="4242", SITE_FILE=str(tmp_path / "site.comment"),
                KAOS_WORK=str(work), KAOS_CKPT_ROOT=str(scr / "kaos-ckpt"), KAOS_SCR=str(scr), WF_UID="wf1",
                STEP_NAME="train", KAOS_ATTEMPT="1", CKPTPY=str(py), HAVE_CKPT="1", STEP_OUTPUTS="", USER="u1")
@@ -524,9 +536,8 @@ def test_a_step_that_succeeds_deletes_its_checkpoint_copies_and_its_scratch(tmp_
     assert _copier(tmp_path, env, "final").returncode == 0
     store = tmp_path / "scr" / "kaos-ckpt" / "wf1" / "train"
     assert store.is_dir()
-    r = _bash(tmp_path, _block('if [ -n "$STEP_OUTPUTS" ] && [ -n "$STAGEOUT_B64" ] && [ -n "$LAKEFS_BEARER_TOKEN" ]; then'
-                               " printf %s \"$STAGEOUT_B64\" | base64 -d | python3 - || echo \"stage-out failed (rc=$rc)\"; fi", "exit 0"),
-              env, rc=0)
+    env["HANDBACK_B64"] = payloads.b64("pass\n")     # the result hand-back is tested in test_step_contract.py
+    r = _bash(tmp_path, _block('if [ $rc -eq 0 ]; then', "exit 0"), env, rc=0)
     assert r.returncode == 0 and not store.exists() and not (tmp_path / "work").exists()
 
 

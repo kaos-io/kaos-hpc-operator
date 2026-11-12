@@ -8,14 +8,14 @@ import (
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 )
 
-func stagedJob(s *hpcv1alpha1.StagingStatus) *hpcv1alpha1.HPCArgoWorkflowJob {
+func stagedJob(s ...hpcv1alpha1.StagingStatus) *hpcv1alpha1.HPCArgoWorkflowJob {
 	return jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseRunning,
-		Run: &hpcv1alpha1.RunStatus{State: "PENDING", Staging: s}})
+		Run: &hpcv1alpha1.RunStatus{State: "PENDING", Staged: s}})
 }
 
 func TestStagingLine(t *testing.T) {
-	st := func(kind string, size int64, secs int32) *hpcv1alpha1.StagingStatus {
-		return &hpcv1alpha1.StagingStatus{Repo: "dataset-poulaki", Commit: "c2c2c2c2c2c2", Kind: kind, Files: 3, Bytes: size, Seconds: secs}
+	st := func(kind string, size int64, secs int32) hpcv1alpha1.StagingStatus {
+		return hpcv1alpha1.StagingStatus{Repo: "dataset-poulaki", Commit: "c2c2c2c2c2c2", Kind: kind, Files: 3, Bytes: size, Seconds: secs}
 	}
 	cases := []struct {
 		name string
@@ -30,13 +30,13 @@ func TestStagingLine(t *testing.T) {
 			"HPC: dataset dataset-poulaki@c2c2c2c2c2c2 staged (already cached)"},
 		{"should_show_plain_bytes_below_a_kilobyte", stagedJob(st(hpcv1alpha1.StagingDelta, 512, 1)),
 			"HPC: dataset dataset-poulaki@c2c2c2c2c2c2 staged (delta), 512 B, 1s"},
-		{"should_print_nothing_before_the_runner_reports_it", stagedJob(nil), ""},
+		{"should_print_nothing_before_the_runner_reports_it", stagedJob(), ""},
 		{"should_print_nothing_without_a_run", jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{}), ""},
 		{"should_print_nothing_for_an_unknown_kind", stagedJob(st("other", 1, 1)), ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := stagingLine(tc.job); got != tc.want {
+			if got := strings.Join(stagingLines(tc.job), "\n"); got != tc.want {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
@@ -46,9 +46,9 @@ func TestStagingLine(t *testing.T) {
 func TestShowStagingPrintsOneLineOnceAndNoPath(t *testing.T) {
 	var out bytes.Buffer
 	f := &follower{o: Options{Out: &out}}
-	job := stagedJob(nil)
+	job := stagedJob()
 	f.showStaging(job) // unknown yet
-	job.Status.Run.Staging = &hpcv1alpha1.StagingStatus{Repo: "ds", Commit: "abc", Kind: hpcv1alpha1.StagingFirst, Files: 2, Bytes: 2000, Seconds: 3}
+	job.Status.Run.Staged = []hpcv1alpha1.StagingStatus{{Repo: "ds", Commit: "abc", Kind: hpcv1alpha1.StagingFirst, Files: 2, Bytes: 2000, Seconds: 3}}
 	f.showStaging(job)
 	f.showStaging(job) // same record: not again
 	job.Status.Run.State = "RUNNING"

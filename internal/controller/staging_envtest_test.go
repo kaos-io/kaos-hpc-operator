@@ -15,7 +15,7 @@ import (
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 )
 
-// PRD-HPC-1461: the runner reports how the dataset was staged in status.run.staging; the controller keeps
+// PRD-HPC-1461: the runner reports how each input was staged in status.run.staged; the controller keeps
 // it across its own reconciles and a restart, and the CRD refuses what is not a bounded record.
 var _ = Describe("HPC dataset staging record", func() {
 	var (
@@ -49,16 +49,16 @@ var _ = Describe("HPC dataset staging record", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), got)).To(Succeed())
 		return got
 	}
-	writeStaging := func(j *hpcv1alpha1.HPCArgoWorkflowJob, s hpcv1alpha1.StagingStatus) error {
+	writeStaging := func(j *hpcv1alpha1.HPCArgoWorkflowJob, s ...hpcv1alpha1.StagingStatus) error {
 		cur := &hpcv1alpha1.HPCArgoWorkflowJob{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), cur)).To(Succeed())
 		orig := cur.DeepCopy()
-		cur.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "105", State: "PENDING", Staging: &s}
+		cur.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "105", State: "PENDING", Staged: s}
 		return k8sClient.Status().Patch(ctx, cur, client.MergeFrom(orig))
 	}
 	newJob := func() *hpcv1alpha1.HPCArgoWorkflowJob {
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: "st-job", Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "zot.example/proj/app:v1", WallTimeMinutes: 10,
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "zot.example/proj/app:v1", WallTimeMinutes: 10,
 				StepName: "train", Command: []string{"x"}}}
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		Expect(reconcileOnce(j).Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
@@ -69,14 +69,14 @@ var _ = Describe("HPC dataset staging record", func() {
 
 	It("should_persist_the_staging_record_and_keep_it_across_reconciles_and_a_controller_restart", func() {
 		j := newJob()
-		Expect(writeStaging(j, good)).To(Succeed())
+		second := hpcv1alpha1.StagingStatus{Repo: "dataset-labels", Commit: "d3d3d3d3d3d3", Kind: hpcv1alpha1.StagingCached}
+		Expect(writeStaging(j, good, second)).To(Succeed()) // one record per input
 		reconcileOnce(j)
 		r = &HPCArgoWorkflowJobReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: record.NewFakeRecorder(20),
 			RunnerImage: "kaos/hpc-operator:test"} // a fresh process: only the object holds the record
 		got := reconcileOnce(j)
 		Expect(got.Status.Run).NotTo(BeNil())
-		Expect(got.Status.Run.Staging).NotTo(BeNil())
-		Expect(*got.Status.Run.Staging).To(Equal(good))
+		Expect(got.Status.Run.Staged).To(Equal([]hpcv1alpha1.StagingStatus{good, second}))
 	})
 
 	It("should_refuse_an_unknown_kind_a_long_commit_and_a_negative_size", func() {

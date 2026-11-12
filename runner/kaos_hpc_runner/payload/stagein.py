@@ -15,9 +15,15 @@ open(os.environ['DATASET_DIRFILE'], 'w').write(str(dest))
 # The marker of a whole copy is .kaos-complete: names starting with .kaos- at the root are reserved for the
 # platform, so no file of a dataset can be taken for it. A copy that has only .complete was made when stage-in
 # kept data.yaml, images/ and labels/ alone: it is completed below, never served as it is.
+# What the step finds the copy by (kaos-lib, $KAOS_STAGED_ROOT/<input>/.kaos-ready): which repository, which
+# commit, and that it is the whole tree. Written last, under a name only this job writes, then renamed.
+def ready():
+    tmp = dest / ('.kaos-ready.kaos-part-%s-%d' % (os.environ.get('SLURM_JOB_ID', ''), os.getpid()))
+    tmp.write_text(json.dumps({'repo': REPO, 'commit': commit, 'full': True}))
+    os.replace(str(tmp), str(dest / '.kaos-ready'))
 if (dest / '.kaos-complete').exists():
     (dest / '.kaos-complete').touch()       # last use, for the job's cache cleanup
-    (dest / '.kaos-commit').write_text(commit)  # the kubecore consumer checks it
+    ready()
     print('stage-in: cache hit', dest, flush=True)
     sys.exit(0)
 def ls(prefix):
@@ -88,5 +94,5 @@ with concurrent.futures.ThreadPoolExecutor(8) as ex:
 if not any(o['path'] == '.complete' for o in objs) and (dest / '.complete').exists():
     (dest / '.complete').unlink()           # the marker of a copy made before .kaos-complete
 (dest / '.kaos-complete').touch()
-(dest / '.kaos-commit').write_text(commit)   # the kubecore consumer checks it
+ready()
 print('stage-in: downloaded', n, 'of', len(objs), '->', dest, flush=True)

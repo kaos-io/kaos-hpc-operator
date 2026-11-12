@@ -72,10 +72,10 @@ var _ = Describe("HPCArgoWorkflowJob node sharing plan", func() {
 		seq++
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("share-%d", seq), Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/share/app:v1", WallTimeMinutes: wall,
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "reg.example/share/app:v1", WallTimeMinutes: wall,
 				Command: []string{"python", "train.py"}, StepName: fmt.Sprintf("train-%d", seq),
 				Sharing: &hpcv1alpha1.Sharing{Scope: "abcdef12"},
-				Env:     []hpcv1alpha1.NameValue{{Name: "OUTPUTS_REPO", Value: "outputs-app"}}},
+				Env:     []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: "{}"}}},
 		}
 		if mut != nil {
 			mut(j)

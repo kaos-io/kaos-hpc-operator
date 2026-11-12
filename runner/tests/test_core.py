@@ -138,50 +138,72 @@ def test_the_job_name_carries_the_hpc_job_and_the_attempt():
 
 # ---------------------------------------------------------------- dataset
 
-def test_the_dataset_is_the_pinned_commit_and_nothing_is_resolved():
+def test_the_inputs_are_the_pinned_commits_and_nothing_is_resolved():
     commit = "c0ffee12" + "0" * 56
     cfg = helpers.settings()
-    assert (cfg.dataset_repo, cfg.dataset_ref, cfg.dataset_commit) == ("dataset-default", "main", commit)
-    cfg.check_dataset()
-    assert helpers.settings(DATASET_REPO="my-repo", DATASET_VERSION="v3").dataset_ref == "v3", "any repository"
-    assert json.loads(cfg.data_lock()) == {"version": 1, "reads": [
-        {"repo": "dataset-default", "owner": None, "ref": "latest", "commit": commit}]}
-    none = helpers.settings(DATASET_REPO=None, DATASET_VERSION=None, DATASET_COMMIT=None)
-    assert none.dataset_repo == "" and none.data_lock() == ""
-    none.check_dataset()
+    assert cfg.inputs == [], "reading the settings judges nothing"
+    cfg.check_job()
+    assert cfg.inputs == [{"name": "dataset", "repo": "dataset-default", "commit": commit, "ref": "main"}], \
+        "latest is filed under main on the site, as before"
+    two = helpers.settings(HPC_INPUTS=json.dumps([
+        {"name": "labels", "repo": "dataset-labels", "ref": "v3", "commit": "2" * 64},
+        {"name": "embeddings", "repo": "dataset-embeddings", "commit": "3" * 64}]))     # written by a needed step: no ref
+    two.check_job()
+    assert [(i["name"], i["ref"]) for i in two.inputs] == [("labels", "v3"), ("embeddings", "3" * 64)]
+    none = helpers.settings(HPC_INPUTS="[]")
+    none.check_job()
+    assert none.inputs == []
+    assert cfg.context == helpers.fixture("context-one-upstream.wire"), "the context is kept as text, unread"
+    assert not hasattr(cfg, "data_lock") and not hasattr(cfg, "dataset_repo")
+
+
+def _inputs(**over):
+    entry = dict(helpers.INPUTS[0], **over)
+    return json.dumps([{k: v for k, v in entry.items() if v is not None}])
 
 
 @pytest.mark.parametrize("env, said", [
-    ({"DATASET_COMMIT": None}, "has no pinned commit"),
-    ({"DATASET_COMMIT": "c0ffee12"}, "has no pinned commit"),
-    ({"DATASET_COMMIT": "main"}, "has no pinned commit"),
-    ({"DATASET_OWNER": "other-project"}, "cannot be read on HPC yet"),
-    # a job stored before the run's data was pinned, as this controller passes it on
-    ({"DATASET_REPO": None, "DATASET_VERSION": None, "DATASET_COMMIT": None, "DATASET_UNPINNED": "dataset-a@latest"},
-     "without a pinned commit"),
-    # the same job under an older controller's environment (DATASET only)
-    ({"DATASET_REPO": None, "DATASET_VERSION": None, "DATASET_COMMIT": None, "DATASET": "dataset-a@latest"},
-     "without a pinned commit"),
+    # PRD kaos#1911 T-04: a job from before the step contract, as the controller would pass it on
+    ({"KAOS_STEP_CONTEXT": None}, "carries no step context"),
+    ({"KAOS_STEP_CONTEXT": ""}, "carries no step context"),
+    ({"HPC_INPUTS": _inputs(commit=None)}, "not a list of pinned datasets"),
+    ({"HPC_INPUTS": _inputs(commit="c0ffee12")}, "has no pinned commit"),
+    ({"HPC_INPUTS": _inputs(commit="main")}, "has no pinned commit"),
+    ({"HPC_INPUTS": _inputs(repo="outputs-yolo")}, "is not a dataset repository"),
+    # every name becomes a word of the job script and a folder of the step
+    ({"HPC_INPUTS": _inputs(name="a b")}, "input name"),
+    ({"HPC_INPUTS": _inputs(name="../x")}, "input name"),
+    ({"HPC_INPUTS": _inputs(name="$(id)")}, "input name"),
+    ({"HPC_INPUTS": _inputs(name="x|y")}, "input name"),
+    ({"HPC_INPUTS": _inputs(name="n" * 41)}, "input name"),
+    ({"HPC_INPUTS": json.dumps(helpers.INPUTS * 2)}, "the same name"),
+    ({"HPC_INPUTS": "{"}, "not a list of pinned datasets"),
+    ({"HPC_INPUTS": '{"name":"x"}'}, "not a list of pinned datasets"),
 ])
-def test_an_attempt_whose_dataset_cannot_be_staged_as_pinned_never_starts_and_says_why(env, said, capsys):
+def test_an_attempt_that_cannot_run_on_the_step_contract_never_starts_and_says_why(env, said, capsys):
     cfg = helpers.settings(**env)          # reading the settings never ends the process ...
     with pytest.raises(SystemExit) as exc:
-        cfg.check_dataset()                # ... starting an attempt does, before staging and before any submit
+        cfg.check_job()                    # ... starting an attempt does, before staging and before any submit
     assert exc.value.code == 1 and said in capsys.readouterr().out
 
 
-def test_the_cancel_only_runner_is_never_stopped_by_the_dataset_check(monkeypatch):
-    """The controller sends a cancel-only runner after an attempt that died without a report. If the dataset
+def test_the_cancel_only_runner_is_never_stopped_by_the_job_check(monkeypatch):
+    """The controller sends a cancel-only runner after an attempt that died without a report. If the job
     check ended it too, the controller would keep sending cancel runners until its give-up time (hours)."""
     from kaos_hpc_runner import runner as runmod
     called = []
     monkeypatch.setattr(runmod.Runner, "cancel_only", lambda self: called.append("cancel") or 0)
-    for extra in ({"DATASET_OWNER": "other-project"}, {"DATASET_COMMIT": None},
-                  {"DATASET_REPO": None, "DATASET_VERSION": None, "DATASET_COMMIT": None,
-                   "DATASET_UNPINNED": "dataset-a@latest"}):
+    for extra in ({"KAOS_STEP_CONTEXT": None}, {"HPC_INPUTS": "{"}, {"HPC_INPUTS": _inputs(commit=None)}):
         env = {k: v for k, v in dict(helpers.BASE_ENV, **extra).items() if v is not None}
         assert runmod.main(env, ["--cancel-only"]) == 0
     assert called == ["cancel"] * 3
+
+
+def test_the_outputs_repository_is_the_apps_and_nothing_else_names_it():
+    assert helpers.settings().outputs_repo == "outputs-yolo"
+    assert helpers.settings(KAOS_APP=None).outputs_repo == ""
+    assert helpers.settings(KAOS_APP="../x").outputs_repo == "", "only an app name becomes a repository"
+    assert helpers.settings(OUTPUTS_REPO="outputs-other").outputs_repo == "outputs-yolo", "OUTPUTS_REPO is not read"
 
 
 # ---------------------------------------------------------------- Slurm readings
@@ -364,9 +386,9 @@ def test_main_py_is_the_entrypoint_the_job_runs(tmp_path):
 
 
 def test_a_job_that_cannot_be_replaced_is_not_cancelled_for_it():
-    """resubmit() is cancel-then-submit. The dataset check must run BEFORE the cancel: a healthy running job
+    """resubmit() is cancel-then-submit. The job check must run BEFORE the cancel: a healthy running job
     whose replacement would be refused keeps running instead of being cancelled and then not replaced."""
     import inspect
     from kaos_hpc_runner import runner as runmod
     body = inspect.getsource(runmod.Runner.resubmit)
-    assert body.index("check_dataset()") < body.index("self.slurm.cancel(")
+    assert body.index("check_job()") < body.index("self.slurm.cancel(")

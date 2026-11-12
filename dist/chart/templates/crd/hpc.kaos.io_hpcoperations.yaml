@@ -231,7 +231,8 @@ spec:
                       ExitCode of the job's step; 85 means it saved and continues (D-44). Codes the job script and the runner
                       reserve: 210 (no Apptainer), 231 (image pull), 232 (staging), 233 (batch script), 234 (no verified
                       checkpoint to restore), 235 (checkpoint copy or job comment failed), 236 (Idle), 237 (InsufficientQuota),
-                      238 (SubmitLimit).
+                      238 (SubmitLimit), 239 (InvalidImage), 240 (GPUViolation), 241 (StagingMismatch), 242 (ReservedName),
+                      243 (ResultNotHandedBack), 244 (InvalidResult).
                     format: int32
                     type: integer
                   gpuUtilization:
@@ -374,54 +375,63 @@ spec:
                     description: Slot is the GPU slot the host gave this job.
                     format: int32
                     type: integer
-                  staging:
+                  staged:
                     description: |-
-                      Staging says how the dataset was staged before submit (first copy, delta or already cached; what was
-                      copied and how long it took). Absent when the step has no dataset or the job stages it itself. The
-                      follower prints it as one "HPC: dataset ... staged" line.
-                    properties:
-                      bytes:
-                        description: Bytes is the number of bytes copied in this staging
-                          (0 when cached).
-                        format: int64
-                        minimum: 0
-                        type: integer
-                      commit:
-                        description: Commit is the pinned commit, shortened to 12
-                          characters.
-                        maxLength: 12
-                        type: string
-                      files:
-                        description: Files is the number of files copied in this staging
-                          (0 when cached).
-                        format: int32
-                        minimum: 0
-                        type: integer
-                      kind:
-                        description: Kind is first, delta or cached.
-                        enum:
-                        - first
-                        - delta
-                        - cached
-                        type: string
-                      repo:
-                        description: Repo is the dataset repository's name.
-                        maxLength: 128
-                        type: string
-                      seconds:
-                        description: Seconds is how long the staging took (0 when
-                          cached).
-                        format: int32
-                        minimum: 0
-                        type: integer
-                    required:
-                    - bytes
-                    - commit
-                    - files
-                    - kind
-                    - repo
-                    - seconds
-                    type: object
+                      Staged says how each of the step's inputs (spec.inputs) was staged before submit, one record per dataset
+                      commit (first copy, delta or already cached; what was copied and how long it took). Absent when the step
+                      has no input; an input the job stages itself has no record. The follower prints one "HPC: dataset ...
+                      staged" line per record.
+                    items:
+                      description: |-
+                        StagingStatus says how one dataset of the step was staged on the site's scratch before the site job was
+                        submitted. It is bounded (one short record, no paths) and set by the runner; the follower prints it
+                        as one line in the step's log.
+                      properties:
+                        bytes:
+                          description: Bytes is the number of bytes copied in this
+                            staging (0 when cached).
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        commit:
+                          description: Commit is the pinned commit, shortened to 12
+                            characters.
+                          maxLength: 12
+                          type: string
+                        files:
+                          description: Files is the number of files copied in this
+                            staging (0 when cached).
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        kind:
+                          description: Kind is first, delta or cached.
+                          enum:
+                          - first
+                          - delta
+                          - cached
+                          type: string
+                        repo:
+                          description: Repo is the dataset repository's name.
+                          maxLength: 128
+                          type: string
+                        seconds:
+                          description: Seconds is how long the staging took (0 when
+                            cached).
+                          format: int32
+                          minimum: 0
+                          type: integer
+                      required:
+                      - bytes
+                      - commit
+                      - files
+                      - kind
+                      - repo
+                      - seconds
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: atomic
                   startTime:
                     description: StartTime and EndTime as the site reports them.
                     format: date-time

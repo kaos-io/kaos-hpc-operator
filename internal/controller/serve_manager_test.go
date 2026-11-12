@@ -37,7 +37,7 @@ func TestShouldRefuseAnEnvOutsideTheAllowlistWithInvalidSpec(t *testing.T) {
 	}
 	job := &hpcv1alpha1.HPCArgoWorkflowJob{
 		ObjectMeta: metav1.ObjectMeta{Name: "evil", Namespace: "ns", UID: "u1"},
-		Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "c", Image: "reg.example/img:1", WallTimeMinutes: 5, StepName: "s",
+		Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "c", Image: "reg.example/img:1", WallTimeMinutes: 5, StepName: "s",
 			Env: []hpcv1alpha1.NameValue{{Name: "MLFLOW_EXTERNAL_URL", Value: "https://evil.example"}}},
 	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(job).WithStatusSubresource(job).Build()
@@ -95,7 +95,7 @@ var _ = Describe("HPCArgoWorkflowJob controller wiring", func() {
 		go func() { defer GinkgoRecover(); Expect(mgr.Start(mctx)).To(Succeed()) }()
 
 		job := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: "wired", Namespace: envNS},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: 30, StepName: "s"}}
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: 30, StepName: "s"}}
 		Expect(k8sClient.Create(ctx, job)).To(Succeed())
 
 		var rj batchv1.Job
