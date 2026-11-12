@@ -41,8 +41,11 @@ type Options struct {
 	// kaos-result output); SlurmIDPath receives the site job id.
 	ResultPath  string
 	SlurmIDPath string
-	Out         io.Writer
-	Now         func() time.Time
+	// TerminationPath receives the follower's last line when the step fails: the workflow shows a pod's
+	// termination message as the step's message, so the cause is named on the step, not only in its log.
+	TerminationPath string
+	Out             io.Writer
+	Now             func() time.Time
 }
 
 // Run creates or re-attaches to the step's job, follows it to its end and reports the result as an
@@ -53,11 +56,16 @@ func Run(ctx context.Context, c client.WithWatch, cfg Config, o Options) int {
 	if f.o.Now == nil {
 		f.o.Now = time.Now
 	}
+	code := ExitFailed
 	if err := f.attach(ctx); err != nil {
 		f.say("cannot start the job: %v", err)
-		return ExitFailed
+	} else {
+		code = f.follow(ctx)
 	}
-	return f.follow(ctx)
+	if code != ExitSucceeded && f.o.TerminationPath != "" {
+		_ = os.WriteFile(f.o.TerminationPath, []byte(f.lastSaid), 0o644)
+	}
+	return code
 }
 
 type follower struct {
@@ -72,6 +80,8 @@ type follower struct {
 	shownStaging map[string]bool
 	// lastWarning is the time-limit warning already printed.
 	lastWarning string
+	// lastSaid is the last line said: on a failure, why.
+	lastSaid string
 }
 
 // view is what a change of is printed for.
@@ -80,7 +90,8 @@ type view struct {
 }
 
 func (f *follower) say(format string, args ...any) {
-	_, _ = fmt.Fprintf(f.o.Out, "%s %s\n", f.o.Now().UTC().Format(time.RFC3339), fmt.Sprintf(format, args...))
+	f.lastSaid = fmt.Sprintf(format, args...)
+	_, _ = fmt.Fprintf(f.o.Out, "%s %s\n", f.o.Now().UTC().Format(time.RFC3339), f.lastSaid)
 }
 
 // attach creates the job, or finds the one an earlier pod of this step created. The same name for

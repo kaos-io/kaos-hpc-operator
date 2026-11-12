@@ -223,6 +223,9 @@ func TestOnlyASucceededJobHandsOnAResult(t *testing.T) {
 		if got := read(t, h.opts.ResultPath); got != fixture(t, "result-ok.wire") {
 			t.Errorf("kaos-result.json = %q", got)
 		}
+		if _, err := os.Stat(h.opts.TerminationPath); !os.IsNotExist(err) {
+			t.Errorf("a step that succeeded leaves no termination message, got err=%v", err)
+		}
 	})
 	t.Run("should_fail_the_step_when_a_succeeded_job_carries_no_result", func(t *testing.T) {
 		// The runner fails a job whose step wrote no result; should one still succeed without, nothing stands in.
@@ -252,6 +255,11 @@ func TestOnlyASucceededJobHandsOnAResult(t *testing.T) {
 			}
 			if !strings.Contains(h.out.String(), "ResultNotHandedBack") || !strings.Contains(h.out.String(), "the result could not be fetched") {
 				t.Errorf("the reason and the cause must be printed:\n%s", h.out)
+			}
+			// The step's message in the run is the pod's termination message: it names the cause too.
+			want := "the job ended " + string(phase) + " (ResultNotHandedBack): the result could not be fetched"
+			if got := read(t, h.opts.TerminationPath); got != want {
+				t.Errorf("termination message %q, want %q", got, want)
 			}
 		})
 	}

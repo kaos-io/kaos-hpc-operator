@@ -418,7 +418,7 @@ func TestTheRunnerGetsTheContextUnchangedAndEveryInput(t *testing.T) {
 		Commit string `json:"commit"`
 		Ref    string `json:"ref,omitempty"`
 	}
-	var ins []input
+	ins := make([]input, 0, len(job.Spec.Inputs))
 	for _, in := range job.Spec.Inputs {
 		ins = append(ins, input{in.Name, in.Repo, in.Commit, in.Ref})
 	}

@@ -76,7 +76,8 @@ func newHarness(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) *h
 	h.c = interceptor.NewClient(base, funcs)
 	dir := t.TempDir()
 	h.opts = Options{Poll: 5 * time.Millisecond, Recheck: 10 * time.Millisecond,
-		ResultPath: filepath.Join(dir, "outputs", "kaos-result.json"), SlurmIDPath: filepath.Join(dir, "slurm-job-id"), Out: h.out}
+		ResultPath: filepath.Join(dir, "outputs", "kaos-result.json"), SlurmIDPath: filepath.Join(dir, "slurm-job-id"),
+		TerminationPath: filepath.Join(dir, "termination-log"), Out: h.out}
 	return h
 }
 
