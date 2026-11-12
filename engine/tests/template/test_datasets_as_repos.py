@@ -37,7 +37,7 @@ def _raw():
     }
 
 
-def test_the_runner_is_told_the_apps_outputs_repository():
+def test_the_runner_derives_the_outputs_repository_from_the_app_not_from_variables():
     ctx = yaml.safe_load(CTX_PATH.read_text())
     ctx["app"] = "myapp"
     out = enhance(_raw(), ctx)
@@ -48,7 +48,8 @@ def test_the_runner_is_told_the_apps_outputs_repository():
     mr = next(t for t in out["spec"]["templates"] if t["name"] == "hpc-follower")
     menv = {e["name"]: e.get("value") for e in mr["container"]["env"]}
     assert menv["KAOS_STEP_CONTEXT"] == "{{inputs.parameters.kaos-context}}"
-    assert menv["OUTPUTS_REPO"] == "outputs-myapp" and menv["OUTPUTS_REF"] == "main"
+    # the engine sets neither: the runner derives `outputs-<app>` (branch main) from the job's spec.app
+    assert "OUTPUTS_REPO" not in menv and "OUTPUTS_REF" not in menv
     assert "DATASET_REPO" not in menv and "OUTPUTS_BRANCH" not in menv and "DATASET_PIN" not in menv
 
 

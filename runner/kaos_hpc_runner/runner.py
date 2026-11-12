@@ -8,7 +8,6 @@ exits. A continuation is the controller's decision (D-44): a new attempt gets a 
 
 import calendar
 import json
-import os
 import signal
 import sys
 import time

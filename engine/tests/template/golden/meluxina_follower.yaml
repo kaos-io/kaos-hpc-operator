@@ -71,9 +71,5 @@ container:
     value: '5'
   - name: KAOS_STEP_CONTEXT
     value: '{{inputs.parameters.kaos-context}}'
-  - name: OUTPUTS_REPO
-    value: outputs-PLACEHOLDER-app
-  - name: OUTPUTS_REF
-    value: main
   terminationMessagePolicy: FallbackToLogsOnError
 serviceAccountName: hpc-submitter

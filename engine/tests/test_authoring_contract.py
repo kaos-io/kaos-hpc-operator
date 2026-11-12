@@ -275,6 +275,33 @@ def test_a_produced_name_follows_the_same_rule(make, name):
                               + ("3 to 40 characters" if make == "dataset" else "at most 40 characters"))
 
 
+@pytest.mark.parametrize("make", ["model", "artifact", "dataset"])
+def test_a_produced_name_of_40_characters_is_accepted_and_41_is_not(make):
+    assert render(lambda a: a.step("one", kind="train", produces=[getattr(a, make)("a" * 40)]))
+    assert "the name is invalid" in refused(
+        lambda a: a.step("one", kind="train", produces=[getattr(a, make)("a" * 41)]))
+
+
+def test_no_name_the_engine_accepts_makes_a_job_the_definition_refuses():
+    """The job definition (api/v1alpha1/hpcargoworkflowjob_types.go): an input's name is at most 40 characters,
+    its repo matches ^dataset-[a-z0-9][a-z0-9-]{0,54}$ within 63, and the job's app is at most 55."""
+    import re
+
+    from kubecore.step_contract import MAX_APP_NAME, MAX_NAME, dataset_name_problem, dataset_repo, produced_repo
+    repo_pattern = re.compile(r"^dataset-[a-z0-9][a-z0-9-]{0,54}$")
+    assert MAX_NAME == 40
+    for app_len in range(1, MAX_APP_NAME + 1):
+        app = "a" * app_len
+        for name_len in range(3, MAX_NAME + 1):
+            name = "b" * name_len
+            if dataset_name_problem(app, "one", name):
+                continue   # refused at render, no job is made
+            repo = dataset_repo(app, name)
+            assert len(repo) <= 63 and repo_pattern.match(repo), (app_len, name_len)
+            assert produced_repo(app, "dataset", name) == repo
+        assert len(produced_repo(app, "model", "m")) <= 63   # outputs-<app>, held by the app's 55 characters
+
+
 @pytest.mark.parametrize("name", ["train_data", "Raw", "a" * 41])
 def test_an_input_name_follows_the_same_rule(name):
     message = refused(lambda a: a.step("one", kind="train", inputs=[name]))

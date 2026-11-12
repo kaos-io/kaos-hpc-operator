@@ -33,7 +33,6 @@ import re
 
 from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
-from kubecore.outputs_repo import OUTPUTS_REF, outputs_repo
 from kubecore.step_contract import (
     CLUSTER_ONLY_KINDS,
     CONTEXT_ENV,
@@ -141,9 +140,6 @@ def follower_template(ctx: dict, tpl: dict) -> dict:
         # (spec.context) and fills the job's inputs from it (every read of its ledger, every dataset an
         # upstream step wrote). Neither the follower nor the runner ever resolves a version.
         {"name": CONTEXT_ENV, "value": "{{inputs.parameters.%s}}" % CONTEXT_PARAM},
-        # Where the runner stages the job's outputs to (the controller admits these by an allowlist).
-        {"name": "OUTPUTS_REPO", "value": outputs_repo(ctx)},
-        {"name": "OUTPUTS_REF", "value": OUTPUTS_REF},
     ] + ([{"name": KAOS_LIB_SUPPORT_ENV, "value": support_value(ctx)}] if support_value(ctx) else []) \
       + sharing_env(ctx)
     follower = dict(tpl)
