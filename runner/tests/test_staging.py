@@ -5,6 +5,7 @@ fake lakeFS."""
 import io
 import json
 import os
+import pathlib
 import stat
 import urllib.request
 
@@ -41,6 +42,9 @@ class _Stager:
     def __init__(self, status, stage_rcs=(0,), key=True, version=(0, 2), status_rc=0):
         self.status, self.stage_rcs, self.calls, self.key = status, list(stage_rcs), [], key
         self.version, self.status_rc = version, status_rc
+        # What ssh printed for the last call. Exit 2 from `version` with the tool's own usage error is a tool from
+        # before `version`; exit 2 without it is python failing to open the file.
+        self.last_error = "kaos-stager: error: forced command accepts: status|verify|stage" if version[0] == 2 else ""
 
     def have_key(self):
         return self.key
@@ -212,6 +216,74 @@ def test_a_job_that_will_stage_in_job_has_its_names_checked_before_it_is_submitt
     assert len(_listings(lakefs)) == 1
 
 
+def test_the_name_rule_agrees_with_the_shared_table():
+    """hack/staging-contract/names.json is the same file next to the staging tool (kubecore-operator
+    images/meluxina-tokenmint/stager/names.json), whose own name_rule is tested against it there; the in-job
+    stage-in's is tested against it in test_stagein.py."""
+    table = json.loads((pathlib.Path(__file__).resolve().parents[2] / "hack" / "staging-contract" / "names.json")
+                       .read_text())["names"]
+    assert len(table) > 30
+    for path, size, verdict in table:
+        assert staging.name_rule(path, size) == verdict, repr(path)[:80]
+
+
+@pytest.mark.parametrize("key", [True, False])
+def test_a_file_that_is_also_a_folder_stops_the_run_on_either_staging_path(monkeypatch, key):
+    """`a` and `a/b` in one commit: the object store holds both, a file system cannot. In path order `a-b` comes
+    between them."""
+    tree = {"a": 1, "a-b": 1, "a/b": 1, "z.txt": 1}
+    stager = _Stager({"ready": False, "base": None}, key=key)
+    cfg = _twin(monkeypatch, _LakeFS(tree), stager)
+    with pytest.raises(staging.ReservedName) as e:
+        _stage(cfg, stager)
+    msg = str(e.value)
+    assert "an object named 'a'" in msg and "'a/b'" in msg and "a file or a folder under one name" in msg
+    assert not any(w[0] == "stage" for w, _ in stager.calls)
+
+
+def test_names_that_only_look_like_a_file_and_its_folder_are_staged(monkeypatch):
+    tree = {"a": 1, "a-b/c": 1, "a.d/e": 1, "ab": 1, "b/c": 1, "b/c.d": 1}
+    stager = _Stager({"ready": False, "base": None})
+    cfg = _twin(monkeypatch, _LakeFS(tree), stager)
+    assert _stage(cfg, stager)
+    assert {r["path"] for r in _stage_call(stager)[1] if r["op"] == "fetch"} == set(tree)
+
+
+@pytest.mark.parametrize("name", ["n" * 246, "d/" + "n" * 250, "d" * 256 + "/x"])
+def test_a_name_too_long_for_the_site_stops_the_run_before_the_copy(monkeypatch, name):
+    stager = _Stager({"ready": False, "base": None})
+    cfg = _twin(monkeypatch, _LakeFS({name: 1, "ok": 1}), stager)
+    with pytest.raises(staging.ReservedName) as e:
+        _stage(cfg, stager)
+    assert "longer than 245 bytes" in str(e.value) and "reserved for the platform" not in str(e.value)
+    assert not any(w[0] == "stage" for w, _ in stager.calls)
+
+
+def test_a_folder_marker_is_skipped_not_refused(monkeypatch):
+    """Object stores keep zero-byte objects named `docs/` as folder markers. Nothing is sent for one and it is
+    not counted, in a first copy and in a delta."""
+    stager = _Stager({"ready": False, "base": None})
+    cfg = _twin(monkeypatch, _LakeFS({"docs/": 0, "docs/a.txt": 4, "empty/": 0}), stager)
+    info = {}
+    assert staging.stage_dataset(cfg, stager, lambda: "wallet-jwt", info=info)
+    words, records = _stage_call(stager)
+    assert [r["path"] for r in records if r["op"] == "fetch"] == ["docs/a.txt"]
+    assert records[-1]["files"] == 1 and words[words.index("--need-files") + 1] == 1 and info["files"] == 1
+    lakefs = _LakeFS({}, diff=[{"type": "added", "path": "new/", "size_bytes": 0},
+                               {"type": "added", "path": "new/b.txt", "size_bytes": 2},
+                               {"type": "removed", "path": "old/", "size_bytes": 0}])
+    stager = _Stager({"ready": False, "base": BASE, "base_files": 10, "base_prefix": ""})
+    cfg = _twin(monkeypatch, lakefs, stager)
+    assert _stage(cfg, stager)
+    _, records = _stage_call(stager)
+    assert [(r["op"], r.get("path")) for r in records[1:]] == [("fetch", "new/b.txt"), ("end", None)]
+    assert records[-1]["files"] == 11, "base count + the one file added; markers are not files"
+    stager = _Stager({"ready": False, "base": None})
+    cfg = _twin(monkeypatch, _LakeFS({"docs/": 3}), stager)
+    with pytest.raises(staging.ReservedName):
+        _stage(cfg, stager)                # a name ending in / that has content cannot be a file
+
+
 def test_the_platforms_own_folder_and_ordinary_dot_names_are_staged(monkeypatch):
     tree = {".kaos/seal.json": 5, ".gitattributes": 2, "a/.kaos-like/b": 1, "part.kaos-partial": 4}
     stager = _Stager({"ready": False, "base": None})
@@ -259,6 +331,50 @@ def test_a_staging_tool_of_another_contract_stops_the_run_before_anything_is_sta
     assert [w[0] for w, _ in stager.calls] == ["version"], "no status, no stage, no retry"
     assert _listings(lakefs) == []
     assert "Nothing was staged" in str(e.value) and "staging contract" in str(e.value)
+
+
+class _Absent(_Stager):
+    """The login node cannot run the staging tool: python exits 2 for a file it cannot open, and says so."""
+
+    def __init__(self, status, until=None, rc=2):
+        super().__init__(status)
+        self.until, self.rc = until, rc
+        self.last_error = "/usr/bin/python3: can't open file '/home/users/u1/.kaos/stager-c2.py': [Errno 2]"
+
+    def __call__(self, words, feed=None, quiet=False):
+        if words[0] == "version" and (self.until is None or len(self.calls) < self.until):
+            self.calls.append((words, None))
+            return self.rc, []
+        self.last_error = ""
+        return super().__call__(words, feed, quiet)
+
+
+@pytest.mark.parametrize("rc", [2, 126, 127])
+def test_a_staging_tool_that_is_not_installed_is_asked_for_a_while_then_the_run_stops_with_its_own_sentence(
+        monkeypatch, rc):
+    """Not "another contract": no update is coming. The credential refresh installs the tool every 15 minutes, so
+    the runner asks for 20; then the run ends before anything is submitted. It is not a fallback to the in-job
+    copy, which would cost node time on every job for as long as the install fails."""
+    stager = _Absent({"ready": True}, rc=rc)
+    cfg = _twin(monkeypatch, _LakeFS(NOT_YOLO), stager)
+    clock = [1000.0]
+    monkeypatch.setattr(staging.time, "time", lambda: clock[0])
+    monkeypatch.setattr(staging.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    with pytest.raises(staging.StagingMismatch) as e:
+        _stage(cfg, stager)
+    msg = str(e.value)
+    assert "is not installed for this project, or cannot be run" in msg and "exit %d" % rc in msg
+    assert "credential refresh" in msg and "Nothing was staged and nothing was submitted" in msg
+    assert "staging contract" not in msg and "update" not in msg, "no update is coming: do not say to wait for one"
+    assert 20 * 60 < clock[0] - 1000.0 <= 30 * 60 and len(stager.calls) > 3
+    assert _listings(_LakeFS({})) == []
+
+
+def test_a_staging_tool_installed_while_the_runner_asks_is_used(monkeypatch):
+    stager = _Absent({"ready": True}, until=3)
+    cfg = _twin(monkeypatch, _LakeFS({}), stager)
+    assert _stage(cfg, stager).endswith(COMMIT)
+    assert [w[0] for w, _ in stager.calls] == ["version"] * 4 + ["status"]
 
 
 def test_a_staging_tool_replaced_between_two_calls_stops_the_run_too(monkeypatch):

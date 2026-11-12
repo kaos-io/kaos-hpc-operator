@@ -58,15 +58,17 @@ const (
 	ReasonInvalidImage = "InvalidImage"
 	// ReasonStagingMismatch: the site's staging tool and the runner speak different staging contracts (the two
 	// ship separately and one was updated first), so no copy of the dataset can be trusted to be whole
-	// (PRD kaos#1911 F-04). Failed before anything is staged or submitted; the runner reports it with
-	// ExitCodeStagingMismatch. Terminal: it ends when the other side is updated.
+	// (PRD kaos#1911 F-04); or the staging tool is not installed for the project (the login node could not run
+	// it for 20 minutes), and the message says which. Failed before anything is staged or submitted; the runner
+	// reports it with ExitCodeStagingMismatch. Terminal: it ends when the other side is updated or installed.
 	ReasonStagingMismatch = "StagingMismatch"
-	// ReasonReservedName: the dataset version holds an object whose name cannot be copied to the site. Either
-	// it is reserved for the platform there (a root name starting with ".kaos-", or a file name ending in
+	// ReasonReservedName: the dataset version holds an object whose name cannot be copied to the site. It is
+	// reserved for the platform there (a root name starting with ".kaos-", or a file name ending in
 	// ".kaos-part"), where it would be taken for a marker of the copy; or its path could leave the dataset's
-	// folder (a ".." or "." or empty part, a leading "/", a NUL byte). Failed before anything is staged or
-	// submitted; the runner reports it with ExitCodeReservedName and its message names the object and which of
-	// the two it is. Terminal: it ends with a new version of the dataset.
+	// folder (a ".." or "." or empty part, a leading "/", a NUL byte); or it is too long for a file name there;
+	// or it is a file that is also a folder ("a" and "a/b"). Failed before anything is staged or submitted; the
+	// runner reports it with ExitCodeReservedName and its message names the object and which rule it breaks.
+	// Terminal: it ends with a new version of the dataset.
 	ReasonReservedName         = "ReservedName"
 	ReasonMultiNodeUnsupported = "MultiNodeUnsupported"
 	ReasonWallTimeOverLimit    = "WallTimeOverLimit"
@@ -424,7 +426,7 @@ type RunStatus struct {
 	// ExitCode of the job's step; 85 means it saved and continues (D-44). Codes the job script and the runner
 	// reserve: 210 (no Apptainer), 231 (image pull), 232 (staging), 233 (batch script), 234 (no verified
 	// checkpoint to restore), 235 (checkpoint copy or job comment failed), 236 (Idle), 237 (InsufficientQuota),
-	// 238 (SubmitLimit).
+	// 238 (SubmitLimit), 239 (InvalidImage), 240 (GPUViolation), 241 (StagingMismatch), 242 (ReservedName).
 	// +optional
 	ExitCode *int32 `json:"exitCode,omitempty"`
 	// StartTime and EndTime as the site reports them.

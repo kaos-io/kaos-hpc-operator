@@ -181,7 +181,8 @@ def test_caches_are_cleaned_by_last_use(tmp_path):
     subprocess.run(["bash", "-c", "\n".join(cleanup)], env=env, check=True)
 
     assert sorted(p.name for p in (scr / "sif-cache").iterdir()) == ["inuse.sif", "live.sif.part-3-4", "recent.sif"]
-    assert sorted(p.name for p in (scr / "data-cache" / "repo").iterdir()) == ["c2", "c3", "c5"]
+    assert sorted(p.name for p in (scr / "data-cache" / "repo").iterdir()) == ["c2", "c3", "c5"], \
+        "and no lock or moved-away folder is left behind"
     assert (scr / "apptainer-args").read_text().split() == ["cache", "clean", "--force", "--days", "1"]
 
 
@@ -190,7 +191,7 @@ def test_this_jobs_image_and_download_are_touched_before_the_cleanup():
     touch = lines.index('touch -c "$SIF"')
     first_clean = next(i for i, l in enumerate(lines) if l.startswith("find $SCR/"))
     assert touch < first_clean
-    assert "(dest / '.kaos-complete').touch()" in payloads.STAGEIN
+    assert "os.utime(str(MARK), None)" in payloads.STAGEIN and "MARK.touch()" in payloads.STAGEIN
 
 
 def _pull_block():
