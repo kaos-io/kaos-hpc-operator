@@ -102,14 +102,25 @@ longest the step may run, as minutes or hours: 90m, 12h. Default from pipeline.p
 `walltime=`, else `4h` (the same default as an HPC class). On a cluster machine the value is the step's deadline; on
 an HPC class it is the job's limit. The platform's own compose step has a fixed limit of 30 minutes and no field.
 Waiting for a machine does not count: a step that never gets one is bounded by the platform's pending reaper, not by
-this limit. A step that declares `checkpoint_every=` (not `False`) also has `<step>-checkpoint-every` ("How often
-the 'x' step's checkpoint is saved: minutes or hours, for example 10m or 1h."), default the value in code. Both are
+this limit. A step that declares `checkpoint_every=` (not `False`) or `resumable=` also has `<step>-checkpoint-every` ("How often
+the 'x' step's checkpoint is saved: minutes or hours, for example 10m or 1h."), default the value in code (10 minutes,
+`resilience.DEFAULT_EVERY_MINUTES`, for a step that declares `resumable=` alone). Both are
 text: minutes (`90`, `90m`) or hours (`12h`), at least one minute; compose refuses any other value before a step
 starts, naming the field: `<step>-walltime is '1d'. Write minutes or hours, for example 90, 90m or 12h: at least
 one minute, at most 30 days, no other unit.` Compose writes the numbers as its output `kaos-run-settings` (`{"<step>": {"walltime":
 minutes, "checkpoint-every": minutes}}`), which the deadline, the HPC job's limit and the checkpoint copies read.
 A step with a checkpoint interval has the field `checkpoint_every` (minutes, a number) in its context, after
 `produces`; a step without one has no such field.
+
+| | Who sets it | Order, first wins | Default | Read by |
+|---|---|---|---|---|
+| time limit | the run form's `<step>-walltime` | the form value, then `step(walltime=)` | `walltime=`, else `4h` | the cluster deadline; the HPC job's limit (the follower and the runner) |
+| checkpoint interval | the run form's `<step>-checkpoint-every`, a field of a step that declares `checkpoint_every=` or `resumable=` (not `checkpoint_every=False`) | the form value, then `step(checkpoint_every=)`, then the argument of `kaos_lib.checkpoint.register(...)` in code, then the library's adaptive default | `checkpoint_every=`, else 10 minutes for a `resumable=` step | cluster: the helper's `CKPT_EVERY_MIN` (from the form field); HPC: the job's copier (`KAOS_CKPT_EVERY_S`, from `checkpoint_every` of the step context, kept fixed); the step: `kaos_lib.checkpoint.tick()` (the same context field) |
+
+`step(walltime=)` and `step(checkpoint_every=)` are checked when the pipeline is rendered, and by lint, with compose's
+sentence above: a default the form would refuse (over 30 days, under a minute) cannot be written. `checkpoint_every=False`
+means no field and no copies; `register(checkpoint_every=False)` in code turns the library's periodic checkpoints off only
+for a step that has no form value.
 
 **A long job continues instead of starting over.** A step that declares `resumable=` is run again, and continues
 from its newest checkpoint, in each of three cases, on a cluster machine and on an HPC class, at most five times

@@ -103,7 +103,7 @@ from kubecore.run_settings import (
     setting,
     walltime_field,
 )
-from kubecore.resilience import enhance_resilience, every_minutes, shared_templates, write_helper_configmap
+from kubecore.resilience import enhance_resilience, every_field_default, every_minutes, shared_templates, write_helper_configmap
 from kubecore.step_contract import (
     CLUSTER_ONLY_KINDS,
     CONTEXT_PARAM,
@@ -788,8 +788,9 @@ def enhance_walltime(spec: dict, step: dict, annots: dict) -> None:
 
 
 def enhance_run_form(spec: dict, steps: list, offers: dict) -> None:
-    """The run form's own fields for the steps that declare walltime= and checkpoint_every=: `<step>-walltime`
-    and `<step>-checkpoint-every`, whose default is the value in code. Compose gets each value (checks it,
+    """The run form's own fields: `<step>-walltime` for every step and `<step>-checkpoint-every` for a step that declares
+    checkpoint_every= or resumable= (not checkpoint_every=False), whose default is the value in code (the engine's
+    default for resumable= alone). Compose gets each value (checks it,
     and writes the numbers as its output `kaos-run-settings`)."""
     compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
     if compose is None:
@@ -821,8 +822,8 @@ def enhance_run_form(spec: dict, steps: list, offers: dict) -> None:
         lead = step_resumable_lead(step)
         if lead:
             args.extend(["--resumable-lead", f"{step_name}={lead}"])
-        every = every_minutes(annots)
-        if every.isdigit():
+        every = every_field_default(annots)
+        if every:
             field(checkpoint_field(step_name), f"{every}m",
                   f"How often the '{step_name}' step's checkpoint is saved: minutes or hours, "
                   f"for example 10m or 1h.", "--checkpoint-every", step_name)

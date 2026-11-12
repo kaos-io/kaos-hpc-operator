@@ -591,3 +591,35 @@ def test_the_runners_check_and_the_reference_checker_agree_on_the_shape_of_every
         assert runner_ok == (ref.shape_of_result(value) == ""), raw
         compared += 1
     assert compared >= 20
+
+
+# ------------------------------------------------ the run form's checkpoint interval reaches the job's copier
+
+@pytest.mark.parametrize("context, seconds", [
+    ('{"checkpoint_every": 20}', 1200), ('{"checkpoint_every": 1}', 60), ('{}', 0), ('', 0), ('not json', 0),
+    ('{"checkpoint_every": 0}', 0), ('{"checkpoint_every": true}', 0), ('{"checkpoint_every": "20"}', 0), ('[]', 0),
+])
+def test_the_interval_the_run_form_chose_is_what_the_jobs_copier_is_given(context, seconds):
+    from kaos_hpc_runner import runner
+    assert runner.checkpoint_every_seconds(context) == seconds
+
+
+def _copier_state(**env):
+    """The copier's interval settings as its module sets them up (the part before it runs)."""
+    from kaos_hpc_runner import payloads
+    prefix = payloads.CKPT.split("\ndef say(")[0]
+    names = {"__name__": "ckpt-test"}
+    saved = {k: os.environ.get(k) for k in ("KAOS_CKPT_EVERY_S",)}
+    os.environ.pop("KAOS_CKPT_EVERY_S", None)
+    os.environ.update(env)
+    try:
+        exec(compile(prefix, "ckpt.py", "exec"), names)   # noqa: S102 - the platform's own payload text
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    return names["state"]["every"], names["FIXED_EVERY"]
+
+
+def test_the_copier_keeps_the_interval_the_run_form_chose_and_adapts_only_without_one():
+    assert _copier_state(KAOS_CKPT_EVERY_S="1200") == (1200.0, True)
+    assert _copier_state() == (900.0, False)

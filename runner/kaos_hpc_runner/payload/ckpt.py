@@ -31,6 +31,7 @@ MIN_EVERY_S, MAX_EVERY_S, DEFAULT_EVERY_S = 300, 3600, 900
 SPACE_LIMIT, FILES_LIMIT = 0.8, 0.8
 SEQ_RE = re.compile(r'^(\d{6})\.json$')
 LEASE_RE = re.compile(r'kaos-ckpt-lease=(\S+)')
+FIXED_EVERY = bool(os.environ.get('KAOS_CKPT_EVERY_S'))    # set by the runner from the run form's <step>-checkpoint-every
 state = {'comment_ok': True, 'sig': None, 'digest': None, 'skipped': '', 'every': float(os.environ.get('KAOS_CKPT_EVERY_S') or DEFAULT_EVERY_S)}
 
 
@@ -430,7 +431,8 @@ def watch():
             except Exception as e:
                 say('periodic copy failed: %s' % e)
             took = time.time() - started
-            state['every'] = min(max(10 * took, MIN_EVERY_S), MAX_EVERY_S)   # saving stays near 10% of the run time
+            if not FIXED_EVERY:         # the run form chose an interval: it is kept; otherwise saving stays near 10% of the run time
+                state['every'] = min(max(10 * took, MIN_EVERY_S), MAX_EVERY_S)
             last = time.time()
     return 0
 

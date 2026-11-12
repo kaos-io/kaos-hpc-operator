@@ -35,6 +35,7 @@ from hera.workflows import DAG, Container, Env, Parameter, Resources, WorkflowTe
 from hera.workflows.models import ValueFrom
 
 from kubecore import derive_tree
+from kubecore.run_settings import checkpoint_field, minutes, time_problem, walltime_field
 from kubecore.step_contract import (
     CONTEXT_DIR,
     CONTEXT_ENV,
@@ -124,8 +125,10 @@ def _checkpoint_every_minutes(name, value):
             f"step {name!r}: checkpoint_every={value!r} must be False (no copies) or minutes like '20m', '1h' "
             f"or 20: how often the platform copies the step's checkpoint folder (KAOS_CHECKPOINT_DIR)."
         )
-    minutes = int(match.group(1))
-    return str(minutes * 60 if match.group(2) == "h" else minutes)
+    count = int(match.group(1)) * (60 if match.group(2) == "h" else 1)
+    if not minutes(str(value)):          # the run form's `<step>-checkpoint-every` would refuse its default
+        raise AuthoringError(f"step {name!r}: {time_problem(checkpoint_field(name), value)}")
+    return str(count)
 IDLE_TIMEOUT_ANNOTATION = "platform.kubecore.io/idle-timeout"
 
 
@@ -460,6 +463,8 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
             f"string like '90m', '12h' or '720', at least one minute (the step's time limit, wherever it "
             f"runs; the step is ended when it elapses)."
         )
+    if walltime is not None and not minutes(walltime):     # the form would refuse its default: compose's sentence
+        raise AuthoringError(f"step {name!r}: {time_problem(walltime_field(name), walltime)}")
     if resumable is True:
         resumable = DEFAULT_RESUMABLE_LEAD
     elif resumable is False:
