@@ -35,6 +35,8 @@ from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
 from kubecore.step_contract import (
     CLUSTER_ONLY_KINDS,
+    DATASET_PRODUCER_LABEL,
+    DATASET_PRODUCERS_STAY_ON_CLUSTER,
     CONTEXT_ENV,
     CONTEXT_PARAM,
     RESULT_PARAM,
@@ -217,10 +219,13 @@ HPC_CLASS_PREFIX_FMT = "%s-"  # class names are provider-prefixed: meluxina-gpu
 
 
 def runs_on_hpc(step: dict) -> bool:
-    """False for a step whose kind never runs on an HPC class (ingest, publish, control): it is offered
-    no HPC class and gets no HPC variant."""
-    kind = ((step.get("metadata") or {}).get("labels") or {}).get(STEP_KIND_LABEL)
-    return kind not in CLUSTER_ONLY_KINDS
+    """False for a step whose kind never runs on an HPC class (ingest, publish, control), and for one that
+    produces a dataset (DATASET_PRODUCERS_STAY_ON_CLUSTER): it is offered no HPC class and gets no HPC
+    variant. The one predicate."""
+    labels = (step.get("metadata") or {}).get("labels") or {}
+    if DATASET_PRODUCERS_STAY_ON_CLUSTER and labels.get(DATASET_PRODUCER_LABEL) == "true":
+        return False
+    return labels.get(STEP_KIND_LABEL) not in CLUSTER_ONLY_KINDS
 
 
 def hpc_classes(ctx: dict) -> list:

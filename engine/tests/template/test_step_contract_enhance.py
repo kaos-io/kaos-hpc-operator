@@ -156,7 +156,7 @@ def test_every_task_an_expression_reads_is_in_the_depends_of_the_task_that_reads
 KNOWN_REFERENCES = {
     "inputs.parameters.kaos-context",
     "workflow.name", "workflow.uid",
-    "inputs.parameters.gpus", "inputs.parameters.cpu", "inputs.parameters.mem",
+    "inputs.parameters.gpus", "inputs.parameters.cpu", "inputs.parameters.mem", "inputs.parameters.disk",
     "inputs.parameters.step-name", "inputs.parameters.image",
     "inputs.parameters.step-command", "inputs.parameters.step-kind", "inputs.parameters.time-limit",
     "inputs.parameters.deadline-seconds", "inputs.parameters.hpc-class", "inputs.parameters.resumable-lead",
@@ -227,10 +227,11 @@ def test_a_cpu_step_gets_what_a_node_of_its_class_offers_and_the_numbers_follow_
     assert resources["requests"]["cpu"] == resources["limits"]["cpu"] == "7"
     assert resources["requests"]["memory"] == resources["limits"]["memory"] == "27Gi", "the default class, cpu-standard"
     assert {p["name"]: p.get("default") for p in template["inputs"]["parameters"]} == {
-        "kaos-context": None, "cpu": "7", "mem": "27Gi"}
+        "kaos-context": None, "cpu": "7", "mem": "27Gi", "disk": "10Gi"}
     patch = yaml.safe_load(template["podSpecPatch"])["containers"][0]
     assert patch == {"name": "main", "resources": {
-        "requests": {"cpu": "{{inputs.parameters.cpu}}", "memory": "{{inputs.parameters.mem}}"},
+        "requests": {"cpu": "{{inputs.parameters.cpu}}", "memory": "{{inputs.parameters.mem}}",
+                     "ephemeral-storage": "{{inputs.parameters.disk}}"},
         "limits": {"cpu": "{{inputs.parameters.cpu}}", "memory": "{{inputs.parameters.mem}}"}}}
     task = _task(wft, "one")
     assert _arg(task, "cpu") == ('{{=({"cpu-standard": "7", "kubecorecpu": "7", "gpu-t4": "7"}'
@@ -244,11 +245,11 @@ def test_a_gpu_step_gets_its_gpu_and_the_node_numbers_in_one_patch():
     template = _template(wft, "one")
     assert template["container"]["resources"]["requests"]["memory"] == "25Gi", "the default of a gpu step is gpu-t4"
     assert {p["name"]: p.get("default") for p in template["inputs"]["parameters"]} == {
-        "kaos-context": None, "cpu": "7", "mem": "25Gi", "gpus": "1"}
+        "kaos-context": None, "cpu": "7", "mem": "25Gi", "disk": "10Gi", "gpus": "1"}
     patch = yaml.safe_load(template["podSpecPatch"])["containers"]
     assert len(patch) == 1 and patch[0]["resources"]["requests"] == {
         "cpu": "{{inputs.parameters.cpu}}", "memory": "{{inputs.parameters.mem}}",
-        "nvidia.com/gpu": "{{inputs.parameters.gpus}}"}
+        "ephemeral-storage": "{{inputs.parameters.disk}}", "nvidia.com/gpu": "{{inputs.parameters.gpus}}"}
     assert patch[0]["resources"]["limits"]["nvidia.com/gpu"] == "{{inputs.parameters.gpus}}"
     assert '"?? "25Gi"' not in _arg(_task(wft, "one"), "mem")
     assert _arg(_task(wft, "one"), "mem").endswith('?? "25Gi"}}')
@@ -299,20 +300,104 @@ def test_a_class_the_platform_cannot_size_fails_the_render_naming_it():
         _enhanced(lambda: authoring.step("one", kind="transform"), ctx)
 
 
-def test_disk_is_declared_in_code_and_is_ten_gi_otherwise():
-    wft = _enhanced(lambda: (authoring.step("small", kind="transform"), authoring.step("big", kind="transform", disk="40Gi")))
-    assert _template(wft, "small")["container"]["resources"]["requests"]["ephemeral-storage"] == "10Gi"
-    assert _template(wft, "big")["container"]["resources"]["requests"]["ephemeral-storage"] == "40Gi"
-    assert "ephemeral-storage" not in _template(wft, "big").get("podSpecPatch", "")
+def _with_usable_disk(ctx, **gib):
+    """Put `allocatable.ephemeralStorageGiB` on the named classes (the tier entries too)."""
+    entries = list(ctx["computeClasses"]["all"]) + [ctx["computeClasses"][t] for t in ("cpu", "gpu")]
+    for cls in entries:
+        if cls["name"] in gib:
+            cls["allocatable"]["ephemeralStorageGiB"] = gib[cls["name"]]
+    return ctx
 
 
-def test_a_disk_larger_than_the_default_classs_boot_disk_fails_the_render():
-    """The one disk check that exists: against the class the step defaults to (or is pinned to). A class chosen
-    on the form later is not checked: `computeClasses.all` entries carry no diskSizeGb."""
+def _disk_patch(template):
+    return yaml.safe_load(template["podSpecPatch"])["containers"][0]["resources"]
+
+
+def test_disk_is_refused_in_step_and_never_a_step_option():
+    with pytest.raises(authoring.AuthoringError, match="disk is no longer declared"):
+        _enhanced(lambda: authoring.step("big", kind="transform", disk="40Gi"))
+
+
+def test_a_class_without_a_usable_disk_gets_the_flat_ten_gi_and_is_not_refused():
+    wft = _enhanced(lambda: authoring.step("small", kind="transform"))
+    template = _template(wft, "small")
+    assert template["container"]["resources"]["requests"]["ephemeral-storage"] == "10Gi"
+    assert _disk_patch(template)["requests"]["ephemeral-storage"] == "{{inputs.parameters.disk}}"
+    assert "ephemeral-storage" not in _disk_patch(template).get("limits", {}), "a request, never a limit"
+    assert {p["name"]: p.get("default") for p in template["inputs"]["parameters"]}["disk"] == "10Gi"
+    assert _arg(_task(wft, "small"), "disk").endswith('?? "10Gi"}}')
+
+
+def test_a_class_with_a_usable_disk_gets_it_less_the_image_reserve_per_class_picked_on_the_form():
+    ctx = _with_usable_disk(_context(), **{"cpu-standard": 43, "gpu-t4": 15})
+    ctx["computeClasses"]["all"].append({"name": "kubecorecpu-x", "tier": "cpu", "machineType": "e2-standard-8",
+                                         "allocatable": {"cpu": 7, "memoryGiB": 27}})
+    wft = _enhanced(lambda: (authoring.step("a", kind="transform"), authoring.step("g", kind="train", gpu=True)), ctx)
+    expression = _arg(_task(wft, "a"), "disk")
+    assert '"cpu-standard": "33Gi"' in expression and '"gpu-t4": "5Gi"' in expression
+    assert '"kubecorecpu": "10Gi"' in expression and '"kubecorecpu-x": "10Gi"' in expression, "no disk: the flat default"
+    assert expression.endswith('?? "33Gi"}}'), "the default class's disk when the class is not in the table"
+    assert _arg(_task(wft, "g"), "disk").endswith('?? "5Gi"}}')
+    assert {p["name"]: p.get("default") for p in _template(wft, "a")["inputs"]["parameters"]}["disk"] == "33Gi"
+    assert "meluxina" not in expression
+
+
+def test_the_image_reserve_never_asks_for_more_than_the_node_gives():
+    ctx = _with_usable_disk(_context(), **{"cpu-standard": 8})   # 8 - 10 < the flat default: still the value less the reserve
+    assert enhance.IMAGE_RESERVE_GIB == 10
+    assert enhance.node_disks(ctx)["cpu-standard"] == "1Gi", "max(1, 8 - 10)"
+    ctx = _with_usable_disk(_context(), **{"cpu-standard": 15})
+    assert enhance.node_disks(ctx)["cpu-standard"] == "5Gi"
+
+
+def test_a_step_pinned_to_one_class_has_that_classs_disk_as_a_static_request():
+    ctx = _with_usable_disk(_context(), **{"gpu-t4": 43})
+    with authoring.pipeline("t") as p:
+        authoring.step("pinned", kind="train", gpu=True)
+    raw = yaml.safe_load(p.wt.to_yaml())
+    _template(raw, "pinned")["metadata"]["annotations"] = {"platform.kubecore.io/compute-class": "gpu-t4"}
+    template = _template(enhance.enhance(raw, ctx), "pinned")
+    assert template["container"]["resources"]["requests"]["ephemeral-storage"] == "33Gi"
+    assert "disk" not in [p["name"] for p in template["inputs"]["parameters"]]
+
+
+# The ephemeral-storage key the operator publishes: read in one place, `node_disks`.
+def test_the_usable_disk_key_is_read_from_allocatable_ephemeral_storage_gib_only():
+    ctx = _context()
+    ctx["computeClasses"]["all"][0]["allocatable"]["ephemeral-storage"] = 99
+    ctx["computeClasses"]["all"][0]["diskSizeGb"] = 99
+    assert enhance.node_disks(ctx)["cpu-standard"] == "10Gi"
+
+
+# A step that produces a dataset: no HPC class until the jobs there hold the app's own rights (PRD kaos#1911 F-40).
+
+def test_a_step_that_produces_a_dataset_is_offered_no_hpc_class_and_gets_no_hpc_variant():
+    wft = _enhanced(lambda: authoring.step("prep", kind="transform", produces=[authoring.dataset("clean")]))
+    choice = next(p for p in wft["spec"]["arguments"]["parameters"] if p["name"] == "prep-class")
+    assert not [c for c in choice["enum"] if c.startswith("meluxina-")]
+    assert "meluxina-* classes" not in choice["description"]
+    assert "prep-hpc" not in _tasks(wft)
+    assert "when" not in _tasks(wft)["prep"], "it always runs on the cluster"
+
+
+def test_a_step_that_produces_a_model_or_an_artifact_is_unaffected():
+    wft = _enhanced(lambda: authoring.step(
+        "train", kind="train", produces=[authoring.model("m"), authoring.artifact("report")]))
+    choice = next(p for p in wft["spec"]["arguments"]["parameters"] if p["name"] == "train-class")
+    assert [c for c in choice["enum"] if c.startswith("meluxina-")]
+    assert "train-hpc" in _tasks(wft)
+
+
+def test_a_step_that_produces_a_dataset_and_is_pinned_to_an_hpc_class_fails_the_render():
+    with authoring.pipeline("t") as p:
+        authoring.step("prep", kind="transform", produces=[authoring.dataset("clean")])
+    raw = yaml.safe_load(p.wt.to_yaml())
+    _template(raw, "prep")["metadata"]["annotations"] = {"platform.kubecore.io/compute-class": "meluxina-cpu"}
     with pytest.raises(enhance.EnhanceError) as exc:
-        _enhanced(lambda: authoring.step("big", kind="transform", disk="80Gi"))
-    assert str(exc.value) == ("step 'big' requests 80Gi ephemeral-storage but compute class 'cpu-standard' (n2-standard-8) "
-                              "has only a 50GB boot disk — the pod would never schedule. Lower disk= or pick a bigger class.")
+        enhance.enhance(raw, _context())
+    assert str(exc.value) == (
+        "step 'prep': a step that produces a dataset runs on the cluster for now; HPC (Slurm) classes are offered "
+        "to it once jobs there hold the app's own rights.")
 
 
 def test_the_render_refuses_a_produced_dataset_the_lake_cannot_hold_in_this_app():

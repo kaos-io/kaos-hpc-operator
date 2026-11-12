@@ -94,11 +94,10 @@ def refuse_app_engine_copy(repo: Path, engine: Path) -> None:
     before this one; it fails here, whatever profile it was given, with what to delete."""
     app_pkg = repo / "kubecore"
     if app_pkg.exists() and app_pkg.resolve() != (engine / "kubecore").resolve():
-        from kubecore.step_contract import MIGRATION_GUIDE_URL
+        from kubecore.step_contract import OLD_APP_NOTICE
         raise EngineError(
-            f"this app has a kubecore/ folder of its own. The platform renders pipeline.py with its own engine "
-            f"and an app carries no copy of it: delete the kubecore/ folder; `from kubecore.authoring import "
-            f"pipeline, step` in pipeline.py keeps working. See {MIGRATION_GUIDE_URL}", EXIT_OLD_APP)
+            f"this app has a kubecore/ folder of its own, and an app carries no copy of the engine. "
+            f"{OLD_APP_NOTICE}", EXIT_OLD_APP)
 
 
 def assert_untouched(modules: dict[str, object]) -> None:

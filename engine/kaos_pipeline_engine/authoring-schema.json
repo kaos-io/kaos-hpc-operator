@@ -69,14 +69,6 @@
    "doc": "The step needs one GPU."
   },
   {
-   "name": "disk",
-   "required": false,
-   "default": null,
-   "type": "string",
-   "pattern": "^[0-9]+(Ki|Mi|Gi|Ti|K|M|G|T)?$",
-   "doc": "Ephemeral-storage request as a Kubernetes quantity, e.g. '20Gi'."
-  },
-  {
    "name": "when",
    "required": false,
    "default": null,
@@ -129,15 +121,16 @@
   }
  ],
  "removed": {
-  "outputs": "outputs= was removed. A step hands its values on with kaos_lib.step.result(...) and the steps that need it read them with kaos_lib.step.upstream('<step>'); what the step writes is declared with produces=[model(...), artifact(...), dataset(...)]",
-  "hpc_time_limit": "hpc_time_limit= was removed. Write walltime= with the same value (walltime='12h')"
+  "outputs": "outputs= is no longer part of step()",
+  "hpc_time_limit": "hpc_time_limit= is no longer part of step()",
+  "disk": "disk is no longer declared; a step gets the disk of the machine its class runs on"
  },
  "produced": {
   "model": "a trained model, stored with the run",
   "artifact": "any other files of the run",
   "dataset": "a new version of a dataset this step alone writes"
  },
- "migration_guide": "https://storage.googleapis.com/kaos-dev-511509-kaos-lib/docs/migrate-to-0.5.html",
+ "old_app_marker": "Create it again from the template.",
  "annotations": {
   "walltime": "platform.kubecore.io/hpc",
   "resumable": "platform.kubecore.io/hpc-resumable",

@@ -39,12 +39,19 @@ MAX_OVERRIDE = 16 * 1024       # bytes of the run's ADVANCED override: compose r
 MAX_REF_VERSION = 255          # characters of the version in a dataset reference
 MAX_REPO = 63                  # characters of a repository id
 
-# Where the app's migration guide to the step contract lives.
-MIGRATION_GUIDE_URL = "https://storage.googleapis.com/kaos-dev-511509-kaos-lib/docs/migrate-to-0.5.html"
+# The refusals that identify an app made before the current pipelines end with OLD_APP_NOTICE. The CI chart
+# tells such an app from any other render failure by OLD_APP_MARKER (the authoring schema's `old_app_marker`).
+OLD_APP_MARKER = "Create it again from the template."
+OLD_APP_NOTICE = "This app was made before the current pipelines. " + OLD_APP_MARKER
 
 KINDS = ("ingest", "transform", "train", "evaluate", "publish", "control")
 # Kinds that never run on an HPC class: they move data in or out of the platform, or steer the run.
 CLUSTER_ONLY_KINDS = ("ingest", "publish", "control")
+# A step that produces a dataset is never offered an HPC class and gets no HPC variant: a job on HPC holds a
+# token the lake treats as admin, which would bypass the rule that only the producing app writes its dataset.
+# PRD kaos#1911 F-40 (jobs that hold the app's own rights) removes this rule: delete the constant and its uses.
+DATASET_PRODUCERS_STAY_ON_CLUSTER = True
+DATASET_PRODUCER_LABEL = "platform.kubecore.io/produces-dataset"   # on the step's pod, "true"
 PRODUCED_TYPES = ("model", "artifact", "dataset")
 DATASET_PREFIX = "dataset-"    # a dataset is a repository named dataset-...
 MAX_DATASET_SUFFIX = 48        # characters the lake allows after dataset-: <app>-<name> for a produced dataset

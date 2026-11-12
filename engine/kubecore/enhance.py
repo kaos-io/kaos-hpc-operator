@@ -81,7 +81,15 @@ from kubecore.kaos_lib_support import support_value
 from kubecore.meluxina import HPC_TWIN_TEMPLATE, enhance_hpc, hpc_classes, runs_on_hpc
 from kubecore.outputs_repo import outputs_repo
 from kubecore.resilience import enhance_resilience, shared_templates, write_helper_configmap
-from kubecore.step_contract import CONTEXT_PARAM, MAX_APP_NAME, TEMPLATE_CAP, dataset_name_problem, template_bytes
+from kubecore.step_contract import (
+    CONTEXT_PARAM,
+    DATASET_PRODUCER_LABEL,
+    DATASET_PRODUCERS_STAY_ON_CLUSTER,
+    MAX_APP_NAME,
+    TEMPLATE_CAP,
+    dataset_name_problem,
+    template_bytes,
+)
 
 ANNOTATION_PREFIX = "platform.kubecore.io/"
 KNOWN_ANNOTATIONS = {"compute-class", "inject", "source", "image", "shm", "workspace", "hpc", "hpc-resumable",
@@ -345,6 +353,11 @@ def default_class_name(step: dict, ctx: dict, annots: dict) -> str:
     annotation wins, else the pool's gpu/cpu tier default."""
     pinned = annots.get("compute-class")
     if pinned is not None:
+        produces_dataset = ((step.get("metadata") or {}).get("labels") or {}).get(DATASET_PRODUCER_LABEL) == "true"
+        if DATASET_PRODUCERS_STAY_ON_CLUSTER and produces_dataset and pinned in {c["name"] for c in hpc_classes(ctx)}:
+            raise EnhanceError(
+                f"step '{step['name']}': a step that produces a dataset runs on the cluster for now; HPC (Slurm) "
+                f"classes are offered to it once jobs there hold the app's own rights.")
         if pinned not in {c["name"] for c in ctx["computeClasses"]["all"]}:
             known = ", ".join(c["name"] for c in ctx["computeClasses"]["all"])
             raise EnhanceError(
@@ -422,26 +435,54 @@ def node_sizes(ctx: dict) -> dict:
     return sizes
 
 
+# Of a class's usable disk the images of the node's pods share it: a step asks for the rest.
+IMAGE_RESERVE_GIB = 10
+
+
+def node_disks(ctx: dict) -> dict:
+    """{class: ephemeral-storage request}: the disk a step asks for on each class the pool offers.
+
+    The operator puts the class's usable disk in the pipeline context, a whole number of GiB, next to
+    `allocatable` cpu and memory: `allocatable.ephemeralStorageGiB` (absent when the disk is unknown). It is
+    the node's allocatable ephemeral storage less a margin, and container images share that disk, so a step
+    asks for it less IMAGE_RESERVE_GIB (at least 1Gi, and never more than the node can give). A class
+    without it gets DISK_REQUEST_DEFAULT: unlike cpu and memory, an unknown disk does not refuse the render.
+    The key is read here and nowhere else.
+    """
+    classes = ctx["computeClasses"]
+    tier_defaults = {c["name"]: c for c in (classes.get("cpu"), classes.get("gpu")) if c}
+    disks = {}
+    for cls in list(classes["all"]) + list(tier_defaults.values()):
+        alloc = cls.get("allocatable") or (tier_defaults.get(cls["name"]) or {}).get("allocatable") or {}
+        usable = alloc.get("ephemeralStorageGiB")
+        disks[cls["name"]] = f"{max(1, usable - IMAGE_RESERVE_GIB)}Gi" if usable else DISK_REQUEST_DEFAULT
+    return disks
+
+
 def enhance_class_sizing(spec: dict, step: dict, ctx: dict, annots: dict) -> None:
     """A step gets the node of the class it is given: its requests are what a node of that class
-    offers a pod (`node_sizes`), cpu and memory, limits equal to requests.
+    offers a pod (`node_sizes`), cpu and memory, limits equal to requests, and the disk of its machine
+    (`node_disks`), a request and no limit.
 
     Nothing to type and nothing to mistype: the run form has no cpu, memory or disk field. The class is
     chosen at submit time, so the numbers follow it the way the GPU does (enhance_gpu_routing): the
-    template takes inputs `cpu` and `mem`, a `podSpecPatch` puts them in the main container's requests
-    and limits, and every DAG task that runs the step computes them from `{step}-class` with an
-    expression. A class that is not in the table (an HPC class: that twin never runs this task) gets the
+    template takes inputs `cpu`, `mem` and `disk`, a `podSpecPatch` puts them in the main container's
+    requests (and cpu and memory in its limits), and every DAG task that runs the step computes them
+    from `{step}-class` with an expression. A class that is not in the table (an HPC class: that twin never runs this task) gets the
     default class's numbers. A step pinned to one class has the same numbers as plain container resources.
     Limits equal requests so a step that overruns memory is stopped inside its own cgroup instead of
-    pressing on the node's daemons, and cannot starve them. Disk is `disk=` in pipeline.py, 10Gi otherwise.
+    pressing on the node's daemons, and cannot starve them.
     """
     if "compute-class" in annots:
         return  # pinned: enhance_scheduling sets the static requests
     sizes = node_sizes(ctx)
-    default_cpu, default_mem = sizes[default_class_name(step, ctx, annots)]
+    disks = node_disks(ctx)
+    default_name = default_class_name(step, ctx, annots)
+    default_cpu, default_mem = sizes[default_name]
+    default_disk = disks[default_name]
     step_name = step["name"]
     input_params = step.setdefault("inputs", {}).setdefault("parameters", [])
-    for name, value in (("cpu", str(default_cpu)), ("mem", f"{default_mem}Gi")):
+    for name, value in (("cpu", str(default_cpu)), ("mem", f"{default_mem}Gi"), ("disk", default_disk)):
         if not any(p.get("name") == name for p in input_params):
             input_params.append({"name": name, "default": value})
     patch_obj = yaml.safe_load(step.get("podSpecPatch") or "") or {}
@@ -454,13 +495,16 @@ def enhance_class_sizing(spec: dict, step: dict, ctx: dict, annots: dict) -> Non
     for field_name, param in (("cpu", "cpu"), ("memory", "mem")):
         res.setdefault("requests", {})[field_name] = "{{inputs.parameters.%s}}" % param
         res.setdefault("limits", {})[field_name] = "{{inputs.parameters.%s}}" % param
+    res.setdefault("requests", {})["ephemeral-storage"] = "{{inputs.parameters.disk}}"   # a request, no limit
     step["podSpecPatch"] = yaml.safe_dump(patch_obj, default_flow_style=False)
     cpu_map = "{" + ", ".join(f'"{n}": "{c}"' for n, (c, _) in sizes.items()) + "}"
     mem_map = "{" + ", ".join(f'"{n}": "{m}Gi"' for n, (_, m) in sizes.items()) + "}"
+    disk_map = "{" + ", ".join(f'"{n}": "{d}"' for n, d in disks.items() if n in sizes) + "}"
     klass = f"workflow.parameters['{step_name}-class']"
     # A map literal never closes with `}}`, which would end the expression.
     values = {"cpu": f'{{{{=({cpu_map}[{klass}]) ?? "{default_cpu}"}}}}',
-              "mem": f'{{{{=({mem_map}[{klass}]) ?? "{default_mem}Gi"}}}}'}
+              "mem": f'{{{{=({mem_map}[{klass}]) ?? "{default_mem}Gi"}}}}',
+              "disk": f'{{{{=({disk_map}[{klass}]) ?? "{default_disk}"}}}}'}
     for template in spec["templates"]:
         for task in (template.get("dag", {}) or {}).get("tasks", []):
             if task.get("template") != step_name:
@@ -760,9 +804,10 @@ def enhance_scheduling(step: dict, ctx: dict, annots: dict) -> None:
     for field_name, default in defaults.items():
         requests.setdefault(field_name, default)
         limits.setdefault(field_name, requests[field_name])  # limits follow requests
-    # Disk request floor (#892) — request only, deliberately NO limit (see
-    # DISK_REQUEST_DEFAULT): an eviction shield for every step.
-    requests.setdefault("ephemeral-storage", DISK_REQUEST_DEFAULT)
+    # The disk of the class's machine (node_disks) — request only, deliberately NO limit (see
+    # DISK_REQUEST_DEFAULT): an eviction shield for every step. A step on the form's class gets it from the
+    # podSpecPatch (enhance_class_sizing); this is the pinned step's and the default class's.
+    requests.setdefault("ephemeral-storage", node_disks(ctx)[compute_class["name"]])
     # NOTE (#865): the GPU request is deliberately NOT set here for
     # class-routable steps — enhance_gpu_routing moves it into the
     # podSpecPatch keyed to the runtime class choice, so a gpu-capable step
@@ -853,15 +898,6 @@ def validate_scheduling(step: dict, compute_class: dict, gpu: bool = None, env_h
                 f"'{class_name}' ({machine}) can only give a pod {allocatable['memoryGiB']}Gi — "
                 f"the pod would never schedule. Lower the request or pick a bigger class."
             )
-    disk_size_gb = compute_class.get("diskSizeGb")
-    if "ephemeral-storage" in requests and disk_size_gb:
-        want = _parse_mem_gib(requests["ephemeral-storage"])
-        if want > disk_size_gb:
-            raise EnhanceError(
-                f"step '{step_name}' requests {requests['ephemeral-storage']} ephemeral-storage "
-                f"but compute class '{class_name}' ({machine}) has only a {disk_size_gb}GB boot "
-                f"disk — the pod would never schedule. Lower disk= or pick a bigger class."
-            )
     # A gpu-declaring step on an accelerator-less class can never schedule —
     # unless the target ml environment declares NO gpu flavours at all
     # (PRD-1124 D-02: cpu-only environment). Then the step defaults to the cpu
@@ -874,11 +910,8 @@ def validate_scheduling(step: dict, compute_class: dict, gpu: bool = None, env_h
         )
 
 
-# Ephemeral-storage baseline for every step (#892). Unlike cpu/mem there is
-# no whole-node "allocatable disk" in the class catalog, so the platform sets
-# a flat floor: the previous DSL requested 10Gi on its heavy steps (a couple
-# of compute-heavy steps) and that proved sufficient; steps that need
-# more declare disk="20Gi" in pipeline.py. Request-only, never a limit: the
+# Ephemeral-storage request of a step on a class whose usable disk the platform did not say (node_disks).
+# Request-only, never a limit: the
 # request is the eviction shield (a pod under its request is evicted LAST and
 # the scheduler won't place it on a nearly-full node); a limit would instead
 # kill legitimate spiky export scratch (onnx2tf temp trees).

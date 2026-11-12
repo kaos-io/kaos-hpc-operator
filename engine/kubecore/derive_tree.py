@@ -42,7 +42,7 @@ from hydra import compose, initialize_config_dir
 from hydra.core.config_store import ConfigStore
 from omegaconf import OmegaConf
 
-from kubecore.step_contract import MIGRATION_GUIDE_URL, REMOVED_CONFIG_KEYS, RESERVED_CONFIG_KEYS
+from kubecore.step_contract import OLD_APP_NOTICE, REMOVED_CONFIG_KEYS, RESERVED_CONFIG_KEYS
 
 # Hera is a RENDER-TIME dependency (form derivation only). The compose step
 # runs at RUN time in a lean image without Hera, and only calls compose_tree()
@@ -215,9 +215,8 @@ def refuse_platform_group() -> None:
         for key in (entry if isinstance(entry, dict) else {}):
             if str(key).replace("optional ", "").split("@")[0].strip() == REMOVED_GROUP:
                 raise DeriveError(
-                    f"config/config.yaml still lists `- {key}: {entry[key]}` in its defaults. The platform no "
-                    f"longer adds a `{REMOVED_GROUP}` section to an app's config: delete that line. A step gets "
-                    f"the run, the app and where its results go from kaos_lib.step. See {MIGRATION_GUIDE_URL}"
+                    f"config/config.yaml lists `- {key}: {entry[key]}` in its defaults, and the platform no "
+                    f"longer adds a `{REMOVED_GROUP}` section to an app's config. {OLD_APP_NOTICE}"
                 )
 
 
@@ -390,8 +389,8 @@ def refuse_reserved_keys(tree: dict) -> None:
     for key in REMOVED_CONFIG_KEYS:
         if key in tree:
             raise DeriveError(
-                f"the config key '{key}' is reserved: the platform used to add a `{key}` section to an app's "
-                f"config and no longer does. Rename '{key}' in your config/ tree. See {MIGRATION_GUIDE_URL}"
+                f"the config tree defines a top-level `{key}` section, which the platform no longer uses. "
+                f"{OLD_APP_NOTICE}"
             )
 
 

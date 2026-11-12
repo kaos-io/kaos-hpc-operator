@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from helpers import copy_app, run_render
+from kubecore.step_contract import OLD_APP_MARKER, OLD_APP_NOTICE
 
 
 def render(build):
@@ -27,12 +28,10 @@ def refused(build):
 
 # ---------------------------------------------------------------- kind=
 
-def test_a_step_without_a_kind_fails_the_render_naming_the_kinds_and_the_guide():
-    from kubecore import authoring
+def test_a_step_without_a_kind_is_an_app_from_before_the_contract():
     message = refused(lambda a: a.step("train"))
-    assert message == ("step 'train' has no kind=. Every step declares what it does: kind= is one of ingest, "
-                       "transform, train, evaluate, publish, control (for example step('train', kind='transform', "
-                       f"...)). See {authoring.MIGRATION_GUIDE_URL}")
+    assert message == ("step 'train' has no kind=, which every step declares: one of ingest, transform, train, "
+                       "evaluate, publish, control. " + OLD_APP_NOTICE)
 
 
 def test_an_unknown_kind_fails_the_render_naming_the_kinds():
@@ -63,24 +62,24 @@ def test_the_keywords_after_the_name_are_given_by_name():
 
 # ---------------------------------------------------------------- removed keywords (AC-01)
 
-def test_outputs_fails_the_render_with_the_migration_message():
-    from kubecore import authoring
+def test_outputs_is_an_app_from_before_the_contract():
     message = refused(lambda a: a.step("prepare", kind="transform", outputs=["dataset-info"]))
-    assert message == (
-        "step 'prepare': outputs= was removed. A step hands its values on with kaos_lib.step.result(...) and the "
-        "steps that need it read them with kaos_lib.step.upstream('prepare'); what the step writes is declared "
-        f"with produces=[model(...), artifact(...), dataset(...)]. See {authoring.MIGRATION_GUIDE_URL}")
+    assert message == "step 'prepare': outputs= is no longer part of step(). " + OLD_APP_NOTICE
 
 
-def test_hpc_time_limit_fails_the_render_with_the_migration_message():
-    from kubecore import authoring
+def test_hpc_time_limit_is_an_app_from_before_the_contract():
     message = refused(lambda a: a.step("train", kind="train", hpc_time_limit="12h"))
-    assert message == ("step 'train': hpc_time_limit= was removed. Write walltime= with the same value "
-                       f"(walltime='12h'). See {authoring.MIGRATION_GUIDE_URL}")
+    assert message == "step 'train': hpc_time_limit= is no longer part of step(). " + OLD_APP_NOTICE
+
+
+def test_disk_is_refused_and_a_step_gets_the_disk_of_its_class():
+    message = refused(lambda a: a.step("train", kind="train", disk="20Gi"))
+    assert message == ("step 'train': disk is no longer declared; a step gets the disk of the machine its class "
+                       "runs on. " + OLD_APP_NOTICE)
 
 
 def test_an_app_on_the_old_contract_fails_the_render_and_writes_nothing(tmp_path):
-    """AC-01, as CI runs it: exit 1, the migration message on stderr, no rendered template."""
+    """AC-01, as CI runs it: exit 1, the old-app message on stderr, no rendered template."""
     repo = copy_app(tmp_path / "app")
     (repo / "pipeline.py").write_text(textwrap.dedent("""
         from pathlib import Path
@@ -92,7 +91,7 @@ def test_an_app_on_the_old_contract_fails_the_render_and_writes_nothing(tmp_path
     """))
     done = run_render(repo)
     assert done.returncode == 1
-    assert "outputs= was removed" in done.stderr and "/docs/migrate-to-0.5.html" in done.stderr
+    assert "outputs= is no longer part of step()" in done.stderr and OLD_APP_MARKER in done.stderr
     assert not (repo / "out").exists()
 
 
@@ -337,15 +336,13 @@ def test_a_step_may_read_at_most_sixteen_datasets_by_name(tmp_path, monkeypatch)
 # ---------------------------------------------------------------- the platform config group is gone
 
 def test_an_app_whose_config_still_names_the_platform_group_fails_the_render_with_what_to_delete(tmp_path):
-    from kubecore.step_contract import MIGRATION_GUIDE_URL
     repo = copy_app(tmp_path / "app")
     with (repo / "config" / "config.yaml").open("a") as f:
         f.write("  - platform: live\n")
     done = run_render(repo)
     assert done.returncode == 1 and not (repo / "out").exists()
-    assert ("config/config.yaml still lists `- platform: live` in its defaults. The platform no longer adds a "
-            "`platform` section to an app's config: delete that line. A step gets the run, the app and where its "
-            f"results go from kaos_lib.step. See {MIGRATION_GUIDE_URL}") in done.stderr
+    assert ("config/config.yaml lists `- platform: live` in its defaults, and the platform no longer adds a "
+            "`platform` section to an app's config. " + OLD_APP_NOTICE) in done.stderr
 
 
 def test_the_same_app_fails_compose_with_the_same_message(tmp_path, monkeypatch):
@@ -354,7 +351,7 @@ def test_the_same_app_fails_compose_with_the_same_message(tmp_path, monkeypatch)
     with (config / "config.yaml").open("a") as f:
         f.write("  - platform: live\n")
     monkeypatch.setattr(derive_tree, "CONFIG_DIR", config)
-    with pytest.raises(derive_tree.DeriveError, match="delete that line"):
+    with pytest.raises(derive_tree.DeriveError, match="lists `- platform: live` in its defaults"):
         compose.compose_config([])
 
 
@@ -442,7 +439,7 @@ def test_no_message_a_client_reads_names_the_workflow_engine():
     for build in (lambda a: a.step("Bad Name", kind="train"), lambda a: a.step("one"), lambda a: a.step("one", kind="x"),
                   lambda a: a.step("one", kind="train", outputs=["x"]), lambda a: a.step("main", kind="train")):
         assert "Argo" not in refused(build)
-    assert authoring.MIGRATION_GUIDE_URL
+    assert not hasattr(authoring, "MIGRATION_GUIDE_URL")
 
 
 def test_the_schema_says_kind_is_required():
@@ -455,22 +452,23 @@ def test_the_schema_says_kind_is_required():
 
 
 def test_an_app_may_not_define_a_top_level_platform_section_of_its_own(tmp_path):
-    from kubecore.step_contract import MIGRATION_GUIDE_URL
     repo = copy_app(tmp_path / "app")
     with (repo / "config" / "experiment.yaml").open("a") as f:
         f.write("platform:\n  region: x\n")
     done = run_render(repo)
     assert done.returncode == 1
-    assert ("the config key 'platform' is reserved: the platform used to add a `platform` section to an app's config "
-            f"and no longer does. Rename 'platform' in your config/ tree. See {MIGRATION_GUIDE_URL}") in done.stderr
+    assert ("the config tree defines a top-level `platform` section, which the platform no longer uses. "
+            + OLD_APP_NOTICE) in done.stderr
 
 
-def test_the_migration_guide_has_a_real_address_in_a_release_build():
-    """One constant, step_contract.MIGRATION_GUIDE_URL. A release build (KAOS_ENGINE_RELEASE=1) must not ship an
-    address under `.invalid`."""
-    import os
+def test_the_old_app_marker_is_one_sentence_the_notice_ends_with():
+    from kubecore import step_contract
+    assert OLD_APP_MARKER == "Create it again from the template."
+    assert OLD_APP_NOTICE == "This app was made before the current pipelines. " + OLD_APP_MARKER
+    assert not hasattr(step_contract, "MIGRATION_GUIDE_URL")
 
-    from kubecore.step_contract import MIGRATION_GUIDE_URL
-    assert MIGRATION_GUIDE_URL.startswith("https://")
-    if os.environ.get("KAOS_ENGINE_RELEASE"):
-        assert not MIGRATION_GUIDE_URL.split("/")[2].endswith(".invalid"), MIGRATION_GUIDE_URL
+
+def test_an_honest_mistake_in_a_new_pipeline_does_not_carry_the_old_app_marker():
+    for build in (lambda a: a.step("one", kind="training"), lambda a: a.step("Bad Name", kind="train"),
+                  lambda a: a.step("a" * 41, kind="train"), lambda a: a.step("kaos-x", kind="train")):
+        assert OLD_APP_MARKER not in refused(build)

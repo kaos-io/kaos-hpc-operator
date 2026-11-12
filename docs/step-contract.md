@@ -40,7 +40,7 @@ runner's hand-back and its checks. Where a section says "the engine refuses" or 
 ## 1. Authoring keywords
 
 ```python
-step(name, *, kind, reads=, inputs=, needs=, produces=, gpu=, disk=, when=, walltime=,
+step(name, *, kind, reads=, inputs=, needs=, produces=, gpu=, when=, walltime=,
      resumable=, checkpoint_every=, idle_timeout=)
 ```
 
@@ -54,11 +54,27 @@ Everything after `name` is keyword-only.
 | `inputs=` | The names of the config values that hold a dataset reference. An input name is a top-level config key: no dotted paths. Compose pins each to one commit when the run starts. Step code names the input, never a version. |
 | `needs=` | The steps this step runs after, at most ten. Each one's result reaches this step in `upstream`. |
 | `produces=` | What the step writes: `model("name")`, `artifact("name")`, `dataset("name")`. A dataset an app produces is the repository `dataset-<app>-<name>`: `dataset("clean")` in the app `hera1` is `dataset-hera1-clean`. The name is per app because every app made from a template declares the same names and a dataset has exactly one producer; two apps of a project never share one. |
-| `gpu=`, `disk=`, `when=` | Unchanged. |
+| `gpu=`, `when=` | Unchanged. |
 | `walltime=` | The run limit on an HPC class: `'90m'`, `'12h'` or `'720'` (minutes). |
 | `resumable=`, `checkpoint_every=`, `idle_timeout=` | Unchanged. |
 
-Removed, with no alias: `outputs=` (the result replaces it) and `hpc_time_limit=` (`walltime=` replaces it).
+Removed, with no alias: `outputs=` (the result replaces it), `hpc_time_limit=` (`walltime=` replaces it) and
+`disk=`: a step is not told its disk, it gets the disk of the machine its class runs on (the usable disk of that
+class, less a fixed reserve for the container images, or 10Gi where the platform does not say). A step that
+passes `disk=` is refused.
+
+**Placement of a step that produces a dataset.** A step whose `produces=` holds a `dataset(...)` is not
+offered an HPC class and has no HPC variant, the way `ingest`, `publish` and `control` steps are not: a job on
+HPC holds a token the lake treats as admin, which would bypass the rule that only the producing app writes a
+produced dataset. The step runs on the cluster until jobs there hold the app's own rights (PRD kaos#1911 F-40).
+A step that produces a dataset and is pinned to an HPC class is refused. A step that produces only a model or
+an artifact is not affected.
+
+**Apps made before the current pipelines.** An app that still uses a keyword the contract removed (a step
+with no `kind=`, `outputs=`, `hpc_time_limit=`, `disk=`), lists the `platform` config group or defines a
+top-level `platform` section, or carries a `kubecore/` folder of its own, is not moved to this contract. The
+render refuses it with a message that ends: "This app was made before the current pipelines. Create it again
+from the template."
 
 **Names.** A step name, an input name and a `produces` name match `[a-z0-9]([a-z0-9-]*[a-z0-9])?` and are at
 most 40 characters; a dataset name is also at least 3. The lake allows 3 to 48 characters after `dataset-`, so
@@ -134,7 +150,7 @@ under the run's work folder.
 | `step` | string | This step's name. |
 | `kind` | string | This step's kind (section 1). |
 | `experiment` | string | The experiment the run belongs to: the config value `experiment.name`, else the app's name. It is the `<experiment>` folder of the run's artifacts, `<name>/<experiment>/<run>/`. |
-| `params` | object | The config sections this step names in `reads=`, as compose resolved them, and nothing else. It never holds a `plan` section. It never holds a `platform` section either, because the wave removes the `platform` config group altogether: an app whose config still names it fails with the migration message. |
+| `params` | object | The config sections this step names in `reads=`, as compose resolved them, and nothing else. It never holds a `plan` section. It never holds a `platform` section either, because the wave removes the `platform` config group altogether: an app whose config still names it is refused as an app made before the current pipelines. |
 | `ledger` | object | A [ledger](#5-the-ledger) with one read for each input this step declares in `inputs=`, at the commit compose pinned. `writes` is empty. |
 | `produces` | array | What this step declares in `produces=`: `{"name", "type", "repo"}` each, in that order. `type` is `model`, `artifact` or `dataset`; `repo` is the repository it is written to. A `dataset` entry may carry `promote` (boolean; absent means `false`) after `repo`. |
 | `upstream` | object | One entry for each step in `needs=`, keyed by step name, in the order of `needs=`: that step's [result](#4-the-result), or the sentinel `{"version":1,"status":"absent"}` when it did not run. Empty when the step needs none. Always the last field. |

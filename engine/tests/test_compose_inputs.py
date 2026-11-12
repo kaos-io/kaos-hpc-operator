@@ -15,7 +15,7 @@ from paths import ENGINE
 
 sys.path.insert(0, str(ENGINE))
 from kubecore import compose  # noqa: E402
-from kubecore.step_contract import MIGRATION_GUIDE_URL, cost, wire  # noqa: E402
+from kubecore.step_contract import OLD_APP_NOTICE, cost, wire  # noqa: E402
 
 COMMITS = {"dataset-a": "a1" * 32, "dataset-b": "b2" * 32}
 
@@ -249,14 +249,13 @@ def test_a_config_tree_that_defines_a_reserved_key_fails_compose_naming_the_key(
                               f"pipeline-version); rename '{key}' in your config/ tree")
 
 
-def test_a_config_tree_with_a_platform_section_of_its_own_fails_compose_with_the_migration_message(monkeypatch):
+def test_a_config_tree_with_a_platform_section_of_its_own_fails_compose_as_an_old_app(monkeypatch):
     from omegaconf import OmegaConf
     monkeypatch.setattr(compose.derive_tree, "compose_tree", lambda overrides=None: OmegaConf.create({"platform": {"a": 1}}))
     with pytest.raises(compose.derive_tree.DeriveError) as exc:
         compose.compose_config([])
-    assert str(exc.value) == ("the config key 'platform' is reserved: the platform used to add a `platform` section to "
-                              "an app's config and no longer does. Rename 'platform' in your config/ tree. See "
-                              f"{MIGRATION_GUIDE_URL}")
+    assert str(exc.value) == ("the config tree defines a top-level `platform` section, which the platform no longer "
+                              "uses. " + OLD_APP_NOTICE)
 
 
 # ---------------------------------------------------------------- config never reads the environment

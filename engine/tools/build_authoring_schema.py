@@ -41,8 +41,6 @@ def _described(authoring) -> dict[str, dict]:
         "produces": {"type": "array", "items": "produced",
                      "doc": "What the step writes: model('name'), artifact('name') or dataset('name')."},
         "gpu": {"type": "boolean", "doc": "The step needs one GPU."},
-        "disk": {"type": "string", "pattern": authoring._DISK_QUANTITY_RE.pattern,
-                 "doc": "Ephemeral-storage request as a Kubernetes quantity, e.g. '20Gi'."},
         "when": {"type": "string", "doc": "A condition on the run's form values; the step is skipped when it is false."},
         "walltime": {"type": "string", "pattern": authoring._WALLTIME_RE.pattern,
                      "doc": "The step's run limit when it runs on an HPC class: '90m', '12h' or '720' (minutes)."},
@@ -61,6 +59,7 @@ def _described(authoring) -> dict[str, dict]:
 
 def build() -> dict:
     from kubecore import authoring
+    from kubecore.step_contract import OLD_APP_MARKER
 
     described = _described(authoring)
     params = []
@@ -81,11 +80,11 @@ def build() -> dict:
         "function": "kubecore.authoring.step",
         "doc": inspect.getdoc(authoring).split("\n\n")[0],
         "params": params,
-        # Keywords the step contract removed, with what to write instead (the render fails on them).
-        "removed": {name: text.format(name="<step>") for name, text in authoring._REMOVED_KEYWORDS.items()},
+        # Keywords the step contract removed, with the reason the render gives (it fails on them).
+        "removed": dict(authoring._REMOVED_KEYWORDS),
         "produced": {"model": "a trained model, stored with the run", "artifact": "any other files of the run",
                      "dataset": "a new version of a dataset this step alone writes"},
-        "migration_guide": authoring.MIGRATION_GUIDE_URL,
+        "old_app_marker": OLD_APP_MARKER,
         "annotations": {
             "walltime": authoring.WALLTIME_ANNOTATION,
             "resumable": authoring.HPC_RESUMABLE_ANNOTATION,

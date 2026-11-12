@@ -18,7 +18,7 @@ It is released by the same build as the controller, at the same version (D-58/D-
 | `kubecore/step_contract.py` | the step contract as the engine writes it: names, caps, the wire form, the expression that assembles a step's context (see "The step contract" below) |
 | `kaos_engine/compose.py` | what the compose-and-validate step runs, `python -I -m kaos_engine.compose`: the engine's compose with the engine first on the path. Pins every declared input and writes each step's context and the run's ledger |
 | `kaos_engine/version.py` | build tag -> PEP 440 |
-| `kaos_pipeline_engine/authoring-schema.json` | `step()` options for the pipeline linter, the removed keywords with what to write instead, and the migration guide's address |
+| `kaos_pipeline_engine/authoring-schema.json` | `step()` options for the pipeline linter, the removed keywords with the reason each is refused, and `old_app_marker` |
 | `Dockerfile.engine`, `pyproject.toml`, `setup.py`, `requirements*.txt` | image and wheel  The image keeps the pinned set at `/etc/kaos-engine/constraints.txt` for images built on top of it |
 | `tools/` | the generator of `authoring-schema.json` |
 | `tests/` | `template/` = the kubecore tests that came with the template; `app/` = the fixture app they render; the rest are the engine's tests |
@@ -33,7 +33,7 @@ is one contract and no older one beside it: a pipeline written for the earlier k
 ```python
 from kubecore.authoring import artifact, dataset, model, pipeline, step
 
-step(name, *, kind=, reads=, inputs=, needs=, produces=, gpu=, disk=, when=, walltime=,
+step(name, *, kind=, reads=, inputs=, needs=, produces=, gpu=, when=, walltime=,
      resumable=, checkpoint_every=, idle_timeout=)
 ```
 
@@ -68,8 +68,7 @@ step("evaluate", kind="evaluate", inputs=["clean"])       # in the step: step.in
 ```
 
 Refused at render, each with a message that names the step and what to write: a missing or unknown `kind=`;
-`outputs=` and `hpc_time_limit=` (removed; the message says what replaces them and points at
-`authoring.MIGRATION_GUIDE_URL`, the address of the migration guide); a step or produced name that
+`outputs=`, `hpc_time_limit=` and `disk=` (removed); a step that produces a dataset and is pinned to an HPC class; a step or produced name that
 starts with `kaos-`; a config tree that defines `plan` or `pipeline-version`, or a leaf whose form field would
 get one of those names; a step (or the HPC follower) whose rendered definition is over 24 KiB, counted as the
 workflow engine encodes it (`&`, `<` and `>` cost six bytes each); an app name over 55 characters; a
@@ -80,10 +79,28 @@ repository) to every app's config; no step can read it now, so the group, its se
 overrides for it are deleted. An app that still names it fails the render, and compose, with:
 
 ```
-config/config.yaml still lists `- platform: live` in its defaults. The platform no longer adds a `platform`
-section to an app's config: delete that line. A step gets the run, the app and where its results go from
-kaos_lib.step. See <MIGRATION_GUIDE_URL>
+config/config.yaml lists `- platform: live` in its defaults, and the platform no longer adds a `platform`
+section to an app's config. This app was made before the current pipelines. Create it again from the template.
 ```
+
+**No app is moved to this contract.** Old apps are deleted and created again from the template. The refusals
+that identify an app from before the contract each say what is wrong in one sentence and end with
+`step_contract.OLD_APP_NOTICE`, "This app was made before the current pipelines. Create it again from the
+template." Its second sentence is `step_contract.OLD_APP_MARKER`, published as `old_app_marker` in the authoring
+schema. They are: a step with no `kind=`; `outputs=`, `hpc_time_limit=` or `disk=`; the `platform` group in
+`config/config.yaml`; a top-level `platform` config key (render and compose); a `kubecore/` folder in the app.
+Every other refusal (an unknown `kind`, a name that is too long or reserved, a wrong `walltime`, ...) is a mistake in
+a new pipeline and keeps its plain message without the sentence.
+
+**A step that produces a dataset is not offered an HPC class.** A job on HPC holds a token the lake treats as
+admin, which would bypass the rule that only the producing app writes a produced dataset. So a step whose
+`produces=` holds a `dataset(...)` gets no HPC class in its `<step>-class` choice and no `<step>-hpc` twin, like
+the kinds `ingest`, `publish` and `control` (`meluxina.runs_on_hpc`, the one predicate; the authoring step marks the
+pod with `platform.kubecore.io/produces-dataset`). A step that produces such a dataset and is pinned to an HPC class
+fails the render ("a step that produces a dataset runs on the cluster for now; HPC (Slurm) classes are offered to
+it once jobs there hold the app's own rights"). The rule is `step_contract.DATASET_PRODUCERS_STAY_ON_CLUSTER`; PRD
+kaos#1911 F-40 (HPC jobs that hold the app's own rights) removes it. A step that produces only a model or an
+artifact is unaffected.
 
 **What a step gets and hands back.** Every step container runs `python -m app.entry` with no arguments. Its one
 input parameter is `kaos-context`, which the container reads as `KAOS_STEP_CONTEXT`; its one output parameter is
@@ -129,7 +146,8 @@ cpu and memory, and the limits equal the requests.
   type and adds nothing: `step_contract` has no table, `enhance.node_sizes` reads the context. The checkpoint
   helper's sidecar (10m, 64Mi) and the workflow executor's containers (no requests) live inside the margin.
 - **At run time.** The class is chosen at submit, so the numbers follow it the way the GPU does: the template takes
-  inputs `cpu` and `mem`, a `podSpecPatch` puts them into the main container's requests and limits, and each task
+  inputs `cpu`, `mem` and `disk`, a `podSpecPatch` puts them into the main container's requests (cpu and memory also
+  its limits), and each task
   that runs the step computes them from `<step>-class` with an expression over a table of the pool's classes
   (`{"cpu-standard": "7", "gpu-t4": "7"}[workflow.parameters['train-class']]`, with the default class's number as
   the fallback for a class not in the table: an HPC class, whose cluster task never runs). A step pinned to one class
@@ -138,10 +156,15 @@ cpu and memory, and the limits equal the requests.
   the node's daemons, and cannot starve them. A step cannot ask for more than its class has, so no pod waits for a node
   that cannot hold it. Several cluster steps no longer share a node by lowering fields by hand; HPC node sharing is
   unchanged.
-- **Disk** is `disk=` in `pipeline.py`, a request of 10Gi otherwise. The one check is at render, against the class the
-  step defaults to or is pinned to (`validate_scheduling`: `disk=` above the class's boot disk fails the render). A
-  class picked on the form later is not checked, because `computeClasses.all` entries carry no `diskSizeGb` (only the
-  tier defaults do): a gap on the operator's side.
+- **Disk** follows the class the same way, and the engineer no longer asks for it (`disk=` is refused). The request
+  of a step's ephemeral storage is the usable disk of its class less `enhance.IMAGE_RESERVE_GIB` (10 GiB, because
+  the container images share that disk; at least 1Gi, never more than the node gives), and 10Gi
+  (`DISK_REQUEST_DEFAULT`) for a class whose usable disk the platform does not say: unlike cpu and memory, that does
+  not fail the render. It is a request and no limit. **For the operator:** the engine reads
+  `computeClasses.{cpu,gpu}.allocatable.ephemeralStorageGiB` and `computeClasses.all[].allocatable.ephemeralStorageGiB`,
+  a whole number of GiB (the node's allocatable ephemeral storage less a margin), absent when the disk is unknown,
+  in one function, `enhance.node_disks`. The template takes a third input `disk`, each task computes it from
+  `<step>-class` like `cpu` and `mem`, and a step pinned to one class has a static request.
 - **A class that cannot be sized fails the render.** The operator's table holds GCE machine types; any other (an AWS
   type, a GCE type not in the table) has no `allocatable`, and a pool that offers such a class fails the render naming
   it. Before, the same class crashed the render with a `KeyError` when it was a step's default, and sized the step as
@@ -199,12 +222,15 @@ The value is in wire form: plain JSON to any parser.
 
 **For the charts package (W4).**
 
+- To tell an app from before the contract from any other render failure, match `step_contract.OLD_APP_MARKER`
+  ("Create it again from the template.", `old_app_marker` in `kaos_pipeline_engine/authoring-schema.json`) in the
+  render's output. There is no migration guide and no address to match.
 - The run form no longer has `<step>-cpu`, `<step>-mem` or `<step>-disk`; anything that fills, validates or lists them
   goes. The class (`<step>-class`) stays an enum.
 - The input names are in the step table (above). The field named `dataset` is no longer special.
 - `files/engine.py:50,149,151` still names the profiles `legacy-v1` and `yolo-v1` and reads the app's own
   `kubecore/derive_tree.py` to choose one. Both go: an app that carries a `kubecore/` folder now fails the render
-  with the migration message whatever profile is passed (the runner checks the folder before it checks the profile),
+  as an app made before the current pipelines whatever profile is passed (the runner checks the folder before it checks the profile),
   and the profile is `yolo` when the config tree has a `quantization` section, else `hera`.
 - `tests/connections` fixtures and goldens (14 files) hold the old step shape: `step-outputs`, `dataset-pin`,
   `data-lock`, `compose-and-validate.outputs.parameters.params`. Regenerate them from the engine.

@@ -17,12 +17,7 @@ compose-and-validate step as task 1:
 - every step hands back one result, the output `kaos-result`;
 - `gpu=True` -> `Resources(gpus=1)`, which is exactly what the enhancer
   detects for GPU scheduling;
-- `disk="20Gi"` -> an ephemeral-storage REQUEST (#892). Without it a
-  disk-heavy step (quantization/export scratch, dataset unpack) rides at
-  request 0 — best-effort on disk, first evicted under node pressure, and
-  schedulable onto nearly-full nodes. The enhancer injects a platform
-  default for steps that don't set it, so this knob is for steps that need
-  MORE than the baseline;
+- there is no `disk=`: a step gets the disk of the machine its class runs on;
 - `needs=[other]` wires dependencies AND puts the needed step's result in
   this step's context; a needed step that is conditional (`when=`) gets a
   skip-tolerant depends expression automatically, and its result is then
@@ -49,7 +44,9 @@ from kubecore.step_contract import (
     MAX_INPUTS,
     MAX_NAME,
     MAX_NEEDS,
-    MIGRATION_GUIDE_URL,
+    DATASET_PRODUCER_LABEL,
+    DATASET_PRODUCERS_STAY_ON_CLUSTER,
+    OLD_APP_NOTICE,
     MIN_DATASET_NAME,
     LEDGER_PARAM,
     LEDGER_PATH,
@@ -89,14 +86,12 @@ _current = None
 
 # Kubernetes resource quantity ("10Gi", "512Mi", "2G"); anchored so a typo
 # ("10 Gi", "10GB") fails the render instead of rendering an invalid manifest.
-_DISK_QUANTITY_RE = re.compile(r"^[0-9]+(Ki|Mi|Gi|Ti|K|M|G|T)?$")
 _WALLTIME_RE = re.compile(r"^[0-9]+[mh]?$")
 # Keywords the step contract removed, with what to write instead.
 _REMOVED_KEYWORDS = {
-    "outputs": "outputs= was removed. A step hands its values on with kaos_lib.step.result(...) and the steps "
-               "that need it read them with kaos_lib.step.upstream('{name}'); what the step writes is declared "
-               "with produces=[model(...), artifact(...), dataset(...)]",
-    "hpc_time_limit": "hpc_time_limit= was removed. Write walltime= with the same value (walltime='12h')",
+    "outputs": "outputs= is no longer part of step()",
+    "hpc_time_limit": "hpc_time_limit= is no longer part of step()",
+    "disk": "disk is no longer declared; a step gets the disk of the machine its class runs on",
 }
 
 
@@ -201,7 +196,7 @@ def dataset(name, **options) -> Produced:
 
 
 class Step:
-    def __init__(self, name, kind, reads, inputs, needs, produces, gpu, disk, when, walltime, resumable,
+    def __init__(self, name, kind, reads, inputs, needs, produces, gpu, when, walltime, resumable,
                  checkpoint_every, idle_timeout):
         self.name = name
         self.kind = kind
@@ -210,7 +205,6 @@ class Step:
         self.needs = needs
         self.produces = produces
         self.gpu = gpu
-        self.disk = disk
         self.when = when
         self.walltime = walltime
         self.resumable = resumable
@@ -221,9 +215,7 @@ class Step:
 def _check_kind(name, kind):
     if kind is None:
         raise AuthoringError(
-            f"step {name!r} has no kind=. Every step declares what it does: kind= is one of "
-            f"{', '.join(KINDS)} (for example step({name!r}, kind='transform', ...)). "
-            f"See {MIGRATION_GUIDE_URL}"
+            f"step {name!r} has no kind=, which every step declares: one of {', '.join(KINDS)}. {OLD_APP_NOTICE}"
         )
     if kind not in KINDS:
         raise AuthoringError(
@@ -312,7 +304,7 @@ def _check_data(name, kind, inputs, needs, produces):
             )
 
 
-def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None, gpu=False, disk=None,
+def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None, gpu=False,
          when=None, walltime=None, resumable=None, checkpoint_every=None, idle_timeout=None, **removed) -> Step:
     if _current is None:
         raise RuntimeError("step() must be called inside `with pipeline(...):`")
@@ -320,7 +312,7 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
         if keyword not in _REMOVED_KEYWORDS:
             raise TypeError(f"step() got an unexpected keyword argument {keyword!r}")
         raise AuthoringError(
-            f"step {name!r}: {_REMOVED_KEYWORDS[keyword].format(name=name)}. See {MIGRATION_GUIDE_URL}"
+            f"step {name!r}: {_REMOVED_KEYWORDS[keyword]}. {OLD_APP_NOTICE}"
         )
     if not _well_formed(name):
         raise AuthoringError(
@@ -347,11 +339,6 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
             f"duplicate step name {name!r} — every step must be uniquely named "
             f"(it is the step's identity in the DAG and its image)."
         )
-    if disk is not None and not (isinstance(disk, str) and _DISK_QUANTITY_RE.match(disk)):
-        raise AuthoringError(
-            f"step {name!r}: disk={disk!r} is not a Kubernetes quantity — use a "
-            f"string like '20Gi' (digits + optional Ki/Mi/Gi/Ti/K/M/G/T suffix)."
-        )
     if walltime is not None and not (
         isinstance(walltime, str) and _WALLTIME_RE.match(walltime) and int(walltime.rstrip("mh")) != 0
     ):
@@ -375,7 +362,7 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
     # machine is interrupted too. A resumable step gets its checkpoint copies wherever it runs (resilience.py).
     checkpoint_every = _checkpoint_every_minutes(name, checkpoint_every)
     idle_timeout = _idle_timeout_minutes(name, idle_timeout)
-    s = Step(name, kind, reads, inputs, needs, produces, gpu, disk, when, walltime, resumable, checkpoint_every,
+    s = Step(name, kind, reads, inputs, needs, produces, gpu, when, walltime, resumable, checkpoint_every,
              idle_timeout)
     _current.steps.append(s)
     return s
@@ -443,17 +430,11 @@ class pipeline:
                     name=s.name, image=IMAGE,
                     command=STEP_COMMAND,
                     env=[Env(name=CONTEXT_ENV, value="{{inputs.parameters.%s}}" % CONTEXT_PARAM)],
-                    labels={STEP_LABEL: s.name, STEP_KIND_LABEL: s.kind},
-                    # Request-only for disk: the request is the eviction shield
-                    # and scheduling signal; a limit would OOM-kill spiky export
-                    # scratch instead (#892). The enhancer reads this as the
-                    # developer-set value and keys the {step}-disk knob off it.
-                    resources=Resources(
-                        gpus=1 if s.gpu else None,
-                        ephemeral_request=s.disk,
-                    )
-                    if (s.gpu or s.disk)
-                    else None,
+                    labels={STEP_LABEL: s.name, STEP_KIND_LABEL: s.kind,
+                            **({DATASET_PRODUCER_LABEL: "true"}
+                               if DATASET_PRODUCERS_STAY_ON_CLUSTER and any(e.type == "dataset" for e in s.produces)
+                               else {})},
+                    resources=Resources(gpus=1) if s.gpu else None,
                     # Read by kubecore/meluxina.py: the run limit when
                     # this step runs on an HPC class (developer-set; the
                     # enhancer defaults it otherwise).
