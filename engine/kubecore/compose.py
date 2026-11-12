@@ -497,7 +497,7 @@ def _pairs(items: list) -> dict:
     return {key: value for key, _, value in (item.partition("=") for item in items)}
 
 
-def run_settings(steps: list, walltimes: list, checkpoints: list) -> dict:
+def run_settings(steps: list, walltimes: list, checkpoints: list, leads: list = ()) -> dict:
     """What the run form says about each step's time (`<step>-walltime`, `<step>-checkpoint-every`), checked
     here before any step starts: {step: {"walltime": minutes, "checkpoint-every": minutes}} for the steps that
     have such a field. The refusal names the field."""
@@ -511,6 +511,11 @@ def run_settings(steps: list, walltimes: list, checkpoints: list) -> dict:
             if problem:
                 raise ComposeError(problem)
             settings.setdefault(step, {})[key] = minutes(value)
+    for step, lead in _pairs(list(leads)).items():     # a resumable step is told to save this long before its limit
+        if step in settings and settings[step].get("walltime", 0) <= int(lead):
+            raise ComposeError(f"{walltime_field(step)} is {settings[step]['walltime']} minutes, which is not longer "
+                               f"than the {lead} minutes before its limit that the step is told to save "
+                               f"(resumable= in pipeline.py). Give the step more time.")
     return settings
 
 
@@ -613,6 +618,8 @@ def main(argv=None) -> None:
                         help="JSON {step: {offered, refused}}: the classes the form offers each step.")
     parser.add_argument("--promote", action="append", default=[], metavar="DATASET=VALUE",
                         help="The run form's promote-<dataset>, true or false (repeatable).")
+    parser.add_argument("--resumable-lead", action="append", default=[], metavar="STEP=MINUTES",
+                        help="Minutes before its limit that a resumable step is told to save (repeatable).")
     parser.add_argument("--settings-output", default="",
                         help="Where to write the numbers the form gave each step: {step: {walltime, checkpoint-every}}.")
     parser.add_argument("--ledger-output", default="", help="Where to write the run's ledger: every pinned input.")
@@ -631,7 +638,7 @@ def main(argv=None) -> None:
         resolved = compose_config(args.overrides, advanced, args.require, json.loads(args.render_defaults))
         if args.steps:
             steps = _steps(args.steps)
-            settings = run_settings(steps, args.walltime, args.checkpoint_every)
+            settings = run_settings(steps, args.walltime, args.checkpoint_every, args.resumable_lead)
             promote = run_promote(steps, args.promote)
             run_classes(steps, args.classes, args.class_offers)
             reads = pin_inputs(resolved, steps)

@@ -100,6 +100,17 @@ minutes, "checkpoint-every": minutes}}`), which the deadline, the HPC job's limi
 A step with a checkpoint interval has the field `checkpoint_every` (minutes, a number) in its context, after
 `produces`; a step without one has no such field.
 
+**A long job continues instead of starting over.** A step that declares `resumable=` is run again, and continues
+from its newest checkpoint, in each of three cases, on a cluster machine and on an HPC class, at most five times
+after the first run: it reaches its time limit, its machine is lost, or it asks to be restarted (exit code 85,
+`kaos_lib.checkpoint.exit_for_restart`). The time limit applies to each run of the step, not to the sum: on the
+cluster each run is a new pod with the full deadline; on an HPC class each continuation is a new job with the full
+limit, and the follower's own deadline covers the queue and every continuation. On the cluster the step is run
+again by the step's retry rule (a step that does not declare `resumable=` is retried only when its machine is lost)
+and restores its checkpoint folder in the init container; on HPC the controller sends the stop signal the declared
+lead (`resumable=`) before the limit and submits the continuation. The form's `<step>-walltime` must be longer than
+that lead: compose refuses a smaller value, naming the field.
+
 **Classes on the run form.** A step is offered the GPU classes of the cluster only when its code declares
 `gpu=True`. A step with `gpu=True` is offered the GPU and the CPU classes (it can run CPU-only on a CPU class); a step
 without it, the platform's own compose step included, is offered the CPU classes only, or every class the pool has

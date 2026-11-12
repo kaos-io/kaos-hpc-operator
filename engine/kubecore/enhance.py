@@ -78,7 +78,15 @@ import yaml
 
 from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
-from kubecore.meluxina import HPC_TWIN_TEMPLATE, STEP_KIND_LABEL, enhance_hpc, hpc_classes, parse_time_limit, runs_on_hpc
+from kubecore.meluxina import (
+    HPC_TWIN_TEMPLATE,
+    STEP_KIND_LABEL,
+    enhance_hpc,
+    hpc_classes,
+    parse_time_limit,
+    runs_on_hpc,
+    step_resumable_lead,
+)
 from kubecore.outputs_repo import outputs_repo
 from kubecore.run_settings import (
     DEFAULT_WALLTIME,
@@ -796,6 +804,9 @@ def enhance_run_form(spec: dict, steps: list, offers: dict) -> None:
         field(walltime_field(step_name), declared_walltime(annots),
               f"The longest the step may run, as minutes or hours: {WALLTIME_EXAMPLE}. Default from pipeline.py.",
               "--walltime", step_name)
+        lead = step_resumable_lead(step)
+        if lead:
+            args.extend(["--resumable-lead", f"{step_name}={lead}"])
         every = every_minutes(annots)
         if every.isdigit():
             field(checkpoint_field(step_name), f"{every}m",

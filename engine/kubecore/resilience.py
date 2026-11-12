@@ -34,7 +34,7 @@ from pathlib import Path
 
 import yaml
 
-from kubecore.meluxina import POD_LOSS_RETRY
+from kubecore.meluxina import HPC_MAX_CONTINUATIONS, POD_LOSS_RETRY
 from kubecore.outputs_repo import outputs_repo
 from kubecore.run_settings import add_input, add_task_argument, setting
 
@@ -68,10 +68,23 @@ IDLE_END_PREFIX = "KaosIdle"
 RETRY_EXPRESSION = "(%s) and not (lastRetry.message startsWith '%s')" % (POD_LOSS_RETRY, IDLE_END_PREFIX)
 
 
-def retry_strategy() -> dict:
-    """Tier 1: retry only a step lost with its node, never one that failed by itself or was ended as Idle."""
-    return {"limit": RETRY_LIMIT, "retryPolicy": "Always", "expression": RETRY_EXPRESSION,
-            "backoff": dict(RETRY_BACKOFF)}
+# A step that declares resumable= is also run again when it reaches its time limit (the kubelet's and the
+# workflow engine's words for it) and when it asks to be continued (exit code 85, kaos_lib.checkpoint
+# exit_for_restart): each run restores the newest copy of its checkpoint folder (the restore init container) and
+# has the full time limit again, because the deadline is per pod. At most HPC_MAX_CONTINUATIONS continuations,
+# the number an HPC class allows.
+CONTINUE_EXIT_CODE = "85"
+DEADLINE_MESSAGES = "longer than the specified deadline|exceeded its deadline"
+RESUMABLE_EXPRESSION = ("((%s) or lastRetry.exitCode == '%s' or lastRetry.message matches '.*(%s).*')"
+                        " and not (lastRetry.message startsWith '%s')"
+                        % (POD_LOSS_RETRY, CONTINUE_EXIT_CODE, DEADLINE_MESSAGES, IDLE_END_PREFIX))
+
+
+def retry_strategy(resumable: bool = False) -> dict:
+    """Tier 1: retry only a step lost with its node, never one that failed by itself or was ended as Idle.
+    A resumable step is also continued at its time limit and when it exits 85."""
+    return {"limit": str(HPC_MAX_CONTINUATIONS) if resumable else RETRY_LIMIT, "retryPolicy": "Always",
+            "expression": RESUMABLE_EXPRESSION if resumable else RETRY_EXPRESSION, "backoff": dict(RETRY_BACKOFF)}
 
 
 # The annotation step(resumable=...) renders (kubecore/authoring.py) and its opt-out value; kubecore/meluxina.py
@@ -230,7 +243,8 @@ def inject_folder(step: dict, helper: bool, ctx: dict) -> bool:
 def enhance_resilience(spec: dict, step: dict, ctx: dict, annots: dict, gpu: bool, inject_off: bool,
                        shared: set) -> None:
     """Apply the Kubernetes backend of the resilience contract to one step template."""
-    step.setdefault("retryStrategy", retry_strategy())
+    declared = annots.get("hpc-resumable")
+    step.setdefault("retryStrategy", retry_strategy(declared not in (None, "", RESUMABLE_OFF)))
     every = every_minutes(annots)
     helper = wants_helper(step, gpu, every, ctx, inject_off, shared)
     if not inject_folder(step, helper, ctx) or not helper:

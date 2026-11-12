@@ -190,3 +190,72 @@ def test_the_form_has_a_promote_choice_for_each_produced_dataset_and_for_nothing
     assert [n for n in form if n.startswith("promote-")] == ["promote-embeddings"]    # not the model
     args = _template(wft, "compose-and-validate")["container"]["args"]
     assert args[args.index("--promote") + 1] == "embeddings={{workflow.parameters.promote-embeddings}}"
+
+
+# ------------------------------------------------------------------ a long job continues instead of starting over
+
+def _retry(**keywords):
+    return _template(_enhanced(kind="train", produces=[authoring.model("m")], gpu=True, **keywords), "one")["retryStrategy"]
+
+
+def _continues(status, message, exit_code=""):
+    """RESUMABLE_EXPRESSION as the workflow engine evaluates it (a Go regexp `matches` is a search anchored by the
+    expression's own `.*`)."""
+    import re
+    from kubecore import meluxina, resilience
+    lost = status == "Error" or re.search(".*(%s).*" % meluxina.POD_LOSS_MESSAGES, message) is not None
+    lost = lost and meluxina.NO_RESULT_MESSAGE not in message
+    deadline = re.search(".*(%s).*" % resilience.DEADLINE_MESSAGES, message) is not None
+    return (lost or exit_code == "85" or deadline) and not message.startswith(resilience.IDLE_END_PREFIX)
+
+
+def test_a_resumable_step_on_the_cluster_is_run_again_up_to_the_continuation_limit():
+    from kubecore import meluxina, resilience
+    retry = _retry(resumable=True)
+    assert retry["expression"] == resilience.RESUMABLE_EXPRESSION
+    assert retry["limit"] == str(meluxina.HPC_MAX_CONTINUATIONS) == "5"
+
+
+@pytest.mark.parametrize("what, status, message, exit_code", [
+    ("it reaches its time limit (the kubelet's words)", "Failed", "Pod was active on the node longer than the specified deadline", ""),
+    ("it reaches its time limit (the workflow engine's words)", "Failed", "Step exceeded its deadline", ""),
+    ("its machine is lost", "Failed", "Pod was rejected: node shutting down", ""),
+    ("it asks to be restarted", "Error", "Error (exit code 85)", "85"),
+])
+def test_a_resumable_step_continues_in_each_of_the_three_cases(what, status, message, exit_code):
+    assert _continues(status, message, exit_code), what
+
+
+def test_a_resumable_step_that_fails_by_itself_or_is_ended_as_idle_is_not_run_again():
+    assert not _continues("Failed", "Error (exit code 1)", "1")
+    assert not _continues("Failed", "OOMKilled (exit code 137)", "137")
+    assert not _continues("Failed", "KaosIdle: no GPU use", "")
+
+
+def test_a_step_that_does_not_declare_resumable_keeps_the_pod_loss_rule_only():
+    from kubecore import resilience
+    retry = _retry()
+    assert retry["expression"] == resilience.RETRY_EXPRESSION and retry["limit"] == "2"
+    assert _retry(resumable=False)["expression"] == resilience.RETRY_EXPRESSION
+
+
+def test_the_time_limit_is_per_run_of_the_step_because_it_is_the_deadline_of_each_pod():
+    """Every run of the step is a new pod with the template's deadline: the limit applies to each run, not to
+    the sum. On an HPC class every continuation is a new job with its own limit; the follower's deadline covers
+    the queue and every continuation."""
+    wft = _enhanced(kind="train", produces=[authoring.model("m")], resumable=True, walltime="2h")
+    assert _template(wft, "one")["activeDeadlineSeconds"] == "{{inputs.parameters.deadline}}"
+    assert evaluate(_arguments(wft, "one-hpc")["deadline-seconds"], {"one": {"walltime": 120}}) == \
+        (1 + 5) * (120 + 480) * 60
+
+
+def test_a_walltime_on_the_form_not_longer_than_the_save_lead_of_a_resumable_step_is_refused():
+    from kubecore import compose
+    wft = _enhanced(kind="train", produces=[authoring.model("m")], resumable="20m", walltime="2h")
+    args = _template(wft, "compose-and-validate")["container"]["args"]
+    assert args[args.index("--resumable-lead") + 1] == "one=20"
+    assert compose.run_settings([{"name": "one"}], ["one=30m"], [], ["one=20"]) == {"one": {"walltime": 30}}
+    with pytest.raises(compose.ComposeError) as exc:
+        compose.run_settings([{"name": "one"}], ["one=15m"], [], ["one=20"])
+    assert str(exc.value) == ("one-walltime is 15 minutes, which is not longer than the 20 minutes before its limit "
+                              "that the step is told to save (resumable= in pipeline.py). Give the step more time.")
