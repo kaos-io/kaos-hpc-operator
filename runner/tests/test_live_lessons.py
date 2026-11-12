@@ -257,8 +257,7 @@ def test_the_gcp_token_goes_to_gar_hosts_only__live_job_5140432(tmp_path, ref, t
 def _inputs_block():
     """The job script from its inputs loop to the line after it (the staged root of the step)."""
     lines = _lines()
-    start = lines.index('BIND=""')
-    return lines[start:lines.index('done', start) + 2]
+    return lines[lines.index('BIND=""; KAOS_IN_ROOT=$SCR/kaos-tmp/in-$KAOS_JOB_ID; rm -rf "$KAOS_IN_ROOT"'):lines.index('done') + 2]
 
 
 def _stagein(tmp_path, stagein_py, staged_ready=False):
@@ -285,11 +284,15 @@ def test_a_failed_in_job_stage_in_ends_the_job_232_instead_of_running_without_da
 
 def test_a_successful_in_job_stage_in_binds_the_downloaded_copy(tmp_path):
     copy = tmp_path / 'data' / 'dataset-r' / 'c0ffee12'
-    ok = ('import os, pathlib; d = pathlib.Path(%r); d.mkdir(parents=True); (d / ".kaos-ready").write_text("{}"); '
+    ok = ('import os, pathlib; d = pathlib.Path(%r); d.mkdir(parents=True); (d / ".kaos-complete").touch(); '
           'assert os.environ["DATASET_REPO"] == "dataset-r" and os.environ["DATASET_COMMIT"] == "c0ffee12"; '
           'open(os.environ["DATASET_DIRFILE"], "w").write(str(d))' % str(copy))
     p, _ = _stagein(tmp_path, ok)
-    assert p.returncode == 0 and 'BIND= -B %s:/kaos/inputs/raw:ro' % copy in p.stdout, p.stdout + p.stderr
+    root = tmp_path / 'scr' / 'kaos-tmp' / 'in-9'
+    assert p.returncode == 0 and 'BIND=-B %s:/kaos/inputs:ro -B %s:/kaos/inputs/raw:ro' % (root, copy) in p.stdout, p.stdout + p.stderr
+    # The record the step finds the input by is BESIDE the folder the copy is bound onto, never inside it.
+    assert json.loads((root / 'raw.kaos-ready').read_text()) == {'repo': 'dataset-r', 'commit': 'c0ffee12', 'full': True}
+    assert (root / 'raw').is_dir() and list((root / 'raw').iterdir()) == []
 
 
 def test_an_in_job_stage_in_that_leaves_no_complete_copy_ends_the_job_232(tmp_path):
@@ -297,12 +300,14 @@ def test_an_in_job_stage_in_that_leaves_no_complete_copy_ends_the_job_232(tmp_pa
     p, _ = _stagein(tmp_path, 'import os; open(os.environ["DATASET_DIRFILE"], "w").write("%s")' % (tmp_path / 'nowhere'))
     assert p.returncode == 232 and 'BIND=' not in p.stdout
     assert 'is not complete' in p.stdout
+    assert not (tmp_path / 'scr' / 'kaos-tmp' / 'in-9' / 'raw.kaos-ready').exists(), 'no record for a copy that is not whole'
 
 
 def test_a_ready_staged_copy_skips_the_in_job_download_and_is_marked_used(tmp_path):
     p, staged = _stagein(tmp_path, 'import sys; sys.exit(3)', staged_ready=True)
-    assert p.returncode == 0 and 'BIND= -B %s:/kaos/inputs/raw:ro' % staged in p.stdout
+    assert p.returncode == 0 and '-B %s:/kaos/inputs/raw:ro' % staged in p.stdout
     assert (staged / '.kaos-used').exists()
+    assert (tmp_path / 'scr' / 'kaos-tmp' / 'in-9' / 'raw.kaos-ready').exists()
 
 
 # ------------------------------------------------ dataset-commit lease vs the 24 h eviction rule
@@ -326,7 +331,8 @@ def test_a_resident_copy_is_marked_used_by_the_job_that_starts_on_it_so_the_24h_
     marker.write_text('')
     old = time.time() - 30 * 3600
     os.utime(marker, (old, old))
-    env = dict(os.environ, KAOS_JOB_ID='9', KAOS_INPUTS='raw|dataset-r|c0ffee12|%s' % staged)
+    (tmp_path / 'kaos-tmp').mkdir()
+    env = dict(os.environ, SCR=str(tmp_path), KAOS_JOB_ID='9', KAOS_INPUTS='raw|dataset-r|c0ffee12|%s' % staged)
     subprocess.run([BASH, '-c', 'fail(){ exit "$1"; }\n' + '\n'.join(_inputs_block())], env=env, check=True)
     assert time.time() - marker.stat().st_mtime < 60
 

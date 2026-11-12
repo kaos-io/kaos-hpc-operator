@@ -83,11 +83,13 @@ def batch_lines(scope, scratch):
         'mkdir -p $APPTAINER_CACHEDIR $APPTAINER_TMPDIR $SCR/sif-cache',
         'KEY=$(printf %s "$IMAGE_REF" | sha256sum | cut -c1-16)',
         'SIF=$SCR/sif-cache/$KEY.sif',
-        # The step's inputs (spec.inputs), each a whole dataset commit, each presented to the step as one folder
-        # named after the input under one root: $KAOS_STAGED_ROOT/<input>/ in the container, read-only, with
-        # the record .kaos-ready ({"repo","commit","full":true}) that kaos-lib finds the folder by. KAOS_INPUTS
-        # holds one word per input: name|repository|commit|resident path.
-        'BIND=""',
+        # The step's inputs (spec.inputs), each a whole dataset commit, presented to the step under one root,
+        # $KAOS_STAGED_ROOT (/kaos/inputs in the container, read-only): the folder <input>/ holds the dataset,
+        # and beside it the record <input>.kaos-ready ({"repo","commit","full":true}) says which repository
+        # and commit it is and that it is the whole tree. kaos-lib finds an input by that record. The root is
+        # a folder of this job; each copy is bound onto its folder there, whichever way it was staged.
+        # KAOS_INPUTS holds one word per input: name|repository|commit|resident path.
+        'BIND=""; KAOS_IN_ROOT=$SCR/kaos-tmp/in-$KAOS_JOB_ID; rm -rf "$KAOS_IN_ROOT"',
         'for KAOS_IN in $KAOS_INPUTS; do',
         '  IFS="|" read -r IN_NAME IN_REPO IN_COMMIT IN_STAGED <<< "$KAOS_IN"',
         '  IN_DIR=""',
@@ -106,14 +108,18 @@ def batch_lines(scope, scratch):
         ' DATASET_DIRFILE=$SCR/kaos-tmp/ds-$KAOS_JOB_ID-$IN_NAME.dir',
         '    printf %s "$STAGEIN_B64" | base64 -d | python3 - || fail 232',
         '    IN_DIR=$(cat "$DATASET_DIRFILE" 2>/dev/null); rm -f "$DATASET_DIRFILE"',
-        '    [ -n "$IN_DIR" ] && [ -f "$IN_DIR/.kaos-ready" ] || { echo "input $IN_NAME: the in-job copy is not complete"; fail 232; }',
+        '    [ -n "$IN_DIR" ] && [ -f "$IN_DIR/.kaos-complete" ] || { echo "input $IN_NAME: the in-job copy is not complete"; fail 232; }',
         '  else',
         '    echo "input $IN_NAME: no staged copy and no way to download it in the job"; fail 232',
         '  fi',
+        # Only now, for a copy that is whole: the folder it is bound onto, and its record beside it.
+        '  mkdir -p "$KAOS_IN_ROOT/$IN_NAME" || fail 232',
+        '  printf \'{"repo":"%s","commit":"%s","full":true}\' "$IN_REPO" "$IN_COMMIT" > "$KAOS_IN_ROOT/$IN_NAME.kaos-ready" || fail 232',
         '  BIND="$BIND -B $IN_DIR:/kaos/inputs/$IN_NAME:ro"',
         'done',
         # Apptainer passes the host env through, so the step context and the wallet/endpoint vars reach the step.
-        '[ -n "$KAOS_INPUTS" ] && export APPTAINERENV_KAOS_STAGED_ROOT=/kaos/inputs',
+        'if [ -n "$KAOS_INPUTS" ]; then BIND="-B $KAOS_IN_ROOT:/kaos/inputs:ro$BIND";'
+        ' export APPTAINERENV_KAOS_STAGED_ROOT=/kaos/inputs; fi',
         # Writable /work: the SIF is read-only, but steps write /work/output
         # (declared outputs), /work/runs, /work/dataset caches. Per-job scratch
         # on Lustre, removed after a successful stage-out.
@@ -291,6 +297,7 @@ def batch_lines(scope, scratch):
         'wait $STEP_PID; rc=$?',
         'while kill -0 $STEP_PID 2>/dev/null; do wait $STEP_PID; rc=$?; done',
         'kill $SAMPLER_PID 2>/dev/null',
+        'rm -rf "$KAOS_IN_ROOT"',     # the step is gone: the folder its inputs were presented in goes too
         'trap - USR1',
         '[ -n "$CKPT_PID" ] && { kill $CKPT_PID 2>/dev/null; wait $CKPT_PID 2>/dev/null; }',
         '[ -n "$WATCHDOG_PID" ] && kill $WATCHDOG_PID 2>/dev/null',

@@ -27,12 +27,6 @@ open(os.environ['DATASET_DIRFILE'], 'w').write(str(dest))
 #     second sees the other: the cleanup sees a new or missing marker and leaves the folder, or this program sees
 #     the cleanup, waits the moment it takes, and starts over on what is there then.
 MARK, OLD_MARK = dest / '.kaos-complete', dest / '.complete'
-# What the step finds the copy by (kaos-lib, $KAOS_STAGED_ROOT/<input>/.kaos-ready): which repository, which
-# commit, and that it is the whole tree. Written after the marker, under a name only this job writes, then renamed.
-def ready():
-    tmp = dest / ('.kaos-ready.kaos-part-%s-%d' % (os.environ.get('SLURM_JOB_ID', ''), os.getpid()))
-    tmp.write_text(json.dumps({'repo': REPO, 'commit': commit, 'full': True}))
-    os.replace(str(tmp), str(dest / '.kaos-ready'))
 CLEAN = pathlib.Path(str(dest) + '.kaos-clean')
 def cleaning():
     # True while a cleanup holds this folder. One left by a cleanup that was killed is not obeyed for ever.
@@ -62,7 +56,6 @@ while True:
             os.utime(str(OLD_MARK), None)   # a job script from before .kaos-complete cleans by this one
         except OSError:
             pass
-        ready()
         print('stage-in: cache hit', dest, flush=True)
         sys.exit(0)
     break
@@ -226,5 +219,4 @@ for leftover in PARTS.iterdir():            # this writer's, and those a killed 
     except OSError:
         pass
 MARK.touch()
-ready()
 print('stage-in: downloaded', n, 'of', len(objs), '->', dest, flush=True)

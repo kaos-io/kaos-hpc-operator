@@ -181,6 +181,15 @@ ROOT=$FAKE_ROOT; rm -rf "$ROOT"; mkdir -p "$ROOT"
 while [ $# -gt 0 ] && [ "${1%.sif}" = "$1" ]; do
   if [ "$1" = "-B" ]; then
     shift; src=${1%%:*}; rest=${1#*:}; dst=${rest%%:*}
+    if [ -L "$ROOT$(dirname "$dst")" ]; then
+      # A bind onto a folder of an earlier bind: this stand-in works on a copy of that outer folder.
+      outer=$(readlink "$ROOT$(dirname "$dst")"); rm "$ROOT$(dirname "$dst")"; cp -r "$outer" "$ROOT$(dirname "$dst")"
+      NESTED="$NESTED $(dirname "$dst")"
+    fi
+    case " $NESTED " in *" $(dirname "$dst") "*)
+      # Apptainer needs the folder it binds onto to exist in the outer bind.
+      rmdir "$ROOT$dst" || { echo "fake apptainer: no empty mount point $dst in the outer bind" >&2; exit 97; } ;;
+    esac
     mkdir -p "$ROOT$(dirname "$dst")"; ln -s "$src" "$ROOT$dst"
   fi
   shift
@@ -193,24 +202,26 @@ done
 exec "$@"
 '''
 
-# The step: what kaos-lib 0.5 does with what it is given (kaos_lib/layouts/local.py staged_dir, kaos_lib/step.py):
-# it reads KAOS_STEP_CONTEXT, finds each input's folder under $KAOS_STAGED_ROOT by its .kaos-ready record
-# (repository, commit, owner absent or null, "full": true), and writes /work/output/kaos-result.json.
+# The step: what kaos-lib does with what it is given: it reads KAOS_STEP_CONTEXT, finds each input under
+# $KAOS_STAGED_ROOT by the record <input>.kaos-ready beside the folder <input>/ (repository, commit, owner absent
+# or null, "full": true), and writes /work/output/kaos-result.json. It reports every file it sees in each folder.
 STEP_PY = r'''
 import hashlib, json, os, pathlib, sys
 ctx = os.environ.get("KAOS_STEP_CONTEXT", "")
 root = os.environ.get("KAOS_STAGED_ROOT")
 found = {}
 if root and pathlib.Path(root).is_dir():
-    for staged in sorted(p for p in pathlib.Path(root).iterdir() if p.is_dir()):
+    for record in sorted(pathlib.Path(root).glob("*.kaos-ready")):
+        staged = record.with_name(record.name[:-len(".kaos-ready")])
         try:
-            info = json.loads((staged / ".kaos-ready").read_text())
+            info = json.loads(record.read_text())
         except (OSError, ValueError):
             continue
-        if isinstance(info, dict) and info.get("full") is True:
-            files = sorted(str(f.relative_to(staged)) for f in staged.rglob("*") if f.is_file() and not f.name.startswith(".kaos-"))
+        if isinstance(info, dict) and info.get("full") is True and staged.is_dir():
+            files = sorted(str(f.relative_to(staged)) for f in staged.rglob("*") if f.is_file())
             found[staged.name] = {"repo": info.get("repo"), "commit": info.get("commit"), "owner": info.get("owner") or None,
                                   "files": files}
+    found["(root)"] = sorted(p.name for p in pathlib.Path(root).iterdir())
 saw = {"bytes": len(ctx.encode()), "sha256": hashlib.sha256(ctx.encode()).hexdigest(), "inputs": found,
        "old": [k for k in ("KUBECORE_STAGED_DIR", "KUBECORE_DATASET_DIR", "KAOS_LIB_LOCK", "DATASET_STAGED") if k in os.environ]}
 pathlib.Path(os.environ["SAW"]).write_text(json.dumps(saw))
@@ -319,10 +330,15 @@ def test_each_input_is_one_folder_named_after_it_under_one_root_whichever_way_it
     site.resident(TWO_INPUTS[0], {"train/a.csv": b"a", "meta.json": b"{}"})
     lakefs.commits[EMB] = {"part-0.npy": b"0000", "deep/part-1.npy": b"1111", ".kaos/schema.json": b"{}"}
     assert site.run() == 0, site.out
-    assert site.step_saw()["inputs"] == {
-        "labels": {"repo": "dataset-labels", "commit": LABELS, "owner": None, "files": ["meta.json", "train/a.csv"]},
-        "embeddings": {"repo": "dataset-embeddings", "commit": EMB, "owner": None,
-                       "files": [".kaos/schema.json", "deep/part-1.npy", "part-0.npy"]}}
+    saw = site.step_saw()["inputs"]
+    assert saw.pop("(root)") == ["embeddings", "embeddings.kaos-ready", "labels", "labels.kaos-ready"], \
+        "one folder per input and its record beside it, nothing else"
+    assert {k: (v["repo"], v["commit"], v["owner"]) for k, v in saw.items()} == {
+        "labels": ("dataset-labels", LABELS, None), "embeddings": ("dataset-embeddings", EMB, None)}
+    for name, files in (("labels", ["meta.json", "train/a.csv"]),
+                        ("embeddings", [".kaos/schema.json", "deep/part-1.npy", "part-0.npy"])):
+        assert [f for f in saw[name]["files"] if not f.startswith(".kaos-")] == files, "the whole tree of the commit"
+    assert not (site.scratch / "kaos-tmp" / "in-5001").exists(), "the job's own folder of inputs goes with the step"
     assert "input labels: resident copy" in site.out and "stage-in: downloaded 3 of 3" in site.out
     assert "KAOS_STAGED_ROOT=/kaos/inputs" in site.batch and "KUBECORE_STAGED_DIR" not in site.batch
     # Both commits are leased, so the staging tool evicts neither while the job queues or runs.
@@ -336,7 +352,7 @@ def test_a_staged_copy_without_its_record_is_not_served_the_job_downloads_the_co
     half = site.resident(TWO_INPUTS[0], {"train/a.csv": b"a"}, marker=False)      # a copy that was never completed
     lakefs.commits[LABELS] = {"train/a.csv": b"a", "train/b.csv": b"b"}
     assert site.run() == 0, site.out
-    assert site.step_saw()["inputs"]["labels"]["files"] == ["train/a.csv", "train/b.csv"]
+    assert [f for f in site.step_saw()["inputs"]["labels"]["files"] if not f.startswith(".kaos-")] == ["train/a.csv", "train/b.csv"]
     assert "not ready - downloading in-job" in site.out and not (half / "train" / "b.csv").exists()
 
 
@@ -412,17 +428,19 @@ def test_a_step_that_fails_hands_nothing_back_whatever_it_wrote(tmp_path, lakefs
     assert _handed(lakefs) == {} and "result hand-back" not in site.out
 
 
-def test_the_in_job_stage_in_marks_a_copy_it_finds_complete_for_the_step_too(tmp_path, lakefs):
-    """A copy an earlier job completed (it has .kaos-complete) gets the record the step finds it by."""
-    dest = tmp_path / "data-cache" / "dataset-labels" / LABELS
-    dest.mkdir(parents=True)
-    (dest / "a.csv").write_text("a")
-    (dest / ".kaos-complete").touch()
-    env = dict(os.environ, LAKEFS_ENDPOINT=lakefs.url, LAKEFS_BEARER_TOKEN="wallet", DATASET_REPO="dataset-labels",
-               DATASET_COMMIT=LABELS, DATASET_CACHE=str(tmp_path / "data-cache"), DATASET_DIRFILE=str(tmp_path / "dirfile"))
-    p = subprocess.run([sys.executable, "-c", payloads.STAGEIN], env=env, capture_output=True, text=True)
-    assert p.returncode == 0 and "cache hit" in p.stdout, p.stdout + p.stderr
-    assert json.loads((dest / ".kaos-ready").read_text()) == {"repo": "dataset-labels", "commit": LABELS, "full": True}
+# What is still open (PRD kaos#1911 F-04, item C of the HPC package): the copy is bound as its cache folder is,
+# and both caches keep their own markers INSIDE that folder (.kaos-ready and .kaos-used in the staging tool's,
+# .kaos-complete and .kaos-parts/ in the in-job one). The step must see only the dataset. That needs the caches
+# to keep the dataset in a subfolder (or their markers beside the copy), which is the staging lane's layout.
+@pytest.mark.xfail(strict=True, reason="the caches keep their markers inside the copy folder; needs the cache layout to change")
+@MODES
+def test_the_step_sees_only_the_datasets_files_in_an_input_folder(tmp_path, lakefs, monkeypatch, shared):
+    site = Site(tmp_path, lakefs, shared, helpers.fixture("context-one-upstream.wire"), inputs=TWO_INPUTS, monkeypatch=monkeypatch)
+    site.resident(TWO_INPUTS[0], {"train/a.csv": b"a"})
+    lakefs.commits[EMB] = {"part-0.npy": b"0000"}
+    assert site.run() == 0, site.out
+    saw = site.step_saw()["inputs"]
+    assert (saw["labels"]["files"], saw["embeddings"]["files"]) == (["train/a.csv"], ["part-0.npy"])
 
 
 def test_the_payloads_run_on_the_nodes_python():
