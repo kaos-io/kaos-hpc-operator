@@ -233,7 +233,7 @@ def test_every_step_runs_the_same_entry_with_one_value_and_hands_back_one_result
         assert env["KAOS_STEP_CONTEXT"] == "{{inputs.parameters.kaos-context}}"
         assert "KAOS_LIB_LOCK" not in env
         sizing = ("gpus", "cpu", "mem", "disk")
-            assert [p["name"] for p in step["inputs"]["parameters"] if p["name"] not in sizing] == ["kaos-context"]
+        assert [p["name"] for p in step["inputs"]["parameters"] if p["name"] not in sizing] == ["kaos-context"]
         # no default: a step that ends well without a result fails in the workflow engine
         assert step["outputs"]["parameters"] == [{"name": "kaos-result", "valueFrom": {
             "path": "/work/output/kaos-result.json"}}]
