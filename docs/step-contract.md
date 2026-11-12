@@ -63,6 +63,12 @@ Removed, with no alias: `outputs=` (the result replaces it), `hpc_time_limit=` (
 class, less a fixed reserve for the container images, or 10Gi where the platform does not say). A step that
 passes `disk=` is refused.
 
+**Classes on the run form.** A step is offered the GPU classes of the cluster only when its code declares
+`gpu=True`. A step with `gpu=True` is offered the GPU and the CPU classes (it can run CPU-only on a CPU class); a step
+without it, the platform's own compose step included, is offered the CPU classes only, or every class the pool has
+when the pool declares no CPU class. The default class of a step does not change. The HPC classes are offered by the
+rules below.
+
 **Placement of a step that produces a dataset.** A step whose `produces=` holds a `dataset(...)` is not
 offered an HPC class and has no HPC variant, the way `ingest`, `publish` and `control` steps are not: a job on
 HPC holds a token the lake treats as admin, which would bypass the rule that only the producing app writes a

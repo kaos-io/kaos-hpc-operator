@@ -420,3 +420,56 @@ def test_the_step_table_lists_the_short_name_and_the_context_the_repository():
     compose = _template(wft, "compose-and-validate")["container"]["args"]
     table = json.loads(compose[compose.index("--steps") + 1])
     assert table[0]["produces"] == [{"name": "clean", "type": "dataset"}], "the table has no repository: compose names it"
+
+
+# The classes a step is offered on the run form: GPU classes only when its code declares gpu=True (owner ruling 2026-11-12).
+
+def _class_choice(wft, step):
+    return next(p for p in wft["spec"]["arguments"]["parameters"] if p["name"] == f"{step}-class")
+
+
+def _cluster_classes(choice):
+    return [c for c in choice["enum"] if not c.startswith("meluxina-")]
+
+
+def test_a_step_without_gpu_is_offered_only_the_cpu_classes_of_the_cluster_and_its_hpc_classes():
+    wft = _enhanced(lambda: authoring.step("one", kind="train"))
+    choice = _class_choice(wft, "one")
+    assert _cluster_classes(choice) == ["cpu-standard", "kubecorecpu"]
+    assert [c for c in choice["enum"] if c.startswith("meluxina-")], "its HPC classes are as before"
+    assert choice["value"] == "cpu-standard"
+
+
+def test_the_compose_step_is_offered_only_the_cpu_classes_of_the_cluster():
+    wft = _enhanced(lambda: authoring.step("one", kind="train", gpu=True))
+    assert _cluster_classes(_class_choice(wft, "compose-and-validate")) == ["cpu-standard", "kubecorecpu"]
+
+
+def test_a_gpu_step_is_still_offered_the_gpu_and_the_cpu_classes_with_its_default_unchanged():
+    wft = _enhanced(lambda: authoring.step("one", kind="train", gpu=True))
+    choice = _class_choice(wft, "one")
+    assert _cluster_classes(choice) == ["cpu-standard", "kubecorecpu", "gpu-t4"]
+    assert choice["value"] == "gpu-t4"
+
+
+def test_a_pool_that_declares_only_gpu_classes_still_offers_a_step_without_gpu_what_exists():
+    ctx = _context()
+    cc = ctx["computeClasses"]
+    cc["all"] = [c for c in cc["all"] if c.get("tier") == "gpu"]
+    del cc["cpu"]
+    choice = _class_choice(_enhanced(lambda: authoring.step("one", kind="train"), ctx), "one")
+    assert _cluster_classes(choice) == ["gpu-t4"] and choice["value"] == "gpu-t4"
+
+
+def test_a_pool_whose_default_cpu_class_is_missing_from_the_catalog_still_offers_it_first():
+    ctx = _context()
+    cc = ctx["computeClasses"]
+    cc["all"] = [c for c in cc["all"] if c["name"] != cc["cpu"]["name"]]
+    choice = _class_choice(_enhanced(lambda: authoring.step("one", kind="train"), ctx), "one")
+    assert _cluster_classes(choice) == ["cpu-standard", "kubecorecpu"]
+
+
+def test_the_form_says_which_classes_a_step_may_pick():
+    info = next(p for p in _enhanced(lambda: authoring.step("one", kind="train"))["spec"]["arguments"]["parameters"]
+                if p["name"] == "pipeline-info")["value"]
+    assert "Only a step that declares gpu=True is offered the GPU classes" in info
