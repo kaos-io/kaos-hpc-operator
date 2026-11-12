@@ -623,3 +623,57 @@ def _copier_state(**env):
 def test_the_copier_keeps_the_interval_the_run_form_chose_and_adapts_only_without_one():
     assert _copier_state(KAOS_CKPT_EVERY_S="1200") == (1200.0, True)
     assert _copier_state() == (900.0, False)
+
+
+# ------------------------------------------- the copier keeps its spacing and its last minutes, whatever the form asks
+
+def _copier():
+    """The copier's own functions, as its payload text defines them (the part before it runs a mode)."""
+    from kaos_hpc_runner import payloads
+    prefix = payloads.CKPT.split("\nif MODE == 'watch':")[0]
+    names = {"__name__": "ckpt-test"}
+    saved = sys.argv
+    sys.argv = ["ckpt.py", "none"]
+    try:
+        exec(compile(prefix, "ckpt.py", "exec"), names)   # noqa: S102 - the platform's own payload text
+    finally:
+        sys.argv = saved
+    return names
+
+
+@pytest.mark.parametrize("target, took, apart, why", [
+    (60, 0, 300, "copies are at least 5 minutes apart on HPC (Slurm)"),      # a minute asked: five minutes at the least
+    (300, 0, 300, ""), (1200, 0, 1200, ""),
+    (1200, 50, 1200, ""),                                                    # a 50 s copy every 20 min is under a tenth
+    (1200, 400, 4000, "a copy takes 400 s and copying is kept under a tenth of the run time"),
+    (60, 400, 4000, "a copy takes 400 s and copying is kept under a tenth of the run time"),
+    (900, 10, 900, ""),
+])
+def test_a_copy_never_starts_sooner_than_five_minutes_or_ten_times_the_last_copy_after_the_last_one_ended(target, took, apart, why):
+    assert _copier()["spacing"](target, took) == (apart, why)
+
+
+@pytest.mark.parametrize("elapsed, took, ok", [(2800, 100, True), (2899, 100, True), (2900, 100, False), (3500, 0, False), (0, 0, True)])
+def test_no_periodic_copy_starts_when_the_time_left_is_the_final_copys(elapsed, took, ok):
+    # a one hour limit, a ten minute lead: a copy starts only when it ends before the lead begins
+    assert _copier()["time_for_a_copy"](elapsed, 3600, 600, took) is ok
+
+
+def test_without_a_limit_or_a_lead_a_periodic_copy_is_never_held_back():
+    f = _copier()["time_for_a_copy"]
+    assert f(10 ** 6, 0, 600, 5) and f(10 ** 6, 3600, 0, 5)
+
+
+def test_the_watcher_waits_copies_or_stops_by_these_rules():
+    decide = _copier()["decide"]
+    assert decide(100, 100, 60, 0, 3600, 600) == "wait", "a minute asked, five apart"
+    assert decide(300, 400, 60, 0, 3600, 600) == "copy"
+    assert decide(300, 3100, 60, 20, 3600, 600) == "late", "the lead needs the time left"
+    assert decide(5000, 100, 1200, 400, 0, 0) == "copy" and decide(3999, 100, 1200, 400, 0, 0) == "wait", "duty cap"
+
+
+def test_the_runner_hands_the_job_its_limit_so_the_copier_can_keep_the_last_minutes():
+    import inspect
+
+    from kaos_hpc_runner import runner
+    assert "KAOS_TIME_LIMIT_S=%d' % (cfg.time_limit * 60)" in inspect.getsource(runner)

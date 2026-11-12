@@ -270,6 +270,7 @@ class Runner:
         # project's Lustre project id is the digits of its account.
         env += ['CKPT_B64=' + payloads.b64(payloads.CKPT), 'KAOS_CKPT_BUDGET_PCT=%d' % cfg.ckpt_budget_pct,
                 'KAOS_PROJID=' + ''.join(c for c in ident['account'] if c.isdigit())]
+        env.append('KAOS_TIME_LIMIT_S=%d' % (cfg.time_limit * 60))   # the copier keeps the last minutes for the final copy
         every = checkpoint_every_seconds(cfg.context)    # the run form's <step>-checkpoint-every, from the step context
         if every:
             env.append('KAOS_CKPT_EVERY_S=%d' % every)

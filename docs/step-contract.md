@@ -115,7 +115,16 @@ A step with a checkpoint interval has the field `checkpoint_every` (minutes, a n
 | | Who sets it | Order, first wins | Default | Read by |
 |---|---|---|---|---|
 | time limit | the run form's `<step>-walltime` | the form value, then `step(walltime=)` | `walltime=`, else `4h` | the cluster deadline; the HPC job's limit (the follower and the runner) |
-| checkpoint interval | the run form's `<step>-checkpoint-every`, a field of a step that declares `checkpoint_every=` or `resumable=` (not `checkpoint_every=False`) | the form value, then `step(checkpoint_every=)`, then the argument of `kaos_lib.checkpoint.register(...)` in code, then the library's adaptive default | `checkpoint_every=`, else 10 minutes for a `resumable=` step | cluster: the helper's `CKPT_EVERY_MIN` (from the form field); HPC: the job's copier (`KAOS_CKPT_EVERY_S`, from `checkpoint_every` of the step context, kept fixed); the step: `kaos_lib.checkpoint.tick()` (the same context field) |
+| checkpoint interval | the run form's `<step>-checkpoint-every`, a field of a step that declares `checkpoint_every=` or `resumable=` (not `checkpoint_every=False`) | the form value, then `step(checkpoint_every=)`, then the argument of `kaos_lib.checkpoint.register(...)` in code, then the library's adaptive default | `checkpoint_every=`, else 10 minutes for a `resumable=` step | cluster: the helper's `CKPT_EVERY_MIN` (from the form field); HPC: the job's copier (`KAOS_CKPT_EVERY_S`, from `checkpoint_every` of the step context, as the target, with the spacing below); the step: `kaos_lib.checkpoint.tick()` (the same context field) |
+
+**How the copier uses the interval.** The form value is the TARGET interval between copies, counted from the end of the
+previous copy. On HPC (Slurm) the copier never starts a periodic copy sooner than the larger of the form value and five
+minutes (`MIN_EVERY_S` 300 s), nor sooner than ten times the duration of the previous copy (copying stays under a tenth of the run
+time), and it starts none when the time left before the limit is not more than the resumable lead plus the time the copy
+takes, so that no periodic copy is in flight when the wall-time signal asks for the final copy (it writes one plain line,
+`copying every N minutes, not every M: <why>`, when it copies less often than asked, and one when it stops for the limit).
+On the cluster the helper never copies sooner than 60 seconds after the previous copy ended, nor sooner than ten times its
+duration, and not less often than hourly; it has no wall-time signal, a stop (SIGTERM) triggers the final copy.
 
 `step(walltime=)` and `step(checkpoint_every=)` are checked when the pipeline is rendered, and by lint, with compose's
 sentence above: a default the form would refuse (over 30 days, under a minute) cannot be written. `checkpoint_every=False`
