@@ -10,7 +10,7 @@ word.** It is not part of `run-all.sh`, sends nothing without `--submit`, and re
 ## What it does
 
 It submits **one** job, one node, with a time limit of 5 minutes (it needs seconds). The job carries the
-same 98304-byte value twice, the two ways the runner sends a step's inputs, and writes what it finds
+same 98240-byte value twice, the two ways the runner sends a step's inputs, and writes what it finds
 into its own job comment as `<word>=<bytes>:<sha256>`:
 
 | Word | What it proves |
@@ -47,11 +47,17 @@ python3 hack/contract-checks/live-site/context_probe.py --partition <test-lane p
 Use a partition and QoS the project has budget on: a job without budget waits forever, and the probe
 gives up after an hour without cancelling it (`scancel` it then).
 
-Expected output of step 1 (checked locally):
+The value is built with the reference wire writer (`hack/contract-checks/wire.py`), so it is true wire form and
+costs exactly 96 KiB (98240 bytes: each quote and backslash counts twice against the cap). It carries one string
+with a dollar sign, a backtick, quotes, a backslash and braces, written as the wire form writes them, so the
+comparison also proves the escaped form survives.
+
+Expected output of step 1 with none of `HPC_HOME`, `HPC_USER`, `HPC_ACCOUNT` set (checked locally; the request
+size depends on their lengths, the other two numbers and the sha256 do not):
 
 ```
-request: 198339 bytes; job script: 99487 bytes; largest environment string: 98322 bytes
-expected for every word: 98304:50b506212c7ad09b640670501c0f748464538b19a1706d2ee6424894072645cd
+request: 198213 bytes; job script: 99423 bytes; largest environment string: 98258 bytes
+expected for every word: 98240:1e55abd174f77faafe771b7f37f5d6c4723220aeda70acffdba7e9c2af29f55d
 nothing was sent (no --submit)
 ```
 

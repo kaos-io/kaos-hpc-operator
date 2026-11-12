@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The live-site half of check 4 of the step contract: ONE job on a real Slurm site that reports
-whether a 96 KiB KAOS_STEP_CONTEXT reaches a job unchanged. NOT part of run-all.sh. It spends site time:
+whether a KAOS_STEP_CONTEXT at the 96 KiB cap (by cost, in wire form) reaches a job unchanged. NOT part of run-all.sh. It spends site time:
 run it only with the owner's word (README.md here).
 
 The job carries the same value twice, the two ways the runner sends a step's inputs:
@@ -25,9 +25,13 @@ import os
 import shlex
 import sys
 import time
+import pathlib
 import urllib.request
 
-CAP = 96 * 1024
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import wire  # noqa: E402
+
+CAP = wire.CONTEXT_CAP
 
 # Each line reports one way the value arrived. `kaos_word NAME` reads the value from stdin.
 JOB = r'''#!/bin/bash -l
@@ -57,17 +61,22 @@ exit 0
 '''
 
 
-def context(size=CAP):
-    """A step context in wire form of exactly `size` bytes, with what a shell could change in a string."""
-    head = ('{"version":1,"run":"contract-live","app":"hera-demo","project":"vision","step":"train","kind":"train",'
-            '"experiment":"it\'s $HOME `x` ; done \\\\n \\"q\\" \\u007b\\u007bworkflow.name\\u007d\\u007d","params":{"blob":"')
-    tail = '"},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[],"upstream":{"prepare":{"version":1,"status":"absent"}}}'
-    fill, links, h = size - len(head) - len(tail), [], "contract-live"
-    while 64 * len(links) < fill:
+def context(cost=CAP):
+    """A step context in true wire form (written by the reference writer, hack/contract-checks/wire.py) that costs
+    exactly `cost`, with what a shell could change in a string: a dollar sign, a backtick, a quote, a backslash,
+    braces. The wire form writes the dollar sign and the braces as escapes, so the job must hand them back as such."""
+    def build(blob):
+        return {"version": 1, "run": "contract-live", "app": "hera-demo", "project": "vision", "step": "train",
+                "kind": "train", "experiment": "it's $HOME `x` ; done \\n \"q\" {{workflow.name}} $(id)",
+                "params": {"blob": blob}, "ledger": {"version": 2, "reads": [], "writes": []}, "produces": [],
+                "upstream": {"prepare": {"version": 1, "status": "absent"}}}
+    fill, links, h = cost - wire.cost(wire.dumps(build(""))), [], "contract-live"
+    while 64 * len(links) < fill:   # hex characters: each costs one, so the cost lands exactly
         h = hashlib.sha256(h.encode()).hexdigest()
         links.append(h)
-    text = head + "".join(links)[:fill] + tail
-    assert len(text) == size and json.loads(text)["version"] == 1
+    value = build("".join(links)[:fill])
+    text = wire.dumps(value)
+    assert wire.cost(text) == cost and json.loads(text) == value and "$" not in text and "{{" not in text
     return text
 
 
