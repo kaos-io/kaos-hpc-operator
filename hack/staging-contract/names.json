@@ -1,5 +1,5 @@
 {
- "_": "Object names and what name_rule says of each: [path, size in bytes, verdict]. The same file is in novelcore/kubecore-operator images/meluxina-tokenmint/stager/names.json and kaos-io/kaos-hpc-operator hack/staging-contract/names.json; the three implementations of name_rule are tested against it.",
+ "_": "Object names and what name_rule says of each: [path, size in bytes, verdict]. The dataset's files live under data/ in every copy, so a name can no longer collide with a marker of the copy: only a file name ending in .kaos-part (a half-downloaded file, named beside its target) is reserved. The same file is in novelcore/kubecore-operator images/meluxina-tokenmint/stager/names.json and kaos-io/kaos-hpc-operator hack/staging-contract/names.json; the three implementations of name_rule are tested against it.",
  "names": [
   [
    "a.txt",
@@ -154,22 +154,22 @@
   [
    ".kaos-ready",
    1,
-   "reserved"
+   ""
   ],
   [
    ".kaos-commit",
    1,
-   "reserved"
+   ""
   ],
   [
    ".kaos-complete",
    0,
-   "reserved"
+   ""
   ],
   [
    ".kaos-notes/a.txt",
    1,
-   "reserved"
+   ""
   ],
   [
    "scenes/points.ply.kaos-part",

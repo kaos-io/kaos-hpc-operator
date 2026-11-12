@@ -278,15 +278,18 @@ class Site:
         self.saw = tmp_path / "saw.json"
 
     def resident(self, inp, files, marker=True):
-        """A copy the site's staging tool made from a login node, with the record it writes."""
+        """A copy the site's staging tool made from a login node, with the record it writes. The dataset's files
+        are under data/, the record and the lease note beside it, and the path the runner is given is data/."""
         d = self.scratch / "kaos" / "p1" / "datasets" / inp["repo"] / inp["commit"]
+        (d / "data").mkdir(parents=True, exist_ok=True)
         for rel, body in files.items():
-            (d / rel).parent.mkdir(parents=True, exist_ok=True)
-            (d / rel).write_bytes(body)
+            (d / "data" / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / "data" / rel).write_bytes(body)
         if marker:
             (d / ".kaos-ready").write_text(json.dumps({"repo": inp["repo"], "commit": inp["commit"], "ref": inp.get("ref"),
-                                                       "prefix": "", "full": True, "base": None, "files": len(files)}))
-        self.runner.staged[inp["name"]] = str(d)
+                                                       "prefix": "", "full": True, "layout": "data", "base": None,
+                                                       "files": len(files)}))
+        self.runner.staged[inp["name"]] = str(d / "data")
         return d
 
     def run(self, jid="5001", result_text=None):
@@ -348,7 +351,7 @@ def test_each_input_is_one_folder_named_after_it_under_one_root_whichever_way_it
         "labels": ("dataset-labels", LABELS, None), "embeddings": ("dataset-embeddings", EMB, None)}
     for name, files in (("labels", ["meta.json", "train/a.csv"]),
                         ("embeddings", [".kaos/schema.json", "deep/part-1.npy", "part-0.npy"])):
-        assert [f for f in saw[name]["files"] if not f.startswith(".kaos-")] == files, "the whole tree of the commit"
+        assert saw[name]["files"] == files, "the whole tree of the commit, and nothing of the platform's"
     assert not (site.scratch / "kaos-tmp" / "in-5001").exists(), "the job's own folder of inputs goes with the step"
     assert "input labels: resident copy" in site.out and "stage-in: downloaded 3 of 3" in site.out
     assert "KAOS_STAGED_ROOT=/kaos/inputs" in site.batch and "KUBECORE_STAGED_DIR" not in site.batch
@@ -363,8 +366,8 @@ def test_a_staged_copy_without_its_record_is_not_served_the_job_downloads_the_co
     half = site.resident(TWO_INPUTS[0], {"train/a.csv": b"a"}, marker=False)      # a copy that was never completed
     lakefs.commits[LABELS] = {"train/a.csv": b"a", "train/b.csv": b"b"}
     assert site.run() == 0, site.out
-    assert [f for f in site.step_saw()["inputs"]["labels"]["files"] if not f.startswith(".kaos-")] == ["train/a.csv", "train/b.csv"]
-    assert "not ready - downloading in-job" in site.out and not (half / "train" / "b.csv").exists()
+    assert site.step_saw()["inputs"]["labels"]["files"] == ["train/a.csv", "train/b.csv"]
+    assert "not ready - downloading in-job" in site.out and not (half / "data" / "train" / "b.csv").exists()
 
 
 @MODES
@@ -439,11 +442,8 @@ def test_a_step_that_fails_hands_nothing_back_whatever_it_wrote(tmp_path, lakefs
     assert _handed(lakefs) == {} and "result hand-back" not in site.out
 
 
-# What is still open (PRD kaos#1911 F-04, item C of the HPC package): the copy is bound as its cache folder is,
-# and both caches keep their own markers INSIDE that folder (.kaos-ready and .kaos-used in the staging tool's,
-# .kaos-complete and .kaos-parts/ in the in-job one). The step must see only the dataset. That needs the caches
-# to keep the dataset in a subfolder (or their markers beside the copy), which is the staging lane's layout.
-@pytest.mark.xfail(strict=True, reason="the caches keep their markers inside the copy folder; needs the cache layout to change")
+# Both caches keep the dataset's files under <copy>/data/ and their own markers (.kaos-ready and .kaos-used in the
+# staging tool's, .kaos-complete and .kaos-parts/ in the in-job one) beside it: the job binds data/.
 @MODES
 def test_the_step_sees_only_the_datasets_files_in_an_input_folder(tmp_path, lakefs, monkeypatch, shared):
     site = Site(tmp_path, lakefs, shared, helpers.fixture("context-one-upstream.wire"), inputs=TWO_INPUTS, monkeypatch=monkeypatch)
@@ -452,6 +452,29 @@ def test_the_step_sees_only_the_datasets_files_in_an_input_folder(tmp_path, lake
     assert site.run() == 0, site.out
     saw = site.step_saw()["inputs"]
     assert (saw["labels"]["files"], saw["embeddings"]["files"]) == (["train/a.csv"], ["part-0.npy"])
+
+
+@MODES
+def test_a_copy_of_the_older_layout_is_served_by_neither_path(tmp_path, lakefs, monkeypatch, shared):
+    """Copies from before the data/ layout have their files directly in the folder. The login-node copy is handed
+    to the job by the path an older staging tool reported (the folder itself, its markers inside); the in-job
+    copy is complete by an empty marker. The job serves neither: the step sees the commit's files, no others."""
+    site = Site(tmp_path, lakefs, shared, helpers.fixture("context-one-upstream.wire"), inputs=TWO_INPUTS, monkeypatch=monkeypatch)
+    old = site.scratch / "kaos" / "p1" / "datasets" / "dataset-labels" / LABELS
+    old.mkdir(parents=True)
+    (old / "stale-a.csv").write_bytes(b"stale")
+    (old / ".kaos-ready").write_text(json.dumps({"repo": "dataset-labels", "commit": LABELS, "full": True}))
+    site.runner.staged["labels"] = str(old)                 # what an older staging tool reported as the path
+    in_job = site.scratch / "data-cache" / "dataset-embeddings" / EMB
+    in_job.mkdir(parents=True)
+    (in_job / "stale-b.npy").write_bytes(b"stale")
+    (in_job / ".kaos-complete").write_text("")
+    lakefs.commits[LABELS] = {"train/a.csv": b"a"}
+    lakefs.commits[EMB] = {"part-0.npy": b"0000"}
+    assert site.run() == 0, site.out
+    saw = site.step_saw()["inputs"]
+    assert (saw["labels"]["files"], saw["embeddings"]["files"]) == (["train/a.csv"], ["part-0.npy"])
+    assert "input labels: resident copy" not in site.out and "not ready - downloading in-job" in site.out
 
 
 def test_the_payloads_run_on_the_nodes_python():

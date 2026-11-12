@@ -29,10 +29,13 @@ tmp = tempfile.mkdtemp()
 import atexit, shutil
 atexit.register(shutil.rmtree, tmp, True)
 dest = os.path.join(tmp, 'cache', 'ds', COMMIT)
-for rel, body in YOLO.items():                      # the copy an older stage-in left, with its .complete marker
-    os.makedirs(os.path.dirname(os.path.join(dest, rel)), exist_ok=True)
-    open(os.path.join(dest, rel), 'wb').write(body)
-open(os.path.join(dest, '.complete'), 'w').close()
+def old_layout_copy(marker):
+    """A copy of the older layout: files directly in the folder (here with a `data/` folder among them)."""
+    for rel, body in dict(YOLO, **{'data/stale.bin': b'stale'}).items():
+        os.makedirs(os.path.dirname(os.path.join(dest, rel)), exist_ok=True)
+        open(os.path.join(dest, rel), 'wb').write(body)
+    open(os.path.join(dest, marker), 'w').close()
+old_layout_copy('.complete')
 env = dict(os.environ, LAKEFS_ENDPOINT='http://127.0.0.1:%d' % httpd.server_address[1], LAKEFS_BEARER_TOKEN='w',
            DATASET_REPO='ds', DATASET_COMMIT=COMMIT, DATASET_CACHE=os.path.join(tmp, 'cache'),
            DATASET_DIRFILE=os.path.join(tmp, 'dirfile'), SLURM_JOB_ID='9')
@@ -43,28 +46,41 @@ def run():
     return p.stdout.strip()
 def tree():
     out = {}
-    for d, _, names in os.walk(dest):
+    data = os.path.join(dest, 'data')
+    for d, _, names in os.walk(data):
         for n in names:
-            if n not in ('.kaos-complete', '.kaos-commit'):
-                out[os.path.relpath(os.path.join(d, n), dest)] = open(os.path.join(d, n), 'rb').read()
+            out[os.path.relpath(os.path.join(d, n), data)] = open(os.path.join(d, n), 'rb').read()
     return out
 print(sys.version.split()[0])
-print(run())
-assert tree() == TREE and sorted(downloads) == ['README.md', 'scenes/0001/points.ply'], downloads
-assert os.path.exists(os.path.join(dest, '.kaos-complete')) and not os.path.exists(os.path.join(dest, '.complete'))
-print('PASS: the old partial copy was completed, not served; only the missing files were downloaded')
+for marker in ('.complete', '.kaos-complete'):
+    if marker == '.kaos-complete':
+        shutil.rmtree(dest); old_layout_copy(marker)
+    del downloads[:]
+    out = run(); print(out)
+    assert 'cache hit' not in out and 'older layout' in out
+    assert tree() == TREE and sorted(downloads) == sorted(TREE), downloads
+    assert open(os.path.join(dest, '.kaos-complete')).read() == 'data' and not os.path.exists(os.path.join(dest, '.complete'))
+    assert sorted(os.listdir(dest)) == ['.kaos-complete', '.kaos-parts', 'data']
+    print('PASS: a copy of the older layout (marker %s) was not served: moved aside, made again under data/' % marker)
 del downloads[:]
 out = run(); print(out)
 assert 'cache hit' in out and downloads == []
 print('PASS: the whole copy is a cache hit')
-TREE['.kaos-commit'] = b'a reserved root name'
+TREE['.kaos-commit'] = b'a name of a platform file'
 os.remove(os.path.join(dest, '.kaos-complete'))
+out = run(); print(out)
+assert tree() == TREE and os.path.isfile(os.path.join(dest, '.kaos-complete'))
+print('PASS: a dataset file named like a platform file is data under data/')
+del TREE['.kaos-commit']
+os.remove(os.path.join(dest, '.kaos-complete'))
+TREE['a/b.kaos-part'] = b'x'
+del downloads[:]
 p = subprocess.run([sys.executable, payload], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                    universal_newlines=True)
 print(p.stderr.strip())
 assert p.returncode != 0 and downloads == [] and 'reserved for the platform' in p.stderr
-print('PASS: a reserved root name fails the stage-in before any download')
-del TREE['.kaos-commit']
+print('PASS: a name ending in .kaos-part fails the stage-in before any download')
+del TREE['a/b.kaos-part']
 TREE['a/../../../escape.txt'] = b'out'
 p = subprocess.run([sys.executable, payload], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                    universal_newlines=True)
@@ -75,7 +91,7 @@ print('PASS: an object path that leaves the cache folder fails the stage-in befo
 del TREE['a/../../../escape.txt']
 outside = os.path.join(tmp, 'outside')
 os.mkdir(outside)
-os.symlink(outside, os.path.join(dest, 'linked'))
+os.symlink(outside, os.path.join(dest, 'data', 'linked'))
 TREE['linked/sub/x.bin'] = b'x'
 p = subprocess.run([sys.executable, payload], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                    universal_newlines=True)

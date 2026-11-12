@@ -1,9 +1,10 @@
-"""An old in-job copy is completed by the stage-in while another job's end-of-job cleanup runs (see README.md).
+"""An old in-job copy is made again by the stage-in while another job's end-of-job cleanup runs (see README.md).
 
-The copy has only the marker of before (.complete), last used 20 days ago, so the cleanup wants the folder. The
-stage-in (the real payload) fills it from a fake lakeFS; the two data-cache cleanup lines of the real job script
-run again and again until the stage-in ends. The folder must never be taken from under the stage-in, and the
-copy must be marked only when it is the whole commit. First seen in the review of 2026-11-12: stage-in rc 0,
+The copy is of the older layout (its files directly in the folder, the marker .complete), last used 20 days ago,
+so the cleanup wants the folder. The stage-in (the real payload) moves it aside and fills a new copy (the files
+under data/) from a fake lakeFS; the two data-cache cleanup lines of the real job script run again and again until
+the stage-in ends. The folder being filled must never be taken from under the stage-in, and the copy must be
+marked only when it is the whole commit. First seen in the review of 2026-11-12: stage-in rc 0,
 marker present, 3410 of 10001 objects on disk.
 
 usage: race.py <runner dir> [objects, default 10001]
@@ -72,13 +73,16 @@ while p.poll() is None:
     runs += 1
     time.sleep(0.05)
 out, err = p.communicate()
-have = {os.path.relpath(os.path.join(d, n), dest) for d, _, ns in os.walk(dest) for n in ns}
+have = {os.path.relpath(os.path.join(d, n), os.path.join(dest, 'data')) for d, _, ns in os.walk(os.path.join(dest, 'data')) for n in ns}
+marked = os.path.isfile(os.path.join(dest, '.kaos-complete'))
 print('the cleanup ran %d times while the stage-in filled the folder' % runs)
 print('stage-in rc %d, last line: %s' % (p.returncode, (out.strip().splitlines() or err.strip().splitlines() or [''])[-1]))
-print('.kaos-complete present: %s, objects on disk: %d of %d' % ('.kaos-complete' in have, len(have & set(TREE)), len(TREE)))
-kept = 'downloaded %d of %d' % (len(TREE) - len(YOLO), len(TREE)) in out
-print('the files of the old copy were kept, only the rest was downloaded: %s' % kept)
-ok = p.returncode == 0 and '.kaos-complete' in have and have & set(TREE) == set(TREE) and runs > 3 and kept
-print('%s: a copy that is being completed is never removed by another job\'s cleanup, and is marked only whole'
+print('.kaos-complete present: %s, objects on disk under data/: %d of %d' % (marked, len(have & set(TREE)), len(TREE)))
+again = 'downloaded %d of %d' % (len(TREE), len(TREE)) in out
+leftovers = sorted(n for n in os.listdir(os.path.dirname(dest)) if n != COMMIT)
+print('the whole commit was downloaded again, nothing of the old layout reused: %s; left beside the copy: %s'
+      % (again, leftovers))
+ok = (p.returncode == 0 and marked and have == set(TREE) and runs > 3 and again and not leftovers)
+print('%s: a copy that is being made is never removed by another job\'s cleanup, and is marked only whole'
       % ('PASS' if ok else 'FAIL'))
 sys.exit(0 if ok else 1)

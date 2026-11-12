@@ -203,7 +203,7 @@ def test_this_jobs_image_and_download_are_touched_before_the_cleanup():
     touch = lines.index('touch -c "$SIF"')
     first_clean = next(i for i, l in enumerate(lines) if l.startswith("find $SCR/"))
     assert touch < first_clean
-    assert "os.utime(str(MARK), None)" in payloads.STAGEIN and "MARK.touch()" in payloads.STAGEIN
+    assert "os.utime(str(MARK), None)" in payloads.STAGEIN and "os.replace(tmp, str(MARK))" in payloads.STAGEIN
 
 
 def _pull_block():

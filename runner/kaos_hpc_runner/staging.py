@@ -13,16 +13,15 @@ before anything is submitted: no room in the quota (InsufficientQuota), a stagin
 another staging contract (StagingMismatch), and a dataset object whose name is reserved for the
 platform (ReservedName).
 
-Names that are not copied. Reserved: the markers of a copy on the site live at its root under
-`.kaos-` (.kaos-ready, .kaos-used, .kaos-complete, .kaos-commit, ...) and the staging tool's half-downloaded
-files end in `.kaos-part`; a dataset object with such a name would be taken for a marker, or refused by the
-staging tool mid-copy. Unsafe: a path with a `..`, `.` or empty part, a leading `/` or a NUL byte could be
+Names that are not copied. Reserved: the staging tool's half-downloaded files end in `.kaos-part`, beside the
+file they become; a dataset object with such a name would be refused by the staging tool mid-copy. (A copy on
+the site keeps the dataset's files under `<copy>/data/` and every file of the platform beside that folder, so
+no other name of a dataset can collide with one.) Unsafe: a path with a `..`, `.` or empty part, a leading `/` or a NUL byte could be
 written outside the dataset's folder. Too long: no room for the suffix of a half-downloaded file. A file that is
 also a folder (`a` and `a/b`). All are refused here, by name, before anything is copied or submitted (name_rule
 and Names; a zero-byte folder marker such as `docs/` is skipped, not refused):
-a small listing of the root names under `.kaos-` first, every name of the plan when the copy is made from the
-login node, and every name of the commit when the job is about to stage in-job. The `.kaos/` folder is the
-platform's own inside a dataset and is staged like any other.
+every name of the plan when the copy is made from the login node, and every name of the commit when the job is
+about to stage in-job. A `.kaos/` or `.kaos-*` name inside a dataset is staged like any other.
 
 The staging contract (CONTRACT) is what `status` and `stage` mean to the runner and to the staging tool,
 which ship separately. The runner asks the tool for its number (`version`) and sends its own with every
@@ -47,7 +46,7 @@ from . import settings
 
 STAGE_BUDGET_S = 4 * 3600
 EX_RETRY, EX_NOSPACE, EX_USAGE, EX_CONTRACT = 75, 76, 2, 78
-CONTRACT = 2   # 2 = the whole tree of the commit; the staging tool's CONTRACT must be the same number
+CONTRACT = 2   # 2 = the whole tree of the commit, its files under <copy>/data/; the tool's CONTRACT is the same number
 
 
 class InsufficientQuota(Exception):
@@ -69,9 +68,6 @@ class ReservedName(Exception):
     object and which of the two it is, for the job's status and the pipeline log."""
 
 
-RESERVED_PREFIX = '.kaos-'
-
-
 def name_rule(path, size=0):
     """Why a dataset object is not copied under its own name, or '' when it is.
 
@@ -84,8 +80,8 @@ def name_rule(path, size=0):
 
       'marker'    a zero-byte object whose name ends in "/": a folder marker, skipped
       'unsafe'    empty, a leading "/", an empty, "." or ".." part, a NUL byte: it could leave the folder
-      'reserved'  a root name starting with .kaos- (the markers of a copy) or a file name ending in
-                  .kaos-part (half-downloaded files); the .kaos/ folder is the platform's own and is copied
+      'reserved'  a file name ending in .kaos-part (the staging tool's half-downloaded files, named beside their
+                  target); the dataset's files live under data/, so no name can collide with a marker of a copy
       'long'      a part longer than 255 bytes, or a file name longer than 245 (no room for .kaos-part)
     """
     if not isinstance(path, str):
@@ -95,7 +91,7 @@ def name_rule(path, size=0):
     parts = path.split('/')
     if not path or '\x00' in path or path.startswith('/') or any(p in ('', '.', '..') for p in parts):
         return 'unsafe'
-    if parts[0].startswith('.kaos-') or parts[-1].endswith('.kaos-part'):
+    if parts[-1].endswith('.kaos-part'):
         return 'reserved'
     sizes = [len(p.encode('utf-8', 'replace')) for p in parts]
     if max(sizes) > 255 or sizes[-1] > 245:
@@ -106,8 +102,7 @@ def name_rule(path, size=0):
 WHY = {
     'unsafe': 'a path that is empty, starts with "/", or has an empty part, a "." or ".." part or a NUL byte could '
               'be written outside the dataset\'s folder on the site',
-    'reserved': 'names starting with .kaos are reserved for the platform (at the root of a dataset every name '
-                'starting with .kaos-, and anywhere a file name ending in .kaos-part)',
+    'reserved': 'a file name ending in .kaos-part is reserved for the platform (half-downloaded files)',
     'long': 'a file name longer than 245 bytes, or a folder name longer than 255, cannot be written on the site',
 }
 
@@ -476,8 +471,6 @@ def stage_dataset(cfg, inp, stager, mint_wallet, info=None):
     if not wallet:
         return ''
     api = lakefs + '/api/v1/repositories/' + urllib.parse.quote(repo, safe='')
-    # First, and cheap: the root names under .kaos-, so that a reserved name never waits for the staging tool.
-    refuse_names(api, repo, commit, wallet, RESERVED_PREFIX)
     if not stager.have_key() or not ssh_present():
         print('stage: skipped (needs the staging key and an ssh client) - the job stages in-job', flush=True)
         refuse_names(api, repo, commit, wallet)     # the in-job copy joins every name to its folder: check them all

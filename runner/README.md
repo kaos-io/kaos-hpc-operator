@@ -20,7 +20,7 @@ Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /ru
 | `staging.py` | `Stager` (ssh to the forced-command stager), dataset staging (every object of the pinned commit, whatever the dataset's shape; `CONTRACT` is the staging contract the runner checks against the staging tool's `version` and sends with every `status` and `stage`; `name_rule` and `Names` refuse, before anything is staged or submitted, the object names that cannot be copied), `staging_record` (one bounded record of `status.run.staged` per input: kind first/delta/cached, files, bytes, seconds; the follower prints one line from each) |
 | `image.py` | registry client, docker-archive streaming, `image_key` (tar name = SIF name = `kaos-image=` lease, always in the job comment), `cleanup_images` (asks the stager's `gc` when an attempt is over; AC-65) |
 | `jobscript.py` | the batch script (+ KAOS_METRIC sampler, tar deletion after SIF build) |
-| `payload/` | on-node programs: stagein/handback/ckpt/slots/idlewatch (`payloads.py` loads them). Stage-in believes a cache hit only if `.kaos-complete` is still in the folder after it looked for the cleanup's lock, and removes `name.part-*` files of a killed older writer that the commit does not list before it marks a copy |
+| `payload/` | on-node programs: stagein/handback/ckpt/slots/idlewatch (`payloads.py` loads them). Stage-in keeps a copy as `<copy>/data/` (the dataset's files) with `.kaos-complete` (it holds the word `data`) and `.kaos-parts/` beside it; it believes a cache hit only if the marker names that layout and is still in the folder after it looked for the cleanup's lock; a copy of an older layout (files directly in the folder) is moved aside whole, under the cleanup's lock, and made again |
 | `result.py` | the step's result on its way back: the check (`version` 1, `status` `ok`, `values`, `reads`, `writes`, 8 KiB by cost) and the wire form it is written in |
 | `sharing.py` | PRD-1609 inputs-in-script |
 | `reporter.py` | status merge patches: `status.run`, `status.result` (only with the report of a step that ended well), `status.pendingReason` |
@@ -60,7 +60,7 @@ The job script and the runner reserve these codes; the controller turns them int
 | 239 | runner | the step's image reference can never be pulled (reported FAILED, no site job) | `InvalidImage` |
 | 240 | runner | the slot manager stopped the step for computing on a GPU outside its set, on a node shared by several steps | `GPUViolation` |
 | 241 | runner | the site's staging tool speaks another staging contract, or is not installed for the project after 20 minutes of asking (counted from the first answer that it is absent; reported FAILED, nothing staged, no site job) | `StagingMismatch` |
-| 242 | runner | the dataset holds an object that cannot be copied to the site: a name reserved for the platform, a path that could leave the dataset's folder, a name too long, or a file that is also a folder (reported FAILED, nothing staged, no site job) | `ReservedName` |
+| 242 | runner | the dataset holds an object that cannot be copied to the site: a name ending in `.kaos-part`, a path that could leave the dataset's folder, a name too long, or a file that is also a folder (reported FAILED, nothing staged, no site job) | `ReservedName` |
 | 243 | job script, or runner | the step ended well but its result could not be handed back: the job could not read or upload the result file (job script); the runner could not fetch it, nothing arrived, or the run has no way to hand a result back, in which case nothing is submitted (runner, reported FAILED) | `ResultNotHandedBack` |
 | 244 | runner | the result file the job handed back is not a result of the step contract (reported FAILED) | `InvalidResult` |
 
@@ -75,23 +75,27 @@ the job script parses it.
 
 **The inputs.** Each entry of `HPC_INPUTS` is staged whole, at its pinned commit: from a login node by the site's
 staging tool when the runner has the staging key, else in the job (`payload/stagein.py`, on the job's own time). The
-job script is told where (`KAOS_INPUTS`, one word per input: `name|repository|commit|resident path`) and presents both
-kinds the same way, read-only in the container:
+job script is told where (`KAOS_INPUTS`, one word per input: `name|repository|commit|resident path`, the path being the
+copy's `data/` folder) and presents both kinds the same way, read-only in the container:
 
 ```
 $KAOS_STAGED_ROOT/                 /kaos/inputs: a folder of this job
-    <input>/                       the copy of the dataset commit, bound here
+    <input>/                       the dataset's files, bound here: the `data/` folder of the copy, nothing else
     <input>.kaos-ready             {"repo": "...", "commit": "...", "full": true}
 ```
+
+A copy on the site is a folder `<copy>/` with the dataset's files under `<copy>/data/` and every file of the platform
+beside that folder: `.kaos-ready`, `.kaos-used` (and, while it is made, `.kaos-plan`, `.kaos-linked`,
+`.kaos-completing`) in the staging tool's copy; `.kaos-complete` and `.kaos-parts/` in the in-job copy. The job script
+binds `<copy>/data` for both kinds, alone on a node and on a shared node, so a dataset file can have any name that is
+safe on the site (only a file name ending in `.kaos-part` is refused). A copy of an older layout, with its files
+directly in the folder, is never served: the staging tool treats it as a partial copy (never ready, never a base,
+removed when unleased and unused for a day), and the in-job stage-in moves it aside and makes the copy again.
 
 The record is written by the job script only for a copy that is whole (the staging tool's ready marker, or the
 in-job copy's `.kaos-complete`). An input that cannot be staged ends the job 232 before the step starts. Every input's
 commit is a `kaos-commit=` word of the job comment, so the staging tool evicts none of them while the job queues or
 runs. Not staged: a model or an artifact a needed step wrote; kaos-lib downloads those.
-
-Still open: the copy is bound as its cache folder is, and both caches keep their own markers inside it (`.kaos-ready`,
-`.kaos-used` in the staging tool's; `.kaos-complete`, `.kaos-parts/` in the in-job one), so the step sees those beside
-the dataset's files. `tests/test_step_contract.py` holds the expectation as an expected failure.
 
 **The result.** After a step that exited 0, the job script runs `payload/handback.py`: it uploads
 `$KAOS_WORK/output/kaos-result.json`, unread, to `hpc-outputs/<workflow uid>/<step>/<site job id>/kaos-result.json` on the

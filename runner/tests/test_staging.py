@@ -80,8 +80,8 @@ def _stage(cfg, stager, wallet="wallet-jwt"):
 
 
 def _listings(lakefs):
-    """The listings of the commit's objects, without the one small look for reserved root names."""
-    return [u for u in lakefs.urls if "/objects/ls?" in u and "prefix=.kaos-" not in u]
+    """The listings of the commit's objects."""
+    return [u for u in lakefs.urls if "/objects/ls?" in u]
 
 
 def _stage_call(stager):
@@ -143,20 +143,15 @@ def test_the_filter_is_gone():
 # ------------------------------------------------ names reserved for the platform
 
 @pytest.mark.parametrize("name", [".kaos-ready", ".kaos-commit", ".kaos-complete", ".kaos-notes/a.txt"])
-@pytest.mark.parametrize("key", [True, False])
-def test_a_dataset_with_a_reserved_root_name_stops_the_run_on_either_staging_path(monkeypatch, name, key):
-    """Site markers live under `.kaos-` at the root of a copy. A dataset object there would be refused by the
-    staging tool (and the job would copy in-job on node time) or would overwrite a marker. Both paths stop
-    before anything is staged or submitted: with the staging key (login-node staging) and without it (in-job)."""
+def test_a_dataset_object_named_like_a_marker_of_a_copy_is_staged_like_any_other(monkeypatch, name):
+    """The dataset's files live under data/ in a copy and the markers beside that folder, so a dataset may use any
+    name that is not unsafe, too long or a half-downloaded file's. The staging tool is asked, and sent the object."""
     lakefs = _LakeFS(dict(NOT_YOLO, **{name: 3}))
-    stager = _Stager({"ready": False, "base": None}, key=key)
+    stager = _Stager({"ready": False, "base": None})
     cfg = _twin(monkeypatch, lakefs, stager)
-    with pytest.raises(staging.ReservedName) as e:
-        _stage(cfg, stager)
-    assert stager.calls == [], "the staging tool is not even asked"
-    assert repr(name) in str(e.value) and "names starting with .kaos are reserved for the platform" in str(e.value)
-    assert "Nothing was staged" in str(e.value)
-    assert len(lakefs.urls) == 1 and "prefix=.kaos-" in lakefs.urls[0], "one small listing, not the whole commit"
+    assert _stage(cfg, stager).endswith(COMMIT)
+    assert name in {r["path"] for r in _stage_call(stager)[1] if r["op"] == "fetch"}
+    assert not any("prefix=" in u and "prefix=&" not in u for u in lakefs.urls), "no extra look at the root names"
 
 
 @pytest.mark.parametrize("diff", [False, True])

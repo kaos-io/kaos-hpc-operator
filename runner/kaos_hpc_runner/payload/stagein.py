@@ -12,17 +12,20 @@ base = EP + '/api/v1/repositories/' + urllib.parse.quote(REPO, safe='')
 commit = os.environ['DATASET_COMMIT']
 dest = pathlib.Path(os.environ['DATASET_CACHE']) / REPO / commit
 open(os.environ['DATASET_DIRFILE'], 'w').write(str(dest))
-# The marker of a whole copy is .kaos-complete: names starting with .kaos- at the root are reserved for the
-# platform, so no file of a dataset can be taken for it. It is written last, after the files on disk were checked
-# against the commit's listing. A copy that has only .complete was made when stage-in kept data.yaml, images/ and
-# labels/ alone: it is completed below, never served as it is.
+# A copy is a folder <cache>/<repo>/<commit>/ with the dataset's files under data/ and every file of the platform
+# beside it: the marker .kaos-complete and the half-downloaded files in .kaos-parts/. The job binds data/ onto the
+# step's input folder, so the step sees the dataset's files and nothing else, and no name of a dataset can collide
+# with a file of the platform. The marker is written last, after the files on disk were checked against the
+# commit's listing, and says which layout the copy has (LAYOUT). A copy of an older layout (its files directly in
+# the folder: a marker .kaos-complete with no layout in it, or a .complete) is never served and never completed:
+# it is moved aside whole and the copy is made again (retire_old_layout).
 #
-# The cleanup of unused copies (jobscript.py, the data-cache lines) and this program agree on three things:
-#  1. The cleanup matches a folder only by an old marker (.kaos-complete, or .complete with no .kaos-complete
-#     beside it). A folder being filled has neither: .complete is removed (or, when it is a file of the dataset,
-#     made new) BEFORE the first download.
+# The cleanup of unused copies (jobscript.py, the data-cache lines) and this program agree on four things:
+#  1. The cleanup matches a folder only by an old marker (.kaos-complete, or .complete of an older layout). A
+#     folder being filled has neither: no marker is written before the last file is checked.
 #  2. The cleanup takes <folder>.kaos-clean (mkdir, atomic), looks at the marker's age AGAIN, moves the folder away
-#     in one rename and lets go; the slow delete happens on the moved folder.
+#     in one rename and lets go; the slow delete happens on the moved folder. A copy of an older layout is moved
+#     away by this program in the same way, under the same lock.
 #  3. This program changes the marker FIRST and looks for <folder>.kaos-clean AFTER. Whichever of the two came
 #     second sees the other: the cleanup sees a new or missing marker and leaves the folder, or this program sees
 #     the cleanup, waits the moment it takes, and starts over on what is there then.
@@ -31,6 +34,8 @@ open(os.environ['DATASET_DIRFILE'], 'w').write(str(dest))
 #     believed only if the marker is STILL in the folder after that look; the cleanup's move takes it away, and a
 #     folder another stage-in has begun to fill again has none until that copy is whole. Otherwise: start over,
 #     at most HIT_RETRIES times, then fill the folder like a miss (that is always safe).
+LAYOUT = 'data'
+DATA = dest / LAYOUT
 MARK, OLD_MARK = dest / '.kaos-complete', dest / '.complete'
 CLEAN = pathlib.Path(str(dest) + '.kaos-clean')
 def cleaning():
@@ -44,17 +49,40 @@ def cleaning():
             return waited
         waited = True
         time.sleep(1)
-HIT_RETRIES, lost = 5, 0
-while True:
+def old_layout():
+    # True for a copy whose files are directly in its folder: a .complete, or a marker that does not name LAYOUT.
+    if os.path.lexists(str(OLD_MARK)):
+        return True
     try:
-        os.utime(str(MARK), None)           # last use, for the cleanup; also what tells a cleanup to leave it
-        hit = True
+        return MARK.read_text() != LAYOUT
     except OSError:
-        hit = False
+        return False
+def retire_old_layout():
+    # Under the cleanup's lock (rule 2), so that the two never move the folder at once: the folder goes aside whole.
+    try:
+        CLEAN.mkdir()
+    except OSError:
+        return
+    try:
+        if old_layout():
+            os.rename(str(dest), str(dest) + '.kaos-trash-' + str(os.getpid()))
+            print('stage-in: a copy of an older layout was moved aside:', dest, flush=True)
+    except OSError:
+        pass
+    finally:
         try:
-            os.utime(str(OLD_MARK), None)   # an older copy this job is about to complete: not unused any more
+            CLEAN.rmdir()
         except OSError:
             pass
+HIT_RETRIES, lost = 5, 0
+while True:
+    if old_layout():
+        retire_old_layout()
+    try:
+        os.utime(str(MARK), None)           # last use, for the cleanup; also what tells a cleanup to leave it
+        hit = MARK.read_text() == LAYOUT
+    except OSError:
+        hit = False
     if cleaning():
         continue                            # a cleanup was at this folder: look again at what is there now
     if hit and not MARK.is_file():          # the cleanup moved the folder after the renewal (rule 4)
@@ -63,13 +91,12 @@ while True:
             continue
         hit = False
     if hit:
-        try:
-            os.utime(str(OLD_MARK), None)   # a job script from before .kaos-complete cleans by this one
-        except OSError:
-            pass
         print('stage-in: cache hit', dest, flush=True)
         sys.exit(0)
     break
+if old_layout():
+    sys.exit('stage-in: the copy of %s@%s on the site (%s) was made by an older version and could not be moved aside '
+             'now (a cleanup is at it). Nothing was downloaded. Run the step again.' % (REPO, commit[:12], dest))
 def ls(prefix):
     objs, after = [], ''
     while True:
@@ -95,8 +122,8 @@ def name_rule(path, size=0):
 
       'marker'    a zero-byte object whose name ends in "/": a folder marker, skipped
       'unsafe'    empty, a leading "/", an empty, "." or ".." part, a NUL byte: it could leave the folder
-      'reserved'  a root name starting with .kaos- (the markers of a copy) or a file name ending in
-                  .kaos-part (half-downloaded files); the .kaos/ folder is the platform's own and is copied
+      'reserved'  a file name ending in .kaos-part (the staging tool's half-downloaded files, named beside their
+                  target); the dataset's files live under data/, so no name can collide with a marker of a copy
       'long'      a part longer than 255 bytes, or a file name longer than 245 (no room for .kaos-part)
     """
     if not isinstance(path, str):
@@ -106,7 +133,7 @@ def name_rule(path, size=0):
     parts = path.split('/')
     if not path or '\x00' in path or path.startswith('/') or any(p in ('', '.', '..') for p in parts):
         return 'unsafe'
-    if parts[0].startswith('.kaos-') or parts[-1].endswith('.kaos-part'):
+    if parts[-1].endswith('.kaos-part'):
         return 'reserved'
     sizes = [len(p.encode('utf-8', 'replace')) for p in parts]
     if max(sizes) > 255 or sizes[-1] > 245:
@@ -116,8 +143,7 @@ OUTSIDE = 'it could be written outside the dataset\'s folder'
 WHY = {
     'unsafe': 'a path that is empty, starts with "/", or has an empty part, a "." or ".." part or a NUL byte is '
               'not copied: ' + OUTSIDE,
-    'reserved': 'names starting with .kaos are reserved for the platform (at the root of a dataset every name '
-                'starting with .kaos-, and anywhere a file name ending in .kaos-part)',
+    'reserved': 'a file name ending in .kaos-part is reserved for the platform (half-downloaded files)',
     'long': 'a file name longer than 245 bytes, or a folder name longer than 255, cannot be written on the site',
 }
 def refuse(path, why):
@@ -143,16 +169,10 @@ for o in ls(''):
     objs.append(o)
 print('stage-in:', len(objs), 'objects @', commit[:12], flush=True)
 # From here the folder is being filled: no marker a cleanup could match (see 1 and 3 above).
-try:
-    if any(o['path'] == '.complete' for o in objs):
-        os.utime(str(OLD_MARK), None)       # a file of the dataset: made new, downloaded again below if it differs
-    else:
-        OLD_MARK.unlink()                   # the marker of a copy made before .kaos-complete
-except OSError:
-    pass
 cleaning()                                  # a cleanup that was already at the folder finishes first
-# Where each file really lands: a folder of the copy that is a symbolic link is not written through.
-ROOT = os.path.realpath(str(dest))
+# Where each file really lands: a folder of the copy that is a symbolic link is not written through, data/ itself
+# included.
+ROOT = os.path.realpath(str(dest)) + os.sep + LAYOUT
 inside = set()
 def check_inside(o, parent):
     if parent not in inside:
@@ -167,7 +187,7 @@ PARTS = dest / '.kaos-parts'
 ME = '%s-%d' % (os.environ.get('SLURM_JOB_ID', ''), os.getpid())
 def fetch(numbered):
     i, o = numbered
-    p = dest / o['path']
+    p = DATA / o['path']
     check_inside(o, str(p.parent))          # before the folder is made: nothing is created through a link
     p.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -196,36 +216,25 @@ def fetch(numbered):
         raise
     return 1
 PARTS.mkdir(parents=True, exist_ok=True)
+DATA.mkdir(exist_ok=True)
 with concurrent.futures.ThreadPoolExecutor(8) as ex:
     n = sum(ex.map(fetch, enumerate(objs)))
 # The copy is marked only when what is on disk IS the commit: every listed file there with its size, and no file
 # the listing does not have. Anything else is a failure, never a marker.
 def on_disk(o):
     try:
-        st = (dest / o['path']).lstat()
+        st = (DATA / o['path']).lstat()
     except OSError:
         return o['path']
     return None if st.st_size == o.get('size_bytes') else o['path']
 with concurrent.futures.ThreadPoolExecutor(8) as ex:
     wrong = [p for p in ex.map(on_disk, objs) if p]
 listed, extra = set(o['path'] for o in objs), []
-for d, dirs, names in os.walk(str(dest)):
-    rel = os.path.relpath(d, str(dest))
-    if rel == '.':
-        dirs[:] = [x for x in dirs if not x.startswith('.kaos-')]
-        names = [x for x in names if not x.startswith('.kaos-')]
-    # Half-downloaded files of a writer from before .kaos-parts (name.part-<job>-<pid>) are never dataset files (a
-    # dataset name of that shape is refused above) unless the commit lists them: one a killed writer left is removed
-    # here, before the copy is marked. Not counted either: .complete, which a job script from before .kaos-complete
-    # writes into the folder when it ends.
+for d, dirs, names in os.walk(str(DATA)):
+    rel = os.path.relpath(d, str(DATA))
     for name in names:
         x = os.path.normpath(os.path.join(rel, name))
-        if '.part-' in name and x not in listed:
-            try:
-                os.unlink(os.path.join(d, name))
-            except OSError:
-                extra.append(x)             # it stays and is counted: the copy is then not marked
-        elif x not in listed and x != '.complete':
+        if x not in listed:
             extra.append(x)
 if wrong or extra:
     sys.exit('stage-in: the copy of %s@%s on the site is not the commit: %d of %d files are missing or have another '
@@ -238,5 +247,8 @@ for leftover in PARTS.iterdir():            # this writer's, and those a killed 
             leftover.unlink()
     except OSError:
         pass
-MARK.touch()
+tmp = str(MARK) + '.new-' + ME             # replaced in one step: a reader sees the whole marker or none
+with open(tmp, 'w') as f:
+    f.write(LAYOUT)
+os.replace(tmp, str(MARK))
 print('stage-in: downloaded', n, 'of', len(objs), '->', dest, flush=True)

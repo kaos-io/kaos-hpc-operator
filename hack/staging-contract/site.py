@@ -5,8 +5,9 @@ staging tool (stager.py of the platform repository, in forced-command mode), whi
 lakeFS and reads fake `lfs` / `squeue`. No test in either repository imports this file.
 
 usage: site.py <runner dir> <stager.py> <dir of the staging tool's test_stager.py> <scenario>
-scenarios: any-shape, old-partial, reserved-name, unsafe-name, uncopyable, folder-marker, file-folder-delta,
-           tool-absent (give a stager.py path that does not exist), new-runner-old-tool, old-runner-new-tool
+scenarios: any-shape, old-partial, old-layout, marker-like-names, reserved-name, unsafe-name, uncopyable,
+           folder-marker, file-folder-delta, tool-absent (give a stager.py path that does not exist),
+           new-runner-old-tool, old-runner-new-tool
 """
 import atexit
 import http.server
@@ -28,7 +29,8 @@ import helpers            # noqa: E402
 import test_stager        # noqa: E402  (FAKE_LFS, FAKE_SQUEUE)
 from kaos_hpc_runner import staging   # noqa: E402
 
-C1, C2, C3, C4, C5, C6, C7, C8, C9, CA, CB = ('c%s' % c * 32 for c in '123456789ab')
+REPO = 'dataset-ds'
+C1, C2, C3, C4, C5, C6, C7, C8, C9, CA, CB, CC = ('c%s' % c * 32 for c in '123456789abc')
 YOLO = {'data.yaml': b'names: [x]', 'images/a.jpg': b'a' * 100, 'labels/a.txt': b'0 0.5'}
 TREES = {
     # not YOLO-shaped: no data.yaml, images/ or labels/
@@ -38,7 +40,7 @@ TREES = {
     C2: {'scenes/0001/points.ply': b'p' * 300, 'scenes/0002/points.ply': b'q' * 200,
          'calibration/cam0.json': b'{"fx": 2}', 'README.md': b'# a 3D dataset', 'splits.csv': b'0001,train\n0002,val\n'},
     C3: dict(YOLO, **{'README.md': b'# notes', 'calibration/cam0.json': b'{"fx": 1}'}),
-    C4: {'scenes/0001/points.ply': b'p' * 300, '.kaos-ready': b'not a marker'},     # a reserved root name
+    C4: {'scenes/0001/points.ply': b'p' * 300, 'scenes/0001/points.ply.kaos-part': b'x'},   # a reserved name
     C5: {'scenes/0001/points.ply': b'p' * 300, 'a/../../../escape.txt': b'out'},    # a path that leaves the folder
     C6: {'a': b'x', 'a-b': b'w', 'a/b': b'y', 'z.txt': b'z'},                       # a file that is also a folder
     C7: {'d/' + 'n' * 250: b'x', 'ok': b'y'},                                       # a file name too long for the site
@@ -46,6 +48,9 @@ TREES = {
     # between two versions: the folder `a` becomes a file, the file `f` becomes a folder
     C9: {'a/b': b'1', 'a/c/d': b'2', 'f': b'3', 'keep': b'k'},
     CA: {'a': b'now a file', 'f/g': b'now a folder', 'keep': b'k'},
+    # names of the platform's files in a copy: the dataset lives under data/, so they are data
+    CC: {'.kaos-ready': b'not a marker', '.kaos-used': b'u', '.kaos-plan': b'p', 'sub/.kaos-ready': b'x', 'data': b'a file',
+         'k': b'2'},
 }
 
 
@@ -103,27 +108,37 @@ open(os.path.join(keydir, 'id_ed25519'), 'w').close()
 staging.time.sleep = lambda s: None
 
 
-def tree(path):
+def tree(path, skip_markers=False):
+    """The files under path: for a copy on the site, path is the data/ folder, which holds the dataset and
+    nothing else. skip_markers is for a copy of the older layout, whose folder also holds the tool's files."""
     out = {}
     for d, _, names in os.walk(path):
         for n in names:
             rel = os.path.relpath(os.path.join(d, n), path)
-            if not rel.startswith('.kaos-'):
+            if not (skip_markers and rel.startswith('.kaos-')):
                 with open(os.path.join(d, n), 'rb') as f:
                     out[rel] = f.read()
     return out
 
 
 def stage(commit):
-    cfg = helpers.settings(DATASET_REPO='ds', DATASET_COMMIT=commit,
-                           LAKEFS_EXTERNAL_URL='http://127.0.0.1:%d' % httpd.server_address[1])
+    url = 'http://127.0.0.1:%d' % httpd.server_address[1]
     info = {}
-    path = staging.stage_dataset(cfg, staging.Stager(cfg, staging_dir=keydir), lambda: 'wallet', info=info)
+    if 'inp' in staging.stage_dataset.__code__.co_varnames[:staging.stage_dataset.__code__.co_argcount]:
+        cfg = helpers.settings(HPC_INPUTS=json.dumps([{'name': 'dataset', 'repo': REPO, 'ref': 'main', 'commit': commit}]),
+                               LAKEFS_EXTERNAL_URL=url)
+        cfg.check_job()
+        path = staging.stage_dataset(cfg, cfg.inputs[0], staging.Stager(cfg, staging_dir=keydir), lambda: 'wallet',
+                                     info=info)
+    else:                       # a runner from before the step contract (old-runner-new-tool): one dataset in the env
+        cfg = helpers.settings(DATASET_REPO=REPO, DATASET_COMMIT=commit, LAKEFS_EXTERNAL_URL=url)
+        path = staging.stage_dataset(cfg, staging.Stager(cfg, staging_dir=keydir), lambda: 'wallet', info=info)
     return path, info
 
 
 def marker(path):
-    with open(os.path.join(path, '.kaos-ready')) as f:
+    """The ready marker of the copy whose data/ folder is path: beside it."""
+    with open(os.path.join(os.path.dirname(path), '.kaos-ready')) as f:
         return json.load(f)
 
 
@@ -137,27 +152,30 @@ if scenario == 'any-shape':
     path, info = stage(C1)
     check('a tree with no data.yaml, images/ or labels/ is complete on the site (%d files)' % len(TREES[C1]),
           path and tree(path) == TREES[C1])
-    check('its marker says full, and the staging record is a first copy of every file',
-          marker(path).get('full') is True and (info['kind'], info['files']) == ('first', len(TREES[C1])))
+    check('its marker says full and the data layout, and the staging record is a first copy of every file',
+          marker(path).get('full') is True and marker(path).get('layout') == 'data'
+          and (info['kind'], info['files']) == ('first', len(TREES[C1])))
+    check('the path the job binds is the data/ folder, and the tool\'s own files are beside it',
+          os.path.basename(path) == 'data' and sorted(os.listdir(os.path.dirname(path))) == ['.kaos-plan', '.kaos-ready', 'data'])
     path, info = stage(C2)
     check('the next version is a delta on it and is complete too', tree(path) == TREES[C2] and info['kind'] == 'delta')
     path, info = stage(C2)
     check('a whole copy is a cache hit', info['kind'] == 'cached')
 elif scenario == 'old-partial':
-    old = os.path.join(root, 'datasets', 'ds', C3)
+    old = os.path.join(root, 'datasets', REPO, C3)
     for rel, body in YOLO.items():
         os.makedirs(os.path.dirname(os.path.join(old, rel)), exist_ok=True)
         with open(os.path.join(old, rel), 'wb') as f:
             f.write(body)
     def partial(commit, age):
         """A copy as the staging tool of before the contract made it: the YOLO folders, a marker without "full"."""
-        d = os.path.join(root, 'datasets', 'ds', commit)
+        d = os.path.join(root, 'datasets', REPO, commit)
         for rel, body in YOLO.items():
             os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
             with open(os.path.join(d, rel), 'wb') as f:
                 f.write(body)
         with open(os.path.join(d, '.kaos-ready'), 'w') as f:
-            json.dump({'repo': 'ds', 'commit': commit, 'ref': 'main', 'prefix': '', 'base': None, 'files': 3,
+            json.dump({'repo': REPO, 'commit': commit, 'ref': 'main', 'prefix': '', 'base': None, 'files': 3,
                        'bytes': 115, 'staged_at': 1.0, 'host': 'login02'}, f)
         os.utime(os.path.join(d, '.kaos-ready'), (time.time() - age, time.time() - age))
         return d
@@ -170,16 +188,50 @@ elif scenario == 'old-partial':
     path, info = stage(C1)
     check('an old partial copy is not the base of another version', info['kind'] == 'first' and tree(path) == TREES[C1])
     check('a leased one and one used in the last day stay; an old unused one goes',
-          tree(old) == YOLO and tree(recent) == YOLO and not os.path.exists(unused))
+          tree(old, True) == YOLO and tree(recent, True) == YOLO and not os.path.exists(unused))
     path, info = stage(C3)
     check('an old partial copy of the same commit is not served as a cache hit', info['kind'] != 'cached')
     check('it is completed where it is: the same folder the job reads, now the whole tree',
-          path == old and os.stat(old).st_ino == folder and tree(path) == TREES[C3]
+          path == os.path.join(old, 'data') and os.stat(old).st_ino == folder and tree(path) == TREES[C3]
           and marker(path).get('full') is True)
     check('no second copy and no staging folder is left',
-          sorted(os.listdir(os.path.join(root, 'datasets', 'ds'))) == sorted([C1, C3, CB]))
+          sorted(os.listdir(os.path.join(root, 'datasets', REPO))) == sorted([C1, C3, CB]))
+elif scenario == 'old-layout':
+    import time
+
+    def old_layout_copy(commit, **marker_fields):
+        """A whole copy as the tool made it before the data/ layout: the files directly in the commit folder."""
+        d = os.path.join(root, 'datasets', REPO, commit)
+        for rel, body in dict(TREES[commit], **{'STALE.bin': b'stale'}).items():
+            os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
+            with open(os.path.join(d, rel), 'wb') as f:
+                f.write(body)
+        with open(os.path.join(d, '.kaos-ready'), 'w') as f:
+            json.dump(dict({'repo': REPO, 'commit': commit, 'ref': 'main', 'prefix': '', 'base': None,
+                            'files': len(TREES[commit]), 'full': True, 'staged_at': 1.0}, **marker_fields), f)
+        os.utime(os.path.join(d, '.kaos-ready'), (time.time() - 3 * 86400, time.time() - 3 * 86400))
+        return d
+    old_layout_copy(C2)
+    path, info = stage(C3)
+    check('an old-layout copy is not the base of another version',
+          info['kind'] == 'first' and tree(path) == TREES[C3])
+    old = old_layout_copy(C1)
+    path, info = stage(C1)
+    check('an old-layout copy is not served as a cache hit and the path is not its folder',
+          info['kind'] != 'cached' and path == os.path.join(old, 'data'))
+    check('it was completed into data/: the dataset, and none of the old copy\'s stray file',
+          tree(path) == TREES[C1] and marker(path).get('layout') == 'data')
+    path, info = stage(C1)
+    check('and now it is a cache hit', info['kind'] == 'cached')
+elif scenario == 'marker-like-names':
+    path, info = stage(CC)
+    check('names of the tool\'s own files are dataset files, staged under data/ and the copy is whole',
+          path and tree(path) == TREES[CC] and marker(path).get('full') is True and info['files'] == len(TREES[CC]))
+    check('the tool\'s own files are untouched beside data/',
+          sorted(os.listdir(os.path.dirname(path))) == ['.kaos-plan', '.kaos-ready', 'data']
+          and marker(path).get('commit') == CC)
 elif scenario in ('reserved-name', 'unsafe-name'):
-    commit, what = (C4, 'a reserved root name') if scenario == 'reserved-name' else (
+    commit, what = (C4, 'a file name ending in .kaos-part') if scenario == 'reserved-name' else (
         C5, 'an object path that leaves its folder')
     for key in (True, False):         # with the staging key (login-node staging) and without it (in-job)
         if not key:
@@ -218,7 +270,7 @@ elif scenario == 'file-folder-delta':
     path, info = stage(CA)
     check('a version where a folder became a file and a file became a folder is staged as a delta, complete',
           info['kind'] == 'delta' and tree(path) == TREES[CA])
-    check('the base is untouched', tree(os.path.join(root, 'datasets', 'ds', C9)) == TREES[C9])
+    check('the base is untouched', tree(os.path.join(root, 'datasets', REPO, C9, 'data')) == TREES[C9])
 elif scenario == 'tool-absent':
     clock = [1000.0]
     staging.time.time = lambda: clock[0]

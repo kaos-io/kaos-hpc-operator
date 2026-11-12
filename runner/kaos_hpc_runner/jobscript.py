@@ -84,19 +84,21 @@ def batch_lines(scope, scratch):
         'KEY=$(printf %s "$IMAGE_REF" | sha256sum | cut -c1-16)',
         'SIF=$SCR/sif-cache/$KEY.sif',
         # The step's inputs (spec.inputs), each a whole dataset commit, presented to the step under one root,
-        # $KAOS_STAGED_ROOT (/kaos/inputs in the container, read-only): the folder <input>/ holds the dataset,
-        # and beside it the record <input>.kaos-ready ({"repo","commit","full":true}) says which repository
+        # $KAOS_STAGED_ROOT (/kaos/inputs in the container, read-only): the folder <input>/ holds the dataset's
+        # files and nothing else (both kinds of copy keep them under <copy>/data/, beside the files of the platform,
+        # and that folder is what is bound), and beside it the record <input>.kaos-ready ({"repo","commit","full":true}) says which repository
         # and commit it is and that it is the whole tree. kaos-lib finds an input by that record. The root is
         # a folder of this job; each copy is bound onto its folder there, whichever way it was staged.
-        # KAOS_INPUTS holds one word per input: name|repository|commit|resident path.
+        # KAOS_INPUTS holds one word per input: name|repository|commit|resident path (the data/ folder of the
+        # copy staged from the login node, whose markers are beside it).
         'BIND=""; KAOS_IN_ROOT=$SCR/kaos-tmp/in-$KAOS_JOB_ID; rm -rf "$KAOS_IN_ROOT"',
         'for KAOS_IN in $KAOS_INPUTS; do',
         '  IFS="|" read -r IN_NAME IN_REPO IN_COMMIT IN_STAGED <<< "$KAOS_IN"',
         '  IN_DIR=""',
         # PRD-1541 F-06: the copy staged from a login node, when ready. The
         # marker is written last, so its presence means complete.
-        '  if [ -n "$IN_STAGED" ] && [ -f "$IN_STAGED/.kaos-ready" ]; then',
-        '    IN_DIR=$IN_STAGED; touch "$IN_DIR/.kaos-used" 2>/dev/null',
+        '  if [ -n "$IN_STAGED" ] && [ -d "$IN_STAGED" ] && [ -f "${IN_STAGED%/*}/.kaos-ready" ]; then',
+        '    IN_DIR=$IN_STAGED; touch "${IN_STAGED%/*}/.kaos-used" 2>/dev/null',
         '    echo "input $IN_NAME: resident copy $IN_DIR"',
         # F-04 stage-in, the kept fallback: the job downloads the commit itself. Fails LOUDLY (exit 232):
         # silently missing data would surface as a cryptic training error hours later.
@@ -107,8 +109,10 @@ def batch_lines(scope, scratch):
         '    export DATASET_REPO=$IN_REPO DATASET_COMMIT=$IN_COMMIT DATASET_CACHE=$SCR/data-cache'
         ' DATASET_DIRFILE=$SCR/kaos-tmp/ds-$KAOS_JOB_ID-$IN_NAME.dir',
         '    printf %s "$STAGEIN_B64" | base64 -d | python3 - || fail 232',
-        '    IN_DIR=$(cat "$DATASET_DIRFILE" 2>/dev/null); rm -f "$DATASET_DIRFILE"',
-        '    [ -n "$IN_DIR" ] && [ -f "$IN_DIR/.kaos-complete" ] || { echo "input $IN_NAME: the in-job copy is not complete"; fail 232; }',
+        '    IN_COPY=$(cat "$DATASET_DIRFILE" 2>/dev/null); rm -f "$DATASET_DIRFILE"',
+        '    [ -n "$IN_COPY" ] && [ -f "$IN_COPY/.kaos-complete" ] && [ -d "$IN_COPY/data" ] ||'
+        ' { echo "input $IN_NAME: the in-job copy is not complete"; fail 232; }',
+        '    IN_DIR=$IN_COPY/data',
         '  else',
         '    echo "input $IN_NAME: no staged copy and no way to download it in the job"; fail 232',
         '  fi',

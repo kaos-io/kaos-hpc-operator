@@ -1,6 +1,7 @@
 """PRD kaos#1911 F-04 / AC-05: the in-job stage-in (the fallback when nothing was staged from a login node)
-downloads the whole tree of the pinned commit, whatever its shape, and completes a copy an older stage-in left
-with only data.yaml, images/ and labels/ instead of serving it. The real payload runs against a fake lakeFS."""
+downloads the whole tree of the pinned commit, whatever its shape, under <copy>/data/, with the files of the
+platform beside that folder; a copy an older stage-in left (its files directly in the copy folder) is never served:
+it is moved aside and made again. The real payload runs against a fake lakeFS."""
 import json
 import os
 import pathlib
@@ -91,31 +92,43 @@ def _stage_in(tmp_path, fake):
 
 
 def _tree(dest):
-    return {str(f.relative_to(dest)): f.read_bytes() for f in dest.rglob("*")
-            if f.is_file() and str(f.relative_to(dest)) != ".kaos-complete"}
+    """The dataset's files of a copy: what is under data/, which is what the job binds."""
+    return {str(f.relative_to(dest / "data")): f.read_bytes() for f in (dest / "data").rglob("*") if f.is_file()}
 
 
 def test_a_tree_without_data_yaml_images_or_labels_is_downloaded_whole(tmp_path, lakefs):
     fake = lakefs(NOT_YOLO)
     dest, _ = _stage_in(tmp_path, fake)
     assert _tree(dest) == NOT_YOLO
-    assert (dest / ".kaos-complete").exists()
-    assert not (dest / ".kaos-commit").exists()
+    assert sorted(os.listdir(str(dest))) == [".kaos-complete", ".kaos-parts", "data"], \
+        "the platform's files are beside data/, never in it"
+    assert (dest / ".kaos-complete").read_text() == "data", "the marker says which layout the copy has"
 
 
-def test_an_old_partial_copy_is_completed_not_served(tmp_path, lakefs):
-    """The copy an older stage-in left: the YOLO folders and its marker, `.complete`."""
+@pytest.mark.parametrize("marker", [".complete", ".kaos-complete"])
+def test_a_copy_of_the_older_layout_is_never_served_it_is_moved_aside_and_made_again(tmp_path, lakefs, marker):
+    """The copy an older stage-in left: files directly in the folder and a marker without a layout in it
+    (`.complete`, or `.kaos-complete` empty), here with a dataset folder `data/` among them, which a new copy
+    must not take for its own."""
     dest = tmp_path / "data-cache" / "ds" / COMMIT
-    for rel, body in YOLO.items():
+    for rel, body in dict(YOLO, **{"data/old.bin": b"old"}).items():
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
         (dest / rel).write_bytes(body)
-    (dest / ".complete").write_text("")
+    (dest / marker).write_text("")
     fake = lakefs(dict(YOLO, **REST))
     dest, out = _stage_in(tmp_path, fake)
-    assert "cache hit" not in out, "a copy of the YOLO folders only is not the dataset"
-    assert _tree(dest) == dict(YOLO, **REST)
-    assert sorted(fake.downloads) == sorted(REST), "what the old copy holds is not downloaded again"
-    assert (dest / ".kaos-complete").exists() and not (dest / ".complete").exists(), "the old marker is gone"
+    assert "cache hit" not in out and "older layout" in out
+    assert _tree(dest) == dict(YOLO, **REST), "the old copy's files are not the new copy's"
+    assert sorted(fake.downloads) == sorted(dict(YOLO, **REST)), "nothing of the old copy is reused"
+    assert sorted(os.listdir(str(dest))) == [".kaos-complete", ".kaos-parts", "data"]
+    aside = [f for f in dest.parent.iterdir() if ".kaos-trash-" in f.name]
+    assert len(aside) == 1 and (aside[0] / "data" / "old.bin").read_bytes() == b"old", "moved aside whole, for the cleanup"
+
+
+def test_a_dataset_with_a_folder_named_data_is_staged_under_data(tmp_path, lakefs):
+    tree = {"data/train/a.bin": b"a", "data.csv": b"d", "x": b"x"}
+    dest, _ = _stage_in(tmp_path, lakefs(tree))
+    assert _tree(dest) == tree and (dest / "data" / "data" / "train" / "a.bin").is_file()
 
 
 def test_a_whole_copy_is_a_cache_hit_and_downloads_nothing(tmp_path, lakefs):
@@ -126,25 +139,28 @@ def test_a_whole_copy_is_a_cache_hit_and_downloads_nothing(tmp_path, lakefs):
     assert "cache hit" in out and fake.downloads == []
 
 
-def test_a_dataset_file_named_like_the_old_marker_is_data_and_never_a_marker(tmp_path, lakefs):
-    """`.complete` is a name a dataset may use. The marker lives under the reserved `.kaos-` prefix, so the file
-    is downloaded like any other and its presence never makes a half copy look whole."""
-    tree = dict(NOT_YOLO, **{".complete": b"a file of the dataset"})
+def test_a_dataset_file_named_like_a_marker_of_a_copy_is_data_and_never_a_marker(tmp_path, lakefs):
+    """The dataset's files live under data/, the markers beside it: `.complete` and `.kaos-complete` are names a
+    dataset may use. A download that was killed after one of them leaves no marker, so the copy is not whole."""
+    tree = dict(NOT_YOLO, **{".complete": b"a file of the dataset", ".kaos-complete": b"another",
+                             ".kaos-parts/x": b"and a folder"})
     dest = tmp_path / "data-cache" / "ds" / COMMIT
-    dest.mkdir(parents=True)
-    (dest / ".complete").write_bytes(tree[".complete"])     # a download that was killed after this one file
+    (dest / "data").mkdir(parents=True)
+    (dest / "data" / ".complete").write_bytes(tree[".complete"])
+    old = time.time() - 20 * 86400
+    os.utime(str(dest / "data" / ".complete"), (old, old))
     fake = lakefs(tree)
     dest, out = _stage_in(tmp_path, fake)
     assert "cache hit" not in out and _tree(dest) == tree
-    assert (dest / ".kaos-complete").exists()
+    assert (dest / ".kaos-complete").read_text() == "data" and (dest / "data" / ".kaos-complete").read_bytes() == b"another"
 
 
-@pytest.mark.parametrize("name", [".kaos-complete", ".kaos-commit", ".kaos-x/y.bin"])
-def test_a_reserved_root_name_fails_the_stage_in_before_any_download(tmp_path, lakefs, name):
+@pytest.mark.parametrize("name", ["a.kaos-part", "scenes/0001/points.ply.kaos-part"])
+def test_a_name_ending_in_the_part_suffix_fails_the_stage_in_before_any_download(tmp_path, lakefs, name):
     fake = lakefs(dict(NOT_YOLO, **{name: b"x"}))
     p = _run(tmp_path, fake)
     assert p.returncode != 0 and fake.downloads == []
-    assert repr(name) in p.stderr and "names starting with .kaos are reserved for the platform" in p.stderr
+    assert repr(name) in p.stderr and "a file name ending in .kaos-part is reserved for the platform" in p.stderr
     assert not (tmp_path / "data-cache" / "ds" / COMMIT / ".kaos-complete").exists()
 
 
@@ -164,10 +180,22 @@ def test_a_folder_of_the_copy_that_is_a_link_to_elsewhere_is_never_written_throu
     outside = tmp_path / "outside"
     outside.mkdir()
     dest = tmp_path / "data-cache" / "ds" / COMMIT
-    dest.mkdir(parents=True)
-    (dest / "scenes").symlink_to(outside, target_is_directory=True)
+    (dest / "data").mkdir(parents=True)
+    (dest / "data" / "scenes").symlink_to(outside, target_is_directory=True)
     p = _run(tmp_path, lakefs(NOT_YOLO))
     assert p.returncode != 0 and "outside the dataset's folder" in p.stderr and "scenes/0001/" in p.stderr
+    assert list(outside.iterdir()) == [], "nothing was written through the link"
+    assert not (dest / ".kaos-complete").exists()
+
+
+def test_a_data_folder_that_is_a_link_to_elsewhere_is_never_written_through(tmp_path, lakefs):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    dest = tmp_path / "data-cache" / "ds" / COMMIT
+    dest.mkdir(parents=True)
+    (dest / "data").symlink_to(outside, target_is_directory=True)
+    p = _run(tmp_path, lakefs(NOT_YOLO))
+    assert p.returncode != 0 and "outside the dataset's folder" in p.stderr
     assert list(outside.iterdir()) == [], "nothing was written through the link"
     assert not (dest / ".kaos-complete").exists()
 
@@ -215,7 +243,7 @@ def test_a_download_shorter_than_the_listing_is_a_failure_not_a_marker(tmp_path,
     p = _run(tmp_path, fake)
     dest = tmp_path / "data-cache" / "ds" / COMMIT
     assert p.returncode != 0 and not (dest / ".kaos-complete").exists()
-    assert not (dest / "scenes" / "0001" / "points.ply").exists(), "the short file never took the name"
+    assert not (dest / "data" / "scenes" / "0001" / "points.ply").exists(), "the short file never took the name"
 
 
 def test_files_that_vanish_while_the_copy_is_made_are_a_failure_not_a_marker(tmp_path, lakefs):
@@ -226,7 +254,7 @@ def test_files_that_vanish_while_the_copy_is_made_are_a_failure_not_a_marker(tmp
 
     def remove_what_is_there(path):
         if path == "splits.csv":            # the last in path order: the others are on disk or being written
-            for f in dest.glob("scenes/*/*"):
+            for f in (dest / "data").glob("scenes/*/*"):
                 f.unlink()
     fake.hook = remove_what_is_there
     for _ in range(3):                      # the download order is not fixed: until the hook removed something
@@ -234,15 +262,15 @@ def test_files_that_vanish_while_the_copy_is_made_are_a_failure_not_a_marker(tmp
         if p.returncode != 0:
             break
         (dest / ".kaos-complete").unlink()
-        (dest / "splits.csv").unlink()
+        (dest / "data" / "splits.csv").unlink()
     assert p.returncode != 0 and "is not the commit" in p.stderr and "was not marked complete" in p.stderr
     assert not (dest / ".kaos-complete").exists()
 
 
 def test_a_file_the_commit_does_not_have_is_a_failure_not_a_marker(tmp_path, lakefs):
     dest = tmp_path / "data-cache" / "ds" / COMMIT
-    (dest / "scenes").mkdir(parents=True)
-    (dest / "scenes" / "stray.bin").write_bytes(b"?")
+    (dest / "data" / "scenes").mkdir(parents=True)
+    (dest / "data" / "scenes" / "stray.bin").write_bytes(b"?")
     p = _run(tmp_path, lakefs(NOT_YOLO))
     assert p.returncode != 0 and "'scenes/stray.bin'" in p.stderr and not (dest / ".kaos-complete").exists()
 
@@ -251,20 +279,6 @@ def test_half_downloaded_files_do_not_stay_and_are_not_taken_for_the_dataset(tmp
     dest, _ = _stage_in(tmp_path, lakefs(NOT_YOLO))
     assert list((dest / ".kaos-parts").iterdir()) == []
     assert not [f for f in dest.rglob("*") if ".part-" in f.name]
-
-
-def test_a_part_file_a_killed_older_writer_left_is_removed_before_the_copy_is_marked(tmp_path, lakefs):
-    """A writer from before .kaos-parts wrote name.part-<job>-<pid> beside the file; killed, it left a truncated
-    one inside the copy. It is never a file of the dataset: it goes, then the copy is verified and marked."""
-    fake = lakefs(NOT_YOLO)
-    dest, _ = _stage_in(tmp_path, fake)
-    os.remove(str(dest / ".kaos-complete"))
-    for rel in ("scenes/0001/points.ply.part-77-3", "README.md.part-5-9"):
-        (dest / rel).write_bytes(b"trunc")
-    _, out = _stage_in(tmp_path, fake)
-    assert (dest / ".kaos-complete").is_file() and "downloaded 0 of" in out
-    assert not [f for f in dest.rglob("*") if ".part-" in f.name]
-    assert _tree(dest) == NOT_YOLO
 
 
 # ------------------------------------------------ the cleanup of unused copies and a stage-in at the same folder
@@ -282,7 +296,8 @@ def _cleanup(tmp_path):
 
 
 def _old_copy(tmp_path, marker=".complete", days=20):
-    """An in-job copy of the YOLO folders with its marker last used `days` ago."""
+    """An in-job copy of the older layout (the YOLO folders directly in the folder) with its marker last used
+    `days` ago."""
     dest = tmp_path / "data-cache" / "ds" / COMMIT
     for rel, body in YOLO.items():
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -301,41 +316,49 @@ def test_an_unused_copy_is_removed_by_the_cleanup_and_nothing_is_left_beside_it(
 
 
 def test_a_copy_that_is_being_completed_is_never_removed_by_another_jobs_cleanup(tmp_path, lakefs):
-    """The race of the review: the old copy's .complete is 20 days old; while the stage-in fills the folder, the
-    cleanup lines of another job run (here: at every download). The old marker is gone before the first download,
-    so the cleanup has nothing to match."""
+    """The race of the review: the old copy's .complete is 20 days old; while the stage-in makes the copy again,
+    the cleanup lines of another job run (here: at every download). The old folder is moved aside before the first
+    download and the folder being filled has no marker, so the cleanup has nothing to match; what was moved aside
+    is the cleanup's to remove."""
     dest = _old_copy(tmp_path)
     fake = lakefs(dict(YOLO, **REST))
     seen = []
 
     def another_jobs_cleanup(path):
-        seen.append((dest / ".complete").exists())
+        seen.append(((dest / ".complete").exists(), (dest / ".kaos-complete").exists()))
         _cleanup(tmp_path)
     fake.hook = another_jobs_cleanup
     p = _run(tmp_path, fake)
     assert p.returncode == 0, p.stderr
-    assert seen and not any(seen), "the old marker was removed before the first download"
+    assert seen and not any(any(s) for s in seen), "no marker was in the folder while it was filled"
     assert _tree(dest) == dict(YOLO, **REST) and (dest / ".kaos-complete").exists()
     assert sorted(f.name for f in dest.parent.iterdir()) == [COMMIT]
 
 
 def test_a_dataset_file_named_complete_that_is_old_does_not_let_the_cleanup_take_the_folder(tmp_path, lakefs):
     tree = dict(YOLO, **{".complete": b"", "more.bin": b"m"})
-    dest = _old_copy(tmp_path)              # .complete: empty and 20 days old, and also a file of this dataset
+    dest = tmp_path / "data-cache" / "ds" / COMMIT
+    (dest / "data").mkdir(parents=True)
+    (dest / "data" / ".complete").write_bytes(b"")      # a file of this dataset, 20 days old, left by a killed download
+    old = time.time() - 20 * 86400
+    os.utime(str(dest / "data" / ".complete"), (old, old))
     fake = lakefs(tree)
     fake.hook = lambda path: _cleanup(tmp_path)
     p = _run(tmp_path, fake)
     assert p.returncode == 0, p.stderr
-    assert _tree(dest) == {k: v for k, v in tree.items()} and (dest / ".kaos-complete").exists()
+    assert _tree(dest) == tree and (dest / ".kaos-complete").exists()
 
 
 def test_a_cleanup_that_holds_the_folder_is_waited_for_and_the_copy_is_made_again(tmp_path, lakefs):
     """The cleanup took the folder (its marker was old), then a job arrives that wants it. The job touches the
     marker, sees the cleanup, waits, and starts over on what is there: nothing, so it downloads."""
-    dest = _old_copy(tmp_path, ".kaos-complete")
+    fake = lakefs(NOT_YOLO)
+    dest, _ = _stage_in(tmp_path, fake)
+    old = time.time() - 20 * 86400
+    os.utime(str(dest / ".kaos-complete"), (old, old))
+    fake.downloads.clear()
     lock = pathlib.Path(str(dest) + ".kaos-clean")
     lock.mkdir()
-    fake = lakefs(NOT_YOLO)
     env = {"LAKEFS_ENDPOINT": fake.url, "LAKEFS_BEARER_TOKEN": "w", "DATASET_REPO": "ds", "DATASET_COMMIT": COMMIT,
            "DATASET_CACHE": str(tmp_path / "data-cache"), "DATASET_DIRFILE": str(tmp_path / "dirfile"),
            "SLURM_JOB_ID": "9"}
@@ -349,6 +372,7 @@ def test_a_cleanup_that_holds_the_folder_is_waited_for_and_the_copy_is_made_agai
     lock.rmdir()
     assert p.wait(60) == 0, p.stderr.read()
     assert "cache hit" not in p.stdout.read() and _tree(dest) == NOT_YOLO and (dest / ".kaos-complete").exists()
+    assert sorted(fake.downloads) == sorted(NOT_YOLO)
 
 
 def test_a_lock_left_by_a_killed_cleanup_is_not_obeyed_for_ever(tmp_path, lakefs):
@@ -369,18 +393,15 @@ def test_a_lock_left_by_a_killed_cleanup_is_not_obeyed_for_ever(tmp_path, lakefs
     assert list(_old.parent.iterdir()) == []
 
 
-def test_a_cache_hit_renews_both_markers(tmp_path, lakefs):
-    """A job script from before .kaos-complete cleans by .complete: a copy this job uses must not look unused
-    to it."""
+def test_a_cache_hit_renews_the_marker(tmp_path, lakefs):
+    """The cleanup goes by the marker's age: a copy this job uses must not look unused to it."""
     fake = lakefs(NOT_YOLO)
     dest, _ = _stage_in(tmp_path, fake)
-    (dest / ".complete").write_text("")     # written by a job of the older generation that used the copy
     old = time.time() - 20 * 86400
-    for m in (".complete", ".kaos-complete"):
-        os.utime(str(dest / m), (old, old))
+    os.utime(str(dest / ".kaos-complete"), (old, old))
     _, out = _stage_in(tmp_path, fake)
-    assert "cache hit" in out
-    assert all(time.time() - (dest / m).stat().st_mtime < 60 for m in (".complete", ".kaos-complete"))
+    assert "cache hit" in out and time.time() - (dest / ".kaos-complete").stat().st_mtime < 60
+    assert (dest / ".kaos-complete").read_text() == "data"
 
 
 _CLEANUP_MOVES_THE_FOLDER = """

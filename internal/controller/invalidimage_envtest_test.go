@@ -94,12 +94,12 @@ var _ = Describe("HPC invalid image", func() {
 		orig := j.DeepCopy()
 		code := hpcv1alpha1.ExitCodeReservedName
 		j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, State: "FAILED", ExitCode: &code, Terminal: true,
-			Message: "dataset d@c0ffee has an object named '.kaos-ready': names starting with .kaos are reserved for the platform"}
+			Message: "dataset d@c0ffee has an object named 'a.kaos-part': a file name ending in .kaos-part is reserved for the platform"}
 		Expect(k8sClient.Status().Patch(ctx, j, client.MergeFrom(orig))).To(Succeed())
 		got := reconcileOnce(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonReservedName))
-		Expect(got.Status.Message).To(ContainSubstring(".kaos-ready"))
+		Expect(got.Status.Message).To(ContainSubstring("a.kaos-part"))
 		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(0))))
 	})
 

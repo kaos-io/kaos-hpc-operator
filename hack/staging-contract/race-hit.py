@@ -57,11 +57,12 @@ for mode in ('moved', 'moved+refill'):
     tmp = tempfile.mkdtemp(prefix='race-hit-')
     dest = os.path.join(tmp, 'cache', 'ds', COMMIT)
     for rel, body in TREE.items():
-        os.makedirs(os.path.dirname(os.path.join(dest, rel)), exist_ok=True)
-        with open(os.path.join(dest, rel), 'wb') as f:
+        os.makedirs(os.path.dirname(os.path.join(dest, 'data', rel)), exist_ok=True)
+        with open(os.path.join(dest, 'data', rel), 'wb') as f:
             f.write(body)
     marker = os.path.join(dest, '.kaos-complete')
-    open(marker, 'w').close()
+    with open(marker, 'w') as f:
+        f.write('data')
     old = time.time() - 20 * 86400
     os.utime(marker, (old, old))
     env = dict(os.environ, RACE_MODE=mode, LAKEFS_ENDPOINT='http://127.0.0.1:%d' % httpd.server_address[1],
@@ -70,9 +71,10 @@ for mode in ('moved', 'moved+refill'):
                SLURM_JOB_ID='9')
     p = subprocess.run([sys.executable, '-c', HOOK, payload], env=env, stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE, universal_newlines=True, timeout=120)
-    have = {os.path.relpath(os.path.join(d, n), dest) for d, _, ns in os.walk(dest) for n in ns} \
-        if os.path.isdir(dest) else set()
-    whole = set(TREE) <= have and '.kaos-complete' in have
+    data = os.path.join(dest, 'data')
+    have = {os.path.relpath(os.path.join(d, n), data) for d, _, ns in os.walk(data) for n in ns} \
+        if os.path.isdir(data) else set()
+    whole = set(TREE) == have and os.path.isfile(marker)
     crashed = 'FileNotFoundError' in p.stderr
     # `cache hit` is allowed only for a folder that is whole when it is said
     hit_on_nothing = 'cache hit' in p.stdout and not whole
