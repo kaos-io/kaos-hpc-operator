@@ -1,0 +1,19 @@
+#!/bin/sh
+# probe [--result FILE] [DIR...]
+# Prints the environment context, lists every file under each DIR with its sha256, and writes
+# a result file (default /tmp/result.json) holding the host, time and the checksums.
+set -eu
+result=/tmp/result.json
+if [ "${1:-}" = "--result" ]; then result=$2; shift 2; fi
+echo "== context =="
+echo "host=$(hostname) user=$(id -u) pwd=$(pwd) date=$(date -u +%FT%TZ)"
+env | grep -E '^(KAOS|ARGO|LAKE|HPC|POD|STEP|WORKFLOW)' | sed 's/\(SECRET\|KEY\|TOKEN\)=.*/\1=<redacted>/' | sort || true
+for d in "$@"; do
+  echo "== inputs: $d =="
+  if [ ! -d "$d" ]; then echo "(missing)"; continue; fi
+  (cd "$d" && find . -type f | sort | while read -r f; do printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"; done) | tee -a /tmp/probe-sums.txt
+done
+jq -n --arg host "$(hostname)" --arg date "$(date -u +%FT%TZ)" --rawfile sums /tmp/probe-sums.txt \
+  '{host:$host, date:$date, checksums:($sums|split("\n")|map(select(length>0)))}' > "$result" 2>/dev/null \
+  || jq -n --arg host "$(hostname)" '{host:$host, checksums:[]}' > "$result"
+echo "== result written to $result =="
