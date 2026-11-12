@@ -4,18 +4,18 @@ A step only seals its version of a dataset (kaos_lib.step.result()); it never mo
 after every step of the run has succeeded or was skipped, and does two things in this order:
 
 1. CHECK every dataset to promote: the version a step sealed was started on the head of the dataset's `main` (the
-   parent of the sealed commit). If any dataset's `main` has another head now, another run promoted first: nothing is
-   promoted and the task fails, naming every dataset that moved.
+   parent of the sealed commit). If any dataset's `main` has another head now, another run promoted first: nothing more
+   is promoted and the task fails, naming every dataset that moved.
 2. MERGE every dataset's sealed version into its `main`, each on the condition that `main` is still at the head
    checked (the lake refuses a merge otherwise).
 
-What a failure leaves behind. A failed CHECK leaves everything as it was: every sealed version stays kept (tagged)
-in its dataset. A MERGE that fails after another merge succeeded (a second run promoted in the instant between the
-check and the merge, or the lake went away) leaves the datasets already merged at the new version and the others at
-the old one; the task fails and says which is which. Running the task again recovers a crash or an outage: a dataset
-whose `main` already holds this run's merge (the merge commit carries `kaos.promoted=<sealed commit>`) is recognised
-and left alone, the others are checked and merged. After another run moved a dataset in the meantime, the task cannot
-recover that dataset: the run's sealed version stays kept, and the next run starts from the new `latest`.
+What a failure leaves behind. A failed CHECK merges nothing more (what an earlier try of this run merged stays). A MERGE
+that fails after another merge succeeded (another run promoted in the instant between the check and the merge, or the
+data store did not answer) leaves the datasets already merged at the new version and the others at the old one. The task
+says the whole truth of it: what this run promoted (recognised by `kaos.promoted=<sealed commit>` on a merge commit
+anywhere in main's history since the head the version was sealed on), what was refused and why, what was not tried, and
+whether trying again can help: after an outage yes, a dataset already promoted is left alone; after another run moved a
+dataset no, and the message says "start a new run to promote <names>". Every sealed version stays kept (tagged).
 
 A producer that was skipped (a `when=` or `step.skip()`) wrote no version; its dataset is not promoted, and the log
 says so. The task takes its input from the environment variable KAOS_PROMOTE_PLAN: a JSON list of
@@ -56,9 +56,56 @@ def _sealed(entry):
                  and w.get("type") == "dataset"), None)
 
 
+HISTORY_LIMIT = 200          # merges of one dataset looked through for this run's own (by first parents)
+
+
+def _promoted_by_this_run(client, repo, head, expected, commit):
+    """Whether `commit` was merged into `repo`'s main by this run: a merge commit with `kaos.promoted=<commit>` on the
+    way from the head back to the head the version was sealed on (`expected`). Not only at the head: another run may
+    have moved the dataset again since."""
+    seen = head
+    for _ in range(HISTORY_LIMIT):
+        if seen == expected or not seen:
+            return False
+        info = client.commit_info(repo, seen)
+        if (info.get("metadata") or {}).get(PROMOTED) == commit:
+            return True
+        seen = (info.get("parents") or [""])[0]
+    return False
+
+
+def _status(exc):
+    return getattr(exc, "status", None)
+
+
+def _failure(promoted, moved, untried, failed=None):
+    """The one message of a refused or failed task: what this run promoted, what it did not and why, and whether trying
+    again can help. `moved` is a list of (name, text) of datasets another run moved before this run's check; `failed` is
+    (name, repo, why, overtaken) of the merge that was refused; `untried` the names after it (or after the check)."""
+    said = ["Promoted by this run: %s." % (", ".join(promoted) if promoted else "nothing")]
+    if moved:
+        said.append("Not promoted, because another run promoted the dataset first: "
+                    + "; ".join(text for _, text in moved) + ".")
+    overtaken = bool(moved) or bool(failed and failed[3])
+    if failed:
+        said.append(f"Dataset '{failed[0]}' ({failed[1]}) could not be promoted: {failed[2]}.")
+    if untried:
+        said.append("Not tried, so that the datasets of this run stay together: %s." % ", ".join(untried))
+    said.append("Every version this run made stays kept and can be read by its exact version.")
+    if overtaken:
+        names = [n for n, _ in moved] + ([failed[0]] if failed and failed[3] else []) + list(untried)
+        said.append("Another run moved a dataset, so trying this task again cannot finish it: start a new run to promote "
+                    + ", ".join(names) + ".")
+    else:
+        said.append("The data store did not answer as needed: try again. A dataset this run already promoted is "
+                    "recognised and left alone.")
+    return " ".join(said)
+
+
 def promote(plan, run, client, say=print):
-    """Check every dataset to promote, then merge them; returns the names promoted. PromoteError on any refusal."""
-    todo, problems = [], []
+    """Check every dataset to promote, then merge them; returns the names this run promoted. PromoteError says the whole
+    truth of an outcome that is not a full success."""
+    todo, moved, done = [], [], []
     for entry in plan:
         name, step = entry["name"], entry["step"]
         if str(entry["promote"]).strip().lower() != "true":
@@ -76,31 +123,27 @@ def promote(plan, run, client, say=print):
                 f"there is no new version.")
             continue
         head = client.branch_commit(repo, MAIN)
-        merged = (client.commit_info(repo, head).get("metadata") or {}).get(PROMOTED)
-        if merged == commit:
-            say(f"dataset '{name}': already promoted by an earlier try of this task ({repo} is at {head[:12]}).")
-            continue
         expected = (info.get("parents") or [""])[0]
+        if _promoted_by_this_run(client, repo, head, expected, commit):
+            done.append(name)
+            say(f"dataset '{name}': already promoted by this run ({repo} is at {head[:12]}).")
+            continue
         if head != expected:
-            problems.append(f"dataset '{name}' ({repo}): its latest was {expected[:12]} when step '{step}' sealed "
-                            f"{commit[:12]}, and is {head[:12]} now: another run promoted it.")
+            moved.append((name, f"dataset '{name}' ({repo}): its latest was {expected[:12]} when step '{step}' sealed "
+                                f"{commit[:12]}, and is {head[:12]} now"))
             continue
         todo.append((name, step, repo, commit, expected, info))
-    if problems:
-        raise PromoteError("nothing was promoted. " + " ".join(problems) + " The sealed version of every dataset of "
-                           "this run stays kept. Run again: the new run starts from the new latest.")
-    done = []
-    for name, step, repo, commit, expected, info in todo:
+    if moved:
+        raise PromoteError(_failure(done, moved, [item[0] for item in todo]))
+    for i, (name, step, repo, commit, expected, info) in enumerate(todo):
         try:
             merged = client.merge(repo, commit, MAIN, info.get("message") or f"{name}: {run}",
                                   {**(info.get("metadata") or {}), PROMOTED: commit}, tolerate_empty=True,
                                   expected_head=expected)
         except Exception as exc:  # noqa: BLE001 - whatever stops a merge is reported with what is already done
-            left = [item[0] for item in todo[len(done) + 1:]]
-            raise PromoteError(
-                f"dataset '{name}' ({repo}) could not be promoted: {exc}. Already promoted: "
-                f"{', '.join(done) or 'none'}. Not promoted: {', '.join([name] + left)}. The sealed versions stay "
-                f"kept. Run this task again to finish: a dataset already promoted is left alone.") from None
+            overtaken = _status(exc) == HEAD_MOVED
+            why = "another run promoted the dataset in the instant before this merge" if overtaken else str(exc)
+            raise PromoteError(_failure(done, [], [item[0] for item in todo[i + 1:]], (name, repo, why, overtaken))) from None
         done.append(name)
         say(f"dataset '{name}': {repo} is now at {merged[:12]} (latest), the version step '{step}' sealed "
             f"({commit[:12]}).")

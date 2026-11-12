@@ -636,7 +636,11 @@ def main(argv=None) -> None:
         if args.steps:
             steps = _steps(args.steps)
             settings = run_settings(steps, args.walltime, args.checkpoint_every, args.resumable_lead)
-            run_promote(steps, args.promote)     # refuses a value that is not true or false; the final task reads it
+            flags = run_promote(steps, args.promote)   # refuses a value that is not true or false; the final task reads it
+            for name in sorted({e["name"] for step in steps for e in step["produces"] if e["type"] == "dataset"}):
+                what = ("true: latest moves at the end of the run, if every step went well" if flags.get(name)
+                        else "false: its version stays sealed and latest does not move")
+                print(f"dataset {name}: {promote_field(name)} is {what}")
             run_classes(steps, args.classes, args.class_offers)
             reads = pin_inputs(resolved, steps)
             contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, settings)

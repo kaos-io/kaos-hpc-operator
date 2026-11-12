@@ -6,6 +6,9 @@ Stdlib only: the compose step imports it in an image without the render librarie
 """
 
 import json
+import math
+import re
+from decimal import Decimal
 
 CONTEXT_ENV = "KAOS_STEP_CONTEXT"
 CONTEXT_PARAM = "kaos-context"            # a step's one input, and its DAG task argument
@@ -167,15 +170,78 @@ def result_of(task: str, twin: str = "") -> str:
 
 
 def result_value(task: str, key: str) -> str:
-    """The expression for the value `key` of the result of the needed step `task`, as text, for a `when=` that
-    compares it. A value that is not there (the step was skipped or did not run, or never set it) is NOT an
-    empty text: the expression fails, and the workflow engine shows the sentence below as the task's error, so
-    the run stops with the step and the key named instead of the condition quietly being false. (`int()` of a
-    sentence is the one failure the expression language lets us word.) `?.` keeps an absent result from
-    failing earlier with a message that names neither."""
+    """The expression for the value `key` of the result of the needed step `task`, for a `when=` that compares it. A
+    value that is not there (the step was skipped or did not run, or never set it, or set it to null) is NOT an empty
+    text: the expression fails, and the workflow engine shows the sentence below as the task's error, so the run stops
+    with the step and the key named instead of the condition quietly being false. (`int()` of a sentence is the one
+    failure the expression language lets us word.) `?.` keeps an absent result from failing earlier with a message
+    that names neither."""
     sentence = ("step '%s' gave no value '%s' (it was skipped, did not run, or never set it): "
                 "a when= on a step's value needs the value" % (task, key))
-    return "string(fromJSON(%s)?.values?.[%s] ?? int(%s))" % (result_of(task), _quoted(key), _quoted(sentence))
+    return "(fromJSON(%s)?.values?.[%s] ?? int(%s))" % (result_of(task), _quoted(key), _quoted(sentence))
+
+
+MAX_EXACT_INTEGER = 2 ** 53          # a result's number is a double: above this an integer is not exact
+_JSON_NUMBER = re.compile(r"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?\Z")
+_LOOKS_NUMERIC = re.compile(r"[+-]?([0-9][0-9_]*\.?[0-9_]*|\.[0-9]+)([eE][+-]?[0-9]+)?\Z")
+
+
+def json_number_text(value: float) -> str:
+    """A double as the workflow engine's `toJSON` writes it (Go's encoder): the shortest digits that read back, in
+    plain notation from 1e-6 up to 1e21 and in exponent notation (`1e-7`, `1.5e+22`) outside; `1.0` is `1`."""
+    if value == 0:
+        return "-0" if math.copysign(1, value) < 0 else "0"
+    digits = Decimal(repr(value))
+    if 1e-6 <= abs(value) < 1e21:
+        text = format(digits, "f")
+        return text.rstrip("0").rstrip(".") if "." in text else text
+    sign, mantissa, exponent = digits.normalize().as_tuple()
+    power = len(mantissa) - 1 + exponent
+    body = str(mantissa[0]) + ("." + "".join(map(str, mantissa[1:])) if len(mantissa) > 1 else "")
+    return "%s%se%s%d" % ("-" if sign else "", body, "+" if power >= 0 else "-", abs(power))
+
+
+def when_text_problem(text: str) -> str:
+    """Why a text of a `when=` comparison cannot be matched reliably, or ''. A value of a step's result is compared by
+    its JSON text when it is not a string, so a text that looks like a number or a keyword but is not written the way
+    JSON writes it would never match: it is refused, with what to write."""
+    if any(ord(c) < 32 or ord(c) == 127 for c in text):
+        return "it holds a control character (a line break, a tab): write the text on one line"
+    if text.lower() in ("true", "false", "null") and text not in ("true", "false", "null"):
+        return "write %s in lowercase: a true or false value is compared as the word true or false" % text.lower()
+    if _JSON_NUMBER.match(text):
+        number = float(text)
+        if math.isinf(number):
+            return "the number is too large for a result to hold"
+        if re.fullmatch(r"-?[0-9]+", text) and abs(int(text)) > MAX_EXACT_INTEGER:
+            return ("an integer above %d is not held exactly by a result: compare a smaller number, or hand on the "
+                    "value as text" % MAX_EXACT_INTEGER)
+        return ""
+    if _LOOKS_NUMERIC.match(text):
+        return "it looks like a number but is not written as one: write it as JSON writes it (for example 0.5, 1, -3 or 1e-5)"
+    return ""
+
+
+def canonical_when_text(text: str) -> str:
+    """The text a non-string value is compared with: a number as `toJSON` writes it (`1e6` is `1000000`, `1.0` is `1`),
+    anything else as it is (it can only match a string)."""
+    if _JSON_NUMBER.match(text) and not math.isinf(float(text)):
+        return json_number_text(float(text))
+    return text
+
+
+def _single_quoted(text: str) -> str:
+    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def value_test(task: str, key: str, op: str, text: str) -> str:
+    """The comparison of a step's value with the text of a `when=`, exact for every JSON value: a string is compared as
+    text; a number or a boolean by its JSON text (`toJSON`), because the workflow engine's `string()` of a number writes
+    `1e+06` for 1000000 and drops the point of `1.0`."""
+    value = result_value(task, key)
+    test = '(type(%s) == "string" ? %s == %s : toJSON(%s) == %s)' % (
+        value, value, _single_quoted(text), value, _single_quoted(canonical_when_text(text)))
+    return test if op == "==" else "!" + test
 
 
 def context_expression(compose_task: str, step: str, needs: list) -> str:

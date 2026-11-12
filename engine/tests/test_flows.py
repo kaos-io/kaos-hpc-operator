@@ -5,12 +5,21 @@ import re
 import textwrap
 from pathlib import Path
 
+import pytest
 import yaml
 from test_authoring_contract import refused, render
 
 from helpers import copy_app, run_render
 from kubecore import enhance
-from kubecore.step_contract import result_of, result_value, step_folder
+from kubecore.step_contract import (
+    canonical_when_text,
+    json_number_text,
+    result_of,
+    result_value,
+    step_folder,
+    value_test,
+    when_text_problem,
+)
 
 CTX = yaml.safe_load((Path(__file__).resolve().parents[1] / "kubecore" / "local-dev" / "pipeline-context.yaml").read_text())
 
@@ -28,13 +37,13 @@ def verdict_pipeline(a, when="evaluate.passed == true"):
 
 def test_a_when_on_a_needed_steps_value_reads_its_result():
     publish = tasks_of(render(verdict_pipeline))["publish"]
-    assert publish["when"] == "{{=" + result_value("evaluate", "passed") + " == 'true'}}"
+    assert publish["when"] == "{{=" + value_test("evaluate", "passed", "==", "true") + "}}"
     assert 'tasks["evaluate"].outputs.parameters["kaos-result"]' in publish["when"]
 
 
 def test_a_missing_value_fails_the_condition_with_a_sentence_naming_step_and_key():
     expression = result_value("evaluate", "passed")
-    assert "?? int(" in expression, "an absent value must not quietly compare as empty text"
+    assert "?? int(" in expression and "string(" not in expression, "an absent value must not quietly compare as empty text"
     assert "step 'evaluate' gave no value 'passed'" in expression
 
 
@@ -50,7 +59,7 @@ def test_step_and_form_terms_join_with_and_and_or():
     when = tasks_of(render(build))["publish"]["when"]
     assert when.count("&&") == 1 and when.count("||") == 1
     assert "workflow.parameters['experiment-name'] != 'off'" in when
-    assert when.count('tasks["evaluate"].outputs.parameters["kaos-result"]') == 2
+    assert when.count('tasks["evaluate"].outputs.parameters["kaos-result"]') == 6, "three readings for each of the two terms"
 
 
 def test_a_value_of_a_step_that_is_not_needed_is_refused_with_the_fix():
@@ -191,3 +200,57 @@ def test_a_refusal_of_the_engine_is_one_sentence_without_a_traceback(tmp_path):
 def test_any_other_error_of_pipeline_py_keeps_its_traceback(tmp_path):
     done = run_app(tmp_path, PIPELINE.replace("step(", "undefined_function("), ["model_eval"])
     assert done.returncode != 0 and "NameError" in done.stderr and "Traceback" in done.stderr
+
+
+# ----------------------------------------------------------------------- a value is compared exactly
+
+@pytest.mark.parametrize("written, canonical", [
+    ("1000000", "1000000"), ("1e6", "1000000"), ("1.0", "1"), ("1e-5", "0.00001"), ("0.00001", "0.00001"),
+    ("12345678", "12345678"), ("3000000000", "3000000000"), ("0.5", "0.5"), ("-0.0", "-0"), ("1.5e22", "1.5e+22"),
+    ("1e-7", "1e-7"), ("123456789.125", "123456789.125"), ("9007199254740992", "9007199254740992"),
+    ("true", "true"), ("false", "false"), ("null", "null"), ("abc", "abc"), ("", ""), ("two words", "two words"),
+])
+def test_a_text_is_compared_with_a_non_string_value_as_the_workflow_systems_json_writes_it(written, canonical):
+    assert when_text_problem(written) == ""
+    assert canonical_when_text(written) == canonical
+
+
+@pytest.mark.parametrize("written", ["a\nb", "a\tb"])
+def test_a_control_character_is_a_problem_of_the_text(written):
+    assert "control character" in when_text_problem(written)
+
+
+@pytest.mark.parametrize("written, said", [
+    ("1e400", "too large"), (".5", "looks like a number"), ("+1", "looks like a number"), ("01", "looks like a number"),
+    ("5.", "looks like a number"), ("1_000", "looks like a number"), ("True", "write true in lowercase"),
+    ("NULL", "write null in lowercase"), ("9007199254740993", "an integer above 9007199254740992"),
+    ("-9007199254740993", "an integer above"),
+])
+def test_a_text_that_cannot_be_matched_reliably_is_refused_with_what_to_write(written, said):
+    assert said in when_text_problem(written)
+
+    def build(a):
+        evaluate = a.step("evaluate", kind="evaluate")
+        a.step("publish", kind="publish", needs=[evaluate], when=f"evaluate.rows == '{written}'")
+    message = refused(build)
+    assert "cannot be matched reliably" in message and said in message
+
+
+def test_json_numbers_are_written_as_go_writes_them():
+    assert [json_number_text(v) for v in (999999.0, 1e6, 12345678.0, 3e9, 0.5, 1.0, 1e-5, 1e-7, 1.5e22, 1e21, 0.0)] == [
+        "999999", "1000000", "12345678", "3000000000", "0.5", "1", "0.00001", "1e-7", "1.5e+22", "1e+21", "0"]
+
+
+def test_the_comparison_reads_a_string_as_text_and_anything_else_as_json_text():
+    test = value_test("evaluate", "rows", "==", "1e6")
+    assert test.startswith('(type(') and '== "string" ? ' in test and "toJSON(" in test
+    assert "string(" not in test.replace("type(", "")
+    assert "== '1e6'" in test and "== '1000000'" in test, "the text as written for a string, as JSON writes it otherwise"
+    assert value_test("evaluate", "rows", "!=", "1e6") == "!" + test
+
+
+def test_a_when_with_a_line_break_is_refused_at_render():
+    message = refused(lambda a: a.step("publish", kind="publish", when="mode == 'a\nb'"))
+    assert "holds a control character" in message
+    message = refused(lambda a: a.step("publish", kind="publish", when="mode == a\nand mode == b"))
+    assert "holds a control character" in message

@@ -57,7 +57,8 @@ from kubecore.step_contract import (
     SENTINEL,
     APP_REPO_ENV,
     context_expression,
-    result_value,
+    value_test,
+    when_text_problem,
     step_folder,
     wire,
 )
@@ -222,6 +223,9 @@ def _parse_when(name, when):
         )
     if not (isinstance(when, str) and _WHEN_ALL.fullmatch(when)):
         raise AuthoringError(f"step {name!r}: when={when!r} is not a condition the platform can read. {_WHEN_ALLOWED}")
+    if any(ord(c) < 32 or ord(c) == 127 for c in when):
+        raise AuthoringError(f"step {name!r}: when={when!r} holds a control character (a line break, a tab). Write the "
+                             f"condition on one line.")
     compares, joiners = [], []
     for m in _WHEN_TOKEN.finditer(when):
         if m.group(4):
@@ -247,6 +251,10 @@ def _classify_when(name, parsed, needs, steps):
                     f"step.result() could have been given (letters, digits and _, not starting with a digit). "
                     f"Write {head}.<value> with the keyword you gave step.result(<value>=...)."
                 )
+            problem = when_text_problem(text)
+            if problem:
+                raise AuthoringError(f"step {name!r}: when= compares {head}.{key} with {text!r}, which cannot be matched "
+                                     f"reliably: {problem}.")
             compares.append(("step", head, key, op, text))
         elif dot and any(s.name == head for s in steps):
             raise AuthoringError(
@@ -260,11 +268,11 @@ def _classify_when(name, parsed, needs, steps):
 
 def _when_condition(compares, joiners):
     """The workflow engine's expression for the parsed `when=`; values are text, as run-form values are. A
-    step's value is read from the result of the needed step (step_contract.result_value)."""
+    step's value is read from the result of the needed step (step_contract.value_test)."""
     def one(kind, left, key, op, text):
-        text = text.replace("\\", "\\\\").replace("'", "\\'")
         if kind == "step":
-            return "%s %s '%s'" % (result_value(left, key), op, text)
+            return value_test(left, key, op, text)
+        text = text.replace("\\", "\\\\").replace("'", "\\'")
         return "workflow.parameters['%s'] %s '%s'" % (left, op, text)
     parts = [one(*compares[0])]
     for joiner, compare in zip(joiners, compares[1:]):

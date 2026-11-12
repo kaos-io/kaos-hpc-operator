@@ -197,7 +197,7 @@ def refuse_client_identity(wft: dict) -> None:
         name = tpl.get("name", "?")
         if name in RESERVED_TEMPLATE_NAMES:
             raise EnhanceError(
-                f"step or template '{name}' uses a name the platform reserves for its HPC follower "
+                f"step or template '{name}' uses a name the platform reserves for its own templates "
                 f"({', '.join(RESERVED_TEMPLATE_NAMES)}). Rename it.")
         if "serviceAccountName" in tpl or "serviceAccountName" in (tpl.get("executor") or {}):
             raise EnhanceError(
@@ -1166,6 +1166,7 @@ STEP_IMAGES_ENV = "KAOS_STEP_IMAGES"
 
 
 PROMOTE_COMMAND = ["python", "-I", "-m", "kaos_engine.promote"]
+PROMOTE_SIZE = {"cpu": "100m", "mem": "256Mi", "disk": "1Gi"}   # what the final task asks of a node: a few commits and merges
 
 
 def add_promote_task(spec: dict, steps: list) -> None:
@@ -1204,10 +1205,21 @@ def add_promote_task(spec: dict, steps: list) -> None:
         for step, name in producers)
     dag = next(t for t in spec["templates"] if t.get("name") == spec.get("entrypoint") and "dag" in t)["dag"]
     compose_task = next(t for t in dag["tasks"] if t["name"] == COMPOSE_STEP)
-    given = copy.deepcopy((compose_task.get("arguments") or {}).get("parameters") or [])   # the fixed class's sizes
+    # The compose step's class, but with the small fixed size of this task (it reads a few commits and merges): the compose
+    # step's own size (7 CPU, 27 GiB on the standard class) would ask the pool for a node at the end of every run.
+    given = [dict(p, value=PROMOTE_SIZE[p["name"]]) if p["name"] in PROMOTE_SIZE else p
+             for p in copy.deepcopy((compose_task.get("arguments") or {}).get("parameters") or [])]
+    for p in tpl["inputs"]["parameters"]:
+        if p["name"] in PROMOTE_SIZE:
+            p["default"] = PROMOTE_SIZE[p["name"]]
+    # No pod at all when no dataset is ticked on the form (the default): the task is Skipped. The compose step's log says
+    # which datasets stay where they are (kubecore/compose.py).
+    ticked = " || ".join("workflow.parameters[%s] == 'true'" % json.dumps(promote_field(name))
+                         for name in dict.fromkeys(name for _, name in producers))
     ends = " && ".join("(%s.Succeeded || %s.Skipped)" % (n, n) for n in dict.fromkeys(s["name"] for s in table))
     dag["tasks"].append({
         "name": PROMOTE_STEP, "template": PROMOTE_STEP, "depends": "%s && %s" % (COMPOSE_STEP, ends),
+        "when": "{{=%s}}" % ticked,
         "arguments": {"parameters": given + [{"name": PROMOTE_PARAM, "value": "{{=toJSON([%s])}}" % plan}]}})
 
 

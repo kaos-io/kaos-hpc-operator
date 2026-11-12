@@ -11,22 +11,28 @@ from __future__ import annotations
 import sys
 
 from kaos_engine import engine_version
-from kaos_engine.render import EXIT_ENGINE_BROKEN, EngineError, find_engine_dir, import_engine
+from kaos_engine.render import EXIT_ENGINE_BROKEN, EngineError, find_engine_dir
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Only kubecore.promote is imported (not every module of the engine, which would load the render libraries): the task
+    asks a node for a few hundred MiB."""
+    import importlib
+    from pathlib import Path
     try:
         engine = find_engine_dir(None)
         sys.path[:] = [str(engine)] + [p for p in sys.path if p not in ("", str(engine))]
-        modules = import_engine(engine)
-    except EngineError as exc:
+        for name in [m for m in sys.modules if m == "kubecore" or m.startswith("kubecore.")]:
+            del sys.modules[name]
+        module = importlib.import_module("kubecore.promote")
+        if engine not in Path(module.__file__).resolve().parents:
+            raise EngineError(f"kubecore.promote was imported from {module.__file__}, outside the engine {engine}",
+                              EXIT_ENGINE_BROKEN)
+    except (EngineError, ImportError) as exc:
         print(f"kaos-engine: {exc}", file=sys.stderr)
-        return exc.code
-    if "kubecore.promote" not in modules:
-        print(f"kaos-engine: the engine at {engine} has no kubecore/promote.py", file=sys.stderr)
-        return EXIT_ENGINE_BROKEN
+        return getattr(exc, "code", EXIT_ENGINE_BROKEN)
     print(f"kaos-engine: version={engine_version()} engine={engine}", file=sys.stderr)
-    return modules["kubecore.promote"].main(argv)
+    return module.main(argv)
 
 
 if __name__ == "__main__":

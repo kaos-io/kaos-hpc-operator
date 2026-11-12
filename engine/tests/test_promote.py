@@ -81,16 +81,17 @@ def test_every_dataset_to_promote_is_merged_on_the_head_its_version_started_from
 def test_when_one_expected_head_moved_nothing_is_promoted_and_the_message_names_it():
     lake = FakeLake()
     plan = [entry(lake, "clean", "prepare"), entry(lake, "feats", "features")]
-    lake.heads["dataset-app-feats"] = "someone-elses"
-    with pytest.raises(PromoteError) as exc:
+    lake.heads["dataset-app-feats"] = "someone-else"
+    with pytest.raises(promote.PromoteError) as exc:
         run(plan, lake)
     assert lake.merges == [], "all heads are checked before the first merge"
     message = str(exc.value)
-    assert message.startswith("nothing was promoted. dataset 'feats' (dataset-app-feats): its latest was h0 when "
-                              "step 'features' sealed seal-dataset, and is someone-else now: another run "
-                              "promoted it.")
-    assert "'clean'" not in message
-    assert "stays kept" in message
+    assert message.startswith("Promoted by this run: nothing. Not promoted, because another run promoted the dataset first: "
+                              "dataset 'feats' (dataset-app-feats): its latest was h0 when step 'features' sealed "
+                              "seal-dataset, and is someone-else now.")
+    assert "Not tried, so that the datasets of this run stay together: clean." in message
+    assert "start a new run to promote feats, clean." in message
+    assert "stays kept and can be read by its exact version" in message
 
 
 def test_every_dataset_that_moved_is_named_not_only_the_first():
@@ -126,23 +127,44 @@ def test_a_step_that_wrote_what_main_already_holds_has_nothing_to_promote():
     assert "there is no new version" in lines[0]
 
 
-def test_running_the_task_again_leaves_a_promoted_dataset_alone_and_merges_the_rest():
+def test_running_the_task_again_after_an_outage_leaves_a_promoted_dataset_alone_and_merges_the_rest():
     lake = FakeLake()
     plan = [entry(lake, "clean", "prepare"), entry(lake, "feats", "features")]
     lake.fail = {"dataset-app-feats"}
-    with pytest.raises(PromoteError) as exc:
+    with pytest.raises(promote.PromoteError) as exc:
         run(plan, lake)
     message = str(exc.value)
-    assert "dataset 'feats' (dataset-app-feats) could not be promoted: HTTP 500. Already promoted: clean. " \
-           "Not promoted: feats." in message
+    assert message.startswith("Promoted by this run: clean. Dataset 'feats' (dataset-app-feats) could not be promoted: HTTP 500.")
+    assert "try again. A dataset this run already promoted is recognised and left alone." in message
+    assert "start a new run" not in message
     lake.fail = set()
     done, lines = run(plan, lake)
-    assert done == ["feats"]
-    assert "dataset 'clean': already promoted by an earlier try of this task" in lines[0]
+    assert done == ["clean", "feats"]
+    assert "dataset 'clean': already promoted by this run" in lines[0]
     assert len(lake.merges) == 2
 
 
-def test_a_merge_the_lake_refuses_after_the_check_names_what_is_done_and_what_is_not():
+def test_a_merge_the_lake_refuses_after_the_check_says_what_this_run_did_and_that_a_new_run_is_needed():
+    lake = FakeLake()
+    plan = [entry(lake, "clean", "prepare"), entry(lake, "feats", "features"), entry(lake, "extra", "more")]
+    original = lake.merge
+
+    def racing(repo, *args, **kwargs):
+        if repo == "dataset-app-feats":
+            lake.heads[repo] = "another-run"
+        return original(repo, *args, **kwargs)
+    lake.merge = racing
+    with pytest.raises(promote.PromoteError) as exc:
+        run(plan, lake)
+    message = str(exc.value)
+    assert message.startswith("Promoted by this run: clean. Dataset 'feats' (dataset-app-feats) could not be promoted: "
+                              "another run promoted the dataset in the instant before this merge.")
+    assert "Not tried, so that the datasets of this run stay together: extra." in message
+    assert "start a new run to promote feats, extra." in message and "try again" not in message
+
+
+def test_a_dataset_this_run_promoted_is_recognised_after_another_run_moved_it_again():
+    """Promoted, then overtaken, then the task is tried again: the truth is told, not 'nothing was promoted'."""
     lake = FakeLake()
     plan = [entry(lake, "clean", "prepare"), entry(lake, "feats", "features")]
     original = lake.merge
@@ -152,9 +174,19 @@ def test_a_merge_the_lake_refuses_after_the_check_names_what_is_done_and_what_is
             lake.heads[repo] = "another-run"
         return original(repo, *args, **kwargs)
     lake.merge = racing
-    with pytest.raises(PromoteError) as exc:
+    with pytest.raises(promote.PromoteError):
         run(plan, lake)
-    assert "HTTP 412. Already promoted: clean. Not promoted: feats." in str(exc.value)
+    lake.merge = original
+    # another run moves `clean` again, on top of this run's merge
+    lake.commits["next-clean"] = {"parents": [lake.heads["dataset-app-clean"]], "metadata": {}}
+    lake.heads["dataset-app-clean"] = "next-clean"
+    with pytest.raises(promote.PromoteError) as exc:
+        run(plan, lake)
+    message = str(exc.value)
+    assert message.startswith("Promoted by this run: clean. Not promoted, because another run promoted the dataset first: "
+                              "dataset 'feats' (dataset-app-feats)")
+    assert "start a new run to promote feats." in message and "nothing" not in message.split("Not promoted")[0]
+    assert len(lake.merges) == 1, "nothing was merged by the second try"
 
 
 def test_a_plan_that_is_not_json_or_has_the_wrong_shape_is_refused():
@@ -258,7 +290,7 @@ def test_a_pipeline_cannot_carry_a_template_of_that_name():
         authoring.step("ingest", kind="ingest", produces=[authoring.dataset("clean")])
     wft = yaml.safe_load(p.wt.to_yaml())
     wft["spec"]["templates"].append({"name": "kaos-promote", "container": {"image": "x"}})
-    with pytest.raises(enhance.EnhanceError, match="uses a name the platform reserves.*kaos-promote"):
+    with pytest.raises(enhance.EnhanceError, match="uses a name the platform reserves for its own templates.*kaos-promote"):
         enhance.enhance(wft, copy.deepcopy(CTX))
 
 
@@ -267,3 +299,42 @@ def test_a_step_cannot_be_named_kaos_promote():
     with pytest.raises(authoring.AuthoringError, match="reserved"):
         with authoring.pipeline("p"):
             authoring.step("kaos-promote", kind="evaluate")
+
+
+def test_the_final_task_asks_a_node_for_almost_nothing():
+    templates, tasks = parts(enhanced(two_datasets))
+    task = tasks["kaos-promote"]
+    sizes = {p["name"]: p["value"] for p in task["arguments"]["parameters"] if p["name"] in ("cpu", "mem", "disk")}
+    assert sizes == {"cpu": "100m", "mem": "256Mi", "disk": "1Gi"}, "not compose's class sizes"
+    defaults = {p["name"]: p.get("default") for p in templates["kaos-promote"]["inputs"]["parameters"]}
+    assert (defaults["cpu"], defaults["mem"], defaults["disk"]) == ("100m", "256Mi", "1Gi")
+    assert templates["compose-and-validate"]["inputs"]["parameters"] != templates["kaos-promote"]["inputs"]["parameters"]
+
+
+def test_no_pod_starts_for_the_final_task_when_no_dataset_is_ticked():
+    _, tasks = parts(enhanced(two_datasets))
+    assert tasks["kaos-promote"]["when"] == ("{{=workflow.parameters[\"promote-clean\"] == 'true' || "
+                                             "workflow.parameters[\"promote-feats\"] == 'true'}}")
+
+
+def test_the_compose_log_says_which_datasets_stay_where_they_are(tmp_path):
+    from test_compose_inputs import _compose
+    out = tmp_path / "params.yaml"
+    steps = json.dumps([{"name": "prepare", "kind": "ingest", "reads": [], "inputs": [], "needs": [],
+                         "produces": [{"name": "clean", "type": "dataset"}, {"name": "feats", "type": "dataset"}]}])
+    done = _compose(tmp_path, "--output", str(out), "--steps", steps, "--run", "r", "--app", "a", "--project", "p",
+                    "--context-dir", str(tmp_path / "ctx"), "--promote", "clean=true", "--promote", "feats=false")
+    assert done.returncode == 0, done.stderr
+    assert "dataset clean: promote-clean is true: latest moves at the end of the run" in done.stdout
+    assert "dataset feats: promote-feats is false: its version stays sealed and latest does not move" in done.stdout
+
+
+def test_the_final_task_imports_no_render_library():
+    import subprocess
+    import sys
+    engine = Path(__file__).resolve().parents[1]
+    code = (f"import sys; sys.path.insert(0, {str(engine)!r}); import os; os.environ['KAOS_PROMOTE_PLAN']='[]'; "
+            "os.environ['KAOS_RUN']='r'; from kaos_engine import promote; promote.main(); "
+            "print('HERA', any(m.startswith(('hera', 'pydantic', 'hydra')) for m in sys.modules))")
+    done = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True)
+    assert "HERA False" in done.stdout, done.stdout + done.stderr
