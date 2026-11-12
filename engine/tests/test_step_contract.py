@@ -27,19 +27,12 @@ STEPS = {
 }
 
 
-# The fixtures still name the repository of the dataset the run produces `dataset-embeddings`. A produced dataset is
-# named per app, `dataset-<app>-<name>` (owner ruling 2026-11-12), so for the app `hera-demo` it is
-# `dataset-hera-demo-embeddings`. The contract lane moves the fixtures; until then the tests read them with that one
-# value mapped, and nothing else.
-PER_APP = ("dataset-embeddings", "dataset-hera-demo-embeddings")
-
-
 def fixture(name):
-    return json.loads((FIXTURES / f"{name}.json").read_text().replace(*PER_APP))
+    return json.loads((FIXTURES / f"{name}.json").read_text())
 
 
 def wire_of(name):
-    return (FIXTURES / f"{name}.wire").read_text().replace(*PER_APP)
+    return (FIXTURES / f"{name}.wire").read_text()
 
 
 def evaluate(expression, outputs):
