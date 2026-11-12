@@ -443,21 +443,25 @@ class Runner:
             raise result.ResultNotHandedBack('the step ended well, but no data-plane token could be minted to fetch its '
                                              'result. No result was published')
         raw = self.handed_back('kaos-result.json')
-        try:
-            if raw is not None:
-                return result.check(raw)
-            if self.handed_back('kaos-result.absent') is None:
-                raise result.ResultNotHandedBack(
-                    'the step ended well, but the job handed back neither a result nor the record that the step wrote '
-                    'none (site job %s). No result was published' % self.jid)
+        if raw is not None:
+            return result.check(raw)
+        if self.handed_back('kaos-result.absent') is None:
             raise result.ResultNotHandedBack(
-                'the step ended well but wrote no result (%s): a step hands back its result before it ends '
-                '(kaos_lib.step.result()). No result was published' % result.RESULT_FILE)
-        finally:
-            try:   # the hand-off branch has done its job
-                self.handoff('DELETE', '')
-            except Exception as e:
-                print('hand-off branch not deleted:', e, flush=True)
+                'the step ended well, but the job handed back neither a result nor the record that the step wrote '
+                'none (site job %s). No result was published' % self.jid)
+        raise result.ResultNotHandedBack(
+            'the step ended well but wrote no result (%s): a step hands back its result before it ends '
+            '(kaos_lib.step.result()). No result was published' % result.RESULT_FILE)
+
+    def drop_handoff(self):
+        """Delete the hand-off branch, once the terminal report was accepted. Never before: a runner that dies
+        between the fetch and the report leaves the branch, and the next runner of the attempt reads the result
+        from it. A branch left behind is harmless (the result's path names the site job) and goes with the next
+        terminal report of the same step, which deletes the whole branch."""
+        try:
+            self.handoff('DELETE', '')
+        except Exception as e:
+            print('hand-off branch not deleted:', e, flush=True)
 
     def handback_failure(self):
         """What the job's hand-back program said in the job log before the job ended 243, as the sentence of the
@@ -1054,9 +1058,11 @@ class Runner:
                 self.reporter.report(must=True, **dict(
                     fields, state='FAILED', message=msg[:500],
                     exitCode=RESULT_NOT_HANDED_BACK_EXIT if lost else INVALID_RESULT_EXIT))
+                self.drop_handoff()
                 return 0
             print('result: %d bytes' % len(handed), flush=True)
             self.reporter.report(must=True, result=handed, **fields)
+            self.drop_handoff()
             return 0
         self.reporter.report(must=True, **fields)
         return 0

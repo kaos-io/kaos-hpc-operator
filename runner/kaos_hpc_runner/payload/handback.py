@@ -1,7 +1,8 @@
 # Hands the step's result back (docs/step-contract.md, section 8). The step wrote one file,
 # /work/output/kaos-result.json ($KAOS_WORK/output on the node), or none. Its bytes go, unread, to lakeFS at
 # hpc-outputs/{wf-uid}/{step}/{site job id}/kaos-result.json on a hand-off branch of the app's outputs
-# repository; the runner fetches them, checks them and puts them in the job's status, then deletes the branch.
+# repository; the runner fetches them, checks them and puts them in the job's status, and deletes the branch only after
+# that report was accepted (a runner that dies in between leaves it for the next runner of the attempt).
 # When the step wrote no file, an object kaos-result.absent says so: the runner must be able to tell "no
 # result" from "the result did not arrive". The site job id is in the path, so a result of an earlier attempt
 # or of a job this one replaced can never be taken for this one's.

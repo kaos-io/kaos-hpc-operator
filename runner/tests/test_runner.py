@@ -88,6 +88,7 @@ class Net:
     def __init__(self):
         self.objects, self.commits, self.deleted = {}, set(), []
         self.handed, self.ok_by_default, self.fail, self.fetched = {}, True, [], []
+        self.branch_gone = False     # the hand-off branch was deleted: what the job handed back went with it
 
     def __call__(self, req, timeout=0, **kw):
         import io
@@ -96,6 +97,7 @@ class Net:
             raise OSError("no metadata server here")
         if "/branches/" in url and getattr(req, "method", "GET") == "DELETE":
             self.deleted.append(url)
+            self.branch_gone = True
             return io.BytesIO(b"")
         if "/commits/" in url:
             cid = url.rsplit("/", 1)[1]
@@ -110,6 +112,8 @@ class Net:
                 self.fetched.append(name)
                 if self.fail:
                     raise urllib.error.HTTPError(url, self.fail.pop(0), "x", {}, io.BytesIO(b"{}"))
+                if self.branch_gone:
+                    raise urllib.error.HTTPError(url, 404, "nope", {}, io.BytesIO(b"{}"))
                 wf, step, jid, what = name.split("/")[1:]
                 assert (wf, step) == (WF, "model-training")
                 raw = self.handed.get(jid, self.OK if self.ok_by_default else "nothing")
@@ -726,7 +730,7 @@ def test_a_result_that_cannot_be_fetched_is_asked_again_and_then_fails_the_job(r
     assert "could not be fetched from lakeFS after 4 tries (lakeFS answered HTTP 503)" in run["message"]
     assert len(rig.net.fetched) == runmod.RESULT_FETCH_TRIES
     # A blip is not a failure: the fourth try reads it.
-    rig.net.fail, rig.net.fetched[:] = [503, 500, 502], []
+    rig.net.fail, rig.net.fetched[:], rig.net.branch_gone = [503, 500, 502], [], False   # a new run: a new branch
     rig.make(FakeSlurm({"5001": [acc("COMPLETED")]}))
     assert rig.runner.run() == 0
     assert rig.kube.run["state"] == "COMPLETED" and rig.kube.status["result"] == helpers.fixture("result-ok.wire")
@@ -1465,3 +1469,31 @@ def test_only_the_cap_texts_are_matched_as_submit_limit(rig):
     assert slurmmod.submit_limit_refusal("QOSMaxSubmitJobPerUserLimit")
     assert slurmmod.submit_limit_refusal("AssocMaxSubmitJobLimit")
     assert not slurmmod.submit_limit_refusal("Invalid account or account/partition combination specified")
+
+
+class Killed(BaseException):
+    """The runner pod dies (not an error the runner could catch)."""
+
+
+def test_a_runner_killed_between_the_fetch_and_the_report_leaves_the_result_for_the_next_runner(rig):
+    """The hand-off branch is deleted only after the terminal report was accepted. A leftover branch is harmless:
+    the next runner of the attempt reads the result from it, and its own terminal report deletes the branch."""
+    rig.net.handed["5001"] = helpers.fixture("result-model.json").encode()
+    rig.make(FakeSlurm({"5001": [acc("COMPLETED")]}))
+    report = rig.reporter.report
+
+    def die_at_the_terminal_report(must=False, **fields):
+        if fields.get("terminal"):
+            raise Killed()
+        return report(must=must, **fields)
+    rig.reporter.report = die_at_the_terminal_report
+    with pytest.raises(Killed):
+        rig.runner.run()
+    assert rig.net.fetched and not rig.net.deleted, "the result was fetched, and the branch is still there"
+    assert "result" not in rig.kube.status and not rig.kube.run.get("terminal")
+    # The next runner of the same attempt.
+    rig.make(FakeSlurm({"5001": [acc("COMPLETED")]}), status=rig.kube.status)
+    assert rig.runner.run() == 0
+    assert rig.kube.run["state"] == "COMPLETED" and rig.kube.run["terminal"]
+    assert rig.kube.status["result"] == helpers.fixture("result-model.wire")
+    assert rig.net.deleted, "deleted after the accepted terminal report"
