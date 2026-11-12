@@ -9,6 +9,7 @@ script that can be run again; `run-all.sh` runs them all and prints one line per
 | `3a-context-expression.sh` | Does one expression assemble the step context as one JSON value from task outputs, as a DAG task argument and as a container env value? | the lab | Pass |
 | `3b-skipped-upstream.sh` | Is the result of a skipped upstream step the sentinel inside that expression, also for a step with an HPC variant? | the lab | Pass |
 | `3c-large-env-value.sh` | Does a 96 KiB env value reach the container intact? | the lab | Pass when its cost as a JSON string fits |
+| `3d-env-expansion.sh` | Does Kubernetes change `$$` and `$(NAME)` in an env value, and does the wire form (`$` as `\u0024`) arrive unchanged? | an existing local cluster (`KAOS_LAB_KUBECONFIG`); not run by `run-all.sh`, creates no cluster | Pass: RAW arrives changed, ESCAPED byte for byte |
 | `4-hpc-hops.sh` | Does a 96 KiB value survive follower, job object, runner and job environment? | go, python3 | Pass, with the limits below |
 | `5-crd-upgrade.sh` | Do stored HPC jobs stay readable when fields are removed from the job definition? | go | Pass |
 

@@ -486,3 +486,24 @@ func TestValidateImage(t *testing.T) {
 		})
 	}
 }
+
+// Kubernetes expands $(NAME) and $$ in a container's env value, so a context in wire form holds no $ at all
+// (docs/step-contract.md, section 6, rule 7): the value in the runner's environment is the one the job carries.
+func TestAContextWithDollarsReachesTheRunnerWithoutAnyRawDollar(t *testing.T) {
+	_, site := fixtures()
+	job := contractJob(t)
+	job.Spec.Context = `{"version":1,"params":{"p":"a \u0024\u0024 b \u0024(HPC_JOB_NAME) c"}}`
+	env, err := Env(job, site, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range env {
+		if e.Name == "KAOS_STEP_CONTEXT" {
+			if strings.Contains(e.Value, "$") || e.Value != job.Spec.Context {
+				t.Errorf("KAOS_STEP_CONTEXT = %q, want the job's context with no raw $", e.Value)
+			}
+			return
+		}
+	}
+	t.Fatal("no KAOS_STEP_CONTEXT in the runner's environment")
+}

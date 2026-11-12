@@ -7,7 +7,7 @@
   "kind": "transform",
   "experiment": "caf\u00e9 {{workflow.name}}",
   "params": {
-    "note": "braces {{=1+1}} } { & <b> and a quote \" and a backslash \\ and \u00e9\u4e2d\ud83d\ude00",
+    "note": "braces {{=1+1}} } { & <b> dollars $ $$ $(HOME) and a quote \" and a backslash \\ and \u00e9\u4e2d\ud83d\ude00",
     "lr": 1e-05,
     "ratio": 1.0,
     "big": 12345678901234567890,

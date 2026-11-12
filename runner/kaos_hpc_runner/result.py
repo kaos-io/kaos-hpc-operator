@@ -39,15 +39,16 @@ def _no_constant(name):
 
 def _string(text):
     # Wire form, rules 2 and 3: ASCII only; braces never appear (the workflow engine would evaluate "{{");
-    # & < > are written the way Go's encoder writes them, so the cost is the same on every side.
+    # & < > are written the way Go's encoder writes them, so the cost is the same on every side; $ is never
+    # written (Kubernetes expands $(NAME) and $$ in an env value).
     out = json.dumps(text, ensure_ascii=True)
-    for ch, esc in (('{', '\\u007b'), ('}', '\\u007d'), ('&', '\\u0026'), ('<', '\\u003c'), ('>', '\\u003e')):
+    for ch, esc in (('{', '\\u007b'), ('}', '\\u007d'), ('&', '\\u0026'), ('<', '\\u003c'), ('>', '\\u003e'), ('$', '\\u0024')):
         out = out.replace(ch, esc)
     return out
 
 
 def wire(value):
-    """The wire form of a JSON value: no whitespace, ASCII only, braces and & < > inside strings escaped."""
+    """The wire form of a JSON value: no whitespace, ASCII only, braces, & < > and $ inside strings escaped."""
     if isinstance(value, str):
         return _string(value)
     if isinstance(value, _Float):

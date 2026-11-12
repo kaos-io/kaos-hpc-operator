@@ -256,3 +256,17 @@ def test_compose_writes_one_context_per_step_and_the_runs_ledger(rendered):
          "needs": ["dataset-loading"],
          "produces": [{"name": "report", "type": "artifact"}]}]
     assert "{{" not in args[args.index("--steps") + 1]
+
+
+def test_no_dollar_is_ever_written_so_kubernetes_cannot_expand_the_context_in_an_env_value():
+    """Kubernetes turns `$(NAME)` into the value of an earlier variable and `$$` into `$` in a container's env
+    value, and the context travels as one (docs/step-contract.md, section 6, rule 7)."""
+    from kubecore import compose
+    from kubecore.step_contract import cost, wire
+    params = {"a": "$$", "$(HPC_JOB_NAME)": "x $(HOME) $$(HOME) $", "n": ["$$$(X)"]}
+    step = {"name": "prepare", "kind": "transform", "inputs": [], "needs": [], "produces": []}
+    base = wire(compose.base_context(step, "run-1", "app", "proj", "exp", params, {}))
+    assert "$" not in wire(params) and "$" not in base
+    assert json.loads(wire(params)) == params
+    assert json.loads(base)["params"] == params
+    assert wire("$") == '"\\u0024"' and cost(wire("$")) == len(wire("$")) + 2 + 1

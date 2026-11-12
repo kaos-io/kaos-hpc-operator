@@ -60,8 +60,9 @@ OUTPUTS_PREFIX = "outputs-"    # models and artifacts live in outputs-<app>
 
 # Characters a string never holds as themselves: braces (the workflow engine evaluates `{{...}}` wherever
 # it meets it) and the three the workflow engine's own JSON encoder rewrites to six bytes each, which
-# would make a value larger inside a step's definition than the cost counted for it.
-_ESCAPED = {"{": "\\u007b", "}": "\\u007d", "&": "\\u0026", "<": "\\u003c", ">": "\\u003e"}
+# would make a value larger inside a step's definition than the cost counted for it; and `$`, which
+# Kubernetes expands (`$(NAME)`, `$$`) in a container's env value, where the context travels.
+_ESCAPED = {"{": "\\u007b", "}": "\\u007d", "&": "\\u0026", "<": "\\u003c", ">": "\\u003e", "$": "\\u0024"}
 
 
 def _string(text: str) -> str:
@@ -72,7 +73,7 @@ def _string(text: str) -> str:
 
 
 def wire(value) -> str:
-    """The wire form of a JSON value: compact, ASCII, and inside strings no brace, `&`, `<` or `>`.
+    """The wire form of a JSON value: compact, ASCII, and inside strings no brace, `&`, `<`, `>` or `$`.
     The reference writer is hack/contract-checks/wire.py."""
     if isinstance(value, str):
         return _string(value)

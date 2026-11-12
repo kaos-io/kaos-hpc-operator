@@ -1,0 +1,22 @@
+# Check 3(d): one pod, two env values. RAW holds text Kubernetes expands; ESCAPED is the same text in wire form
+# inside a JSON string. The script fills in ESCAPED (the reference writer's output) and compares the two.
+# HPC_JOB_NAME comes first: $(NAME) is expanded only for an earlier variable of the same container.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: env-expansion
+  namespace: w-dollar
+spec:
+  restartPolicy: Never
+  containers:
+    - name: main
+      image: IMAGE
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "printf 'RAW=%s\\n' \"$RAW\"; printf 'ESCAPED=%s\\n' \"$ESCAPED\""]
+      env:
+        - name: HPC_JOB_NAME
+          value: abc
+        - name: RAW
+          value: 'a $$ b $(HPC_JOB_NAME) c'
+        - name: ESCAPED
+          value: ESCAPED_VALUE

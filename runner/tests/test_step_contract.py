@@ -483,3 +483,11 @@ def test_the_payloads_run_on_the_nodes_python():
         src = getattr(payloads, name)
         compile(src, name, "exec")
         assert ":=" not in src and "capture_output" not in src and base64.b64decode(payloads.b64(src)).decode() == src
+
+
+def test_no_dollar_is_ever_written_in_a_result():
+    """Kubernetes expands `$(NAME)` and `$$` in an env value (docs/step-contract.md, section 6, rule 7)."""
+    raw = b'{"version":1,"status":"ok","values":{"$(HOME)":"$$ $(X) $"},"reads":[],"writes":[]}'
+    text = result.check(raw)
+    assert "$" not in text
+    assert json.loads(text) == json.loads(raw.decode())

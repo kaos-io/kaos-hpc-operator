@@ -263,6 +263,7 @@ that every hop carries them unchanged and counts them the same:
 5. Numbers are written as the reference writer writes them. NaN and Infinity are refused.
 6. Fields are written in the order the tables of sections 3, 4, 5 and 8 give, with `upstream` last in a
    context. A reader does not rely on the order.
+7. Inside strings, keys included, `$` is written `\u0024`. The wire form never holds a `$`.
 
 Rule 3 is not optional. The workflow engine evaluates `{{...}}` wherever it meets it, also inside a value
 that passes through: check 3(a) shows a string `{{=1+1}}` arriving as `2`. With rule 3 the text never
@@ -272,6 +273,12 @@ Rule 4 is not optional either. When the workflow engine puts a value into a step
 `&`, `<` and `>` as those six-byte escapes itself, so a value that held them raw would take more room there
 than its cost says (section 7). Check 3(c) shows a context that is within every cap by count and does not
 start because its base holds 2000 raw `&`.
+
+Rule 7 is not optional either. Kubernetes changes a container's environment value: `$(NAME)` becomes the
+value of the earlier variable `NAME` of that container, and `$$` becomes `$`. The context travels as an
+environment value (in a step's pod, and in the runner's job), so a run parameter holding `$$` or
+`$(HPC_JOB_NAME)` would arrive different, and nothing would notice. With rule 7 the text never holds a `$`,
+so nothing can expand. Check 3(d) shows both on a real cluster.
 
 Any JSON parser reads the wire form. Writers: compose (the context, `kaos-ledger`), kaos-lib (the result)
 and, on HPC, the runner (the result it hands back). The reference writer is
@@ -503,6 +510,7 @@ again. Results of 2026-11-12, on Argo Workflows v4.0.6:
 | 3(a) | Does one expression assemble the context as one JSON value from task outputs, as a DAG task argument and as a container env value? | Pass, also for a step with no `needs=`. The same value without the wire form's escapes is changed by the engine: asserted |
 | 3(b) | Does a skipped upstream yield the sentinel inside that expression? | Pass, with `sprig.default`: the engine yields an empty string by itself. Pass for steps with an HPC variant: the cluster twin ran, the HPC twin ran, neither ran |
 | 3(c) | Does a 96 KiB env value reach the container intact? | Pass when its cost fits. The ceiling is 131057 bytes for the step's whole definition. The caps of section 7 keep every step under it: shown for a step that needs three steps and one that needs ten, all at their caps, with plain filler and with the characters that cost more |
+| 3(d) | Does Kubernetes change `$$` and `$(NAME)` in a container's env value, and does the wire form arrive unchanged? | Pass on kind: `a $$ b $(HPC_JOB_NAME) c` arrives as `a $ b abc c`; the same text in wire form (`$` as `\u0024`) arrives byte for byte |
 | 4 | Does a 96 KiB value survive follower, job object, runner and job environment? | Pass on the fake site, with a control run. Needs a live site: the list below |
 | 5 | Do stored HPC jobs stay readable when fields are removed from the definition? | Pass. They read back without the removed fields, and can still be ended, released and deleted |
 
