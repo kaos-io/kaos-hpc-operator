@@ -33,6 +33,9 @@ func testConfig() Config {
 // testKind is the kind of the step in the test contexts.
 const testKind = "train"
 
+// testResult is a small result, as a job that succeeded carries it.
+const testResult = `{"version":1,"status":"ok","values":{},"reads":[],"writes":[]}`
+
 // testContext is a small step context: enough for the tests that do not look at it.
 const testContext = `{"version":1,"run":"wf-1","app":"hera-demo","project":"vision","step":"train","kind":"train",` +
 	`"experiment":"e","params":{},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[],"upstream":{}}`
@@ -161,7 +164,7 @@ func TestShouldCreateTheJobOwnedByTheWorkflowAndHandOnItsResultOnSuccess(t *test
 func TestShouldReattachToTheExistingJobWithoutCreatingAnother(t *testing.T) {
 	cfg := testConfig()
 	existing := cfg.Job()
-	existing.Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed"}
+	existing.Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed", Result: testResult}
 	h := newHarness(t, interceptor.Funcs{}, existing)
 	if code := h.run(context.Background(), cfg); code != ExitSucceeded {
 		t.Fatalf("exit %d:\n%s", code, h.out)
@@ -230,7 +233,7 @@ func TestShouldSurviveAPIBlipsOnCreateAndGet(t *testing.T) {
 			return c.Get(ctx, key, obj, o...)
 		},
 	})
-	go h.setStatus(cfg, hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded})
+	go h.setStatus(cfg, hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Result: testResult})
 	if code := h.run(context.Background(), cfg); code != ExitSucceeded {
 		t.Fatalf("exit %d, blips must not fail the step:\n%s", code, h.out)
 	}
@@ -418,7 +421,7 @@ func TestShouldReattachToTheJobAsTheAPIServerStoredItAndRefuseRealConflicts(t *t
 			existing := cfg.Job()
 			existing.Spec = withCRDDefaults(existing.Spec)
 			tc.mutate(existing)
-			existing.Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed"}
+			existing.Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed", Result: testResult}
 			h := newHarness(t, interceptor.Funcs{}, existing)
 			code := h.run(context.Background(), cfg)
 			if tc.refused && (code != ExitFailed || !strings.Contains(h.out.String(), "different spec")) {

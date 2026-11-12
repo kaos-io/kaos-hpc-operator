@@ -219,28 +219,24 @@ func orDash(s string) string {
 	return s
 }
 
-// AbsentResult is what stands in for a result that is missing (docs/step-contract.md, section 4): the step
-// ended well without writing one.
-const AbsentResult = `{"version":1,"status":"absent"}`
-
-// finish maps the phase to the exit code. Only a job that succeeded hands a result on: its status.result, or
-// the sentinel when the step wrote none. A job that ended any other way writes no result, so the workflow can
-// never take one from it; and a result that cannot be written for the workflow fails the step, naming why.
+// finish maps the phase to the exit code. Only a job that succeeded hands a result on: its status.result, which
+// the runner checked. A job that ended any other way writes no result, so the workflow can never take one from
+// it. A job that succeeded without a result, or a result that cannot be written for the workflow, fails the
+// step, naming why: nothing stands in for a missing result (PRD kaos#1911 CON-04).
 func (f *follower) finish(job *hpcv1alpha1.HPCArgoWorkflowJob) int {
 	if job.Status.Phase != hpcv1alpha1.PhaseSucceeded {
 		f.say("the job ended %s (%s): %s", job.Status.Phase, job.Status.Reason, job.Status.Message)
 		return ExitFailed
 	}
-	result := job.Status.Result
-	if result == "" {
-		result = AbsentResult
-		f.say("the step ended well and handed back no result")
+	if job.Status.Result == "" {
+		f.say("the job succeeded, but it carries no result (status.result): the step's result was not handed back")
+		return ExitFailed
 	}
 	siteJob := ""
 	if job.Status.Run != nil {
 		siteJob = job.Status.Run.SiteJobID
 	}
-	for path, body := range map[string]string{f.o.ResultPath: result, f.o.SlurmIDPath: siteJob} {
+	for path, body := range map[string]string{f.o.ResultPath: job.Status.Result, f.o.SlurmIDPath: siteJob} {
 		err := os.MkdirAll(filepath.Dir(path), 0o755)
 		if err == nil {
 			err = os.WriteFile(path, []byte(body), 0o644)

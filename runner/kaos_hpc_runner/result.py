@@ -9,7 +9,8 @@ replaced by "no result": the job fails, and the sentence says what is wrong (PRD
 import json
 
 RESULT_CAP = 8 * 1024        # the most a result may cost
-ABSENT = '{"version":1,"status":"absent"}'   # what stands in for a missing result; a step never writes it
+RESULT_FILE = '/work/output/kaos-result.json'   # where the step writes it, in every container
+ABSENT = '{"version":1,"status":"absent"}'   # the result of a step that did not run; a step never writes it
 
 
 class InvalidResult(Exception):

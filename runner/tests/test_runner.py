@@ -80,12 +80,14 @@ class Net:
     """urllib.request.urlopen: the metadata server is absent; lakeFS has what the job handed back.
 
     handed: site job id -> the bytes of the result file the job uploaded, or None for "the step wrote none" (the
-    record kaos-result.absent). A job that is not listed handed back the record of no result when
-    absent_by_default, else nothing at all. fail: HTTP codes answered to the next fetches."""
+    record kaos-result.absent). A job that is not listed handed back a small result (OK) when ok_by_default,
+    else nothing at all. fail: HTTP codes answered to the next fetches."""
+
+    OK = b'{"version":1,"status":"ok","values":{},"reads":[],"writes":[]}'
 
     def __init__(self):
         self.objects, self.commits, self.deleted = {}, set(), []
-        self.handed, self.absent_by_default, self.fail, self.fetched = {}, True, [], []
+        self.handed, self.ok_by_default, self.fail, self.fetched = {}, True, [], []
 
     def __call__(self, req, timeout=0, **kw):
         import io
@@ -110,7 +112,7 @@ class Net:
                     raise urllib.error.HTTPError(url, self.fail.pop(0), "x", {}, io.BytesIO(b"{}"))
                 wf, step, jid, what = name.split("/")[1:]
                 assert (wf, step) == (WF, "model-training")
-                raw = self.handed.get(jid, None if self.absent_by_default else "nothing")
+                raw = self.handed.get(jid, self.OK if self.ok_by_default else "nothing")
                 if what == "kaos-result.json" and isinstance(raw, bytes):
                     return io.BytesIO(raw)
                 if what == "kaos-result.absent" and raw is None:
@@ -696,15 +698,17 @@ def _ended_well(rig, **handed):
     return rig.kube.run, rig.kube.status
 
 
-def test_a_step_that_wrote_no_result_publishes_none_and_still_succeeds(rig):
-    run, status = _ended_well(rig)      # the job handed back the record "the step wrote none"
-    assert (run["state"], run["exitCode"], run["terminal"]) == ("COMPLETED", 0, True) and "result" not in status
+def test_a_step_that_ends_well_without_a_result_fails_the_job_naming_that(rig, capsys):
+    """As on the cluster, where a step that succeeds without its result file fails: nothing stands in for it."""
+    run, status = _ended_well(rig, **{"5001": None})      # the job handed back the record "the step wrote none"
+    assert (run["state"], run["exitCode"], run["terminal"]) == ("FAILED", 243, True) and "result" not in status
+    assert "wrote no result (/work/output/kaos-result.json)" in run["message"] and "kaos_lib.step.result()" in run["message"]
     assert [n.rsplit("/", 1)[1] for n in rig.net.fetched] == ["kaos-result.json", "kaos-result.absent"]
     assert rig.net.deleted, "the hand-off branch is deleted"
 
 
 def test_a_result_that_did_not_arrive_fails_the_job_and_is_never_no_result(rig, capsys):
-    rig.net.absent_by_default = False      # neither the file nor the record: the hand-back did not happen
+    rig.net.ok_by_default = False      # neither the file nor the record: the hand-back did not happen
     run, status = _ended_well(rig)
     assert (run["state"], run["exitCode"], run["terminal"]) == ("FAILED", 243, True) and "result" not in status
     assert "handed back neither a result nor the record that the step wrote none" in run["message"]
@@ -769,7 +773,7 @@ def test_a_step_that_did_not_end_well_publishes_nothing_whatever_it_wrote(rig, s
 
 def test_only_this_site_jobs_result_is_taken(rig):
     """A resubmit replaces the site job of the attempt (5001 -> 5002). What 5001 handed back is not 5002's."""
-    rig.net.absent_by_default = False
+    rig.net.ok_by_default = False
     rig.net.handed["4999"] = helpers.fixture("result-ok.wire").encode()     # an earlier attempt's or a replaced job's
     run, status = _ended_well(rig)
     assert (run["state"], run["exitCode"]) == ("FAILED", 243) and "result" not in status

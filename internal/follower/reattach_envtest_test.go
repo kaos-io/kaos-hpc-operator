@@ -73,7 +73,7 @@ func TestShouldReattachAfterPodLossAgainstTheRealAPIServer(t *testing.T) {
 			if err := c.Get(ctx, key, &stored); err != nil {
 				t.Fatal(err)
 			}
-			stored.Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed"}
+			stored.Status = hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Reason: "Completed", Result: testResult}
 			if err := c.Status().Update(ctx, &stored); err != nil {
 				t.Fatal(err)
 			}

@@ -224,14 +224,18 @@ func TestOnlyASucceededJobHandsOnAResult(t *testing.T) {
 			t.Errorf("kaos-result.json = %q", got)
 		}
 	})
-	t.Run("should_hand_on_the_sentinel_when_the_step_ended_well_without_a_result", func(t *testing.T) {
+	t.Run("should_fail_the_step_when_a_succeeded_job_carries_no_result", func(t *testing.T) {
+		// The runner fails a job whose step wrote no result; should one still succeed without, nothing stands in.
 		cfg, h := testConfig(), newHarness(t, interceptor.Funcs{})
 		go h.setStatus(cfg, succeeded(""))
-		if code := h.run(context.Background(), cfg); code != ExitSucceeded {
+		if code := h.run(context.Background(), cfg); code != ExitFailed {
 			t.Fatalf("exit %d:\n%s", code, h.out)
 		}
-		if got := read(t, h.opts.ResultPath); got != fixture(t, "result-absent.wire") || got != AbsentResult {
-			t.Errorf("a missing result is the sentinel, never {} and never empty: %q", got)
+		if _, err := os.Stat(h.opts.ResultPath); !os.IsNotExist(err) {
+			t.Errorf("no result file may exist (never the sentinel, never {}), got err=%v", err)
+		}
+		if !strings.Contains(h.out.String(), "carries no result") {
+			t.Errorf("the cause must be printed:\n%s", h.out)
 		}
 	})
 	for _, phase := range []hpcv1alpha1.Phase{hpcv1alpha1.PhaseFailed, hpcv1alpha1.PhaseCancelled, hpcv1alpha1.PhaseRefused} {

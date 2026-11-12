@@ -3,7 +3,7 @@
 The controller-owned runner of one attempt of an `HPCArgoWorkflowJob` (PRD-HPC-1461 phase 1, D-58/D-64/D-65).
 It is the proven in-pod waiter of the KAOS pipeline template (one optional integration; `kubecore/meluxina.py`, dev be9e52b),
 moved under the controller and without its admission client: it submits the Slurm job (or re-attaches to the one a previous runner of this attempt submitted),
-stages dataset and image through the login-node stager, follows the site job to its end (its state comes from the
+stages every input (dataset) and the image through the login-node stager, follows the site job to its end (its state comes from the
 controller's `status.siteObservation`, D-36; the runner asks the site itself only when that is missing or stale), streams the job log, reports to the job's
 status and exits 0. A continuation is the controller's decision, so a new attempt is a new runner Job.
 
@@ -14,23 +14,24 @@ Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /ru
 ## Modules (`kaos_hpc_runner/`)
 | module | what |
 |---|---|
-| `settings.py` | all inputs, read once from the controller's env; identity, class, dataset, sharing, resume |
+| `settings.py` | all inputs, read once from the controller's env; identity, class, the step context and the inputs (`check_job`), sharing, resume |
 | `slurm.py` | slurmrestd/slurmdbd client (token re-read per request), comment/share parsing, `host_gone` |
 | `wallet.py` | Zitadel wallet mint (RS256 in stdlib, no PyJWT), image WORKDIR lookup |
-| `staging.py` | `Stager` (ssh to the forced-command stager), dataset staging (every object of the pinned commit, whatever the dataset's shape; `CONTRACT` is the staging contract the runner checks against the staging tool's `version` and sends with every `status` and `stage`; `name_rule` and `Names` refuse, before anything is staged or submitted, the object names that cannot be copied), `staging_record` (the bounded `status.run.staging`: kind first/delta/cached, files, bytes, seconds; the follower prints one line from it) |
+| `staging.py` | `Stager` (ssh to the forced-command stager), dataset staging (every object of the pinned commit, whatever the dataset's shape; `CONTRACT` is the staging contract the runner checks against the staging tool's `version` and sends with every `status` and `stage`; `name_rule` and `Names` refuse, before anything is staged or submitted, the object names that cannot be copied), `staging_record` (one bounded record of `status.run.staged` per input: kind first/delta/cached, files, bytes, seconds; the follower prints one line from each) |
 | `image.py` | registry client, docker-archive streaming, `image_key` (tar name = SIF name = `kaos-image=` lease, always in the job comment), `cleanup_images` (asks the stager's `gc` when an attempt is over; AC-65) |
 | `jobscript.py` | the batch script (+ KAOS_METRIC sampler, tar deletion after SIF build) |
-| `payload/` | on-node programs: stagein/stageout/ckpt/slots/idlewatch (`payloads.py` loads them) |
+| `payload/` | on-node programs: stagein/handback/ckpt/slots/idlewatch (`payloads.py` loads them) |
+| `result.py` | the step's result on its way back: the check (`version` 1, `status` `ok`, `values`, `reads`, `writes`, 8 KiB by cost) and the wire form it is written in |
 | `sharing.py` | PRD-1609 inputs-in-script |
-| `reporter.py` | status merge patches: `status.run`, `status.outputs` (<= 64 KiB), `status.pendingReason` |
+| `reporter.py` | status merge patches: `status.run`, `status.result` (only with the report of a step that ended well), `status.pendingReason` |
 | `logs.py` | stager `log` streaming, JSON lines, `status.run.logOffset`, last/max GPU use of the sampler lines in `status.run.gpuUtilization` (AC-69) |
-| `runner.py` | the attempt: submit/adopt, poll loop, resubmits, end |
+| `runner.py` | the attempt: submit/adopt (`site_job` builds the script and the environment that are submitted), poll loop, resubmits, end (`fetch_result`) |
 
 ## Inputs
 Env (controller): `HPC_JOB_NAMESPACE`, `HPC_JOB_NAME`, `KAOS_ATTEMPT`, `KAOS_RESUME_REF` (a
 `scratch://<tar path>#<sha256>` checkpoint reference), `HPC_CKPT_BUDGET_PERCENT`, `IMAGE_REF`, `STEP_COMMAND`, `SLURM_TIME_LIMIT`,
-`HPC_RESUMABLE_LEAD`, `STEP_OUTPUTS`, `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `KUBECORE_WORKFLOW_NAME`, `KUBECORE_RUN_ID`,
-`DATASET_REPO`/`DATASET_VERSION`/`DATASET_COMMIT` (the dataset at the commit the pipeline pinned; the runner never resolves a version), `HPC_SHARING` (`on`/`1`) + `HPC_SCOPE`, allowlisted `OUTPUTS_REPO`/`OUTPUTS_REF`/`CHECKPOINT_*`/
+`HPC_RESUMABLE_LEAD`, `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `WF_NAME` (labels the log lines), `KAOS_APP` (the app: its outputs repository is `outputs-<app>`),
+`KAOS_STEP_CONTEXT` (the step context, exactly as the job carries it; the runner never reads into it), `HPC_INPUTS` (the job's inputs as JSON: `name`, `repo`, `commit`, `ref`; the runner never resolves a version), `HPC_SHARING` (`on`/`1`) + `HPC_SCOPE`, allowlisted
 `KAOS_LIB_SUPPORT`, site: `HPC_ACCOUNT`, `HPC_USER`, `HPC_SCRATCH`, `HPC_HOME`, `HPC_CLASSES_JSON`, `HPC_ENDPOINT`,
 `HPC_REST_VERSION`, the lane the controller chose (`HPC_QOS`, `HPC_RESERVATION`, `HPC_QOS_MAX_MINUTES`), the idle window
 (`HPC_IDLE_TIMEOUT_MINUTES`, 0 = off, default 20), the site's per-user submit cap when the profile has one
@@ -49,7 +50,7 @@ The job script and the runner reserve these codes; the controller turns them int
 | 85 | the step | saved a checkpoint, continue me (the wall-time signal arrived) | continues from the newest verified copy, else `Timeout` (checkpoint missing) / `NotResumable` |
 | 210 | job script | no `apptainer` after loading the module | `SiteFAILED` |
 | 231 | job script | the image could not be pulled (the registry token expires while queued: the runner resubmits with a fresh one, bounded) | `SiteFAILED` |
-| 232 | job script | in-job dataset staging failed (never run without the data) | `SiteFAILED` |
+| 232 | job script | an input could not be staged in the job, or its copy is not complete (never run without the data) | `SiteFAILED` |
 | 233 | job script | the batch script could not be written for the slot manager | `SiteFAILED` |
 | 234 | job script | no verified checkpoint copy to restore | `SiteFAILED` |
 | 235 | job script | the final checkpoint copy or the job comment could not be written and verified | `SiteFAILED` |
@@ -60,6 +61,50 @@ The job script and the runner reserve these codes; the controller turns them int
 | 240 | runner | the slot manager stopped the step for computing on a GPU outside its set, on a node shared by several steps | `GPUViolation` |
 | 241 | runner | the site's staging tool speaks another staging contract, or is not installed for the project after 20 minutes of asking (reported FAILED, nothing staged, no site job) | `StagingMismatch` |
 | 242 | runner | the dataset holds an object that cannot be copied to the site: a name reserved for the platform, a path that could leave the dataset's folder, a name too long, or a file that is also a folder (reported FAILED, nothing staged, no site job) | `ReservedName` |
+| 243 | job script, or runner | the step ended well but its result could not be handed back: the job could not read or upload the result file (job script); the runner could not fetch it, nothing arrived, or the run has no way to hand a result back, in which case nothing is submitted (runner, reported FAILED) | `ResultNotHandedBack` |
+| 244 | runner | the result file the job handed back is not a result of the step contract (reported FAILED) | `InvalidResult` |
+
+## What the step gets and hands back (the step contract)
+
+The site job is built by `Runner.site_job`. The step's command is `python -m app.entry`.
+
+**The context.** `KAOS_STEP_CONTEXT` reaches the step exactly as the job carries it (`spec.context`): in the Slurm
+environment for a job alone on its node; on a shared node as an `export` line of the job script (a host can read a
+waiting job's script, never its environment), quoted so that no character of it is changed. Nothing in the runner or
+the job script parses it.
+
+**The inputs.** Each entry of `HPC_INPUTS` is staged whole, at its pinned commit: from a login node by the site's
+staging tool when the runner has the staging key, else in the job (`payload/stagein.py`, on the job's own time). The
+job script is told where (`KAOS_INPUTS`, one word per input: `name|repository|commit|resident path`) and presents both
+kinds the same way, read-only in the container:
+
+```
+$KAOS_STAGED_ROOT/                 /kaos/inputs: a folder of this job
+    <input>/                       the copy of the dataset commit, bound here
+    <input>.kaos-ready             {"repo": "...", "commit": "...", "full": true}
+```
+
+The record is written by the job script only for a copy that is whole (the staging tool's ready marker, or the
+in-job copy's `.kaos-complete`). An input that cannot be staged ends the job 232 before the step starts. Every input's
+commit is a `kaos-commit=` word of the job comment, so the staging tool evicts none of them while the job queues or
+runs. Not staged: a model or an artifact a needed step wrote; kaos-lib downloads those.
+
+Still open: the copy is bound as its cache folder is, and both caches keep their own markers inside it (`.kaos-ready`,
+`.kaos-used` in the staging tool's; `.kaos-complete`, `.kaos-parts/` in the in-job one), so the step sees those beside
+the dataset's files. `tests/test_step_contract.py` holds the expectation as an expected failure.
+
+**The result.** After a step that exited 0, the job script runs `payload/handback.py`: it uploads
+`$KAOS_WORK/output/kaos-result.json`, unread, to `hpc-outputs/<workflow uid>/<step>/<site job id>/kaos-result.json` on the
+hand-off branch `hpc-<workflow uid>-<step>` of `outputs-<app>`, or the object `kaos-result.absent` when the step wrote no
+file. When it cannot (no token or endpoint, a file that is not a regular file, cannot be read or is over 64 KiB, lakeFS
+refusing after three tries) it prints `result hand-back: <cause>` and the job ends 243. The script removes a result file
+left in the work folder before the step starts (a requeued job runs again under the same id).
+
+The runner (`fetch_result`) then fetches the object for its own site job id (four tries), checks it (`result.check`),
+writes it again in wire form, and sends it as `status.result` in the same patch as the terminal report; it deletes the
+branch. The record that the step wrote no result, neither object there, or lakeFS not answering: the attempt is
+reported FAILED with exit 243, each with its own sentence. Not a result: FAILED with exit 244. The sentence is in `status.run.message` and becomes the job's message. A run that could never hand a
+result back (no data-plane token, no lakeFS endpoint, no app) is reported FAILED 243 before anything is submitted.
 
 ## The site job's name, adopt, and a site that does not answer
 The site job is named `kaos-[<scope>-]<workflow uid>-<step>-<first 8 of the HPC job id>-a<attempt>`. A job script rewrites

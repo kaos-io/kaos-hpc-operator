@@ -78,9 +78,9 @@ const (
 	// ReasonSharedInput: an entry of spec.inputs names an owner, a dataset another project shares. Such a dataset
 	// cannot be staged on an HPC site yet. Refused before anything is booked.
 	ReasonSharedInput = "SharedInput"
-	// ReasonResultNotHandedBack: the step ended well, but what it handed back could not be brought from the
-	// site to status.result: the job could not read or upload the result file, or the runner could not fetch
-	// it (PRD kaos#1911 CON-04). Also when the run has no way to hand a result back at all (no data-plane token,
+	// ReasonResultNotHandedBack: the step ended well, but no result of it reached status.result: the step wrote
+	// none, the job could not read or upload the result file, or the runner could not fetch it (PRD kaos#1911
+	// CON-04). Also when the run has no way to hand a result back at all (no data-plane token,
 	// no lakeFS endpoint, no outputs repository): then nothing is submitted. The job is Failed and publishes no
 	// result; the message names the cause. The job script and the runner report ExitCodeResultNotHandedBack.
 	ReasonResultNotHandedBack = "ResultNotHandedBack"
@@ -844,7 +844,8 @@ type HPCArgoWorkflowJobStatus struct {
 	Run *RunStatus `json:"run,omitempty"`
 	// Result is the step's result (docs/step-contract.md, section 4) in wire form, as the job handed it back:
 	// the runner writes it with its report of a step that ended well, after it checked it. Set only on a job
-	// that Succeeded; absent when the step wrote none. The follower hands it on as the step's kaos-result.
+	// that Succeeded, and every job the runner reports as succeeded has one: a step that ended well without a
+	// result fails. The follower hands it on as the step's kaos-result.
 	// +kubebuilder:validation:MaxLength=8192
 	// +optional
 	Result string `json:"result,omitempty"`

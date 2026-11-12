@@ -27,7 +27,7 @@ const (
 	EnvContext = "KAOS_STEP_CONTEXT"
 
 	HandbackResult  = "result"      // the step wrote a result: served as kaos-result.json (plain JSON, not wire form)
-	HandbackNone    = "none"        // the step ended well and wrote no result: the record kaos-result.absent
+	HandbackNone    = "none"        // the step ended well and wrote no result (the record kaos-result.absent): the job fails
 	HandbackLost    = "lost"        // neither arrived: the upload never happened
 	HandbackGarbage = "garbage"     // the result file is not JSON
 	HandbackDown    = "unreachable" // lakeFS answers 503

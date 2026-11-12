@@ -110,12 +110,12 @@ class Reporter:
     def patch(self, status):
         self.kube('PATCH', self.path('/status'), {'status': status}, 'application/merge-patch+json')
 
-    def report(self, must=False, publish=False, result=None, **run):
+    def report(self, must=False, result=None, **run):
         """status.run of this attempt, every field written (a merge patch would keep an earlier
-        attempt's exit code or checkpoint). publish: the step ended well, and status.result rides in the same
-        patch, so the controller never sees run.terminal before the result: the checked result in wire form,
-        or none (the step wrote no result; whatever was there is removed). Only that one report publishes; no
-        other report touches status.result. must: retry until it lands; the controller settles from it."""
+        attempt's exit code or checkpoint). result: the step ended well, and its checked result (wire form)
+        rides in the same patch as status.result, so the controller never sees run.terminal before the result.
+        Only that one report publishes; no other report touches status.result. must: retry until it lands; the
+        controller settles from it."""
         run['attempt'] = self.attempt
         if 'logOffset' not in run:
             run['logOffset'] = self.log_offset
@@ -128,7 +128,7 @@ class Reporter:
         status = {'run': {k: run.get(k) for k in RUN_FIELDS}}
         if self.qos is not None:
             status['run'].update(qos=self.qos, reservation=self.reservation or None)
-        if publish:
+        if result is not None:
             status['result'] = result
         for n in range(60 if must else 1):
             try:

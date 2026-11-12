@@ -434,22 +434,26 @@ class Runner:
                                          'tries (%s). No result was published' % (RESULT_FETCH_TRIES, err))
 
     def fetch_result(self):
-        """The result of a step that ended well, as the text for status.result (wire form), or None when the step
-        wrote no result. The job handed back the result file's bytes, or the record that there is none
-        (payload/handback.py); the bytes are checked and written again here. Raises ResultNotHandedBack when
-        neither arrived, InvalidResult when the file is not a result: the job then fails, it is never treated as
-        "no result" (PRD kaos#1911 CON-04)."""
+        """The result of a step that ended well, as the text for status.result (wire form). The job handed back
+        the result file's bytes, or the record that the step wrote none (payload/handback.py); the bytes are
+        checked and written again here. Raises ResultNotHandedBack when the step wrote no result or nothing
+        arrived, InvalidResult when the file is not a result: the job then fails. A step that ended well always
+        has a result; nothing stands in for a missing one (PRD kaos#1911 CON-04)."""
         self.fresh_wallet()
         if not self.wallet:
             raise result.ResultNotHandedBack('the step ended well, but no data-plane token could be minted to fetch its '
                                              'result. No result was published')
         raw = self.handed_back('kaos-result.json')
-        if raw is None and self.handed_back('kaos-result.absent') is None:
-            raise result.ResultNotHandedBack(
-                'the step ended well, but the job handed back neither a result nor the record that the step wrote none '
-                '(site job %s). No result was published' % self.jid)
         try:
-            return None if raw is None else result.check(raw)
+            if raw is not None:
+                return result.check(raw)
+            if self.handed_back('kaos-result.absent') is None:
+                raise result.ResultNotHandedBack(
+                    'the step ended well, but the job handed back neither a result nor the record that the step wrote '
+                    'none (site job %s). No result was published' % self.jid)
+            raise result.ResultNotHandedBack(
+                'the step ended well but wrote no result (%s): a step hands back its result before it ends '
+                '(kaos_lib.step.result()). No result was published' % result.RESULT_FILE)
         finally:
             try:   # the hand-off branch has done its job
                 self.handoff('DELETE', '')
@@ -1052,8 +1056,8 @@ class Runner:
                     fields, state='FAILED', message=msg[:500],
                     exitCode=RESULT_NOT_HANDED_BACK_EXIT if lost else INVALID_RESULT_EXIT))
                 return 0
-            print('result:', 'the step wrote none' if handed is None else '%d bytes' % len(handed), flush=True)
-            self.reporter.report(must=True, publish=True, result=handed, **fields)
+            print('result: %d bytes' % len(handed), flush=True)
+            self.reporter.report(must=True, result=handed, **fields)
             return 0
         self.reporter.report(must=True, **fields)
         return 0

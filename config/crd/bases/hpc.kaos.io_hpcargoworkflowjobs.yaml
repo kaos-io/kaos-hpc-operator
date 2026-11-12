@@ -640,7 +640,8 @@ spec:
                 description: |-
                   Result is the step's result (docs/step-contract.md, section 4) in wire form, as the job handed it back:
                   the runner writes it with its report of a step that ended well, after it checked it. Set only on a job
-                  that Succeeded; absent when the step wrote none. The follower hands it on as the step's kaos-result.
+                  that Succeeded, and every job the runner reports as succeeded has one: a step that ended well without a
+                  result fails. The follower hands it on as the step's kaos-result.
                 maxLength: 8192
                 type: string
               resume:

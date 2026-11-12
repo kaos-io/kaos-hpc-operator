@@ -50,17 +50,10 @@ def test_the_log_offset_rides_every_report_and_is_cleared_for_a_new_site_job():
 def test_the_result_rides_in_the_same_patch_as_the_terminal_report():
     r, kube = _reporter()
     wire = helpers.fixture("result-model.wire")
-    r.report(must=True, publish=True, result=wire, siteJobID="1", state="COMPLETED", exitCode=0, terminal=True)
+    r.report(must=True, result=wire, siteJobID="1", state="COMPLETED", exitCode=0, terminal=True)
     (patch,) = kube.patches()
     assert patch[2]["status"]["result"] == wire and patch[2]["status"]["run"]["terminal"] is True
     assert kube.status["result"] == wire
-
-
-def test_a_step_that_wrote_no_result_publishes_none_and_removes_what_was_there():
-    r, kube = _reporter()
-    kube.job["status"]["result"] = "left by something else"
-    r.report(must=True, publish=True, result=None, siteJobID="1", state="COMPLETED", exitCode=0, terminal=True)
-    assert kube.patches()[0][2]["status"]["result"] is None and "result" not in kube.status
 
 
 def test_no_other_report_touches_the_result():
