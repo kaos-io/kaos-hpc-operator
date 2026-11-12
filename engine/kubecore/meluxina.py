@@ -349,6 +349,10 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
             if p.get("name") == CONTEXT_PARAM and isinstance(p.get("value"), str):
                 for r in routed:
                     p["value"] = pair_results(p["value"], r, r + "-" + HPC_TWIN_SUFFIX)
+        # A `when=` on a needed step's value reads that step's result the same way (authoring.py, `<step>.<value>`).
+        if isinstance(task.get("when"), str):
+            for r in routed:
+                task["when"] = pair_results(task["when"], r, r + "-" + HPC_TWIN_SUFFIX)
 
     # A bare task token in Argo depends grammar means Succeeded; a routed dep
     # is now a twin pair where exactly one twin runs and the other is Skipped.

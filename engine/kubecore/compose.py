@@ -51,7 +51,8 @@ config is resolved with an empty environment besides, because this pod holds the
 
 The run's own keys: `plan` and `pipeline-version` are the platform's; the ADVANCED override may carry
 neither. Whether a run promotes a dataset it produces is the run form's `promote-<dataset>` field
-(--promote); the step that produces it finds `promote` on that entry of its context.
+(--promote): compose checks the value; the run's final task moves `latest` (kubecore/promote.py). A step
+never promotes: it seals its version and hands the commit on in its result.
 """
 
 import argparse
@@ -520,16 +521,13 @@ def run_settings(steps: list, walltimes: list, checkpoints: list, leads: list = 
 
 
 def base_context(step: dict, run: str, app: str, project: str, experiment: str, params: dict, reads: dict,
-                 promote: dict = None, checkpoint_every: int = 0) -> dict:
+                 checkpoint_every: int = 0) -> dict:
     """A step's context without `upstream` (the DAG task argument adds it), in the contract's field order.
     `params` is the step's own (step_params)."""
     produces = []
     for entry in step["produces"]:
-        produced = {"name": entry["name"], "type": entry["type"],
-                    "repo": produced_repo(app, entry["type"], entry["name"])}
-        if entry["type"] == "dataset" and (promote or {}).get(entry["name"]):
-            produced["promote"] = True
-        produces.append(produced)
+        produces.append({"name": entry["name"], "type": entry["type"],
+                         "repo": produced_repo(app, entry["type"], entry["name"])})
     context = {
         "version": CONTEXT_VERSION, "run": run, "app": app, "project": project, "step": step["name"],
         "kind": step["kind"], "experiment": experiment, "params": params,
@@ -542,7 +540,7 @@ def base_context(step: dict, run: str, app: str, project: str, experiment: str, 
 
 
 def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict, reads: dict,
-                  promote: dict = None, settings: dict = None) -> dict:
+                  settings: dict = None) -> dict:
     """{step: its base context in wire form}, each within its cap.
 
     `params` holds the config sections the step names in reads=. The cap is checked on the real text,
@@ -555,13 +553,12 @@ def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict,
             problem = entry["type"] == "dataset" and dataset_name_problem(app, step["name"], entry["name"])
             if problem:
                 raise ComposeError(problem)
-    promote = dict(promote or {})
     experiment = experiment_of(resolved, app)
     out = {}
     for step in steps:
         try:
             params = step_params(step, resolved)
-            text = wire(base_context(step, run, app, project, experiment, params, reads, promote,
+            text = wire(base_context(step, run, app, project, experiment, params, reads,
                                       (settings or {}).get(step["name"], {}).get("checkpoint-every", 0)))
         except (TypeError, ValueError) as exc:   # a value JSON cannot hold (inf, nan)
             raise ComposeError(f"the resolved config cannot be handed to the steps: {exc}") from None
@@ -639,10 +636,10 @@ def main(argv=None) -> None:
         if args.steps:
             steps = _steps(args.steps)
             settings = run_settings(steps, args.walltime, args.checkpoint_every, args.resumable_lead)
-            promote = run_promote(steps, args.promote)
+            run_promote(steps, args.promote)     # refuses a value that is not true or false; the final task reads it
             run_classes(steps, args.classes, args.class_offers)
             reads = pin_inputs(resolved, steps)
-            contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, promote, settings)
+            contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, settings)
     except Exception as exc:  # any composition failure = hard error, pre-GPU
         message = str(exc)
         if exc.__cause__ is not None:  # e.g. enum ValidationError inside Hydra's wrapper

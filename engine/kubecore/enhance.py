@@ -71,6 +71,7 @@ developer's repo pins.
 """
 
 import argparse
+import copy
 import json
 from pathlib import Path
 
@@ -109,8 +110,11 @@ from kubecore.step_contract import (
     DATASET_PRODUCER_LABEL,
     DATASET_PRODUCERS_STAY_ON_CLUSTER,
     MAX_APP_NAME,
+    PROMOTE_PARAM,
+    PROMOTE_STEP,
     TEMPLATE_CAP,
     dataset_name_problem,
+    result_of,
     template_bytes,
 )
 
@@ -168,8 +172,8 @@ class EnhanceError(Exception):
 
 
 # PRD-HPC-1461 D-79 F-37: template names only the platform may produce (the follower twin, and its
-# pre-AC-12 name that a Workflow submitted before the rename may still call).
-RESERVED_TEMPLATE_NAMES = (HPC_TWIN_TEMPLATE, "meluxina-run")
+# pre-AC-12 name that a Workflow submitted before the rename may still call; the run's final task).
+RESERVED_TEMPLATE_NAMES = (HPC_TWIN_TEMPLATE, "meluxina-run", PROMOTE_STEP)
 
 
 def refuse_client_identity(wft: dict) -> None:
@@ -1161,6 +1165,52 @@ def refuse_large_templates(spec: dict) -> None:
 STEP_IMAGES_ENV = "KAOS_STEP_IMAGES"
 
 
+PROMOTE_COMMAND = ["python", "-I", "-m", "kaos_engine.promote"]
+
+
+def add_promote_task(spec: dict, steps: list) -> None:
+    """The run's final task `kaos-promote` (kubecore/promote.py): it moves `latest` of every dataset the run form
+    asked to promote, all or none, once every step has succeeded or been skipped. Steps only seal their versions.
+
+    It is the compose template again, as the passes before this one made it (the same image, the same lake
+    credential and service account, the same fixed limit, the cluster), with another command: so it holds exactly
+    the identity a step has, and nothing a step does not. It is added here, never by pipeline.py, and the name is one
+    a pipeline cannot use (refuse_client_identity). A pipeline with no dataset producer has no such task."""
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
+    if compose is None:
+        return
+    args = compose["container"].get("args", [])
+    table = json.loads(args[args.index("--steps") + 1]) if "--steps" in args else []
+    producers = [(s["name"], e["name"]) for s in table for e in s["produces"] if e["type"] == "dataset"]
+    if not producers:
+        return
+    tpl = copy.deepcopy(compose)
+    tpl["name"] = PROMOTE_STEP
+    tpl.setdefault("inputs", {}).setdefault("parameters", []).append({"name": PROMOTE_PARAM})   # beside the class's
+    tpl.pop("outputs", None)
+    container = tpl["container"]
+    container["command"], container["args"] = list(PROMOTE_COMMAND), []
+    container["env"] = [e for e in container.get("env", []) if e["name"] != STEP_IMAGES_ENV] + [
+        {"name": "KAOS_RUN", "value": "{{workflow.name}}"},
+        {"name": "KAOS_PROMOTE_PLAN", "value": "{{inputs.parameters.%s}}" % PROMOTE_PARAM}]
+    labels = tpl.setdefault("metadata", {}).setdefault("labels", {})
+    labels["platform.kubecore.io/step"] = PROMOTE_STEP
+    spec["templates"].insert(spec["templates"].index(compose) + 1, tpl)
+    # What each producer wrote (its result's writes; the sentinel when it did not run) and the form's choice, as JSON.
+    # Every `}` is followed by `,` or `]`: two closing braces would end the expression.
+    plan = ",".join(
+        '{"step":%s,"name":%s,"promote":workflow.parameters[%s],"writes":fromJSON(%s)?.writes ?? []}'
+        % (json.dumps(step), json.dumps(name), json.dumps(promote_field(name)), result_of(step))
+        for step, name in producers)
+    dag = next(t for t in spec["templates"] if t.get("name") == spec.get("entrypoint") and "dag" in t)["dag"]
+    compose_task = next(t for t in dag["tasks"] if t["name"] == COMPOSE_STEP)
+    given = copy.deepcopy((compose_task.get("arguments") or {}).get("parameters") or [])   # the fixed class's sizes
+    ends = " && ".join("(%s.Succeeded || %s.Skipped)" % (n, n) for n in dict.fromkeys(s["name"] for s in table))
+    dag["tasks"].append({
+        "name": PROMOTE_STEP, "template": PROMOTE_STEP, "depends": "%s && %s" % (COMPOSE_STEP, ends),
+        "arguments": {"parameters": given + [{"name": PROMOTE_PARAM, "value": "{{=toJSON([%s])}}" % plan}]}})
+
+
 def enhance_image_guard(steps: list) -> None:
     """Hand the compose step the image every other step will run, as the run resolved it.
 
@@ -1370,6 +1420,7 @@ def enhance(wft: dict, ctx: dict) -> dict:
     enhance_compose_class(spec, steps, ctx)
     enhance_pipeline_info(spec, ctx, steps)
     order_form(spec, steps)
+    add_promote_task(spec, steps)   # before enhance_hpc: its depends are rewritten for the steps that have a twin
     # PRD-1016: the MeluXina leg — must run LAST (twin tasks copy each routed
     # step's FINAL container image/command, and the depends rewrite needs the
     # final DAG). See kubecore/meluxina.py.

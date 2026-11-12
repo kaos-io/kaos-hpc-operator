@@ -16,6 +16,7 @@ It is released by the same build as the controller, at the same version (D-58/D-
 | `kubecore/` | the engine. **This is its source** (PRD-HPC-1461 D-80, 2026-11-10): apps carry no copy and there is no upstream to stay equal to. Edit it here |
 | `kaos_engine/render.py` | the runner, `python -I -m kaos_engine.render` |
 | `kubecore/step_contract.py` | the step contract as the engine writes it: names, caps, the wire form, the expression that assembles a step's context (see "The step contract" below) |
+| `kaos_engine/promote.py`, `kubecore/promote.py` | the run's final task `kaos-promote`, `python -I -m kaos_engine.promote`: checks every dataset the form asked to promote, then moves `latest` of all of them, or of none (`docs/step-contract.md`, section 3). `enhance.add_promote_task` adds it, as a copy of the compose template |
 | `kaos_engine/compose.py` | what the compose-and-validate step runs, `python -I -m kaos_engine.compose`: the engine's compose with the engine first on the path. Pins every declared input and writes each step's context and the run's ledger |
 | `kaos_engine/version.py` | build tag -> PEP 440 |
 | `kaos_pipeline_engine/authoring-schema.json` | `step()` options for the pipeline linter, the removed keywords with the reason each is refused, and `old_app_marker` |
@@ -123,8 +124,8 @@ with the sentinel: a skipped or omitted step has an empty output. Section 10 of 
   sections the step names in `reads=`, `ledger` holds the step's own inputs,
   `experiment` is config `experiment.name` or else the app's name, `produces` names each repository;
 - writes the run's ledger at version 2, every pinned input, as the output `kaos-ledger`;
-- reads the run form's `promote-<dataset>` (`true` puts `promote: true` on that produced dataset in the producing
-  step's context), `<step>-walltime` and `<step>-checkpoint-every` (checked, written as the output `kaos-run-settings`);
+- reads the run form's `promote-<dataset>` (checked only: a step never promotes; the final task below reads it),
+  `<step>-walltime` and `<step>-checkpoint-every` (checked, written as the output `kaos-run-settings`);
   `plan` and `pipeline-version` in the ADVANCED override are reserved and refused (`plan.promote` with a sentence that
   names the form field), so a run never silently ignores one;
 - refuses a config that uses a resolver (`${oc.env:NAME}` and every other `${resolver:...}`; the render refuses it
@@ -291,7 +292,8 @@ python -I -m kaos_engine.render pipeline.py --repo /workspace/repo --profile her
 1. `sys.path` = engine dir, app repo, then the interpreter's own entries (stdlib, site-packages). The engine dir is
    `--engine`, else `$KAOS_ENGINE_DIR`, else next to the runner (the wheel's `kaos_pipeline_engine/`).
 2. `KUBECORE_SCHEMA_PROFILE` (`--profile`, required) and `KUBECORE_CONFIG_DIR` (`--config-dir`, default
-   `<repo>/config`) are set before the engine is imported.
+   `<repo>/config`) are set before the engine is imported, and `KAOS_APP_REPO` (the repo root): the render then refuses a
+   step whose folder `steps/<name with underscores>/` does not exist.
 3. `kubecore` and every engine submodule are imported from the engine dir and their `__file__` asserted (else exit 4).
    A `kubecore/` folder in the app is never imported.
 4. `pipeline.py` runs with `runpy.run_path(..., run_name="__main__")` in the repo dir; it writes

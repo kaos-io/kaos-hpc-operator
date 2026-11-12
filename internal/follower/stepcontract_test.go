@@ -69,7 +69,6 @@ func TestTheJobIsBuiltFromTheContextAndFromNothingElse(t *testing.T) {
 func TestEveryFixtureContextIsCarriedUnchanged(t *testing.T) {
 	inputs := map[string][]string{
 		"context-no-upstream":      {"raw"},
-		"context-promote":          {"raw"},
 		"context-one-upstream":     {"labels", "embeddings"},
 		"context-skipped-upstream": nil, // evaluate declares no input; train wrote a model, export was skipped
 		"context-escapes":          nil,

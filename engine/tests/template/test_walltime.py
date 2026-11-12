@@ -165,10 +165,10 @@ def test_compose_refuses_a_walltime_or_checkpoint_value_that_is_not_minutes_or_h
 def test_the_checkpoint_interval_reaches_the_step_in_its_context():
     from kubecore import compose
     step = {"name": "one", "kind": "train", "reads": [], "inputs": [], "needs": [], "produces": []}
-    out = compose.step_contexts([step], "r", "a", "p", {}, {}, None, {"one": {"checkpoint-every": 20}})
+    out = compose.step_contexts([step], "r", "a", "p", {}, {}, {"one": {"checkpoint-every": 20}})
     context = yaml.safe_load(out["one"])
     assert context["checkpoint_every"] == 20 and list(context)[-1] == "checkpoint_every"
-    plain = yaml.safe_load(compose.step_contexts([step], "r", "a", "p", {}, {}, None, {})["one"])
+    plain = yaml.safe_load(compose.step_contexts([step], "r", "a", "p", {}, {}, {})["one"])
     assert "checkpoint_every" not in plain
 
 

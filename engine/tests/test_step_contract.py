@@ -52,12 +52,12 @@ def evaluate(expression, outputs):
     return eval(body, {"__builtins__": {}}, {"sprig": sprig, "tasks": {t: Task(p) for t, p in outputs.items()}})
 
 
-def base_of(context, step, promote=None):
+def base_of(context, step):
     """The base context compose writes for `step`, from the fixture's own run, params and pinned reads."""
     from kubecore import compose
     reads = {r["name"]: r for r in fixture("ledger-two-reads")["reads"]}
     return compose.base_context(STEPS[step], context["run"], context["app"], context["project"],
-                                context["experiment"], context["params"], reads, promote)
+                                context["experiment"], context["params"], reads)
 
 
 # ---------------------------------------------------------------- the wire form
@@ -116,15 +116,6 @@ def test_a_step_with_no_upstream_gets_exactly_the_fixture():
     base = wire(base_of(want, "prepare"))
     got = evaluate(context_expression(COMPOSE, "prepare", []), {COMPOSE: {"kaos-context-prepare": base}})
     assert got == wire_of("context-no-upstream")
-
-
-def test_a_run_that_asks_to_promote_marks_the_produced_dataset():
-    from kubecore.step_contract import context_expression, wire
-    want = fixture("context-promote")
-    base = wire(base_of(want, "prepare", promote={"embeddings": True}))
-    got = evaluate(context_expression(COMPOSE, "prepare", []), {COMPOSE: {"kaos-context-prepare": base}})
-    assert got == wire_of("context-promote")
-    assert "promote" not in wire(base_of(want, "prepare", promote={"embeddings": False})), "absent means false"
 
 
 def test_a_step_gets_the_result_of_the_step_it_needs_byte_for_byte():

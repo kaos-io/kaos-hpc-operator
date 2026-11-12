@@ -43,7 +43,7 @@ def reference_wire():
 
 # ---------------------------------------------------------------- result.check
 
-@pytest.mark.parametrize("name", ["result-ok", "result-model"])
+@pytest.mark.parametrize("name", ["result-ok", "result-model", "result-skipped"])
 def test_a_fixture_result_is_published_as_its_wire_form(name):
     wire = helpers.fixture(name + ".wire")
     assert result.check(helpers.fixture(name + ".json").encode()) == wire, "from any JSON spelling"
@@ -528,6 +528,11 @@ BAD_RESULTS = [
     (b'{"version":1,"status":"ok","values":{},"reads":[],"writes":[],"writes":[]}', "appears twice"),
     (b'{"version":1,"status":"ok","values":{},"reads":[{"name":"raw","name":"raw"}],"writes":[]}', "appears twice"),
     (b'{"version":1,"status":"ok","values":{},"reads":[],"writes":[],"extra":1}', "unknown field `extra`"),
+    (b'{"version":1,"status":"skipped"}', "skipped result has only version, status and a reason of 1 to 300"),
+    (b'{"version":1,"status":"skipped","reason":""}', "skipped result has only"),
+    (b'{"version":1,"status":"skipped","reason":' + b'"' + b"x" * 301 + b'"}', "skipped result has only"),
+    (b'{"version":1,"status":"skipped","reason":"r","values":{}}', "unknown field `values`"),
+    (b'{"version":1,"status":"later"}', 'status "ok" or "skipped"'),
     (b'{"version":1,"status":"ok","values":{"kaos-x":1},"reads":[],"writes":[]}', "may not start with kaos-"),
     (b'{"version":1,"status":"ok","values":{},"reads":[1,"x"],"writes":[]}', "reads[0]"),
     (b'{"version":1,"status":"ok","values":{},"reads":[],"writes":[null]}', "writes[0]"),

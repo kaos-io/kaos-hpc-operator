@@ -1,0 +1,193 @@
+"""Conditions on a step's value, the one-name rule, and the step's folder (PRD kaos#1911, pipelines authoring UX)."""
+
+import copy
+import re
+import textwrap
+from pathlib import Path
+
+import yaml
+from test_authoring_contract import refused, render
+
+from helpers import copy_app, run_render
+from kubecore import enhance
+from kubecore.step_contract import result_of, result_value, step_folder
+
+CTX = yaml.safe_load((Path(__file__).resolve().parents[1] / "kubecore" / "local-dev" / "pipeline-context.yaml").read_text())
+
+
+def tasks_of(wft):
+    return {t["name"]: t for t in next(t for t in wft["spec"]["templates"] if "dag" in t)["dag"]["tasks"]}
+
+
+def verdict_pipeline(a, when="evaluate.passed == true"):
+    evaluate = a.step("evaluate", kind="evaluate", gpu=False)
+    a.step("publish", kind="publish", needs=[evaluate], when=when)
+
+
+# ----------------------------------------------------------------------------------- when= on a step's value
+
+def test_a_when_on_a_needed_steps_value_reads_its_result():
+    publish = tasks_of(render(verdict_pipeline))["publish"]
+    assert publish["when"] == "{{=" + result_value("evaluate", "passed") + " == 'true'}}"
+    assert 'tasks["evaluate"].outputs.parameters["kaos-result"]' in publish["when"]
+
+
+def test_a_missing_value_fails_the_condition_with_a_sentence_naming_step_and_key():
+    expression = result_value("evaluate", "passed")
+    assert "?? int(" in expression, "an absent value must not quietly compare as empty text"
+    assert "step 'evaluate' gave no value 'passed'" in expression
+
+
+def test_the_sentinel_stands_in_for_a_step_that_did_not_run():
+    assert result_of("evaluate") in result_value("evaluate", "passed")
+
+
+def test_step_and_form_terms_join_with_and_and_or():
+    def build(a):
+        evaluate = a.step("evaluate", kind="evaluate")
+        a.step("publish", kind="publish", needs=[evaluate],
+               when="evaluate.passed == true and experiment-name != off or evaluate.score != 0")
+    when = tasks_of(render(build))["publish"]["when"]
+    assert when.count("&&") == 1 and when.count("||") == 1
+    assert "workflow.parameters['experiment-name'] != 'off'" in when
+    assert when.count('tasks["evaluate"].outputs.parameters["kaos-result"]') == 2
+
+
+def test_a_value_of_a_step_that_is_not_needed_is_refused_with_the_fix():
+    def build(a):
+        a.step("evaluate", kind="evaluate")
+        a.step("publish", kind="publish", when="evaluate.passed == true")
+    assert refused(build) == (
+        "step 'publish': when= reads a value of step 'evaluate', which this step does not need. A step sees the "
+        "result of the steps in its needs= only: add evaluate to needs=[...] of step 'publish'.")
+
+
+def test_a_value_name_that_is_not_a_keyword_name_is_refused():
+    def build(a):
+        evaluate = a.step("evaluate", kind="evaluate")
+        a.step("publish", kind="publish", needs=[evaluate], when="evaluate.pass-rate == 1")
+    assert "which is not a name step.result() could have been given" in refused(build)
+
+
+def test_a_when_on_a_step_name_that_does_not_exist_is_an_unknown_field():
+    def build(a):
+        a.step("publish", kind="publish", when="evaluat.passed == true")
+    assert "names 'evaluat.passed', which is not a field of the run form" in refused(build)
+
+
+def test_the_refusal_names_both_forms_and_the_operators():
+    message = refused(lambda a: a.step("publish", kind="publish", when="score > 0.5"))
+    assert 'when="mode != off"' in message and 'when="evaluate.passed == true"' in message
+    assert "== or !=" in message and "no < or >" in message
+
+
+# ------------------------------------------------------- the same condition when the needed step runs on HPC
+
+def hpc_render(build):
+    ctx = copy.deepcopy(CTX)
+    ctx["hpc"].update(controller="serve", followerImage="registry.example/kaos-hpc-operator:v1.2.3")
+    from kubecore import authoring
+    with authoring.pipeline("p") as p:
+        build(authoring)
+    return enhance.enhance(yaml.safe_load(p.wt.to_yaml()), ctx)
+
+
+def test_the_condition_reads_the_hpc_twin_when_the_needed_step_may_run_there():
+    tasks = tasks_of(hpc_render(verdict_pipeline))
+    assert "evaluate-hpc" in tasks, "the needed step has an HPC twin in this render"
+    when = tasks["publish"]["when"]
+    assert result_of("evaluate", "evaluate-hpc") in when
+    assert result_of("evaluate") not in when.replace(result_of("evaluate", "evaluate-hpc"), "")
+    assert "evaluate-hpc.Succeeded" in tasks["publish"]["depends"], "the twin is in depends, or the engine hides its outputs"
+    assert re.search(r"evaluate-hpc\b", tasks["publish"]["depends"])
+
+
+def test_a_step_that_is_itself_routed_keeps_the_condition_on_both_tasks():
+    def build(a):
+        evaluate = a.step("evaluate", kind="evaluate")
+        a.step("report", kind="transform", needs=[evaluate], when="evaluate.passed == true",
+               produces=[a.artifact("report")])
+    tasks = tasks_of(hpc_render(build))
+    pair = result_of("evaluate", "evaluate-hpc")
+    assert pair in tasks["report"]["when"] and pair in tasks["report-hpc"]["when"]
+
+
+def test_the_value_is_the_same_text_on_the_cluster_and_on_hpc():
+    cluster = tasks_of(render(verdict_pipeline))["publish"]["when"]
+    hpc = tasks_of(hpc_render(verdict_pipeline))["publish"]["when"]
+    assert cluster.replace(result_of("evaluate"), result_of("evaluate", "evaluate-hpc")) == hpc
+
+
+# --------------------------------------------------------------------------- one name, one meaning in a step
+
+def test_a_name_that_is_an_input_and_an_output_of_one_step_is_refused_with_the_fix():
+    def build(a):
+        a.step("refine", kind="transform", inputs=["clean"], produces=[a.dataset("clean")])
+    assert refused(build) == (
+        "step 'refine': clean is both an input (inputs=) of step 'refine' and one of its own outputs (produces=). "
+        "The step reads and writes by name, so the two must differ: rename the config value (for example "
+        "'previous-clean', in inputs= and in config/) or the produced name.")
+
+
+def test_a_name_a_needed_step_produces_and_this_step_produces_too_is_refused():
+    def build(a):
+        first = a.step("first", kind="transform", produces=[a.artifact("report")])
+        a.step("second", kind="transform", needs=[first], produces=[a.artifact("report")])
+    assert "report is both something the step it needs, 'first', produces and one of its own outputs" in refused(build)
+
+
+# ------------------------------------------------------------------------------------------ the step folder
+
+def test_the_folder_of_a_step_has_underscores():
+    assert step_folder("model-eval") == "steps/model_eval"
+    assert step_folder("train") == "steps/train"
+
+
+def run_app(tmp_path, pipeline_text, folders):
+    repo = copy_app(tmp_path / "app")
+    for old in (repo / "steps").iterdir():
+        for f in old.iterdir():
+            f.unlink()
+        old.rmdir()
+    for folder in folders:
+        (repo / "steps" / folder).mkdir(parents=True)
+    (repo / "pipeline.py").write_text(textwrap.dedent(pipeline_text))
+    return run_render(repo)
+
+
+PIPELINE = """
+    from pathlib import Path
+    from kubecore.authoring import pipeline, step
+    with pipeline("p") as p:
+        step("model-eval", kind="evaluate")
+    p.write(Path(__file__).parent / "out" / "raw-workflow-template.yaml")
+"""
+
+
+def test_a_render_without_the_step_folder_names_the_folder(tmp_path):
+    done = run_app(tmp_path, PIPELINE, [])
+    assert done.returncode == 1
+    assert "step 'model-eval' has no folder steps/model_eval/." in done.stderr
+    assert "Create steps/model_eval/ with a Dockerfile and app/entry.py." in done.stderr
+
+
+def test_a_render_with_a_hyphen_folder_says_to_rename_it(tmp_path):
+    done = run_app(tmp_path, PIPELINE, ["model-eval"])
+    assert done.returncode == 1
+    assert "There is a folder steps/model-eval/: rename it to steps/model_eval/." in done.stderr
+
+
+def test_a_render_with_the_underscore_folder_passes(tmp_path):
+    assert run_app(tmp_path, PIPELINE, ["model_eval"]).returncode == 0, "folder is there"
+
+
+def test_a_refusal_of_the_engine_is_one_sentence_without_a_traceback(tmp_path):
+    done = run_app(tmp_path, PIPELINE.replace('kind="evaluate"', 'kind="evaluate", when="score > 3"'), ["model_eval"])
+    assert done.returncode == 1
+    assert "kaos-engine: step 'model-eval': when='score > 3' is not a condition the platform can read." in done.stderr
+    assert "Traceback" not in done.stderr
+
+
+def test_any_other_error_of_pipeline_py_keeps_its_traceback(tmp_path):
+    done = run_app(tmp_path, PIPELINE.replace("step(", "undefined_function("), ["model_eval"])
+    assert done.returncode != 0 and "NameError" in done.stderr and "Traceback" in done.stderr

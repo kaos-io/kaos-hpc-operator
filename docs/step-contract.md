@@ -55,7 +55,7 @@ Everything after `name` is keyword-only.
 | `needs=` | The steps this step runs after, at most ten. Each one's result reaches this step in `upstream`. |
 | `produces=` | What the step writes: `model("name")`, `artifact("name")`, `dataset("name")`. A dataset an app produces is the repository `dataset-<app>-<name>`: `dataset("clean")` in the app `hera1` is `dataset-hera1-clean`. The name is per app because every app made from a template declares the same names and a dataset has exactly one producer; two apps of a project never share one. |
 | `gpu=` | Unchanged. |
-| `when=` | A condition in plain words: the name of a run-form field, `==` or `!=`, and a value: `when="quantization-mode != off"`. The field is a setting's path with dashes, as the run form shows it. The value is a bare word or number (`off`, `3`) or a quoted string (`"two words"`). Comparisons join with `and` / `or` (`and` binds tighter; no parentheses, no other operators). The engine writes it as one condition on the step's task and on its HPC variant, comparing the field's value as text: `quantization-mode != off` becomes `{{=workflow.parameters['quantization-mode'] != 'off'}}` (`and` becomes `&&`, `or` becomes a double bar, in the order written). The step is skipped when it is false. |
+| `when=` | A condition in plain words: a name, `==` or `!=`, and a value. The name is a field of the run form, `when="quantization-mode != off"` (a setting's path with dashes, as the run form shows it), or a value a step in `needs=` handed on, `when="evaluate.passed == true"`: `<step>.<value>`, where `<value>` is a keyword of that step's `step.result(...)` (letters, digits and `_`; a step that is not in this step's `needs=` is refused, naming the fix). The value is a bare word or number (`off`, `3`) or a quoted string (`"two words"`). Comparisons join with `and` / `or` (`and` binds tighter; no parentheses, no other operators). The engine writes it as one condition on the step's task and on its HPC variant, comparing the field's value as text: `quantization-mode != off` becomes `{{=workflow.parameters['quantization-mode'] != 'off'}}` (`and` becomes `&&`, `or` becomes a double bar, in the order written). A step's value is read from the needed step's result (`kaos-result`) through the expression of section 10 item 3, as text: `evaluate.passed == true` becomes `string(fromJSON(<the result of evaluate>)?.values?.["passed"] ?? int("<sentence>")) == 'true'`. When the needed step ran on an HPC class the result is read from its HPC variant (the pair, section 10); the text is the same on both. A value that is not there (the step was skipped or did not run, or never set it) fails the task: `int("<sentence>")` of a sentence is the one failure the expression language lets us word, and the workflow system shows `failed to evaluate expression: invalid operation: int(step 'evaluate' gave no value 'passed' (it was skipped, did not run, or never set it): a when= on a step's value needs the value)` as the task's error, so a missing value is never a quiet `false` (checked on the lab, Argo Workflows v4.0.6, on the cluster and on the HPC variant). The step is skipped when the condition is false. |
 | `walltime=` | The step's time limit, on any kind: `'90m'`, `'12h'` or `'720'` (minutes). It is the default of the step's run-form field `<step>-walltime` (below). |
 | `resumable=`, `idle_timeout=` | Unchanged. |
 | `checkpoint_every=` | How often the step's checkpoint is saved: `'20m'`, `'1h'` or `20` (minutes); `False` for no copies. It is the default of the run-form field `<step>-checkpoint-every`. |
@@ -88,7 +88,7 @@ and, for `control`, `step 'x': a control step steers the run and handles no data
 **The run form.** The form speaks to the developer, in this order: `pipeline-info` (how to fill the form, the machine
 classes, the developer's steps; no account, provider or platform step), the `experiment-*` fields, the other settings
 in the order of `config/`, the dataset fields (the config values `inputs=` names), then for each step, in pipeline order,
-`<step>-class`, `<step>-walltime` and `<step>-checkpoint-every`, then the `promote-<dataset>` choices, `config`
+`<step>-class`, `<step>-walltime` and `<step>-checkpoint-every`, then the `promote-<dataset>` choices (read by the final task `kaos-promote`), `config`
 ("Extra settings for this run, as YAML. They replace the values above.") and last the `image-<step>` fields, each
 described "Set by the platform. Do not change." (the delivery pipeline reads them to check each step has its folder).
 A setting's description is the comment written next to it in `config/*.yaml`: the `# ...` at the end of its line, else
@@ -163,9 +163,14 @@ the run form's `promote-clean`.
 **What the engine refuses when it renders the pipeline**, each time naming the step and the rule:
 
 - a name that breaks the rule above;
-- a `when=` that is not a run-form field compared with a value (an unknown operator, parentheses, a missing
-  value, `{{...}}` written in the workflow system's syntax), or that names a field the run form does not have
-  (the message lists the fields it has);
+- a `when=` that is not a name compared with a value (an unknown operator such as `<` or `>`, parentheses, a missing
+  value, `{{...}}` written in the workflow system's syntax): the message states what is allowed with one example of
+  each form; one that names a field the run form does not have (the message lists the fields it has), or a value of
+  a step that is not in its `needs=` (the message says to add it);
+- a name that is both an input of a step and one of its own outputs, or an output of a step it needs and one of its
+  own: the step reads and writes by name;
+- a step without its folder `steps/<name with every hyphen written as an underscore>/`, when the render runner knows
+  where the app is (`KAOS_APP_REPO`, set by `kaos_engine.render`);
 - within one step, a name in `inputs=` that is also written by a step in `needs=`, or two steps in `needs=`
   that write the same name: all are read by name (section 2), so the message names both;
 - more than ten steps in `needs=` (section 7);
@@ -228,7 +233,7 @@ under the run's work folder.
 | `experiment` | string | The experiment the run belongs to: the config value `experiment.name`, else the app's name. It is the `<experiment>` folder of the run's artifacts, `<name>/<experiment>/<run>/`. |
 | `params` | object | The config sections this step names in `reads=`, as compose resolved them, and nothing else. It never holds a `plan` section. It never holds a `platform` section either, because the wave removes the `platform` config group altogether: an app whose config still names it is refused as an app made before the current pipelines. |
 | `ledger` | object | A [ledger](#5-the-ledger) with one read for each input this step declares in `inputs=`, at the commit compose pinned. `writes` is empty. |
-| `produces` | array | What this step declares in `produces=`: `{"name", "type", "repo"}` each, in that order. `type` is `model`, `artifact` or `dataset`; `repo` is the repository it is written to. A `dataset` entry may carry `promote` (boolean; absent means `false`) after `repo`. |
+| `produces` | array | What this step declares in `produces=`: `{"name", "type", "repo"}` each, in that order. `type` is `model`, `artifact` or `dataset`; `repo` is the repository it is written to. There is no `promote`: a step only seals a version of a dataset, and the run's final task moves `latest` (below). |
 | `upstream` | object | One entry for each step in `needs=`, keyed by step name, in the order of `needs=`: that step's [result](#4-the-result), or the sentinel `{"version":1,"status":"absent"}` when it did not run. Empty when the step needs none. Always the last field. |
 
 Rules:
@@ -240,16 +245,32 @@ Rules:
 - A step depends only on what it declares: its `params` are its `reads=` sections, its `ledger` its
   `inputs=`, its `upstream` its `needs=`.
 - A dataset an upstream step produced in this run is read from `upstream.<step>.writes`, not from `ledger`.
-- `promote` says whether this run moves the dataset's `latest` (the head of its `main` branch) to the version
-  the step seals. The run asks for it: the run form has a choice `promote-<dataset>` (`false` or `true`, default `false`;
-  "Make this run's version of <dataset> the one other pipelines read as latest.") for each `dataset(...)` a step
-  produces, `<dataset>` being the `produces` name, and compose sets `promote` from it. Anything but `true` or
-  `false` is refused, naming the field. The run key `plan.promote` of the ADVANCED override is gone: an override that
-  holds it is refused with "'plan.promote' is no longer read. Tick the field promote-<dataset> of the run form, one
-  for each dataset a step produces." The step never decides and step code cannot set it. With `promote` false or absent the step still seals its version; `latest` stays where it
-  was (PRD D-06).
+- **A step never moves `latest`.** It seals its version (the commit its result names in `writes`) and stops. The run
+  form has a choice `promote-<dataset>` (`false` or `true`, default `false`; "Make this run's version of <dataset> the
+  one other pipelines read as latest.") for each `dataset(...)` a step produces, `<dataset>` being the `produces` name.
+  Compose checks the value (anything but `true` or `false` is refused, naming the field); it is not in any context.
+  The run key `plan.promote` of the ADVANCED override is gone: an override that holds it is refused with "'plan.promote'
+  is no longer read. Tick the field promote-<dataset> of the run form, one for each dataset a step produces."
+  `latest` moves in the run's final task, below (PRD D-06 as amended).
 
-Fixtures: `context-no-upstream`, `context-promote`, `context-one-upstream`, `context-skipped-upstream`,
+**The final task `kaos-promote`.** A pipeline that produces a dataset ends with one more task, added by the enhancer
+(never by `pipeline.py`; `kaos-promote` is not a name a step or a template can take). It runs only when every step of
+the run succeeded or was skipped (`depends`: `compose-and-validate && (<step>.Succeeded || <step>.Skipped)` for every
+step, through the pair of an HPC step), never on an HPC class, and with the compose template's image, service account,
+lake credential and fixed class: the identity a step has. Its input is, for each dataset-producing step, the step's name,
+the dataset's name, the form's `promote-<dataset>` and the `writes` of the step's result (`[]` for a step that did not
+run). It does two things in this order: (1) it CHECKS every dataset to promote: the sealed commit's first parent is the
+head of `main` the step started from, and `main` must still be there; if any dataset's head moved it promotes none and
+fails, naming each dataset that moved; (2) it MERGES every sealed version into `main`, each guarded by `expected_head`,
+with the metadata `kaos.promoted=<sealed commit id>`. A dataset whose producer did not run, or whose step wrote what
+`main` already held, or whose `promote-<dataset>` is not `true`, is left out, and the log says so. **A crash between the
+merges** leaves the datasets already merged at the new version and the others at the old one, and the task fails naming
+both lists; every sealed version stays kept (tagged). **A re-run** of the task recognises a dataset whose `main` head
+carries `kaos.promoted=<its sealed commit>` and leaves it alone, and checks and merges the others; once another run has
+moved a dataset, that dataset is refused with its name and the next run starts from its new head. Models and artifacts
+are not touched: their run-unique folder is saved by their step. The code is `engine/kubecore/promote.py`.
+
+Fixtures: `context-no-upstream`, `context-one-upstream`, `context-skipped-upstream`,
 `context-escapes`.
 
 ## 4. The result
@@ -261,7 +282,7 @@ engine reads it as the step's one output, `kaos-result`. It holds one JSON objec
 | Field | Type | Content |
 |---|---|---|
 | `version` | number | `1`. |
-| `status` | string | `ok`: the step wrote this result. `absent`: there is no result. |
+| `status` | string | `ok`: the step wrote this result. `absent`: there is no result. `skipped`: the step ended itself with `step.skip(reason)`; the result then has only `version`, `status` and `reason` (below). |
 | `values` | object | Small values for the steps that need this one. The app chooses the names; a name may not start with `kaos-`. Metrics and anything large belong in MLflow or in an artifact, not here: the whole result may cost 8 KiB (section 7). |
 | `reads` | array | A ledger read entry for every input the step declares, at its pinned commit, whether or not `input()` was called for it; and one for every dataset written upstream that the step actually read. |
 | `writes` | array | A ledger write entry for each model, artifact or dataset version the step wrote. |
@@ -274,6 +295,8 @@ reached. A step that ends well always has a result, because kaos-lib exits with 
 without one. So `absent` means "did not run", never "ran and had nothing to say". It is never `{}` and
 never an empty value.
 
+**A skipped result** is `{"version":1,"status":"skipped","reason":"<1 to 300 characters>"}` (fixture `result-skipped`). A step writes it with `kaos_lib.step.skip(reason)` and ends with exit code 0, so the workflow system shows the task as succeeded; the result, not the task's phase, says it was skipped. It has no `values`, `reads` or `writes`, and the step saves no output. The steps that need it still run (as for a step skipped by `when=`): the context carries this entry in `upstream`, and kaos-lib reads it as "left no result" with the reason (`step.skipped(name)`). A skipped step's datasets get no new version, so the final task promotes none of them. The HPC runner checks a skipped result as its own shape and publishes it as `status.result` (`runner/kaos_hpc_runner/result.py`), so a step skips the same way on an HPC class.
+
 A step that fails hands back nothing: the steps that need it do not run.
 
 **Who checks a result.** In the cluster nothing between two steps does: kaos-lib writes it, and the `start()`
@@ -281,9 +304,10 @@ of each step that needs it checks the shape of the entry and fails naming the up
 runner checks it before it is handed back (section 8): the whole shape, not the top level. `version` is the
 integer 1, `values` is an object, every entry of `reads` and `writes` has the fields and types of section 5, every
 number is finite, no object holds a key twice, and a field the contract does not give is refused. A result that
-fails any of this fails the job and the message names what is wrong.
+fails any of this fails the job and the message names what is wrong. A skipped result (`status` `skipped`) is checked as
+its own shape: `version`, `status` and a `reason` of 1 to 300 characters, and no other field.
 
-Fixtures: `result-ok` (one read, one write), `result-model`, `result-absent`.
+Fixtures: `result-ok` (one read, one write), `result-model`, `result-absent`, `result-skipped`.
 
 ## 5. The ledger
 

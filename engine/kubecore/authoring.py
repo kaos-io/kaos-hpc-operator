@@ -27,7 +27,9 @@ This is a render-time helper, not a runtime SDK.
 """
 
 import json
+import os
 import re
+from pathlib import Path
 
 from hera.workflows import DAG, Container, Env, Parameter, Resources, WorkflowTemplate
 from hera.workflows.models import ValueFrom
@@ -53,7 +55,10 @@ from kubecore.step_contract import (
     RESULT_PARAM,
     RESULT_PATH,
     SENTINEL,
+    APP_REPO_ENV,
     context_expression,
+    result_value,
+    step_folder,
     wire,
 )
 
@@ -199,22 +204,24 @@ _WHEN_NAME = r"[A-Za-z0-9_.-]+"
 _WHEN_COMPARE = rf"({_WHEN_NAME})\s*(==|!=)\s*(\"[^\"]*\"|'[^']*'|{_WHEN_NAME})"
 _WHEN_ALL = re.compile(rf"\s*{_WHEN_COMPARE}(?:\s+(?:and|or)\s+{_WHEN_COMPARE})*\s*")
 _WHEN_TOKEN = re.compile(rf"{_WHEN_COMPARE}|\s+(and|or)\s+")
-_WHEN_EXAMPLE = 'when="mode != off"'
+_VALUE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")    # a result value is a Python keyword argument of step.result()
+# What when= may hold, in one place: every refusal of a when= says it.
+_WHEN_FORMS = ('when="mode != off" (a field of the run form) or when="evaluate.passed == true" (a value that the '
+               'step "evaluate", which this step needs, handed on with step.result(passed=...))')
+_WHEN_ALLOWED = (f"A condition compares one name with a text, with == or != and nothing else, for example {_WHEN_FORMS}. "
+                 f"Join comparisons with and / or; no parentheses, no < or >.")
 
 
 def _parse_when(name, when):
-    """when= in plain words: `<field> == <value>` or `!=`, joined by `and` / `or` (`and` binds tighter, no
-    parentheses). Returns the (field, operator, value) comparisons and the joiners between them."""
+    """when= in plain words: `<name> == <text>` or `!=`, joined by `and` / `or` (`and` binds tighter, no
+    parentheses). <name> is a field of the run form or `<step>.<value>`. Returns the (name, operator, text)
+    comparisons and the joiners between them; which name is which is decided by _classify_when."""
     if isinstance(when, str) and ("{{" in when or "}}" in when):
         raise AuthoringError(
-            f"step {name!r}: when= is written with the name of a run-form field, for example {_WHEN_EXAMPLE}. "
-            f"Write the field's name instead of {{{{workflow.parameters.<field>}}}}."
+            f"step {name!r}: when= is written with plain names, not with {{{{...}}}}. {_WHEN_ALLOWED}"
         )
     if not (isinstance(when, str) and _WHEN_ALL.fullmatch(when)):
-        raise AuthoringError(
-            f"step {name!r}: when={when!r} is not a run-form field compared with a value, for example "
-            f"{_WHEN_EXAMPLE}. Join comparisons with and / or; no parentheses."
-        )
+        raise AuthoringError(f"step {name!r}: when={when!r} is not a condition the platform can read. {_WHEN_ALLOWED}")
     compares, joiners = [], []
     for m in _WHEN_TOKEN.finditer(when):
         if m.group(4):
@@ -225,10 +232,40 @@ def _parse_when(name, when):
     return compares, joiners
 
 
+def _classify_when(name, parsed, needs, steps):
+    """Each comparison as ("field", field, None, op, text) or ("step", step, value, op, text). A name
+    `<step>.<value>` is a step's value when <step> is in this step's needs=; a step that is declared but not
+    needed is refused, with the fix. Anything else is a field of the run form (checked when the form is known)."""
+    needed = {n.name for n in needs}
+    compares = []
+    for left, op, text in parsed[0]:
+        head, dot, key = left.partition(".")
+        if dot and head in needed:
+            if not _VALUE_KEY.match(key):
+                raise AuthoringError(
+                    f"step {name!r}: when= names the value {key!r} of step {head!r}, which is not a name "
+                    f"step.result() could have been given (letters, digits and _, not starting with a digit). "
+                    f"Write {head}.<value> with the keyword you gave step.result(<value>=...)."
+                )
+            compares.append(("step", head, key, op, text))
+        elif dot and any(s.name == head for s in steps):
+            raise AuthoringError(
+                f"step {name!r}: when= reads a value of step {head!r}, which this step does not need. A step "
+                f"sees the result of the steps in its needs= only: add {head} to needs=[...] of step {name!r}."
+            )
+        else:
+            compares.append(("field", left, None, op, text))
+    return compares, parsed[1]
+
+
 def _when_condition(compares, joiners):
-    """The workflow engine's expression for the parsed `when=`; values are text, as run-form values are."""
-    def one(field, op, value):
-        return "workflow.parameters['%s'] %s '%s'" % (field, op, value.replace("\\", "\\\\").replace("'", "\\'"))
+    """The workflow engine's expression for the parsed `when=`; values are text, as run-form values are. A
+    step's value is read from the result of the needed step (step_contract.result_value)."""
+    def one(kind, left, key, op, text):
+        text = text.replace("\\", "\\\\").replace("'", "\\'")
+        if kind == "step":
+            return "%s %s '%s'" % (result_value(left, key), op, text)
+        return "workflow.parameters['%s'] %s '%s'" % (left, op, text)
     parts = [one(*compares[0])]
     for joiner, compare in zip(joiners, compares[1:]):
         parts += ["&&" if joiner == "and" else "||", one(*compare)]
@@ -348,6 +385,16 @@ def _check_data(name, kind, inputs, needs, produces):
             f"{upstream[clash[0]]!r}, produces. A step reads both by name, so the two must differ: rename "
             f"the config value or the produced {'thing' if len(clash) == 1 else 'things'}."
         )
+    # A step reads an input and writes an output by name, into folders of that name: one name is one thing.
+    same = sorted(set(inputs) & set(names)) or sorted(set(upstream) & set(names))
+    if same:
+        found = f"an input (inputs=) of step {name!r}" if same[0] in inputs else \
+            f"something the step it needs, {upstream[same[0]]!r}, produces"
+        raise AuthoringError(
+            f"step {name!r}: {', '.join(same)} is both {found} and one of its own outputs (produces=). The step "
+            f"reads and writes by name, so the two must differ: rename the config value (for example "
+            f"'previous-{same[0]}', in inputs= and in config/) or the produced name."
+        )
     readable = len(inputs) + sum(1 for need in needs for entry in need.produces if entry.type == "dataset")
     if readable > MAX_INPUTS:
         raise AuthoringError(
@@ -380,7 +427,8 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
         raise AuthoringError(
             f"step name {name!r} is invalid — use a DNS-label name: lowercase "
             f"letters, digits and hyphens, no leading/trailing hyphen, at most {MAX_NAME} characters "
-            f"(e.g. 'model-evaluation'). The name is the step's folder under steps/ and part of its image name."
+            f"(e.g. 'model-evaluation'). Its folder is steps/ plus the name with hyphens written as underscores "
+            f"(steps/model_evaluation/), and the name is part of its image name."
         )
     if name.endswith(RESERVED_STEP_SUFFIX) or name in RESERVED_STEP_NAMES or name.startswith(RESERVED_PREFIX):
         raise AuthoringError(
@@ -419,7 +467,7 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
     # machine is interrupted too. A resumable step gets its checkpoint copies wherever it runs (resilience.py).
     checkpoint_every = _checkpoint_every_minutes(name, checkpoint_every)
     idle_timeout = _idle_timeout_minutes(name, idle_timeout)
-    parsed_when = _parse_when(name, when) if when is not None else None
+    parsed_when = _classify_when(name, _parse_when(name, when), needs, _current.steps) if when is not None else None
     s = Step(name, kind, reads, inputs, needs, produces, gpu, when, walltime, resumable, checkpoint_every,
              idle_timeout)
     s.parsed_when = parsed_when
@@ -456,6 +504,23 @@ class pipeline:
                 f"step {kindless[0]!r} has no kind=, which every step declares: one of {', '.join(KINDS)}.{notice}"
             )
 
+    def _check_folders(self) -> None:
+        """Every step has its folder steps/<name with underscores>/. Checked when the render runner says where the
+        app is (an in-process render of a pipeline has no folders to look at)."""
+        root = os.environ.get(APP_REPO_ENV)
+        if not root:
+            return
+        for s in self.steps:
+            folder = step_folder(s.name)
+            if (Path(root) / folder).is_dir():
+                continue
+            hyphen = "steps/" + s.name
+            found = f" There is a folder {hyphen}/: rename it to {folder}/." if (Path(root) / hyphen).is_dir() else ""
+            raise AuthoringError(
+                f"step {s.name!r} has no folder {folder}/. The folder of a step is steps/ plus the step's name with "
+                f"every hyphen written as an underscore. Create {folder}/ with a Dockerfile and app/entry.py.{found}"
+            )
+
     def _step_table(self) -> str:
         """What compose needs to write each step's context: its kind, the config sections it
         reads (its params), its inputs, the steps it needs (each one's result takes room in the context)
@@ -473,12 +538,13 @@ class pipeline:
         )  # render gate: reads= sections must exist in the tree
         fields = [p.name for p in form.parameters if p.name != derive_tree.ADVANCED_PARAM_KWARGS["name"]]
         for s in self.steps:
-            for field, _, _ in (s.parsed_when[0] if s.parsed_when else []):
-                if field not in fields:
+            for kind, field, _, _, _ in (s.parsed_when[0] if s.parsed_when else []):
+                if kind == "field" and field not in fields:
                     raise AuthoringError(
                         f"step {s.name!r}: when={s.when!r} names {field!r}, which is not a field of the run "
                         f"form. The fields are: {', '.join(fields)}."
                     )
+        self._check_folders()
         derive_tree.validate_inputs({s.name: s.inputs for s in self.steps}, form.tree)
         required = sorted({sec for s in self.steps for sec in s.reads})
 

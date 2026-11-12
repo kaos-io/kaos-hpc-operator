@@ -16,6 +16,8 @@ RESULT_PATH = "/work/output/kaos-result.json"
 LEDGER_PARAM = "kaos-ledger"              # compose's output: the run's ledger as the run starts (pinned inputs)
 LEDGER_PATH = "/work/kaos-ledger.json"
 SENTINEL = {"version": 1, "status": "absent"}
+PROMOTE_STEP = "kaos-promote"             # the run's final task (kubecore/promote.py); a name no step can take
+PROMOTE_PARAM = "kaos-promote-plan"       # its one input: what each dataset-producing step wrote, and the form's promote-<name>
 RESERVED_PREFIX = "kaos-"                 # step names and produced names the platform keeps for itself
 RESERVED_CONFIG_KEYS = ("plan", "pipeline-version")
 # A top-level config key the platform used to add and no longer does: an app that defines one itself is
@@ -115,6 +117,14 @@ def template_bytes(template: dict) -> int:
     return len(text.encode()) + 5 * sum(text.count(c) for c in "&<>") + 3 * sum(text.count(c) for c in "\u2028\u2029")
 
 
+APP_REPO_ENV = "KAOS_APP_REPO"   # set by the render runner: the app repository's root, where steps/ is
+
+
+def step_folder(name: str) -> str:
+    """The folder of a step, relative to the app repository: steps/<name with every hyphen as an underscore>."""
+    return "steps/" + name.replace("-", "_")
+
+
 def dataset_repo(app: str, name: str) -> str:
     """The repository of a dataset an app produces: named per app, so two apps of a project that declare the
     same dataset name (every app made from a template does) never share a repository and a writer."""
@@ -154,6 +164,18 @@ def result_of(task: str, twin: str = "") -> str:
     if twin:
         value = "sprig.default(%s, %s)" % (value, _task_output(task, RESULT_PARAM))
     return value
+
+
+def result_value(task: str, key: str) -> str:
+    """The expression for the value `key` of the result of the needed step `task`, as text, for a `when=` that
+    compares it. A value that is not there (the step was skipped or did not run, or never set it) is NOT an
+    empty text: the expression fails, and the workflow engine shows the sentence below as the task's error, so
+    the run stops with the step and the key named instead of the condition quietly being false. (`int()` of a
+    sentence is the one failure the expression language lets us word.) `?.` keeps an absent result from
+    failing earlier with a message that names neither."""
+    sentence = ("step '%s' gave no value '%s' (it was skipped, did not run, or never set it): "
+                "a when= on a step's value needs the value" % (task, key))
+    return "string(fromJSON(%s)?.values?.[%s] ?? int(%s))" % (result_of(task), _quoted(key), _quoted(sentence))
 
 
 def context_expression(compose_task: str, step: str, needs: list) -> str:

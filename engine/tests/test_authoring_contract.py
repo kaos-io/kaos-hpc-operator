@@ -325,8 +325,10 @@ def test_the_hpc_variant_keeps_the_steps_own_condition():
         "workflow.parameters['experiment-name'] != 'off'")
 
 
-def _example():
-    return 'for example when="mode != off"'
+ALLOWED = ('A condition compares one name with a text, with == or != and nothing else, for example '
+           'when="mode != off" (a field of the run form) or when="evaluate.passed == true" (a value that the step '
+           '"evaluate", which this step needs, handed on with step.result(passed=...)). '
+           'Join comparisons with and / or; no parentheses, no < or >.')
 
 
 @pytest.mark.parametrize("written", [
@@ -336,10 +338,9 @@ def _example():
     "exp$ment == a", "experiment name == a", "experiment-name == a AND dataset == b", "experiment-name == a and",
     "experiment-name == 'open",
 ])
-def test_a_when_that_is_not_a_comparison_is_refused_with_an_example(written):
+def test_a_when_that_is_not_a_comparison_is_refused_with_what_is_allowed(written):
     assert refused(lambda a: a.step("export", kind="evaluate", when=written)) == (
-        f"step 'export': when={written!r} is not a run-form field compared with a value, "
-        f'for example when="mode != off". Join comparisons with and / or; no parentheses.')
+        f"step 'export': when={written!r} is not a condition the platform can read. {ALLOWED}")
 
 
 @pytest.mark.parametrize("written", [
@@ -348,12 +349,11 @@ def test_a_when_that_is_not_a_comparison_is_refused_with_an_example(written):
 ])
 def test_the_workflow_systems_own_syntax_in_when_is_refused(written):
     assert refused(lambda a: a.step("export", kind="evaluate", when=written)) == (
-        "step 'export': when= is written with the name of a run-form field, for example when=\"mode != off\". "
-        "Write the field's name instead of {{workflow.parameters.<field>}}.")
+        f"step 'export': when= is written with plain names, not with {{{{...}}}}. {ALLOWED}")
 
 
 def test_a_when_that_is_not_text_is_refused():
-    assert "is not a run-form field compared with a value" in refused(
+    assert "is not a condition the platform can read" in refused(
         lambda a: a.step("export", kind="evaluate", when=True))
 
 

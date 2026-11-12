@@ -17,7 +17,8 @@ Contract (engine/README.md "The runner contract"):
   6. The app's pyproject dependencies that the engine does not provide are printed (installing them is
      CI's job); nothing is pip-installed here and the app is never installed.
 
-Exit codes: 0 rendered, 1 pipeline.py raised or the app is not on the step contract, 2 bad invocation,
+Exit codes: 0 rendered, 1 pipeline.py raised or the app is not on the step contract (a refusal of the engine's own
+rules is printed as its one sentence, `kaos-engine: <sentence>`, without the traceback), 2 bad invocation,
 3 engine tampered with, 4 engine broken.
 """
 
@@ -42,6 +43,8 @@ EXIT_BAD_INVOCATION = 2
 EXIT_TAMPERED = 3
 EXIT_ENGINE_BROKEN = 4
 EXTRA_DEP_PREFIX = "kaos-engine: extra-dep "
+# The engine's own refusals: kubecore.authoring, derive_tree and enhance raise them.
+REFUSALS = ("AuthoringError", "DeriveError", "EnhanceError")
 
 
 class EngineError(Exception):
@@ -149,6 +152,7 @@ def render(pipeline: Path, repo: Path, profile: str, engine: Path, config_dir: P
         raise EngineError(f"unknown schema profile {profile!r} (use {' or '.join(PROFILES)})", EXIT_BAD_INVOCATION)
     os.environ["KUBECORE_SCHEMA_PROFILE"] = profile
     os.environ["KUBECORE_CONFIG_DIR"] = str(config_dir)
+    os.environ["KAOS_APP_REPO"] = str(repo)    # kubecore.step_contract.APP_REPO_ENV: where steps/ is
     modules = import_engine(engine)
     print(f"kaos-engine: version={engine_version()} profile={profile} engine={engine} repo={repo}", file=sys.stderr)
     extras = extra_dependencies(repo)
@@ -191,6 +195,13 @@ def main(argv: list[str] | None = None) -> int:
     except EngineError as err:
         print(f"kaos-engine: {err}", file=sys.stderr)
         return err.code
+    except Exception as err:  # noqa: BLE001
+        # A refusal of the engine's own rules (a step that breaks a rule, a config tree that cannot be composed) is a
+        # sentence that names the step and the fix: print the sentence, not the Python traceback that leads to it.
+        if type(err).__name__ not in REFUSALS:
+            raise
+        print(f"kaos-engine: {err}", file=sys.stderr)
+        return EXIT_OLD_APP
     return 0
 
 

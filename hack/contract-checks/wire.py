@@ -123,6 +123,8 @@ READ_FIELDS = ["name", "repo", "owner", "ref", "commit"]
 WRITE_FIELDS = ["name", "type", "repo", "commit"]
 PRODUCES_FIELDS = ["name", "type", "repo"]
 RESULT_FIELDS = ["version", "status", "values", "reads", "writes"]
+SKIPPED_FIELDS = ["version", "status", "reason"]
+SKIP_REASON_MAX = 300      # characters of the reason a step gives when it ends as skipped
 CONTEXT_FIELDS = ["version", "run", "app", "project", "step", "kind", "experiment", "params", "ledger", "produces",
                   "upstream"]
 LEDGER_FIELDS = ["version", "reads", "writes"]
@@ -167,11 +169,10 @@ def shape_of_write(e):
 
 
 def shape_of_produces(e):
-    extra = ["promote"] if isinstance(e, dict) and e.get("type") == "dataset" and "promote" in e else []
-    if not isinstance(e, dict) or list(e) != PRODUCES_FIELDS + extra:
-        return "fields must be %s (and promote on a dataset), in that order" % ", ".join(PRODUCES_FIELDS)
-    if not _name(e["name"]) or e["type"] not in TYPES or (extra and not isinstance(e["promote"], bool)):
-        return "name, type or promote is not valid"
+    if not isinstance(e, dict) or list(e) != PRODUCES_FIELDS:
+        return "fields must be %s, in that order" % ", ".join(PRODUCES_FIELDS)
+    if not _name(e["name"]) or e["type"] not in TYPES:
+        return "name or type is not valid"
     return ""
 
 
@@ -185,6 +186,10 @@ def shape_of_ledger(v):
 def shape_of_result(v):
     if v == ABSENT:
         return ""
+    if isinstance(v, dict) and v.get("status") == "skipped":
+        ok = list(v) == SKIPPED_FIELDS and v["version"] == 1 and isinstance(v["reason"], str) \
+            and 0 < len(v["reason"]) <= SKIP_REASON_MAX
+        return "" if ok else "a skipped result is {version: 1, status: skipped, reason: 1 to %d characters}" % SKIP_REASON_MAX
     if not isinstance(v, dict) or list(v) != RESULT_FIELDS or type(v["version"]) is not int or v["version"] != 1 or v["status"] != "ok":
         return "a result is {version: 1, status: ok, values, reads, writes} or the sentinel"
     if not isinstance(v["values"], dict) or any(k.startswith("kaos-") for k in v["values"]):
@@ -245,8 +250,7 @@ def check_fixtures():
          "context-one-upstream.json: upstream.prepare is not result-ok.json")
     want(_load("context-skipped-upstream.json")["upstream"] == {"train": _load("result-model.json"), "export": ABSENT},
          "context-skipped-upstream.json: upstream is not result-model.json plus the sentinel")
-    want(_load("context-promote.json")["produces"] == [dict(_load("context-no-upstream.json")["produces"][0], promote=True)],
-         "context-promote.json: its produced dataset is not the one of context-no-upstream.json with promote true")
+    want(_load("result-skipped.json")["status"] == "skipped", "result-skipped.json is not a skipped result")
     want(len(_load("ledger-two-reads.json")["reads"]) == 2, "ledger-two-reads.json does not hold two reads")
     want(_load("hpc-job.json") == _hpc_job(), "hpc-job.json is not derived from the other fixtures (run write-fixtures)")
     for p in problems:

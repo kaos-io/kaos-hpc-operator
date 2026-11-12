@@ -150,10 +150,10 @@ RESOLVED = {"raw": "dataset-a@latest", "labels": "dataset-b@v3", "train": {"epoc
             "experiment": {"name": "baseline"}}
 
 
-def contexts(table, resolved=RESOLVED, promote=None):
+def contexts(table, resolved=RESOLVED):
     reads = compose.pin_inputs(resolved, table, datasets=FakeDatasets())
     return {name: json.loads(text) for name, text in
-            compose.step_contexts(table, "run-1", "demo", "vision", resolved, reads, promote).items()}
+            compose.step_contexts(table, "run-1", "demo", "vision", resolved, reads).items()}
 
 
 def test_a_step_context_holds_its_own_inputs_and_the_sections_it_reads():
@@ -193,14 +193,13 @@ def test_what_a_step_produces_names_its_repository():
         {"name": "embeddings", "type": "dataset", "repo": "dataset-demo-embeddings"}]
 
 
-def test_a_run_promotes_a_dataset_only_when_the_form_says_true():
-    """D-06: the run form's promote-<dataset>; false means the step seals a version and latest stays."""
+def test_a_step_never_carries_a_promote_flag_and_the_form_value_is_still_checked():
+    """A step only seals a version; the final task of the run moves `latest` (kubecore/promote.py)."""
     table = steps(("prepare", [], 0, [{"name": "embeddings", "type": "dataset"}, {"name": "model", "type": "model"}]))
-    asked = contexts(table, promote=compose.run_promote(table, ["embeddings=true"]))["prepare"]["produces"]
-    assert asked[0] == {"name": "embeddings", "type": "dataset", "repo": "dataset-demo-embeddings", "promote": True}
-    assert "promote" not in asked[1]
-    for flags in ([], ["embeddings=false"]):
-        assert "promote" not in contexts(table, promote=compose.run_promote(table, flags))["prepare"]["produces"][0]
+    for flags in ([], ["embeddings=false"], ["embeddings=true"]):
+        compose.run_promote(table, flags)
+        for entry in contexts(table)["prepare"]["produces"]:
+            assert "promote" not in entry
     assert compose.run_promote(table, ["embeddings=True"]) == {"embeddings": True}
 
 
@@ -526,10 +525,10 @@ def test_two_apps_that_declare_the_same_dataset_name_get_two_repositories():
     repos = {}
     for app in ("hera1", "hera2"):
         reads = {}
-        text = compose.step_contexts(table, "run-1", app, "vision", RESOLVED, reads, {"clean": True})["prepare"]
+        text = compose.step_contexts(table, "run-1", app, "vision", RESOLVED, reads)["prepare"]
         repos[app] = json.loads(text)["produces"][0]
-    assert repos == {"hera1": {"name": "clean", "type": "dataset", "repo": "dataset-hera1-clean", "promote": True},
-                     "hera2": {"name": "clean", "type": "dataset", "repo": "dataset-hera2-clean", "promote": True}}
+    assert repos == {"hera1": {"name": "clean", "type": "dataset", "repo": "dataset-hera1-clean"},
+                     "hera2": {"name": "clean", "type": "dataset", "repo": "dataset-hera2-clean"}}
 
 
 def test_the_repository_is_named_in_one_place_and_models_keep_the_outputs_repository():

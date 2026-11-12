@@ -138,7 +138,7 @@ def test_every_task_an_expression_reads_is_in_the_depends_of_the_task_that_reads
     tasks = _tasks(_enhanced(_pipeline))
     assert {"prepare-hpc", "train-hpc", "alone-hpc"} <= set(tasks) and "load-hpc" not in tasks
     for name, task in tasks.items():
-        if name == "compose-and-validate":
+        if name in ("compose-and-validate", "kaos-promote"):     # the final task reads the steps' results (test_promote)
             continue
         context = next(p["value"] for p in task["arguments"]["parameters"] if p["name"] == "kaos-context")
         read = set(re.findall(r'tasks\["([^"]+)"\]', context))
@@ -154,7 +154,7 @@ def test_every_task_an_expression_reads_is_in_the_depends_of_the_task_that_reads
 # name); none is sized by a step's data. A reference that is not listed here fails the test: decide whether its
 # value is bounded before adding it.
 KNOWN_REFERENCES = {
-    "inputs.parameters.kaos-context",
+    "inputs.parameters.kaos-context", "inputs.parameters.kaos-promote-plan",
     "workflow.name", "workflow.uid",
     "inputs.parameters.gpus", "inputs.parameters.cpu", "inputs.parameters.mem", "inputs.parameters.disk",
     "inputs.parameters.step-name", "inputs.parameters.image",
