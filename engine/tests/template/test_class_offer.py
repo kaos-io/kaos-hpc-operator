@@ -44,7 +44,7 @@ def _refusal(wft, chosen):
 
 
 def test_the_form_and_the_check_are_given_by_one_offer():
-    wft = _enhanced(kind="transform")
+    wft = _enhanced(kind="evaluate")
     form = next(p for p in wft["spec"]["arguments"]["parameters"] if p["name"] == "one-class")
     assert form["enum"] == _offers(wft)["one"]["offered"]
     args = _compose(wft)
@@ -53,7 +53,7 @@ def test_the_form_and_the_check_are_given_by_one_offer():
 
 
 def test_a_gpu_class_for_a_step_that_does_not_declare_gpu_is_refused():
-    assert _refusal(_enhanced(kind="transform"), "gpu-t4") == (
+    assert _refusal(_enhanced(kind="evaluate"), "gpu-t4") == (
         "step 'one' cannot run on class 'gpu-t4': it is a GPU machine and the step does not declare gpu=True. "
         "Add gpu=True to the step in pipeline.py to run it on a GPU machine.")
 
@@ -83,12 +83,12 @@ def test_an_hpc_class_for_a_step_that_produces_a_dataset_is_refused():
 
 
 def test_a_name_that_is_no_class_at_all_is_refused():
-    assert _refusal(_enhanced(kind="transform"), "gpu-x9").startswith(
+    assert _refusal(_enhanced(kind="evaluate"), "gpu-x9").startswith(
         "step 'one' cannot run on class 'gpu-x9': it is not a machine class of this cluster. Choose one of: ")
 
 
 def test_an_offered_class_passes():
-    wft = _enhanced(kind="transform")
+    wft = _enhanced(kind="evaluate")
     args = _compose(wft)
     table = __import__("json").loads(args[args.index("--steps") + 1])
     for chosen in ("cpu-standard", "meluxina-cpu"):

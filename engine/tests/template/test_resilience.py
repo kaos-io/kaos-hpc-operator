@@ -37,10 +37,10 @@ def env_of(tpl, container="container"):
 
 
 def pipeline_steps():
-    authoring.step("prep", kind="train")
-    authoring.step("train", kind="train", gpu=True)
-    authoring.step("cpu-opt-in", kind="train", checkpoint_every="20m")
-    authoring.step("gpu-off", kind="train", gpu=True, checkpoint_every=False)
+    authoring.step("prep", kind="evaluate")
+    authoring.step("train", kind="evaluate", gpu=True)
+    authoring.step("cpu-opt-in", kind="evaluate", checkpoint_every="20m")
+    authoring.step("gpu-off", kind="evaluate", gpu=True, checkpoint_every=False)
 
 
 @pytest.fixture(scope="module")
@@ -75,7 +75,7 @@ def test_should_not_retry_the_steps_own_failure(tpls):
 
 def test_should_keep_a_retry_strategy_the_developer_set():
     def build():
-        authoring.step("s", kind="train")
+        authoring.step("s", kind="evaluate")
     with authoring.pipeline("t") as p:
         build()
     raw = yaml.safe_load(p.wt.to_yaml())
@@ -139,7 +139,7 @@ def test_should_grow_by_a_small_constant_per_helper_step():
     """Regression for the 256 KiB last-applied limit: five GPU steps with helpers stay far below it."""
     def five():
         for i in range(5):
-            authoring.step("s%d" % i, kind="train", gpu=True)
+            authoring.step("s%d" % i, kind="evaluate", gpu=True)
     tpls = render(five)
     per_step = max(len(yaml.safe_dump(tpls["s%d" % i])) for i in range(5))
     assert per_step < 8000, "a helper step weighs %d bytes: is the helper source embedded again?" % per_step
@@ -147,7 +147,7 @@ def test_should_grow_by_a_small_constant_per_helper_step():
 
 def test_should_write_the_helper_configmap_for_the_gitops_commit(tmp_path):
     with authoring.pipeline("t") as p:
-        authoring.step("train", kind="train", gpu=True)
+        authoring.step("train", kind="evaluate", gpu=True)
     wft = enhance.enhance(yaml.safe_load(p.wt.to_yaml()), CONTEXT)
     out = tmp_path / "ckpt-helper.yaml"
     assert resilience.write_helper_configmap(wft, CONTEXT, out) is True
@@ -159,7 +159,7 @@ def test_should_write_the_helper_configmap_for_the_gitops_commit(tmp_path):
 
 def test_should_remove_a_stale_helper_configmap_when_no_step_uses_it(tmp_path):
     with authoring.pipeline("t") as p:
-        authoring.step("prep", kind="train")
+        authoring.step("prep", kind="evaluate")
     wft = enhance.enhance(yaml.safe_load(p.wt.to_yaml()), CONTEXT)
     out = tmp_path / "ckpt-helper.yaml"
     out.write_text("stale")
@@ -169,7 +169,7 @@ def test_should_remove_a_stale_helper_configmap_when_no_step_uses_it(tmp_path):
 
 def test_should_write_the_helper_configmap_from_the_cli(tmp_path):
     with authoring.pipeline("t") as p:
-        authoring.step("train", kind="train", gpu=True)
+        authoring.step("train", kind="evaluate", gpu=True)
     raw, ctx = tmp_path / "raw.yaml", tmp_path / "ctx.yaml"
     raw.write_text(p.wt.to_yaml())
     ctx.write_text(yaml.safe_dump(CONTEXT))
@@ -203,7 +203,7 @@ def test_should_keep_retry_and_folder_but_skip_copies_and_say_so_without_a_platf
 
 def test_should_skip_the_helper_for_fan_out_and_shared_templates():
     def build():
-        authoring.step("a", kind="train", gpu=True)
+        authoring.step("a", kind="evaluate", gpu=True)
     with authoring.pipeline("t") as p:
         build()
     raw = yaml.safe_load(p.wt.to_yaml())
@@ -217,7 +217,7 @@ def test_should_skip_the_helper_for_fan_out_and_shared_templates():
 
 def test_should_skip_the_helper_when_lakefs_injection_is_off():
     def build():
-        authoring.step("a", kind="train", gpu=True)
+        authoring.step("a", kind="evaluate", gpu=True)
     with authoring.pipeline("t") as p:
         build()
     raw = yaml.safe_load(p.wt.to_yaml())
@@ -229,7 +229,7 @@ def test_should_skip_the_helper_when_lakefs_injection_is_off():
 
 def test_should_keep_the_developers_own_checkpoint_folder():
     with authoring.pipeline("t") as p:
-        authoring.step("a", kind="train", gpu=True)
+        authoring.step("a", kind="evaluate", gpu=True)
     raw = yaml.safe_load(p.wt.to_yaml())
     tpl = next(t for t in raw["spec"]["templates"] if t["name"] == "a")
     tpl["container"]["env"] = [{"name": "KAOS_CHECKPOINT_DIR", "value": "/mine"}]
@@ -241,13 +241,13 @@ def test_should_keep_the_developers_own_checkpoint_folder():
 def test_should_reject_a_bad_checkpoint_every(bad):
     with pytest.raises(authoring.AuthoringError):
         with authoring.pipeline("t"):
-            authoring.step("a", kind="train", gpu=True, checkpoint_every=bad)
+            authoring.step("a", kind="evaluate", gpu=True, checkpoint_every=bad)
 
 
 @pytest.mark.parametrize("given,annotation", [("20m", "20"), ("1h", "60"), (30, "30"), (False, "off")])
 def test_should_map_checkpoint_every_to_the_annotation(given, annotation):
     with authoring.pipeline("t") as p:
-        authoring.step("a", kind="train", checkpoint_every=given)
+        authoring.step("a", kind="evaluate", checkpoint_every=given)
     tpl = next(t for t in yaml.safe_load(p.wt.to_yaml())["spec"]["templates"] if t["name"] == "a")
     assert tpl["metadata"]["annotations"]["platform.kubecore.io/checkpoint-every"] == annotation
 
@@ -274,7 +274,7 @@ def test_should_render_the_gpu_step_like_the_golden_file(tpls):
     (None, None), (0, "0"), (False, "0"), ("0", "0"), (40, "40"), ("40m", "40"), ("2h", "120")])
 def test_should_map_idle_timeout_to_the_annotation(given, annotation):
     def steps():
-        authoring.step("a", kind="train", gpu=True, idle_timeout=given)
+        authoring.step("a", kind="evaluate", gpu=True, idle_timeout=given)
     tpl = render(steps)["a"]
     got = (tpl.get("metadata") or {}).get("annotations", {}).get(authoring.IDLE_TIMEOUT_ANNOTATION)
     assert got == annotation
@@ -284,4 +284,4 @@ def test_should_map_idle_timeout_to_the_annotation(given, annotation):
 def test_should_reject_a_bad_idle_timeout(bad):
     with pytest.raises(authoring.AuthoringError, match="idle_timeout"):
         with authoring.pipeline("p"):
-            authoring.step("a", kind="train", gpu=True, idle_timeout=bad)
+            authoring.step("a", kind="evaluate", gpu=True, idle_timeout=bad)

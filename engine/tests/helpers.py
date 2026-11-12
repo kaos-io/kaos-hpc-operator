@@ -44,3 +44,15 @@ def evaluate(expression: str, settings: dict):
     body = re.sub(r'fromJSON\(tasks\["compose-and-validate"\]\.outputs\.parameters\["kaos-run-settings"\]\)',
                   "json.loads(%r)" % json.dumps(settings), body)
     return eval(body, {"json": json, "int": int})  # noqa: S307 - the engine's own output, in a test
+
+
+def valid(authoring, kind: str) -> dict:
+    """The keywords that make a step of `kind` valid on its own: what its kind requires it to produce
+    (docs/step-contract.md, "Step kinds")."""
+    if kind == "ingest":
+        return {"produces": [authoring.dataset("clean")]}
+    if kind == "transform":
+        return {"produces": [authoring.artifact("report")]}
+    if kind == "train":
+        return {"produces": [authoring.model("model")]}
+    return {}

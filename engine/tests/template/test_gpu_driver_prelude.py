@@ -26,9 +26,9 @@ PRELUDE_HEAD = ["sh", "-c", enhance.GPU_PRELUDE_SCRIPT, enhance.GPU_PRELUDE_NAME
 
 def _render(ctx):
     with authoring.pipeline("t") as p:
-        authoring.step("prep", kind="train")
-        authoring.step("train", kind="train", gpu=True)
-        authoring.step("pinned", kind="train", gpu=True, walltime="30m")
+        authoring.step("prep", kind="evaluate")
+        authoring.step("train", kind="evaluate", gpu=True)
+        authoring.step("pinned", kind="evaluate", gpu=True, walltime="30m")
     wf = enhance.enhance(yaml.safe_load(p.wt.to_yaml()), ctx)
     return {t["name"]: t for t in wf["spec"]["templates"]}
 

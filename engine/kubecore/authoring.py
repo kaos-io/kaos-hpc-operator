@@ -261,6 +261,27 @@ def _check_kind(name, kind):
         )
 
 
+def _kind_problem(kind, types):
+    """What a step's kind requires of what it produces (docs/step-contract.md, "Step kinds"), or ''. `types`
+    are the types it produces. A control step is checked by its own rule."""
+    others = ", ".join(k for k in KINDS if k != kind)
+    if kind == "ingest" and "dataset" not in types:
+        return 'an ingest step brings data in, so it produces a dataset. Add produces=[dataset("name")].'
+    if kind == "transform" and not types:
+        return ("a transform step turns data into something. Add produces=[...] with a dataset, a model or an "
+                "artifact.")
+    if kind == "train" and "model" not in types:
+        return (f'a train step produces a model. Add produces=[model("name")], or give the step the kind of the '
+                f'work it does ({others}).')
+    if kind == "evaluate" and types & {"dataset", "model"}:
+        return ('an evaluate step writes reports only, so it may not produce a dataset or a model. Use '
+                'kind="transform" for a step that makes a dataset, kind="train" for one that makes a model.')
+    if kind == "publish" and types:
+        return ("a publish step delivers a result and produces nothing here. Remove produces=, or give the step "
+                "the kind of the work it does.")
+    return ""
+
+
 def _check_data(name, kind, inputs, needs, produces):
     """The names a step reads and writes: each well formed, each once, and no name with two meanings."""
     for entry in inputs:
@@ -294,6 +315,10 @@ def _check_data(name, kind, inputs, needs, produces):
             f"step {name!r}: a control step steers the run and handles no data, so it takes no inputs= and "
             f"no produces=. Give the step the kind of the work it does ({', '.join(k for k in KINDS if k != 'control')})."
         )
+    types = {entry.type for entry in produces}
+    problem = _kind_problem(kind, types)
+    if problem:
+        raise AuthoringError(f"step {name!r}: {problem}")
     needed = [need.name for need in needs]
     again = sorted({n for n in needed if needed.count(n) > 1})
     if again:

@@ -49,7 +49,7 @@ Everything after `name` is keyword-only.
 | Keyword | Meaning |
 |---|---|
 | `name` | The step's name. |
-| `kind=` | Required. One of `ingest`, `transform`, `train`, `evaluate`, `publish`, `control`. The engine labels every pod and HPC job with it (`platform.kubecore.io/step-kind`). |
+| `kind=` | Required. One of `ingest`, `transform`, `train`, `evaluate`, `publish`, `control`; each has a contract (below). The engine labels every pod and HPC job with it (`platform.kubecore.io/step-kind`). |
 | `reads=` | The config sections the step reads. They are the step's `params`. |
 | `inputs=` | The names of the config values that hold a dataset reference. An input name is a top-level config key: no dotted paths. Compose pins each to one commit when the run starts. Step code names the input, never a version. |
 | `needs=` | The steps this step runs after, at most ten. Each one's result reaches this step in `upstream`. |
@@ -64,6 +64,26 @@ Removed, with no alias: `outputs=` (the result replaces it), `hpc_time_limit=` (
 `disk=`: a step is not told its disk, it gets the disk of the machine its class runs on (the usable disk of that
 class, less a fixed reserve for the container images, or 10Gi where the platform does not say). A step that
 that passes one is refused with what to write instead: "step 'x': outputs= is gone. Declare what the step writes with produces=[...] and hand it on with step.result()."; "step 'x': hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\"."; "step 'x': disk= is gone. The step gets the disk of the machine class it runs on." Any other unknown keyword is refused with a sentence that lists the keywords that exist.
+
+**Step kinds.** A kind says what the step is for, and the engine refuses a step that does not do it:
+
+| Kind | Must | May not | Runs on |
+|---|---|---|---|
+| `ingest` | produce at least one dataset | | the cluster only |
+| `transform` | produce at least one thing (dataset, model or artifact) | | the cluster or HPC |
+| `train` | produce at least one model | | the cluster or HPC |
+| `evaluate` | | produce a dataset or a model (artifacts only) | the cluster or HPC |
+| `publish` | | produce anything | the cluster only |
+| `control` | | take `inputs=` or produce anything | the cluster only |
+
+Each rule has one sentence, naming the step, what its kind requires and what to do:
+`step 'x': an ingest step brings data in, so it produces a dataset. Add produces=[dataset("name")].`;
+`step 'x': a transform step turns data into something. Add produces=[...] with a dataset, a model or an artifact.`;
+`step 'x': a train step produces a model. Add produces=[model("name")], or give the step the kind of the work it does (ingest, transform, evaluate, publish, control).`;
+`step 'x': an evaluate step writes reports only, so it may not produce a dataset or a model. Use kind="transform" for a step that makes a dataset, kind="train" for one that makes a model.`;
+`step 'x': a publish step delivers a result and produces nothing here. Remove produces=, or give the step the kind of the work it does.`;
+and, for `control`, `step 'x': a control step steers the run and handles no data, so it takes no inputs= and no produces=. ...`.
+(An ingest step that produces a dataset runs on the cluster either way: section "Placement of a step that produces a dataset".)
 
 **Time limit and checkpoint interval on the run form.** Every step of the developer's pipeline has one time limit,
 wherever it runs, and the run form shows it: a field `<step>-walltime` for every step, with the description "The

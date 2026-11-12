@@ -13,7 +13,7 @@ starts) and hello-world needs its result and writes a report.
 
 from pathlib import Path
 
-from kubecore.authoring import artifact, pipeline, step  # platform-owned, do not edit
+from kubecore.authoring import artifact, dataset, pipeline, step  # platform-owned, do not edit
 
 HERE = Path(__file__).parent
 
@@ -22,7 +22,7 @@ HERE = Path(__file__).parent
 # each app gets its own uniquely-named WFT (no collisions across apps in a
 # shared namespace). You don't need to change it per app.
 with pipeline("ml-pipeline") as p:
-    load = step("dataset-loading", kind="ingest", inputs=["dataset"])
+    load = step("dataset-loading", kind="ingest", inputs=["dataset"], produces=[dataset("loaded")])
     hello = step("hello-world", kind="transform", reads=["experiment"], inputs=["dataset"], needs=[load],
                  produces=[artifact("report")])
 

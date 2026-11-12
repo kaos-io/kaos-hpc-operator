@@ -62,7 +62,7 @@ run, pipeline or app reads it by its repository, through a config value:
 ```python
 # pipeline A
 prepare = step("prepare", kind="transform", inputs=["raw"], produces=[dataset("clean")])
-train   = step("train", kind="train", needs=[prepare])    # in the step: step.input("clean")
+train   = step("train", kind="train", needs=[prepare], produces=[model("model")])    # in the step: step.input("clean")
 
 # pipeline B, config/data.yaml:   clean: dataset-<app>-clean@latest      (the app that produces it; here dataset-hera1-clean@latest)
 step("evaluate", kind="evaluate", inputs=["clean"])       # in the step: step.input("clean")

@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from kubecore import authoring, enhance  # noqa: E402
 from kubecore.run_settings import DEFAULT_WALLTIME  # noqa: E402
-from helpers import evaluate  # noqa: E402
+from helpers import evaluate, valid  # noqa: E402
 from kubecore.meluxina import DEFAULT_TIME_LIMIT_MINUTES  # noqa: E402
 
 BASE = yaml.safe_load((ROOT / "kubecore" / "local-dev" / "pipeline-context.yaml").read_text())
@@ -30,7 +30,8 @@ def _context():
 
 def _enhanced(**keywords):
     with authoring.pipeline("t") as p:
-        authoring.step("one", kind=keywords.pop("kind", "train"), **keywords)
+        kind = keywords.pop("kind", "evaluate")
+        authoring.step("one", kind=kind, **{**valid(authoring, kind), **keywords})
     return enhance.enhance(yaml.safe_load(p.wt.to_yaml()), _context())
 
 

@@ -13,6 +13,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]  # engine/
 sys.path.insert(0, str(ROOT))
 
+from helpers import valid  # noqa: E402
 from kubecore import authoring, enhance  # noqa: E402
 from kubecore.step_contract import TEMPLATE_CAP, result_of, template_bytes  # noqa: E402
 
@@ -39,7 +40,7 @@ def _tasks(wft):
 
 @pytest.mark.parametrize("kind, on_hpc", sorted(KINDS_ON_HPC.items()))
 def test_a_kind_that_never_runs_on_hpc_is_offered_no_hpc_class_and_gets_no_hpc_variant(kind, on_hpc):
-    wft = _enhanced(lambda: authoring.step("one", kind=kind))
+    wft = _enhanced(lambda: authoring.step("one", kind=kind, **valid(authoring, kind)))
     choice = next(p for p in wft["spec"]["arguments"]["parameters"] if p["name"] == "one-class")
     offered = [c for c in choice["enum"] if c.startswith("meluxina-")]
     assert bool(offered) is on_hpc
@@ -50,7 +51,7 @@ def test_a_kind_that_never_runs_on_hpc_is_offered_no_hpc_class_and_gets_no_hpc_v
 
 
 def test_the_compose_step_is_offered_no_hpc_class():
-    wft = _enhanced(lambda: authoring.step("one", kind="train"))
+    wft = _enhanced(lambda: authoring.step("one", kind="evaluate"))
     choice = next(p for p in wft["spec"]["arguments"]["parameters"] if p["name"] == "compose-and-validate-class")
     assert not [c for c in choice["enum"] if c.startswith("meluxina-")]
     assert "compose-and-validate-hpc" not in _tasks(wft)
@@ -68,9 +69,9 @@ def test_a_step_reads_the_result_of_a_step_that_may_run_on_hpc_from_the_pair():
     """Exactly one of `prepare` and `prepare-hpc` ran. The consumer, and the consumer's own HPC variant,
     read whichever did; a step that never runs on HPC is read directly."""
     def build():
-        load = authoring.step("load", kind="ingest")
-        prepare = authoring.step("prepare", kind="transform", needs=[load])
-        authoring.step("train", kind="train", needs=[load, prepare])
+        load = authoring.step("load", kind="ingest", produces=[authoring.dataset("loaded")])
+        prepare = authoring.step("prepare", kind="evaluate", needs=[load])
+        authoring.step("train", kind="evaluate", needs=[load, prepare])
     tasks = _tasks(_enhanced(build))
     assert "load-hpc" not in tasks
     for name in ("train", "train-hpc"):
@@ -94,7 +95,7 @@ def test_a_rendered_step_is_far_under_the_size_its_definition_may_have():
 
 def test_a_step_whose_rendered_definition_is_over_the_limit_fails_the_render_naming_it():
     with authoring.pipeline("t") as p:
-        authoring.step("train", kind="train")
+        authoring.step("train", kind="evaluate")
     raw = yaml.safe_load(p.wt.to_yaml())
     step = next(t for t in raw["spec"]["templates"] if t["name"] == "train")
     step["container"]["env"].append({"name": "BIG", "value": "x" * TEMPLATE_CAP})
@@ -108,11 +109,11 @@ def test_an_app_name_an_hpc_job_cannot_hold_fails_the_render():
     ctx = _context()
     ctx["app"] = "a" * 56
     with pytest.raises(enhance.EnhanceError) as exc:
-        _enhanced(lambda: authoring.step("one", kind="train"), ctx)
+        _enhanced(lambda: authoring.step("one", kind="evaluate"), ctx)
     assert str(exc.value) == (f"the app name '{'a' * 56}' is 56 characters; an app that runs pipelines may have at "
                               "most 55. Create the app under a shorter name.")
     ctx["app"] = "a" * 55
-    assert _enhanced(lambda: authoring.step("one", kind="train"), ctx)
+    assert _enhanced(lambda: authoring.step("one", kind="evaluate"), ctx)
 
 
 def test_the_definition_budget_counts_what_the_workflow_engine_writes():
@@ -123,8 +124,8 @@ def test_the_definition_budget_counts_what_the_workflow_engine_writes():
 
 
 def _pipeline():
-    load = authoring.step("load", kind="ingest", inputs=["dataset"])
-    prepare = authoring.step("prepare", kind="transform", needs=[load],
+    load = authoring.step("load", kind="ingest", inputs=["dataset"], produces=[authoring.dataset("loaded")])
+    prepare = authoring.step("prepare", kind="evaluate", needs=[load],
                              when="experiment-name == yes")
     authoring.step("train", kind="train", gpu=True, resumable=True, needs=[load, prepare],
                    produces=[authoring.model("model")])
@@ -222,7 +223,7 @@ def test_the_run_form_has_no_cpu_memory_or_disk_field():
 
 
 def test_a_cpu_step_gets_what_a_node_of_its_class_offers_and_the_numbers_follow_the_class_it_is_given():
-    wft = _enhanced(lambda: authoring.step("one", kind="transform"))
+    wft = _enhanced(lambda: authoring.step("one", kind="evaluate"))
     template = _template(wft, "one")
     resources = template["container"]["resources"]
     assert resources["requests"]["cpu"] == resources["limits"]["cpu"] == "7"
@@ -242,7 +243,7 @@ def test_a_cpu_step_gets_what_a_node_of_its_class_offers_and_the_numbers_follow_
 
 
 def test_a_gpu_step_gets_its_gpu_and_the_node_numbers_in_one_patch():
-    wft = _enhanced(lambda: authoring.step("one", kind="train", gpu=True))
+    wft = _enhanced(lambda: authoring.step("one", kind="evaluate", gpu=True))
     template = _template(wft, "one")
     assert template["container"]["resources"]["requests"]["memory"] == "25Gi", "the default of a gpu step is gpu-t4"
     assert {p["name"]: p.get("default") for p in template["inputs"]["parameters"]} == {
@@ -259,7 +260,7 @@ def test_a_gpu_step_gets_its_gpu_and_the_node_numbers_in_one_patch():
 
 def test_a_step_pinned_to_one_class_has_plain_resources_and_no_runtime_numbers():
     with authoring.pipeline("t") as p:
-        authoring.step("pinned", kind="train", gpu=True)
+        authoring.step("pinned", kind="evaluate", gpu=True)
     raw = yaml.safe_load(p.wt.to_yaml())
     _template(raw, "pinned")["metadata"]["annotations"] = {"platform.kubecore.io/compute-class": "gpu-t4"}
     wft = enhance.enhance(raw, _context())
@@ -273,7 +274,7 @@ def test_a_step_pinned_to_one_class_has_plain_resources_and_no_runtime_numbers()
 
 
 def test_an_hpc_class_is_not_in_the_table_and_its_cluster_task_never_runs():
-    wft = _enhanced(lambda: authoring.step("one", kind="train"))
+    wft = _enhanced(lambda: authoring.step("one", kind="evaluate"))
     assert "meluxina" not in _arg(_task(wft, "one"), "cpu")
     assert "hasPrefix(workflow.parameters['one-class'], 'meluxina-')" in _task(wft, "one")["when"]
     follower = _template(wft, "hpc-follower")
@@ -284,7 +285,7 @@ def test_a_pool_with_one_class_per_tier_and_a_pool_with_one_class_only():
     ctx = _context()
     ctx["computeClasses"]["all"] = [c for c in ctx["computeClasses"]["all"] if c["name"] == "cpu-standard"]
     ctx["computeClasses"].pop("gpu")
-    wft = _enhanced(lambda: authoring.step("one", kind="transform"), ctx)
+    wft = _enhanced(lambda: authoring.step("one", kind="evaluate"), ctx)
     assert _arg(_task(wft, "one"), "cpu") == "{{=({\"cpu-standard\": \"7\"}[workflow.parameters['one-class']]) ?? \"7\"}}"
 
 
@@ -292,14 +293,14 @@ def test_a_class_the_platform_cannot_size_fails_the_render_naming_it():
     ctx = _context()
     ctx["computeClasses"]["all"].append({"name": "arm-big", "tier": "cpu", "machineType": "c7g.4xlarge"})
     with pytest.raises(enhance.EnhanceError) as exc:
-        _enhanced(lambda: authoring.step("one", kind="transform"), ctx)
+        _enhanced(lambda: authoring.step("one", kind="evaluate"), ctx)
     assert str(exc.value) == (
         "the pool offers the compute class 'arm-big' (machine type 'c7g.4xlarge'), but the platform cannot say how "
         "much of such a node a pod may use, so a step could not be sized on it. The operator knows the sizes of the "
         "machine types in its table only: ask the platform team to add the machine type.")
     ctx["computeClasses"]["all"].append({"name": "arm-huge", "tier": "cpu", "machineType": "c7g.8xlarge"})
     with pytest.raises(enhance.EnhanceError, match="classes 'arm-big' .*'arm-huge' .*sized on them"):
-        _enhanced(lambda: authoring.step("one", kind="transform"), ctx)
+        _enhanced(lambda: authoring.step("one", kind="evaluate"), ctx)
 
 
 def _with_usable_disk(ctx, **gib):
@@ -316,12 +317,12 @@ def _disk_patch(template):
 
 
 def test_disk_is_refused_in_step_and_never_a_step_option():
-    with pytest.raises(authoring.AuthoringError, match="disk is no longer declared"):
-        _enhanced(lambda: authoring.step("big", kind="transform", disk="40Gi"))
+    with pytest.raises(authoring.AuthoringError, match="disk= is gone"):
+        _enhanced(lambda: authoring.step("big", kind="evaluate", disk="40Gi"))
 
 
 def test_a_class_without_a_usable_disk_gets_the_flat_ten_gi_and_is_not_refused():
-    wft = _enhanced(lambda: authoring.step("small", kind="transform"))
+    wft = _enhanced(lambda: authoring.step("small", kind="evaluate"))
     template = _template(wft, "small")
     assert template["container"]["resources"]["requests"]["ephemeral-storage"] == "10Gi"
     assert _disk_patch(template)["requests"]["ephemeral-storage"] == "{{inputs.parameters.disk}}"
@@ -334,7 +335,7 @@ def test_a_class_with_a_usable_disk_gets_it_less_the_image_reserve_per_class_pic
     ctx = _with_usable_disk(_context(), **{"cpu-standard": 43, "gpu-t4": 15})
     ctx["computeClasses"]["all"].append({"name": "kubecorecpu-x", "tier": "cpu", "machineType": "e2-standard-8",
                                          "allocatable": {"cpu": 7, "memoryGiB": 27}})
-    wft = _enhanced(lambda: (authoring.step("a", kind="transform"), authoring.step("g", kind="train", gpu=True)), ctx)
+    wft = _enhanced(lambda: (authoring.step("a", kind="evaluate"), authoring.step("g", kind="evaluate", gpu=True)), ctx)
     expression = _arg(_task(wft, "a"), "disk")
     assert '"cpu-standard": "33Gi"' in expression and '"gpu-t4": "5Gi"' in expression
     assert '"kubecorecpu": "10Gi"' in expression and '"kubecorecpu-x": "10Gi"' in expression, "no disk: the flat default"
@@ -355,7 +356,7 @@ def test_the_image_reserve_never_asks_for_more_than_the_node_gives():
 def test_a_step_pinned_to_one_class_has_that_classs_disk_as_a_static_request():
     ctx = _with_usable_disk(_context(), **{"gpu-t4": 43})
     with authoring.pipeline("t") as p:
-        authoring.step("pinned", kind="train", gpu=True)
+        authoring.step("pinned", kind="evaluate", gpu=True)
     raw = yaml.safe_load(p.wt.to_yaml())
     _template(raw, "pinned")["metadata"]["annotations"] = {"platform.kubecore.io/compute-class": "gpu-t4"}
     template = _template(enhance.enhance(raw, ctx), "pinned")
@@ -435,7 +436,7 @@ def _cluster_classes(choice):
 
 
 def test_a_step_without_gpu_is_offered_only_the_cpu_classes_of_the_cluster_and_its_hpc_classes():
-    wft = _enhanced(lambda: authoring.step("one", kind="train"))
+    wft = _enhanced(lambda: authoring.step("one", kind="evaluate"))
     choice = _class_choice(wft, "one")
     assert _cluster_classes(choice) == ["cpu-standard", "kubecorecpu"]
     assert [c for c in choice["enum"] if c.startswith("meluxina-")], "its HPC classes are as before"
@@ -443,12 +444,12 @@ def test_a_step_without_gpu_is_offered_only_the_cpu_classes_of_the_cluster_and_i
 
 
 def test_the_compose_step_is_offered_only_the_cpu_classes_of_the_cluster():
-    wft = _enhanced(lambda: authoring.step("one", kind="train", gpu=True))
+    wft = _enhanced(lambda: authoring.step("one", kind="evaluate", gpu=True))
     assert _cluster_classes(_class_choice(wft, "compose-and-validate")) == ["cpu-standard", "kubecorecpu"]
 
 
 def test_a_gpu_step_is_still_offered_the_gpu_and_the_cpu_classes_with_its_default_unchanged():
-    wft = _enhanced(lambda: authoring.step("one", kind="train", gpu=True))
+    wft = _enhanced(lambda: authoring.step("one", kind="evaluate", gpu=True))
     choice = _class_choice(wft, "one")
     assert _cluster_classes(choice) == ["cpu-standard", "kubecorecpu", "gpu-t4"]
     assert choice["value"] == "gpu-t4"
@@ -459,7 +460,7 @@ def test_a_pool_that_declares_only_gpu_classes_still_offers_a_step_without_gpu_w
     cc = ctx["computeClasses"]
     cc["all"] = [c for c in cc["all"] if c.get("tier") == "gpu"]
     del cc["cpu"]
-    choice = _class_choice(_enhanced(lambda: authoring.step("one", kind="train"), ctx), "one")
+    choice = _class_choice(_enhanced(lambda: authoring.step("one", kind="evaluate"), ctx), "one")
     assert _cluster_classes(choice) == ["gpu-t4"] and choice["value"] == "gpu-t4"
 
 
@@ -467,11 +468,11 @@ def test_a_pool_whose_default_cpu_class_is_missing_from_the_catalog_still_offers
     ctx = _context()
     cc = ctx["computeClasses"]
     cc["all"] = [c for c in cc["all"] if c["name"] != cc["cpu"]["name"]]
-    choice = _class_choice(_enhanced(lambda: authoring.step("one", kind="train"), ctx), "one")
+    choice = _class_choice(_enhanced(lambda: authoring.step("one", kind="evaluate"), ctx), "one")
     assert _cluster_classes(choice) == ["cpu-standard", "kubecorecpu"]
 
 
 def test_the_form_says_which_classes_a_step_may_pick():
-    info = next(p for p in _enhanced(lambda: authoring.step("one", kind="train"))["spec"]["arguments"]["parameters"]
+    info = next(p for p in _enhanced(lambda: authoring.step("one", kind="evaluate"))["spec"]["arguments"]["parameters"]
                 if p["name"] == "pipeline-info")["value"]
     assert "Only a step that declares gpu=True is offered the GPU classes" in info
