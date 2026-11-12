@@ -411,8 +411,22 @@ func TestTheRunnerGetsTheContextUnchangedAndEveryInput(t *testing.T) {
 	if got["KAOS_STEP_CONTEXT"] != job.Spec.Context || len(job.Spec.Context) < 500 {
 		t.Errorf("KAOS_STEP_CONTEXT is not spec.context")
 	}
-	want := `[{"name":"labels","repo":"dataset-labels","commit":"` + strings.Repeat("2", 64) + `","ref":"v3"},` +
-		`{"name":"embeddings","repo":"dataset-embeddings","commit":"` + strings.Repeat("3", 64) + `"}]`
+	// The job's inputs, in the job's order: name, repository, commit and, when the run asked for a version, ref.
+	type input struct {
+		Name   string `json:"name"`
+		Repo   string `json:"repo"`
+		Commit string `json:"commit"`
+		Ref    string `json:"ref,omitempty"`
+	}
+	var ins []input
+	for _, in := range job.Spec.Inputs {
+		ins = append(ins, input{in.Name, in.Repo, in.Commit, in.Ref})
+	}
+	raw, _ := json.Marshal(ins)
+	want := string(raw)
+	if len(ins) != 2 || ins[0].Name != "labels" || ins[0].Ref != "v3" || ins[1].Name != "embeddings" || ins[1].Ref != "" {
+		t.Fatalf("the fixture job should hold the two inputs of context-one-upstream: %+v", ins)
+	}
 	if got["HPC_INPUTS"] != want {
 		t.Errorf("HPC_INPUTS = %s\nwant         %s", got["HPC_INPUTS"], want)
 	}
