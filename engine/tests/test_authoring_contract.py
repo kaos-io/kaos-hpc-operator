@@ -259,7 +259,7 @@ def test_a_config_leaf_whose_form_field_would_be_a_reserved_name_fails_the_rende
 
 def test_a_step_that_needs_a_conditional_step_waits_for_it_to_end_either_way():
     def build(a):
-        export = a.step("export", kind="transform", when="{{workflow.parameters.experiment-name}} == yes")
+        export = a.step("export", kind="transform", when="experiment-name == yes")
         a.step("evaluate", kind="evaluate", needs=[export])
     wft = render(build)
     tasks = {t["name"]: t for t in next(t for t in wft["spec"]["templates"] if "dag" in t)["dag"]["tasks"]}
@@ -269,6 +269,89 @@ def test_a_step_that_needs_a_conditional_step_waits_for_it_to_end_either_way():
     assert argument["name"] == "kaos-context"
     assert ('sprig.default("{\\"version\\":1,\\"status\\":\\"absent\\"}", '
             'tasks["export"].outputs.parameters["kaos-result"])') in argument["value"]
+
+
+def _when_of(when, **more):
+    wft = render(lambda a: a.step("export", kind="transform", when=when, **more))
+    return {t["name"]: t for t in next(t for t in wft["spec"]["templates"] if "dag" in t)["dag"]["tasks"]}["export"]
+
+
+@pytest.mark.parametrize("written, rendered", [
+    ("experiment-name != off", "{{=workflow.parameters['experiment-name'] != 'off'}}"),
+    ("experiment-name == true", "{{=workflow.parameters['experiment-name'] == 'true'}}"),
+    ("experiment-name == 3", "{{=workflow.parameters['experiment-name'] == '3'}}"),
+    ("experiment-name == \"two words\"", "{{=workflow.parameters['experiment-name'] == 'two words'}}"),
+    ("experiment-name == 'two words'", "{{=workflow.parameters['experiment-name'] == 'two words'}}"),
+    ("experiment-name=='x'", "{{=workflow.parameters['experiment-name'] == 'x'}}"),
+    ("experiment-name == \"it's\"", "{{=workflow.parameters['experiment-name'] == 'it\\'s'}}"),
+    ("experiment-name == \"a and b\" or dataset != x",
+     "{{=workflow.parameters['experiment-name'] == 'a and b' || workflow.parameters['dataset'] != 'x'}}"),
+    ("experiment-name == qat or experiment-name == both",
+     "{{=workflow.parameters['experiment-name'] == 'qat' || workflow.parameters['experiment-name'] == 'both'}}"),
+    ("experiment-description == true and experiment-name != small",
+     "{{=workflow.parameters['experiment-description'] == 'true' && workflow.parameters['experiment-name'] != 'small'}}"),
+    ("dataset == a or dataset == b and experiment-name == c",
+     "{{=workflow.parameters['dataset'] == 'a' || workflow.parameters['dataset'] == 'b' "
+     "&& workflow.parameters['experiment-name'] == 'c'}}"),
+])
+def test_when_is_a_run_form_field_compared_with_a_value(written, rendered):
+    assert _when_of(written)["when"] == rendered
+
+
+def test_a_step_without_when_has_no_condition():
+    assert "when" not in _when_of(None)
+
+
+def test_and_binds_tighter_than_or_in_the_rendered_condition():
+    """The workflow engine's expression language has the same precedence, so the order is kept as written."""
+    import re
+    c = _when_of("dataset == a or dataset == b and experiment-name == c")["when"]
+    assert re.search(r"'a' \|\| .* == 'b' && ", c)
+
+
+def test_the_hpc_variant_keeps_the_steps_own_condition():
+    from kubecore import meluxina
+    assert meluxina._when_expr(_when_of("experiment-name != off")["when"]) == (
+        "workflow.parameters['experiment-name'] != 'off'")
+
+
+def _example():
+    return 'for example when="mode != off"'
+
+
+@pytest.mark.parametrize("written", [
+    "experiment-name = off", "experiment-name > 3", "experiment-name", "experiment-name ==", "== off",
+    "", "   ", "(experiment-name == a)", "experiment-name == a and (dataset == b)", "len(dataset) == 3",
+    "experiment-name == a && dataset == b", "experiment-name == a, dataset == b", "experiment-name == two words",
+    "exp$ment == a", "experiment name == a", "experiment-name == a AND dataset == b", "experiment-name == a and",
+    "experiment-name == 'open",
+])
+def test_a_when_that_is_not_a_comparison_is_refused_with_an_example(written):
+    assert refused(lambda a: a.step("export", kind="transform", when=written)) == (
+        f"step 'export': when={written!r} is not a run-form field compared with a value, "
+        f'for example when="mode != off". Join comparisons with and / or; no parentheses.')
+
+
+@pytest.mark.parametrize("written", [
+    "{{workflow.parameters.experiment-name}} == yes", "experiment-name == {{x}}", "{{=a == b}}",
+    "experiment-name == 'a}}'",
+])
+def test_the_workflow_systems_own_syntax_in_when_is_refused(written):
+    assert refused(lambda a: a.step("export", kind="transform", when=written)) == (
+        "step 'export': when= is written with the name of a run-form field, for example when=\"mode != off\". "
+        "Write the field's name instead of {{workflow.parameters.<field>}}.")
+
+
+def test_a_when_that_is_not_text_is_refused():
+    assert "is not a run-form field compared with a value" in refused(
+        lambda a: a.step("export", kind="transform", when=True))
+
+
+def test_a_when_naming_a_field_the_run_form_does_not_have_is_refused_with_the_fields_it_has():
+    message = refused(lambda a: a.step("export", kind="transform", when="quantization-mode != off"))
+    assert message.startswith("step 'export': when='quantization-mode != off' names 'quantization-mode', "
+                              "which is not a field of the run form. The fields are: ")
+    assert message.endswith("The fields are: experiment-name, experiment-description, dataset.")
 
 
 # ---------------------------------------------------------------- names and counts

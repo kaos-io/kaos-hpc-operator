@@ -125,7 +125,7 @@ def test_the_definition_budget_counts_what_the_workflow_engine_writes():
 def _pipeline():
     load = authoring.step("load", kind="ingest", inputs=["dataset"])
     prepare = authoring.step("prepare", kind="transform", needs=[load],
-                             when="{{workflow.parameters.experiment-name}} == yes")
+                             when="experiment-name == yes")
     authoring.step("train", kind="train", gpu=True, resumable=True, needs=[load, prepare],
                    produces=[authoring.model("model")])
     authoring.step("alone", kind="evaluate")
