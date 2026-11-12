@@ -1,0 +1,44 @@
+# Check 3(b), the rule about `depends`: the step `step` reads the result of task `b` in its expression but
+# names only `a` in its `depends`. The engine never resolves that reference: the step never starts and the
+# run stays Running, with no error.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: contract-3b-depends-
+spec:
+  entrypoint: main
+  templates:
+    - name: producer
+      container:
+        image: alpine:3.20
+        command: [sh, -c]
+        args: ["mkdir -p /work/output && printf %s R > /work/output/kaos-result.json"]
+      outputs:
+        parameters:
+          - name: kaos-result
+            valueFrom: {path: /work/output/kaos-result.json, default: D}
+    - name: consumer
+      inputs:
+        parameters:
+          - name: kaos-context
+      container:
+        image: alpine:3.20
+        command: [sh, -c]
+        args: ['printf "VALUE=%s\n" "$KAOS_STEP_CONTEXT"']
+        env:
+          - name: KAOS_STEP_CONTEXT
+            value: "{{inputs.parameters.kaos-context}}"
+    - name: main
+      dag:
+        tasks:
+          - name: a
+            template: producer
+          - name: b
+            template: producer
+          - name: step
+            template: consumer
+            depends: a
+            arguments:
+              parameters:
+                - name: kaos-context
+                  value: '{{=sprig.default("SENT", tasks["b"].outputs.parameters["kaos-result"])}}'

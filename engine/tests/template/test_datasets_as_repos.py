@@ -37,16 +37,14 @@ def _raw():
     }
 
 
-def test_results_go_to_the_apps_outputs_repository():
+def test_the_runner_is_told_the_apps_outputs_repository():
     ctx = yaml.safe_load(CTX_PATH.read_text())
     ctx["app"] = "myapp"
     out = enhance(_raw(), ctx)
     step = next(t for t in out["spec"]["templates"] if t["name"] == "model-training")
     env = {e["name"]: e.get("value") for e in step["container"]["env"]}
-    assert env["CHECKPOINT_BUCKET"] == "outputs-myapp"
-    assert env["CHECKPOINT_PREFIX"] == "main/checkpoints"
-    assert env["KUBECORE_RUN_ID"] == "{{workflow.name}}"
-    assert env["KUBECORE_WORKFLOW_NAME"] == "{{workflow.name}}", "names the MLflow run"
+    # the run, the app and the outputs repository reach a step in its context, not in variables of their own
+    assert not {"CHECKPOINT_BUCKET", "CHECKPOINT_PREFIX", "KUBECORE_RUN_ID", "KUBECORE_WORKFLOW_NAME"} & set(env)
     mr = next(t for t in out["spec"]["templates"] if t["name"] == "hpc-follower")
     menv = {e["name"]: e.get("value") for e in mr["container"]["env"]}
     assert menv["KAOS_STEP_CONTEXT"] == "{{inputs.parameters.kaos-context}}"
@@ -110,17 +108,6 @@ def test_the_compose_step_has_no_hpc_twin_and_its_class_choice_offers_no_hpc_cla
     hpc = [c for c in params["model-training-class"]["enum"] if c.startswith("meluxina-")]
     assert hpc, "the fixture context has HPC classes"
     assert not [c for c in params["compose-and-validate-class"]["enum"] if c.startswith("meluxina-")]
-
-
-def test_compose_gets_the_outputs_repository_as_platform_checkpoints():
-    ctx = yaml.safe_load(CTX_PATH.read_text())
-    ctx["app"] = "myapp"
-    raw = _raw()
-    raw["spec"]["templates"].append({"name": "compose-and-validate", "container": {"image": "i", "args": []}})
-    out = enhance(raw, ctx)
-    args = next(t for t in out["spec"]["templates"] if t["name"] == "compose-and-validate")["container"]["args"]
-    assert "platform.checkpoints.bucket=outputs-myapp" in args
-    assert "platform.checkpoints.prefix=main/checkpoints" in args
 
 
 def test_a_task_without_a_context_cannot_get_an_hpc_variant():

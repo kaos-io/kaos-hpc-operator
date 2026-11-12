@@ -18,9 +18,6 @@ Booleans are plain values: a bool leaf derives as a form field whose default is
 "true"/"false" and whose override token Hydra parses back to a real bool. No
 enum workaround.
 
-The top-level `platform` section (mounted from pipeline-context) is EXCLUDED
-from the form: it is platform-injected runtime config, not a developer knob.
-
 Each derived entry also carries its Hydra override token
 (`train.epochs={{workflow.parameters.train-epochs}}`) — these become the
 compose step's args — plus a RENDER-DEFAULTS manifest
@@ -33,13 +30,6 @@ Structured-config schemas: sections listed in SCHEMA_SECTIONS are validated by
 dataclasses registered on Hydra's ConfigStore — bad values
 (quantization.mode=banana) hard-fail at compose time, and Enum-typed fields
 derive as form dropdowns.
-
-Platform-group searchpath resolution (production vs local dev):
-  - CI/runtime: the enhancer materializes the `platform` group from
-    pipeline-context and sets KUBECORE_PLATFORM_SEARCHPATH to its dir.
-  - Local dev: falls back to the vendored `kubecore/config/` group (the
-    same shape, real values from the last context) so `python -m ...`
-    and pipeline.py work on a laptop with no cluster.
 """
 
 import os
@@ -51,7 +41,7 @@ from hydra import compose, initialize_config_dir
 from hydra.core.config_store import ConfigStore
 from omegaconf import OmegaConf
 
-from kubecore.step_contract import RESERVED_CONFIG_KEYS
+from kubecore.step_contract import MIGRATION_GUIDE_URL, RESERVED_CONFIG_KEYS
 
 # Hera is a RENDER-TIME dependency (form derivation only). The compose step
 # runs at RUN time in a lean image without Hera, and only calls compose_tree()
@@ -89,12 +79,9 @@ class _LazyConfigDir(os.PathLike):
 
 
 CONFIG_DIR = _LazyConfigDir()  # the developer's experiment config tree
-# Local-dev fallback platform group (vendored). Production overrides via env.
-PLATFORM_SEARCHPATH = Path(
-    os.environ.get("KUBECORE_PLATFORM_SEARCHPATH", str(HERE / "config"))
-)
-
-PLATFORM_SECTIONS = {"platform"}  # injected, never a form surface
+# The config group the platform used to add to every app's config (endpoints, the outputs repository).
+# It is gone: a step gets what it needs from its context and its environment. See refuse_platform_group.
+REMOVED_GROUP = "platform"
 
 # Sections with structured-config (dataclass) schemas: types + enums validated
 # at compose time; Enum fields become form dropdowns. Extend this as the
@@ -107,8 +94,7 @@ ADVANCED_PARAM_KWARGS = dict(
     description=(
         "ADVANCED: override YAML merged LAST over the composed config "
         "(OmegaConf.merge). Overrides everything above — intended for "
-        "scripted submissions (argo submit -p config=...). May not "
-        "modify platform.*."
+        "scripted submissions (argo submit -p config=...)."
     ),
 )
 
@@ -131,17 +117,14 @@ class QuantizationMode(Enum):
     qat = "qat"
 
 
-# ENGINE PATCH (D-79): the structured-config schemas differ between the templates and over time. The
+# ENGINE PATCH (D-79): the structured-config schemas differ between the two templates. The
 # profile is chosen by KUBECORE_SCHEMA_PROFILE before this module is imported; default hera = upstream.
 #   hera       current hera template:   DataConfig.ref, QuantizationConfig.output_prefix=""
 #   yolo       current yolo template:   neither
-#   legacy-v1  both templates before 2026-10-19: DataConfig.ref + .version, output_prefix="quantization"
-#   yolo-v1    yolo 2026-11-01 (blob 7a0f9cd): no DataConfig.ref, output_prefix=""
-# engine/kaos_pipeline_engine/known-vendored.json maps every historical derive_tree.py blob to one of these.
 SCHEMA_PROFILE = os.environ.get("KUBECORE_SCHEMA_PROFILE", "hera")
-if SCHEMA_PROFILE not in ("hera", "yolo", "legacy-v1", "yolo-v1"):
+if SCHEMA_PROFILE not in ("hera", "yolo"):
     raise ImportError(
-        f"KUBECORE_SCHEMA_PROFILE={SCHEMA_PROFILE!r} is not a known schema profile (hera | yolo | legacy-v1 | yolo-v1)"
+        f"KUBECORE_SCHEMA_PROFILE={SCHEMA_PROFILE!r} is not a known schema profile (hera | yolo)"
     )
 
 if SCHEMA_PROFILE == "hera":
@@ -182,46 +165,6 @@ elif SCHEMA_PROFILE == "yolo":
         parity_frames: int = 100
         parity_max_abs_error: float = 0.05
 
-elif SCHEMA_PROFILE == "legacy-v1":
-
-    @dataclass
-    class DataConfig:
-        ref: str = "main"
-        source: DataSource = DataSource.lakefs
-        version: str = ""
-        path_override: str = ""
-        sample_size: str = ""
-        seed: int = 42
-
-    @dataclass
-    class QuantizationConfig:
-        mode: QuantizationMode = QuantizationMode.none
-        image_size: int = 640
-        calibration_frames: int = 512
-        calibration_seed: int = 42
-        parity_frames: int = 100
-        parity_max_abs_error: float = 0.05
-        output_prefix: str = "quantization"
-
-elif SCHEMA_PROFILE == "yolo-v1":
-
-    @dataclass
-    class DataConfig:
-        source: DataSource = DataSource.lakefs
-        path_override: str = ""
-        sample_size: str = ""
-        seed: int = 42
-
-    @dataclass
-    class QuantizationConfig:
-        mode: QuantizationMode = QuantizationMode.none
-        image_size: int = 640
-        calibration_frames: int = 512
-        calibration_seed: int = 42
-        parity_frames: int = 100
-        parity_max_abs_error: float = 0.05
-        output_prefix: str = ""
-
 
 # {config-store name registered in config.yaml's defaults list: node}
 SCHEMAS = {
@@ -254,13 +197,27 @@ _register_schemas()
 class DerivedForm:
     parameters: list = field(default_factory=list)  # hera Parameters (groups first)
     tokens: list = field(default_factory=list)  # hydra override tokens for compose args
-    sections: list = field(default_factory=list)  # top-level config sections (excl platform)
+    sections: list = field(default_factory=list)  # top-level config sections
     render_defaults: dict = field(default_factory=dict)  # {override_key: rendered default}
-    tree: dict = field(default_factory=dict)  # the composed config tree (excl platform)
+    tree: dict = field(default_factory=dict)  # the composed config tree
 
 
-def searchpath_override() -> str:
-    return f"hydra.searchpath=[file://{PLATFORM_SEARCHPATH}]"
+def refuse_platform_group() -> None:
+    """An app whose config still lists the `platform` group in its defaults was written before the step
+    contract: say what to delete instead of letting the config library report a missing file."""
+    import yaml
+    try:
+        defaults = (yaml.safe_load((CONFIG_DIR / "config.yaml").read_text()) or {}).get("defaults") or []
+    except (OSError, yaml.YAMLError, AttributeError):
+        return  # the compose below reports a config tree it cannot read
+    for entry in defaults:
+        for key in (entry if isinstance(entry, dict) else {}):
+            if str(key).replace("optional ", "").split("@")[0].strip() == REMOVED_GROUP:
+                raise DeriveError(
+                    f"config/config.yaml still lists `- {key}: {entry[key]}` in its defaults. The platform no "
+                    f"longer adds a `{REMOVED_GROUP}` section to an app's config: delete that line. A step gets "
+                    f"the run, the app and where its results go from kaos_lib.step. See {MIGRATION_GUIDE_URL}"
+                )
 
 
 def _compose(overrides: list, return_hydra_config: bool = False):
@@ -269,11 +226,12 @@ def _compose(overrides: list, return_hydra_config: bool = False):
     that was deleted/renamed) as a clean, actionable DeriveError instead of a
     raw Hydra stack trace + search-path dump."""
     from hydra.errors import MissingConfigException
+    refuse_platform_group()
     try:
         with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
             return compose(
                 config_name="config",
-                overrides=[searchpath_override()] + list(overrides or []),
+                overrides=list(overrides or []),
                 return_hydra_config=return_hydra_config,
             )
     except MissingConfigException as exc:
@@ -286,7 +244,7 @@ def _compose(overrides: list, return_hydra_config: bool = False):
 
 
 def compose_tree(overrides: list = None):
-    """Compose the config tree (+ the platform group via searchpath)."""
+    """Compose the config tree."""
     return _compose(overrides)
 
 
@@ -297,7 +255,7 @@ def _group_choices() -> dict:
     return {
         k: v
         for k, v in hydra_cfg.hydra.runtime.choices.items()
-        if not k.startswith("hydra/") and k not in PLATFORM_SECTIONS and (CONFIG_DIR / k).is_dir()
+        if not k.startswith("hydra/") and (CONFIG_DIR / k).is_dir()
     }
 
 
@@ -341,9 +299,6 @@ def derive() -> DerivedForm:
     from hera.workflows import Parameter
 
     tree = OmegaConf.to_container(compose_tree(), resolve=True)
-    for section in PLATFORM_SECTIONS:
-        tree.pop(section, None)
-
     refuse_reserved_keys(tree)
     form = DerivedForm(sections=list(tree.keys()), tree=tree)
     seen = {}

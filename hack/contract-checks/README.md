@@ -7,7 +7,7 @@ script that can be run again; `run-all.sh` runs them all and prints one line per
 |---|---|---|---|
 | `0-fixtures.sh` | Do the fixtures agree with the contract and with each other? | python3 | Pass |
 | `3a-context-expression.sh` | Does one expression assemble the step context as one JSON value from task outputs, as a DAG task argument and as a container env value? | the lab | Pass |
-| `3b-skipped-upstream.sh` | Is the result of a skipped upstream step the sentinel inside that expression? | the lab | Pass |
+| `3b-skipped-upstream.sh` | Is the result of a skipped upstream step the sentinel inside that expression, also for a step with an HPC variant? | the lab | Pass |
 | `3c-large-env-value.sh` | Does a 96 KiB env value reach the container intact? | the lab | Pass when its cost as a JSON string fits |
 | `4-hpc-hops.sh` | Does a 96 KiB value survive follower, job object, runner and job environment? | go, python3 | Pass, with the limits below |
 | `5-crd-upgrade.sh` | Do stored HPC jobs stay readable when fields are removed from the job definition? | go | Pass |
@@ -42,48 +42,58 @@ not run them.
 ### 3(a) The context expression
 
 `argo/3a-context-expression.yaml`. Compose writes the base context; an upstream step writes its result;
-the context is joined once in the DAG task argument and once in the container's env value. Both steps
-must receive exactly the wire form of the fixture (`context-one-upstream`, then `context-escapes`): the
-script compares the byte count and the sha256.
+the context is joined once in the DAG task argument and once in the container's env value, and a third
+step with no `needs=` gets the base with an empty `upstream`. Each must receive exactly the wire form
+expected (from `context-one-upstream`, then `context-escapes`): the script compares the byte count and the
+sha256.
 
-It also runs the same base written as ordinary JSON, with no `\u007b` escapes, and prints what arrives:
-the engine evaluates `{{...}}` inside the value (`{{=1+1}}` arrives as `2`, `{{workflow.name}}` as the
-run's name). That is why the wire form escapes braces.
+It then runs the same base written as ordinary JSON, with no `\u007b` escapes, and **requires** that the
+engine changes it: `{{=1+1}}` arrives as `2`, `{{workflow.name}}` as the run's name. Rule 3 of the wire
+form rests on that, so the check fails if a later engine stops doing it.
 
 ### 3(b) A skipped upstream
 
-`argo/3b-skipped-upstream.yaml`. Four upstream steps: one ran, one was skipped by its `when`, one was
-omitted because the step it depends on did not run, one ran and wrote no result. The step that needs
+`argo/3b-skipped-upstream.yaml`. Upstream steps in every state: one ran, one was skipped by its `when`, one
+was omitted because the step it depends on did not run, one ran and wrote no result. The step that needs
 them must receive the result of the first and the sentinel for the other three.
 
-The engine itself gives the empty string for the output of a skipped or omitted step, with no error and
+The engine itself gives the empty string for the output of a skipped or omitted task, with no error and
 without the output's declared default (the check's `plain` step shows it). The sentinel comes from
-`sprig.default(...)` in the expression. A step that ran and wrote nothing gets the sentinel from its
-output's own default.
+`sprig.default(...)` in the expression.
+
+Steps with an HPC variant, with hyphens in their names: `fine-tune` ran and `fine-tune-hpc` was skipped;
+`re-train` was skipped and `re-train-hpc` ran; `dry-run` and `dry-run-hpc` were both skipped. The pair form
+of the expression must give the result, the result and the sentinel.
+
+`argo/3b-not-in-depends.yaml`: a step whose expression reads a task that is not in its `depends`. It never
+starts. After 60 seconds the run is still Running, with no error; the check then deletes it.
 
 ### 3(c) A large env value
 
-`argo/3c-large-env-value.yaml`. Compose builds a context of an exact size from a sha256 chain; the
-script builds the same text and compares. At the cap (98304 bytes) it arrives intact. At 140000 bytes
-the step errors before it runs.
+`argo/3c-large-env-value.yaml` and the Workflows `checklib.needs_workflow` writes. Every case builds its
+context in the cluster from a sha256 chain; the script builds the same text and compares.
 
-Then two contexts of the same 98304 bytes, one with 15000 short strings in it and one with 17000. Inside
-the step's definition the context is a JSON string, where each quote takes two bytes: the first costs
-128368 bytes and arrives intact, the second costs 132368 and does not start. So the ceiling counts the
-context's cost, not its bytes, and the contract counts its caps the same way (section 7 of the document).
-An earlier version of this page said 96 KiB of context always leaves 32 KiB for the rest of the
-definition; that holds only for a context with few quotes.
-
-Last, the guarantee of the document's section 7. A step whose own definition is at the template budget
-(24 KiB), whose base is at its cap (96 KiB less 8 KiB per needed step) and whose needed steps each hand
-back a result at the result cap (8 KiB): with three needed steps and with ten, the most allowed. Both
-receive their context intact. The same three-step case with results of 32 KiB, the cap before, does not
-start. `checklib.needs_workflow` writes these Workflows.
-
-The ceiling is 131072 bytes for the step's whole definition as the engine hands it to the pod (one
-environment string, `ARGO_TEMPLATE`, on the init container; 128729 bytes in the case that passed). Over it
-the engine tries to move the definition into a ConfigMap, which the chart's controller role does not
-allow, and the step ends with `configmaps is forbidden`. A value is never shortened.
+- At the cap (98304 bytes) the context arrives intact. At 140000 bytes the step errors before it runs.
+- Two contexts of the same 98304 bytes, one with 15000 short strings in it and one with 17000. Inside the
+  step's definition the context is a JSON string, where each quote takes two bytes: the first costs
+  128368 bytes and arrives intact, the second costs 132368 and does not start. The ceiling counts the
+  context's cost, not its bytes.
+- The guarantee of the document's section 7. A step whose own definition is at the template budget
+  (24 KiB), whose base is at its cap (96 KiB less 8 KiB per needed step) and whose needed steps each hand
+  back a result at the result cap (8 KiB): three needed steps with plain filler, three with mixed filler,
+  ten with mixed filler. Mixed filler is the characters that take more than a byte in a definition
+  (`&`, `<`, `>`, `"`, `\`, `{`, `}`), in wire form. All three receive their context intact.
+- `cost()` against the engine. For each of those cases the script reads the definition the engine built
+  (`ARGO_TEMPLATE` on the pod's init container) and subtracts the context's cost. The remainder must be
+  the same in every case, and is: 24600 bytes. An earlier version checked `cost()` only against Python's
+  own encoder, which proved nothing about the engine.
+- What the engine adds: the definition it built is 38 bytes shorter than the template in the Workflow
+  with the context in place (it drops the template's `inputs`).
+- Two controls, which must not start: the three-step case with results of 32 KiB (the cap before), and the
+  three-step case with 2000 raw `&` in the base. The second is within every cap by count; the engine writes
+  each `&` as six bytes. That is rule 4 of the wire form.
+- The ceiling: a definition of 131057 bytes arrives intact, one of 131058 does not start
+  (`argument list too long`), one of 131073 does not start (`configmaps is forbidden`).
 
 ### 4 The HPC hops
 

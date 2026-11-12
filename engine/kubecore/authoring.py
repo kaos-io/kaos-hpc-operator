@@ -45,6 +45,9 @@ from kubecore.step_contract import (
     CONTEXT_PARAM,
     DATASET_PREFIX,
     KINDS,
+    MAX_INPUTS,
+    MAX_NAME,
+    MIGRATION_GUIDE_URL,
     MIN_BASE_CONTEXT_CAP,
     LEDGER_PARAM,
     LEDGER_PATH,
@@ -63,15 +66,13 @@ IMAGE = "platform-managed"  # sentinel; the platform always rewrites images
 # image-<step> parameter, so they must be DNS-label-safe (lowercase alphanumeric
 # and hyphens, no leading/trailing hyphen). Validating here turns a silent bad
 # render (or a cryptic Hera NodeNameConflict) into a clear authoring error.
-_STEP_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+_STEP_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")   # also an input's name and a produced name
 
 
 class AuthoringError(Exception):
     pass
 COMPOSE_STEP = "compose-and-validate"
 PARAMS_PATH = "/work/params.yaml"
-# Where the app's migration guide to the step contract lives. Placeholder: set when the guide is published.
-MIGRATION_GUIDE_URL = "https://kaos.invalid/guides/migrate-to-the-step-contract"
 # Template names the platform renders itself: the DAG, and the HPC follower.
 RESERVED_STEP_NAMES = (COMPOSE_STEP, "main", "hpc-follower")
 # A step's HPC variant is the task `<step>-hpc` (kubecore/meluxina.py); a step may not take such a name.
@@ -90,11 +91,6 @@ _current = None
 # ("10 Gi", "10GB") fails the render instead of rendering an invalid manifest.
 _DISK_QUANTITY_RE = re.compile(r"^[0-9]+(Ki|Mi|Gi|Ti|K|M|G|T)?$")
 _WALLTIME_RE = re.compile(r"^[0-9]+[mh]?$")
-# An input is a top-level config key: it names a folder for the step and an entry of the ledger.
-_INPUT_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?$")
-# A model or an artifact is a path segment of the outputs repository; a dataset is the repository dataset-<name>.
-_PRODUCED_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$")
-_DATASET_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,53}[a-z0-9])?$")
 # Keywords the step contract removed, with what to write instead.
 _REMOVED_KEYWORDS = {
     "outputs": "outputs= was removed. A step hands its values on with kaos_lib.step.result(...) and the steps "
@@ -158,14 +154,18 @@ class Produced:
         self.type = type
 
 
+def _well_formed(name) -> bool:
+    """A step, input or produced name: lowercase letters, digits and hyphens, at most 40 characters."""
+    return isinstance(name, str) and len(name) <= MAX_NAME and bool(_STEP_NAME_RE.match(name))
+
+
 def _produced(type, name):
-    pattern = _DATASET_NAME_RE if type == "dataset" else _PRODUCED_NAME_RE
-    if not isinstance(name, str) or not pattern.match(name):
+    if not _well_formed(name):
         raise AuthoringError(
-            f"{type}({name!r}): the name is invalid — use "
-            + ("lowercase letters, digits and hyphens, at most 55 characters (the dataset is stored as "
-               f"{DATASET_PREFIX}<name>)." if type == "dataset" else
-               "letters, digits, '.', '_' and '-' (it is the folder the files are stored under).")
+            f"{type}({name!r}): the name is invalid — use lowercase letters, digits and hyphens, at most "
+            f"{MAX_NAME} characters, for example {type}('{'embeddings' if type == 'dataset' else type}'). "
+            + (f"The dataset is stored as {DATASET_PREFIX}<name>." if type == "dataset" else
+               "It is the folder the files are stored under.")
         )
     if name.startswith(RESERVED_PREFIX):
         raise AuthoringError(
@@ -232,11 +232,17 @@ def _check_kind(name, kind):
 def _check_data(name, kind, inputs, needs, produces):
     """The names a step reads and writes: each well formed, each once, and no name with two meanings."""
     for entry in inputs:
-        if not isinstance(entry, str) or not _INPUT_NAME_RE.match(entry):
+        if not _well_formed(entry):
             raise AuthoringError(
                 f"step {name!r}: inputs= holds {entry!r}. An input is the name of a top-level config value "
                 f"that holds a dataset reference (for example inputs=['dataset'], with `dataset: "
-                f"dataset-default@latest` in config/): letters, digits, '_' and '-'."
+                f"dataset-default@latest` in config/): lowercase letters, digits and hyphens, at most "
+                f"{MAX_NAME} characters. Rename the config value."
+            )
+        if entry.startswith(RESERVED_PREFIX):
+            raise AuthoringError(
+                f"step {name!r}: the input {entry!r} starts with '{RESERVED_PREFIX}', which is reserved for "
+                f"the platform. Rename the config value."
             )
     twice = sorted({entry for entry in inputs if inputs.count(entry) > 1})
     if twice:
@@ -282,6 +288,13 @@ def _check_data(name, kind, inputs, needs, produces):
             f"{upstream[clash[0]]!r}, produces. A step reads both by name, so the two must differ: rename "
             f"the config value or the produced {'thing' if len(clash) == 1 else 'things'}."
         )
+    readable = len(inputs) + sum(1 for need in needs for entry in need.produces if entry.type == "dataset")
+    if readable > MAX_INPUTS:
+        raise AuthoringError(
+            f"step {name!r} can read {readable} datasets by name ({len(inputs)} in inputs= and "
+            f"{readable - len(inputs)} produced by the steps it needs); a step may have at most {MAX_INPUTS}. "
+            f"Split the step, or join datasets it reads."
+        )
     for entry in produces:
         if entry.type != "dataset":
             continue
@@ -304,10 +317,10 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
         raise AuthoringError(
             f"step {name!r}: {_REMOVED_KEYWORDS[keyword].format(name=name)}. See {MIGRATION_GUIDE_URL}"
         )
-    if not isinstance(name, str) or not _STEP_NAME_RE.match(name):
+    if not _well_formed(name):
         raise AuthoringError(
             f"step name {name!r} is invalid — use a DNS-label name: lowercase "
-            f"letters, digits and hyphens, no leading/trailing hyphen "
+            f"letters, digits and hyphens, no leading/trailing hyphen, at most {MAX_NAME} characters "
             f"(e.g. 'model-evaluation'). The name becomes the Argo template, the "
             f"steps/<dir> folder, and the image-<step> parameter."
         )
@@ -376,10 +389,11 @@ class pipeline:
         return False
 
     def _step_table(self) -> str:
-        """What compose needs to write each step's context: its kind, its inputs, the steps it
-        needs (each one's result takes room in the context) and what it produces."""
+        """What compose needs to write each step's context: its kind, the config sections it
+        reads (its params), its inputs, the steps it needs (each one's result takes room in the context)
+        and what it produces."""
         return wire([
-            {"name": s.name, "kind": s.kind, "inputs": s.inputs, "needs": [n.name for n in s.needs],
+            {"name": s.name, "kind": s.kind, "reads": s.reads, "inputs": s.inputs, "needs": [n.name for n in s.needs],
              "produces": [{"name": e.name, "type": e.type} for e in s.produces]}
             for s in self.steps
         ])

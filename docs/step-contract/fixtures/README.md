@@ -9,13 +9,17 @@ All fixtures describe one run, `hera-demo-x7k2p`, of the app `hera-demo` in the 
 `embeddings` and produces `model`; `export` is conditional and was skipped; `evaluate` needs `train` and
 `export`.
 
+Each context's `params` holds only the config sections its step names in `reads=`: here one section, named
+after the step. Dataset references in config name the repository (`dataset-raw-images@latest`); they are
+not in these fixtures, because an input is read through `ledger`, not through `params`.
+
 | File | What it is |
 |---|---|
 | `context-no-upstream.json` | The context of `prepare`: one input, one produced dataset, no upstream. |
 | `context-promote.json` | The context of `prepare` in a run that asked to promote: the same as `context-no-upstream.json`, with `promote: true` on the produced dataset. |
 | `context-one-upstream.json` | The context of `train`: one upstream (`prepare`, whose result is `result-ok.json`). |
 | `context-skipped-upstream.json` | The context of `evaluate`: `train` ran (`result-model.json`), `export` was skipped and is the sentinel. |
-| `context-escapes.json` | A context whose strings hold `{{...}}`, a quote, a backslash and non-ASCII characters, and whose numbers a float would change. Its `.wire` file shows every escape. |
+| `context-escapes.json` | A context whose strings hold `{{...}}`, `&`, `<`, `>`, a quote, a backslash and non-ASCII characters, and whose numbers a float would change. Its `.wire` file shows every escape. |
 | `result-ok.json` | The result of `prepare`: one read, one write (a dataset). |
 | `result-model.json` | The result of `train`: two reads (one of a dataset produced in the run), one write (a model). |
 | `result-absent.json` | The sentinel: what stands in for a result that is missing. |

@@ -79,9 +79,9 @@ import yaml
 from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
 from kubecore.meluxina import HPC_TWIN_TEMPLATE, enhance_hpc, hpc_classes, runs_on_hpc
-from kubecore.outputs_repo import checkpoint_prefix, outputs_repo
+from kubecore.outputs_repo import outputs_repo
 from kubecore.resilience import enhance_resilience, shared_templates, write_helper_configmap
-from kubecore.step_contract import CONTEXT_PARAM, TEMPLATE_CAP, template_bytes
+from kubecore.step_contract import CONTEXT_PARAM, MAX_APP_NAME, TEMPLATE_CAP, template_bytes
 
 ANNOTATION_PREFIX = "platform.kubecore.io/"
 KNOWN_ANNOTATIONS = {"compute-class", "inject", "source", "image", "shm", "workspace", "hpc", "hpc-resumable",
@@ -569,13 +569,8 @@ def enhance_env(step: dict, ctx: dict, annots: dict) -> None:
                 "valueFrom": {"secretKeyRef": {"name": secret_name, "key": keys["secretKey"]}},
             }
         )
-    # Results location: the app's own outputs repository `outputs-<app>` on `main`
-    # (never a dataset repository), plus the run id that names the run's
-    # directory and its lakeFS commit. Steps write with kubecore.outputs.write_run.
-    add({"name": "CHECKPOINT_BUCKET", "value": outputs_repo(ctx)})
-    add({"name": "CHECKPOINT_PREFIX", "value": checkpoint_prefix()})
-    add({"name": "KUBECORE_RUN_ID", "value": "{{workflow.name}}"})
-    add({"name": "KUBECORE_WORKFLOW_NAME", "value": "{{workflow.name}}"})
+    # The run, the app and where results go are in the step's context (KAOS_STEP_CONTEXT): no variable
+    # repeats them.
     # kaos-lib support window (PRD novelcore/kaos#1147): checked by the step at start.
     # Absent from the context = not injected, so the env is unchanged.
     if support_value(ctx):
@@ -944,44 +939,13 @@ def enhance_workspace_pvc(spec: dict, steps: list) -> None:
         )
 
 
-def enhance_platform_group(steps: list, ctx: dict) -> None:
-    """Inject the REAL platform config values into the compose step's overrides.
-
-    `platform.*` is platform-injected runtime config (the project's lakeFS repo,
-    the MLflow endpoint, the checkpoint bucket) — never a developer knob, never
-    committed to a repo. The template vendors a PLACEHOLDER copy of the group so
-    `python -m kubecore.compose` works on a laptop, and that copy is baked into
-    the compose step's image.
-
-    In the cluster the placeholder must lose. Without this the composed params
-    carried `platform.lakefs.repository: PLACEHOLDER-repo`, so config-validation
-    dutifully checked `s3://PLACEHOLDER-repo/...` and every run died on a lakeFS
-    ListObjectsV2 error (live 2026-07-16).
-
-    These go in as plain Hydra override tokens, FIRST, so a developer's own
-    tokens still apply afterwards and the `platform.*` guard on the ADVANCED
-    user YAML (compose.py) still refuses user edits to this group.
-    """
-    compose = next((s for s in steps if s["name"] == "compose-and-validate"), None)
-    if compose is None:
-        return  # a pipeline without the compose step — nothing to inject
-
-    overrides = {
-        "platform.lakefs.repository": ctx["lakefs"]["repository"],
-        "platform.lakefs.endpoint": ctx["lakefs"]["endpoint"],
-        "platform.mlflow.tracking_uri": ctx["mlflow"]["trackingUri"],
-        "platform.checkpoints.bucket": outputs_repo(ctx),
-        "platform.checkpoints.prefix": checkpoint_prefix(),
-    }
-
-    args = compose["container"].setdefault("args", [])
-    existing = {a.split("=", 1)[0] for a in args if isinstance(a, str)}
-    tokens = [f"{k}={v}" for k, v in overrides.items() if k not in existing and v]
-    compose["container"]["args"] = tokens + args
-
-
 def enhance_compose_identity(steps: list, ctx: dict) -> None:
-    """Tell the compose step whose run it composes: the app and the project of every step's context."""
+    """Tell the compose step whose run it composes: the app and the project of every step's context.
+    The app's name is also a field of every HPC job, which holds 55 characters."""
+    if len(ctx["app"]) > MAX_APP_NAME:
+        raise EnhanceError(
+            f"the app name '{ctx['app']}' is {len(ctx['app'])} characters; an app that runs pipelines may have at "
+            f"most {MAX_APP_NAME}. Create the app under a shorter name.")
     compose = next((s for s in steps if s["name"] == "compose-and-validate"), None)
     if compose is None:
         return
@@ -1166,7 +1130,6 @@ def enhance(wft: dict, ctx: dict) -> dict:
         enhance_connections(step, ctx)
     enhance_image_guard(steps)
     enhance_workspace_pvc(spec, steps)
-    enhance_platform_group(steps, ctx)
     enhance_compose_identity(steps, ctx)
     enhance_pipeline_info(spec, ctx, steps)
     # PRD-1016: the MeluXina leg — must run LAST (twin tasks copy each routed

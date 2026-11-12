@@ -1,4 +1,4 @@
-"""The runner contract (engine/README.md): the engine renders; the app's copy never wins."""
+"""The runner contract (engine/README.md): the engine renders; code of the same name in the app never wins."""
 
 import textwrap
 
@@ -54,26 +54,6 @@ def test_should_render_when_a_toplevel_kubecore_alias_is_on_the_path(tmp_path, b
     res = run_render(repo, extra_env={"PYTHONPATH": f"{ENGINE}:{alias.parent}"})
     assert res.returncode == 0, res.stderr
     assert raw_template(repo) == baseline
-
-
-def test_should_import_extra_client_modules_under_kubecore_but_never_let_them_win(tmp_path):
-    repo = copy_app(tmp_path / "app")
-    (repo / "kubecore").mkdir()
-    (repo / "kubecore" / "client_extra.py").write_text("VALUE = 'from-the-client'\n")
-    (repo / "kubecore" / "authoring.py").write_text(TRAP)
-    (repo / "pipeline.py").write_text(textwrap.dedent("""
-        from pathlib import Path
-        import kubecore.authoring as authoring
-        from kubecore import client_extra
-        assert client_extra.VALUE == "from-the-client"
-        assert "engine" in authoring.__file__, authoring.__file__
-        from kubecore.authoring import pipeline, step
-        with pipeline("x") as p:
-            step("hello-world", kind="transform", reads=["experiment"])
-        p.write(Path(__file__).parent / "out" / "raw-workflow-template.yaml")
-    """))
-    res = run_render(repo)
-    assert res.returncode == 0, res.stderr
 
 
 def test_should_exit_3_when_pipeline_py_swaps_an_engine_module(tmp_path):

@@ -5,7 +5,7 @@
 #
 # Layout:
 #   /work/kubecore              the engine (python -m kubecore.compose runs from /work, as the old compose image did)
-#   /work/*.json                known-vendored.json, authoring-schema.json
+#   /work/*.json                authoring-schema.json
 #   site-packages/kaos_engine   the runner:  python -I -m kaos_engine.render pipeline.py --repo ... --profile ...
 #   site-packages/kaos_pipeline_engine   the same engine as the wheel ships it (never a top-level kubecore)
 #

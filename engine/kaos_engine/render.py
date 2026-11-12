@@ -1,21 +1,19 @@
-"""Render an app's pipeline.py with the PLATFORM engine, never with the app's vendored copy.
+"""Render an app's pipeline.py with the PLATFORM engine, never with code of the same name in the app.
 
     python -I -m kaos_engine.render pipeline.py --repo /workspace/repo --profile hera
 
-Why: a vendored `kubecore/` in a client repo is a snapshot; the platform must be able to change the
-rendering code without a commit in the client's repo (PRD-HPC-1461 D-79). So the engine's modules are
-imported FIRST, from the engine directory, and the interpreter then finds them in sys.modules whatever
-the app's directory contains.
+Why: the platform must be able to change the rendering code without a commit in the client's repo
+(PRD-HPC-1461 D-79), and an app must not be able to replace it. So the engine's modules are imported
+FIRST, from the engine directory, and the interpreter then finds them in sys.modules whatever the app's
+directory contains (a `kubecore/` folder in an app is never imported).
 
 Contract (engine/README.md "The runner contract"):
   1. sys.path = [engine dir, app repo] + the interpreter's own entries (stdlib, site-packages).
   2. `kubecore` and every engine submodule is imported from the engine dir; their __file__ is asserted.
-  3. The app's own `kubecore/` is APPENDED to `kubecore.__path__`: extra client modules still import,
-     but every engine name wins.
-  4. KUBECORE_SCHEMA_PROFILE and KUBECORE_CONFIG_DIR are set before the engine is imported.
-  5. pipeline.py runs as `__main__` (it writes out/raw-workflow-template.yaml next to itself).
-  6. Afterwards the engine modules must still be the ones in sys.modules; otherwise exit 3 (tampered).
-  7. The app's pyproject dependencies that the engine does not provide are printed (installing them is
+  3. KUBECORE_SCHEMA_PROFILE and KUBECORE_CONFIG_DIR are set before the engine is imported.
+  4. pipeline.py runs as `__main__` (it writes out/raw-workflow-template.yaml next to itself).
+  5. Afterwards the engine modules must still be the ones in sys.modules; otherwise exit 3 (tampered).
+  6. The app's pyproject dependencies that the engine does not provide are printed (installing them is
      CI's job); nothing is pip-installed here and the app is never installed.
 
 Exit codes: 0 rendered, 1 pipeline.py raised, 2 bad invocation, 3 engine tampered with, 4 engine broken.
@@ -36,7 +34,7 @@ from pathlib import Path
 
 from kaos_engine import engine_version
 
-PROFILES = ("hera", "yolo", "legacy-v1", "yolo-v1")
+PROFILES = ("hera", "yolo")
 EXIT_BAD_INVOCATION = 2
 EXIT_TAMPERED = 3
 EXIT_ENGINE_BROKEN = 4
@@ -88,13 +86,6 @@ def import_engine(engine: Path) -> dict[str, object]:
     return modules
 
 
-def append_app_package(kubecore, repo: Path, engine: Path) -> None:
-    """Let the app's own kubecore/ files import as kubecore.<x> without ever shadowing an engine name."""
-    app_pkg = repo / "kubecore"
-    if app_pkg.is_dir() and app_pkg.resolve() != (engine / "kubecore").resolve():
-        kubecore.__path__.append(str(app_pkg))
-
-
 def assert_untouched(modules: dict[str, object]) -> None:
     """Exit-3 check: every engine module is still the one sys.modules resolves (the app did not swap it)."""
     for name, module in modules.items():
@@ -137,12 +128,11 @@ def _is_unmet(text: str, installed: dict[str, str], own_name: str) -> bool:
 
 
 def render(pipeline: Path, repo: Path, profile: str, engine: Path, config_dir: Path, deps_out: Path | None) -> None:
-    """Steps 1-7 of the module docstring."""
+    """Steps 1-6 of the module docstring."""
     os.environ["KUBECORE_SCHEMA_PROFILE"] = profile
     os.environ["KUBECORE_CONFIG_DIR"] = str(config_dir)
     sys.path[:] = build_sys_path(engine, repo, sys.path)
     modules = import_engine(engine)
-    append_app_package(modules["kubecore"], repo, engine)
     print(f"kaos-engine: version={engine_version()} profile={profile} engine={engine} repo={repo}", file=sys.stderr)
     extras = extra_dependencies(repo)
     for text in extras:

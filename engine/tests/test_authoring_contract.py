@@ -257,3 +257,80 @@ def test_a_step_that_needs_a_conditional_step_waits_for_it_to_end_either_way():
     assert argument["name"] == "kaos-context"
     assert ('sprig.default("{\\"version\\":1,\\"status\\":\\"absent\\"}", '
             'tasks["export"].outputs.parameters["kaos-result"])') in argument["value"]
+
+
+# ---------------------------------------------------------------- names and counts
+
+@pytest.mark.parametrize("name", ["Train", "train_model", "a" * 41, "-train", "train-", "tr.ain", ""])
+def test_a_step_name_is_lowercase_letters_digits_and_hyphens_at_most_40(name):
+    assert f"step name {name!r} is invalid" in refused(lambda a: a.step(name, kind="train"))
+    assert render(lambda a: a.step("a" * 40, kind="train"))
+
+
+@pytest.mark.parametrize("make", ["model", "artifact", "dataset"])
+@pytest.mark.parametrize("name", ["Best", "best_model", "a" * 41, "v1.0"])
+def test_a_produced_name_follows_the_same_rule(make, name):
+    message = refused(lambda a: a.step("one", kind="train", produces=[getattr(a, make)(name)]))
+    assert message.startswith(f"{make}({name!r}): the name is invalid — use lowercase letters, digits and hyphens, "
+                              "at most 40 characters")
+
+
+@pytest.mark.parametrize("name", ["train_data", "Raw", "a" * 41])
+def test_an_input_name_follows_the_same_rule(name):
+    message = refused(lambda a: a.step("one", kind="train", inputs=[name]))
+    assert f"inputs= holds {name!r}" in message and message.endswith("at most 40 characters. Rename the config value.")
+
+
+def test_an_input_name_may_not_start_with_the_platforms_prefix():
+    assert refused(lambda a: a.step("one", kind="train", inputs=["kaos-data"])) == (
+        "step 'one': the input 'kaos-data' starts with 'kaos-', which is reserved for the platform. "
+        "Rename the config value.")
+
+
+def test_a_step_may_read_at_most_sixteen_datasets_by_name(tmp_path, monkeypatch):
+    """Its inputs= and the datasets the steps it needs produce, together."""
+    config = copy_app(tmp_path / "app") / "config"
+    with (config / "dataset.yaml").open("a") as f:
+        f.writelines(f"in{i}: dataset-default@latest\n" for i in range(16))
+    from kubecore import derive_tree
+    monkeypatch.setattr(derive_tree, "CONFIG_DIR", config)
+    names = [f"in{i}" for i in range(16)]
+
+    def build(inputs, extra):
+        def inner(a):
+            up = a.step("up", kind="transform", produces=[a.dataset(f"made{i}") for i in range(extra)] + [a.model("m")])
+            a.step("last", kind="train", inputs=inputs, needs=[up])
+        return inner
+    assert render(build(names, 0)) and render(build(names[:10], 6))
+    assert refused(build(names, 1)) == (
+        "step 'last' can read 17 datasets by name (16 in inputs= and 1 produced by the steps it needs); a step may "
+        "have at most 16. Split the step, or join datasets it reads.")
+
+
+# ---------------------------------------------------------------- the platform config group is gone
+
+def test_an_app_whose_config_still_names_the_platform_group_fails_the_render_with_what_to_delete(tmp_path):
+    from kubecore.step_contract import MIGRATION_GUIDE_URL
+    repo = copy_app(tmp_path / "app")
+    with (repo / "config" / "config.yaml").open("a") as f:
+        f.write("  - platform: live\n")
+    done = run_render(repo)
+    assert done.returncode == 1 and not (repo / "out").exists()
+    assert ("config/config.yaml still lists `- platform: live` in its defaults. The platform no longer adds a "
+            "`platform` section to an app's config: delete that line. A step gets the run, the app and where its "
+            f"results go from kaos_lib.step. See {MIGRATION_GUIDE_URL}") in done.stderr
+
+
+def test_the_same_app_fails_compose_with_the_same_message(tmp_path, monkeypatch):
+    from kubecore import compose, derive_tree
+    config = copy_app(tmp_path / "app") / "config"
+    with (config / "config.yaml").open("a") as f:
+        f.write("  - platform: live\n")
+    monkeypatch.setattr(derive_tree, "CONFIG_DIR", config)
+    with pytest.raises(derive_tree.DeriveError, match="delete that line"):
+        compose.compose_config([])
+
+
+def test_a_rendered_pipeline_carries_no_platform_value():
+    wft = render(lambda a: a.step("one", kind="train", reads=["experiment"]))
+    assert "platform." not in yaml.safe_dump(wft).replace("platform.kubecore.io", "")

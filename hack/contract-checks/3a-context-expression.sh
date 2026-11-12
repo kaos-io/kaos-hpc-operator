@@ -16,6 +16,7 @@ run_case() {
   logs="$(mktemp -d)"
   step_log "$wf" argument > "$logs/argument" 2>&1
   step_log "$wf" env > "$logs/env" 2>&1
+  step_log "$wf" first > "$logs/first" 2>&1
   python3 - "$fixture" "$label" "$logs" <<'PY'
 import pathlib, sys
 import checklib as c
@@ -24,6 +25,8 @@ want = dict(c.base_of(c.fixture(fixture)), upstream={"prepare": c.fixture("resul
 text = c.wire.dumps(want)
 ok = c.same(label + ", assembled in the DAG task argument", pathlib.Path(logs, "argument").read_text(), text)
 ok = c.same(label + ", assembled in the container env value", pathlib.Path(logs, "env").read_text(), text) and ok
+ok = c.same(label + ", a step with no needs=", pathlib.Path(logs, "first").read_text(),
+            c.wire.dumps(dict(c.base_of(c.fixture(fixture)), upstream={}))) and ok
 sys.exit(0 if ok else 1)
 PY
 }
@@ -43,11 +46,12 @@ print(base64.b64encode(json.dumps(c.base_of(c.fixture("context-escapes.json")), 
 if [ "$(wf_phase "$wf")" = Succeeded ]; then
   got="$(step_log "$wf" argument 2>&1 | sed -n 's/^VALUE=//p')"
   case "$got" in
-    *'{{=1+1}}'*) say "NOTE  without the escapes the value arrived unchanged: this engine version does not evaluate {{ in values" ;;
-    *) say "NOTE  without the escapes the engine changed the value (workflow $wf): $(printf %s "$got" | grep -o '"experiment":"[^"]*"') and $(printf %s "$got" | grep -o '"note":"braces [^ ]* ')" ;;
+    *'{{=1+1}}'*|*'{{workflow.name}}'*)
+      say "FAIL  without the escapes the value arrived unchanged: rule 3 of the wire form rests on the engine changing it"; rc=1 ;;
+    *) pass "without the escapes the engine changes the value (workflow $wf): $(printf %s "$got" | grep -o '"experiment":"[^"]*"') and $(printf %s "$got" | grep -o '"note":"braces [^ ]* ')" ;;
   esac
 else
-  say "NOTE  without the escapes the workflow $wf ended $(wf_phase "$wf"): $(wf_message "$wf")"
+  pass "without the escapes the workflow $wf ends $(wf_phase "$wf"): $(wf_message "$wf")"
 fi
 
 [ $rc = 0 ] && pass "3(a) the context expression" || fail "3(a) the context expression"

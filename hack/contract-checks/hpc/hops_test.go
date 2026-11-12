@@ -54,8 +54,10 @@ func repoRoot(t *testing.T) string {
 func largeContext(t *testing.T, size int) string {
 	t.Helper()
 	head := `{"version":1,"run":"contract-4","app":"hera-demo","project":"vision","step":"train","kind":"train",` +
-		`"experiment":"it's $HOME ` + "`x`" + ` ; done \\n \"q\" \u007b\u007bworkflow.name\u007d\u007d","params":{"blob":"`
-	tail := `"},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[],"upstream":{"prepare":{"version":1,"status":"absent"}}}`
+		`"experiment":"it's $HOME ` + "`x`" + ` ; done \\n \"q\" ` +
+		`\u007b\u007bworkflow.name\u007d\u007d","params":{"blob":"`
+	tail := `"},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[],
+		"upstream":{"prepare":{"version":1,"status":"absent"}}}`
 	fill := size - len(head) - len(tail)
 	var b strings.Builder
 	h := "contract-4"
@@ -86,7 +88,7 @@ func crdsWithContractFields(t *testing.T, root string) []*apiextensionsv1.Custom
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no definitions under config/crd/bases: %v", err)
 	}
-	var out []*apiextensionsv1.CustomResourceDefinition
+	out := make([]*apiextensionsv1.CustomResourceDefinition, 0, len(files))
 	patched := false
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
@@ -100,11 +102,13 @@ func crdsWithContractFields(t *testing.T, root string) []*apiextensionsv1.Custom
 		if crd.Spec.Names.Kind == "HPCArgoWorkflowJob" {
 			schema := crd.Spec.Versions[0].Schema.OpenAPIV3Schema
 			spec := schema.Properties["spec"]
-			spec.Properties["context"] = apiextensionsv1.JSONSchemaProps{Type: "string", MaxLength: ptr.To(int64(contextCap))}
+			spec.Properties["context"] = apiextensionsv1.JSONSchemaProps{Type: "string",
+				MaxLength: ptr.To(int64(contextCap))}
 			spec.Properties["app"] = apiextensionsv1.JSONSchemaProps{Type: "string", MaxLength: ptr.To(int64(55))}
 			schema.Properties["spec"] = spec
 			status := schema.Properties["status"]
-			status.Properties["result"] = apiextensionsv1.JSONSchemaProps{Type: "string", MaxLength: ptr.To(int64(resultCap))}
+			status.Properties["result"] = apiextensionsv1.JSONSchemaProps{Type: "string",
+				MaxLength: ptr.To(int64(resultCap))}
 			schema.Properties["status"] = status
 			patched = true
 		}
@@ -141,9 +145,22 @@ func TestA96KiBContextSurvivesEveryHop(t *testing.T) {
 		}
 	}
 
-	// ---- hop 1: the follower creates the job from its environment
+	job, stored := followerToJobObject(ctx, t, c, value)
+	capsOfTheDefinition(ctx, t, c, job, stored, value)
+	runnerEnv := jobObjectToRunnerJob(ctx, t, c, job, stored, value)
+	slurm, report := runnerToStep(t, root, runnerEnv, value)
+	defer slurm.Close()
+	controlRun(t, root, runnerEnv, value, slurm, report)
+}
+
+// followerToJobObject is hop 1: the follower creates the job from its environment.
+func followerToJobObject(
+	ctx context.Context, t *testing.T, c client.Client, value string,
+) (job, stored *unstructured.Unstructured) {
+	t.Helper()
 	followerEnv := map[string]string{
-		"HPC_JOB_NAMESPACE": "ml-vision-env", "WF_NAME": "contract-4", "WF_UID": "0b7f6c1e-1111-2222-3333-444455556666",
+		"HPC_JOB_NAMESPACE": "ml-vision-env", "WF_NAME": "contract-4",
+		"WF_UID":    "0b7f6c1e-1111-2222-3333-444455556666",
 		"STEP_NAME": "train", "NODE_KEY": "train-hpc", "IMAGE_REF": "registry.example/vision/hera-demo/train:v1",
 		"HPC_CLASS": "meluxina-gpu", "SLURM_TIME_LIMIT": "120", "STEP_COMMAND": `["python","-m","app.entry"]`,
 		contextEnv: value,
@@ -157,7 +174,7 @@ func TestA96KiBContextSurvivesEveryHop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := &unstructured.Unstructured{Object: obj}
+	job = &unstructured.Unstructured{Object: obj}
 	job.SetGroupVersionKind(hpcv1alpha1.GroupVersion.WithKind("HPCArgoWorkflowJob"))
 	if err := unstructured.SetNestedField(job.Object, followerEnv[contextEnv], "spec", "context"); err != nil {
 		t.Fatal(err)
@@ -168,17 +185,27 @@ func TestA96KiBContextSurvivesEveryHop(t *testing.T) {
 	if err := c.Create(ctx, job, client.FieldValidation("Strict")); err != nil {
 		t.Fatalf("hop 1, follower to job object: the API server refused the job: %v", err)
 	}
-	stored := &unstructured.Unstructured{}
+	stored = &unstructured.Unstructured{}
 	stored.SetGroupVersionKind(job.GroupVersionKind())
 	if err := c.Get(ctx, client.ObjectKeyFromObject(job), stored); err != nil {
 		t.Fatal(err)
 	}
 	got, _, _ := unstructured.NestedString(stored.Object, "spec", "context")
 	if got != value {
-		t.Fatalf("hop 1, follower to job object: spec.context came back changed (%d bytes, sha256 %s)", len(got), sha(got))
+		t.Fatalf("hop 1, follower to job object: spec.context came back changed (%d bytes, sha256 "+
+			"%s)", len(got), sha(got))
 	}
-	t.Logf("PASS  hop 1, follower to job object: spec.context read back from the API server, %d bytes, sha256 %s", len(got), sha(got))
+	t.Logf("PASS  hop 1, follower to job object: spec.context read back from the API server, %d bytes, "+
+		"sha256 %s", len(got), sha(got))
 
+	return job, stored
+}
+
+// capsOfTheDefinition: the job definition is where the caps are enforced, and the spec stays immutable.
+func capsOfTheDefinition(
+	ctx context.Context, t *testing.T, c client.Client, job, stored *unstructured.Unstructured, value string,
+) {
+	t.Helper()
 	// The definition is where the cap is enforced: one byte more is refused.
 	over := job.DeepCopy()
 	over.SetName("hpc-over-the-cap")
@@ -187,12 +214,14 @@ func TestA96KiBContextSurvivesEveryHop(t *testing.T) {
 	if err := c.Create(ctx, over, client.FieldValidation("Strict")); err == nil {
 		t.Fatal("a context one byte over the cap was accepted")
 	} else {
-		t.Logf("PASS  a context of %d bytes is refused by the job definition: %s", len(value)+1, firstLine(err.Error()))
+		t.Logf("PASS  a context of %d bytes is refused by the job definition: "+
+			"%s", len(value)+1, firstLine(err.Error()))
 	}
 
 	// The spec stays immutable with the large field in it (the rule compares the whole spec).
 	changed := stored.DeepCopy()
-	_ = unstructured.SetNestedField(changed.Object, strings.Replace(value, "contract-4", "contract-5", 1), "spec", "context")
+	_ = unstructured.SetNestedField(changed.Object, strings.Replace(value, "contract-4", "contract-5", 1),
+		"spec", "context")
 	if err := c.Update(ctx, changed); err == nil {
 		t.Fatal("spec.context could be changed after creation")
 	} else {
@@ -211,14 +240,23 @@ func TestA96KiBContextSurvivesEveryHop(t *testing.T) {
 	}
 	t.Logf("PASS  status.result takes a result of %d bytes", len(result))
 	tooLong := withResult.DeepCopy()
-	_ = unstructured.SetNestedField(tooLong.Object, head+strings.Repeat("r", resultCap-len(head)-len(tail)+1)+tail, "status", "result")
+	_ = unstructured.SetNestedField(tooLong.Object, head+strings.Repeat("r",
+		resultCap-len(head)-len(tail)+1)+tail, "status", "result")
 	if err := c.Status().Update(ctx, tooLong); err == nil {
 		t.Fatalf("status.result of %d bytes was accepted", len(result)+1)
 	} else {
-		t.Logf("PASS  status.result of %d bytes is refused by the job definition: %s", len(result)+1, firstLine(err.Error()))
+		t.Logf("PASS  status.result of %d bytes is refused by the job definition: "+
+			"%s", len(result)+1, firstLine(err.Error()))
 	}
 
-	// ---- hop 2: the controller builds the runner Job from the stored job
+}
+
+// jobObjectToRunnerJob is hop 2: the controller builds the runner Job from the stored job. It returns the
+// environment of the runner's container as the API server stored it.
+func jobObjectToRunnerJob(
+	ctx context.Context, t *testing.T, c client.Client, job, stored *unstructured.Unstructured, value string,
+) map[string]string {
+	t.Helper()
 	storedTyped := &hpcv1alpha1.HPCArgoWorkflowJob{}
 	if err := c.Get(ctx, client.ObjectKeyFromObject(job), storedTyped); err != nil {
 		t.Fatal(err)
@@ -227,11 +265,13 @@ func TestA96KiBContextSurvivesEveryHop(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "meluxina", Namespace: "ml-vision"},
 		Spec: hpcv1alpha1.HPCSiteSpec{Site: "meluxina", Sharing: true,
 			Profile: hpcv1alpha1.SiteProfile{Endpoint: "https://slurm-api.example", RESTVersion: "v0.0.44",
-				ScratchRoot: "/project/scratch/p1", Classes: []hpcv1alpha1.SiteClass{{Name: "meluxina-gpu", Partition: "gpu",
-					QOS: "default", Tier: hpcv1alpha1.TierGPU, GPUs: 4, MaxWallTimeMinutes: 2880}}},
+				ScratchRoot: "/project/scratch/p1", Classes: []hpcv1alpha1.SiteClass{{Name: "meluxina-gpu",
+					Partition: "gpu",
+					QOS:       "default", Tier: hpcv1alpha1.TierGPU, GPUs: 4, MaxWallTimeMinutes: 2880}}},
 			Identity: hpcv1alpha1.ProjectIdentity{User: "u1", Account: "p1"}},
 	}
-	rj, err := runnerjob.Build(runnerjob.Config{Image: "registry.example/kaos-hpc-operator:check"}, storedTyped, site, 1)
+	rj, err := runnerjob.Build(runnerjob.Config{Image: "registry.example/kaos-hpc-operator:check"},
+		storedTyped, site, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,16 +291,22 @@ func TestA96KiBContextSurvivesEveryHop(t *testing.T) {
 		runnerEnv[e.Name] = e.Value
 	}
 	if runnerEnv[contextEnv] != value {
-		t.Fatalf("hop 2, job object to runner Job: the env value came back changed (%d bytes)", len(runnerEnv[contextEnv]))
+		t.Fatalf("hop 2, job object to runner Job: the env value came back changed (%d "+
+			"bytes)", len(runnerEnv[contextEnv]))
 	}
 	raw, _ := json.Marshal(storedRJ)
-	t.Logf("PASS  hop 2, job object to runner Job: the runner container's %s read back from the API server, %d bytes, sha256 %s (the Job object: %d bytes)",
+	t.Logf("PASS  hop 2, job object to runner Job: the runner container's %s read back from the API "+
+		"server, %d bytes, sha256 %s (the Job object: %d bytes)",
 		contextEnv, len(runnerEnv[contextEnv]), sha(runnerEnv[contextEnv]), len(raw))
 
-	// ---- hops 3 and 4: the runner process, the Slurm submission, the job script, the step
+	return runnerEnv
+}
+
+// runnerToStep is hops 3 to 5: the runner process, the Slurm submission, the job script, the step.
+func runnerToStep(t *testing.T, root string, runnerEnv map[string]string, value string) (*fakeslurm.Site, hopReport) {
+	t.Helper()
 	slurm := fakeslurm.New(fakeslurm.Options{Name: "contract", Token: "check-token",
 		QOS: []fakeslurm.QOS{{Name: "default", MaxWallMinutes: 2880}}})
-	defer slurm.Close()
 	ca := filepath.Join(t.TempDir(), "ca.pem")
 	if err := os.WriteFile(ca, slurm.CertPEM(), 0o600); err != nil {
 		t.Fatal(err)
@@ -271,7 +317,8 @@ func TestA96KiBContextSurvivesEveryHop(t *testing.T) {
 	runnerEnv["PATH"] = os.Getenv("PATH")
 	report := runnerHop(t, root, runnerEnv)
 	if report.RunnerSaw.SHA256 != sha(value) || report.RunnerSaw.Bytes != len(value) {
-		t.Fatalf("hop 3, runner Job to runner process: the process saw %d bytes, sha256 %s", report.RunnerSaw.Bytes, report.RunnerSaw.SHA256)
+		t.Fatalf("hop 3, runner Job to runner process: the process saw %d bytes, sha256 "+
+			"%s", report.RunnerSaw.Bytes, report.RunnerSaw.SHA256)
 	}
 	t.Logf("PASS  hop 3, runner Job to runner process: the process read %s from its environment, %d bytes, sha256 %s",
 		contextEnv, report.RunnerSaw.Bytes, report.RunnerSaw.SHA256)
@@ -281,16 +328,19 @@ func TestA96KiBContextSurvivesEveryHop(t *testing.T) {
 	if atSite != value {
 		t.Fatalf("hop 4, runner to site (alone): the site holds %d bytes, sha256 %s", len(atSite), sha(atSite))
 	}
-	t.Logf("PASS  hop 4, runner to site, job alone on its node: the fake site accepted the request (%d bytes; largest environment string %d) and holds %s unchanged",
+	t.Logf("PASS  hop 4, runner to site, job alone on its node: the fake site accepted the request (%d "+
+		"bytes; largest environment string %d) and holds %s unchanged",
 		report.Alone.RequestBytes, report.Alone.LargestEnv, contextEnv)
 	// Shared node: the value rides in the script, never in the Slurm environment.
 	if _, there := slurm.JobEnv(report.Shared.Job)[contextEnv]; there || slurm.JobEnv(report.Shared.Job) == nil {
 		t.Fatalf("hop 4, runner to site (shared): the site job is missing or holds the context in its environment")
 	}
-	t.Logf("PASS  hop 4, runner to site, job for a shared node: the fake site accepted the request (%d bytes; job script %d bytes); the value is in the script, not the Slurm environment",
+	t.Logf("PASS  hop 4, runner to site, job for a shared node: the fake site accepted the request (%d "+
+		"bytes; job script %d bytes); the value is in the script, not the Slurm environment",
 		report.Shared.RequestBytes, report.Shared.ScriptBytes)
 
-	for name, m := range map[string]mode{"alone (Slurm environment)": report.Alone, "shared node (export line in the job script)": report.Shared} {
+	for name, m := range map[string]mode{"alone (Slurm environment)": report.Alone, "shared node (export " +
+		"line in the job script)": report.Shared} {
 		if m.StepSaw.SHA256 != sha(value) || m.StepSaw.Bytes != len(value) || m.ScriptExit != 0 {
 			t.Fatalf("hop 5, job script to step, %s: the step saw %d bytes, sha256 %s; the script exited %d\n%s",
 				name, m.StepSaw.Bytes, m.StepSaw.SHA256, m.ScriptExit, m.Tail)
@@ -299,22 +349,34 @@ func TestA96KiBContextSurvivesEveryHop(t *testing.T) {
 			name, contextEnv, m.StepSaw.Bytes, m.StepSaw.SHA256)
 	}
 
-	// ---- the control run: one character of what the job is handed is changed. Both steps must see it.
+	return slurm, report
+}
+
+// controlRun changes one character of what the job is handed. Both steps and the site must show it.
+func controlRun(
+	t *testing.T, root string, runnerEnv map[string]string, value string, slurm *fakeslurm.Site, report hopReport,
+) {
+	t.Helper()
 	runnerEnv["CONTRACT_CHECK_DAMAGE"] = "1"
 	control := runnerHop(t, root, runnerEnv)
 	for name, m := range map[string]mode{"alone": control.Alone, "shared node": control.Shared} {
 		if m.ScriptExit != 0 || m.StepSaw.Bytes != len(value) {
-			t.Fatalf("control run, %s: the step did not run to its end (exit %d, %d bytes)\n%s", name, m.ScriptExit, m.StepSaw.Bytes, m.Tail)
+			t.Fatalf("control run, %s: the step did not run to its end (exit %d, %d "+
+				"bytes)\n%s", name, m.ScriptExit, m.StepSaw.Bytes, m.Tail)
 		}
 		if m.StepSaw.SHA256 == sha(value) {
-			t.Fatalf("control run, %s: a changed value was reported as unchanged: the comparison of hop 5 proves nothing", name)
+			t.Fatalf("control run, %s: a changed value was reported as unchanged: the comparison of hop "+
+				"5 proves nothing", name)
 		}
-		t.Logf("PASS  control run, %s: a value with one character changed is seen as changed (sha256 %s)", name, m.StepSaw.SHA256)
+		t.Logf("PASS  control run, %s: a value with one character changed is seen as changed (sha256 "+
+			"%s)", name, m.StepSaw.SHA256)
 	}
 	if got := slurm.JobEnv(control.Alone.Job)[contextEnv]; got == value || len(got) != len(value) {
-		t.Fatalf("control run: the site should hold the changed value for %s, it holds %d bytes, sha256 %s", control.Alone.Job, len(got), sha(got))
+		t.Fatalf("control run: the site should hold the changed value for %s, it holds %d bytes, sha256 "+
+			"%s", control.Alone.Job, len(got), sha(got))
 	}
-	t.Logf("PASS  control run, the site: it holds the changed value for the control job, and the unchanged one for the first job")
+	t.Logf("PASS  control run, the site: it holds the changed value for the control job, and the " +
+		"unchanged one for the first job")
 	if slurm.JobEnv(report.Alone.Job)[contextEnv] != value {
 		t.Fatalf("the first job's environment at the site changed after the control run")
 	}

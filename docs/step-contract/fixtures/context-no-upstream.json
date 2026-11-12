@@ -6,7 +6,7 @@
   "step": "prepare",
   "kind": "transform",
   "experiment": "baseline",
-  "params": {"raw": "raw-images@latest", "labels": "labels@v3", "train": {"epochs": 3, "lr": 0.001}, "export": {"enabled": false}},
+  "params": {"prepare": {"size": 224}},
   "ledger": {
     "version": 2,
     "reads": [

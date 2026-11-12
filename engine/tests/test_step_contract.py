@@ -249,7 +249,8 @@ def test_compose_writes_one_context_per_step_and_the_runs_ledger(rendered):
     assert "--offline" not in args, "a rendered pipeline never composes offline"
     steps = json.loads(args[args.index("--steps") + 1])
     assert steps == [
-        {"name": "dataset-loading", "kind": "ingest", "inputs": ["dataset"], "needs": [], "produces": []},
-        {"name": "hello-world", "kind": "transform", "inputs": ["dataset"], "needs": ["dataset-loading"],
+        {"name": "dataset-loading", "kind": "ingest", "reads": [], "inputs": ["dataset"], "needs": [], "produces": []},
+        {"name": "hello-world", "kind": "transform", "reads": ["experiment"], "inputs": ["dataset"],
+         "needs": ["dataset-loading"],
          "produces": [{"name": "report", "type": "artifact"}]}]
     assert "{{" not in args[args.index("--steps") + 1]
