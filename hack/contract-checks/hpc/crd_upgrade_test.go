@@ -34,7 +34,8 @@ var jobGVK = hpcv1alpha1.GroupVersion.WithKind("HPCArgoWorkflowJob")
 func oldJob(t *testing.T, ctx context.Context, c client.Client, name string) {
 	t.Helper()
 	job := &hpcv1alpha1.HPCArgoWorkflowJob{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ml-vision-env", Finalizers: []string{hpcv1alpha1.CancelFinalizer}},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ml-vision-env",
+			Finalizers: []string{hpcv1alpha1.CancelFinalizer}},
 		Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "registry.example/app:v1",
 			Command: []string{"python", "-m", "app.entry"}, WallTimeMinutes: 120, StepName: "train",
 			Dataset:  &hpcv1alpha1.DatasetPin{Repo: "dataset-raw", Version: "v1", Commit: strings.Repeat("c2", 32)},
@@ -70,9 +71,12 @@ func swapDefinition(t *testing.T, ctx context.Context, c client.Client, contextR
 		Items: &apiextensionsv1.JSONSchemaPropsOrArray{Schema: &apiextensionsv1.JSONSchemaProps{Type: "object",
 			Required: []string{"name", "repo", "commit"},
 			Properties: map[string]apiextensionsv1.JSONSchemaProps{
-				"name": {Type: "string", MaxLength: ptr.To(int64(63))}, "repo": {Type: "string", MaxLength: ptr.To(int64(63))},
-				"commit": {Type: "string", MaxLength: ptr.To(int64(64))}, "ref": {Type: "string", MaxLength: ptr.To(int64(255))},
-				"owner": {Type: "string", MaxLength: ptr.To(int64(63))}, "line": {Type: "string", MaxLength: ptr.To(int64(255))}}}}}
+				"name": {Type: "string", MaxLength: ptr.To(int64(63))}, "repo": {Type: "string",
+					MaxLength: ptr.To(int64(63))},
+				"commit": {Type: "string", MaxLength: ptr.To(int64(64))}, "ref": {Type: "string",
+					MaxLength: ptr.To(int64(255))},
+				"owner": {Type: "string", MaxLength: ptr.To(int64(63))}, "line": {Type: "string",
+					MaxLength: ptr.To(int64(255))}}}}}
 	required := []string{"class", "image", "wallTimeMinutes"}
 	if contextRequired {
 		required = append(required, "context")
@@ -166,14 +170,16 @@ func storedJobAfterSwap(t *testing.T, ctx context.Context, c client.Client, name
 	}
 
 	// Status write, as the controller ends a job.
-	patch := []byte(`{"status":{"phase":"Failed","reason":"Replaced","message":"this job was created before the platform update"}}`)
+	patch := []byte(`{"status":{"phase":"Failed","reason":"Replaced","message":"this job was created ` +
+		`before the platform update"}}`)
 	if err := c.Status().Patch(ctx, got, client.RawPatch(types.MergePatchType, patch)); err != nil {
 		t.Errorf("FAIL  %s: the status of the stored job cannot be written: %s", label, firstLine(err.Error()))
 	} else {
 		t.Logf("PASS  %s: the status of the stored job can be written", label)
 	}
 	// Finalizer removal, as the controller lets a job go.
-	if err := c.Patch(ctx, got, client.RawPatch(types.MergePatchType, []byte(`{"metadata":{"finalizers":null}}`))); err != nil {
+	if err := c.Patch(ctx, got, client.RawPatch(types.MergePatchType,
+		[]byte(`{"metadata":{"finalizers":null}}`))); err != nil {
 		t.Errorf("FAIL  %s: the finalizer of the stored job cannot be removed: %s", label, firstLine(err.Error()))
 	} else {
 		t.Logf("PASS  %s: the finalizer of the stored job can be removed", label)
@@ -193,13 +199,16 @@ func storedJobAfterSwap(t *testing.T, ctx context.Context, c client.Client, name
 // spec.outputs, under strict field validation (internal/follower/run.go).
 func oldFollower(t *testing.T, ctx context.Context, c client.Client, label string, strict bool) {
 	t.Helper()
-	u := newJob("old-follower-"+strings.ReplaceAll(strings.ToLower(label), " ", "-")+fmt.Sprintf("-%v", strict), false)
-	_ = unstructured.SetNestedMap(u.Object, map[string]any{"repo": "dataset-raw", "version": "v1", "commit": strings.Repeat("c2", 32)}, "spec", "dataset")
+	u := newJob("old-follower-"+strings.ReplaceAll(strings.ToLower(label), " "+
+		"", "-")+fmt.Sprintf("-%v", strict), false)
+	_ = unstructured.SetNestedMap(u.Object, map[string]any{"repo": "dataset-raw", "version": "v1",
+		"commit": strings.Repeat("c2", 32)}, "spec", "dataset")
 	_ = unstructured.SetNestedStringSlice(u.Object, []string{"training-result"}, "spec", "outputs")
 	var opts []client.CreateOption
 	how := "without strict field validation"
 	if strict {
-		opts, how = append(opts, client.FieldValidation("Strict")), "with strict field validation, as the follower does"
+		opts, how = append(opts, client.FieldValidation("Strict")), "with strict field validation, as "+
+			"the follower does"
 	}
 	err := c.Create(ctx, u, opts...)
 	if err != nil {
@@ -207,7 +216,8 @@ func oldFollower(t *testing.T, ctx context.Context, c client.Client, label strin
 		return
 	}
 	spec, _, _ := unstructured.NestedMap(u.Object, "spec")
-	t.Logf("NOTE  %s: a job in the old shape, created %s, is ACCEPTED and stored without its dataset. spec holds: %s", label, how, keys(spec))
+	t.Logf("NOTE  %s: a job in the old shape, created %s, is ACCEPTED and stored without its dataset. "+
+		"spec holds: %s", label, how, keys(spec))
 	_ = c.Delete(ctx, u)
 }
 
@@ -233,10 +243,12 @@ func TestStoredJobsStayReadableWhenFieldsAreRemoved(t *testing.T) {
 	}
 	oldJob(t, ctx, c, "hpc-stored-1")
 	oldJob(t, ctx, c, "hpc-stored-2")
-	t.Logf("two jobs stored under today's definition, each with spec.dataset, spec.outputs, status.outputs and the cancel finalizer")
+	t.Logf("two jobs stored under today's definition, each with spec.dataset, spec.outputs, " +
+		"status.outputs and the cancel finalizer")
 
 	swapDefinition(t, ctx, c, false)
-	t.Logf("the definition was changed in place: dataset, datasetRef, outputs, status.outputs removed; context, app, inputs, status.result added; context optional")
+	t.Logf("the definition was changed in place: dataset, datasetRef, outputs, status.outputs removed; " +
+		"context, app, inputs, status.result added; context optional")
 	storedJobAfterSwap(t, ctx, c, "hpc-stored-1", "context optional")
 	oldFollower(t, ctx, c, "context optional", true)
 	oldFollower(t, ctx, c, "context optional", false)

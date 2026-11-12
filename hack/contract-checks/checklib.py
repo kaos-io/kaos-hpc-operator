@@ -86,48 +86,85 @@ NEEDS_HEAD = ('{"version":1,"run":"contract-3c","app":"hera-demo","project":"vis
 NEEDS_TAIL = '"},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[]}'
 RESULT_HEAD = '{"version":1,"status":"ok","values":{"blob":"'
 RESULT_TAIL = '"},"reads":[],"writes":[]}'
+# Inside a string, in wire form: & < > " \ { } . Each is a character the workflow engine or JSON writes longer
+# than one byte when the value goes into a step's definition.
+BS = chr(92)
+UNIT = BS + "u0026" + BS + "u003c" + BS + "u003e" + BS + '"' + BS + BS + BS + "u007b" + BS + "u007d"
 
 
-def result_of_cost(cost):
-    """A result in wire form that costs exactly `cost`."""
-    fill = cost - wire.cost(RESULT_HEAD + RESULT_TAIL)
-    text = RESULT_HEAD + chain(fill, "contract-3c-result") + RESULT_TAIL
+def blob(fill, units, amps, seed):
+    """`units` UNITs, `amps` raw & (NOT wire form: the control), then a sha256 chain up to `fill` characters."""
+    front = UNIT * units + "&" * amps
+    return front + chain(fill - len(front), seed)
+
+
+def result_of_cost(cost, units=0):
+    """A result in wire form that costs exactly `cost`; returns its filler length and its text."""
+    empty = RESULT_HEAD + blob(len(UNIT) * units, units, 0, "contract-3c-result") + RESULT_TAIL
+    fill = len(UNIT) * units + cost - wire.cost(empty)
+    text = RESULT_HEAD + blob(fill, units, 0, "contract-3c-result") + RESULT_TAIL
     assert wire.cost(text) == cost and json.loads(text)["status"] == "ok"
-    return text
+    return fill, text
 
 
-def needs_case(needs, result_cost):
-    """A step that names `needs` steps (u1..uN). Its context without results costs exactly its base cap,
-    counted as compose counts it: the context with every result still empty. Returns the base's filler
-    length, the result's filler length and the context the step must receive."""
-    result = result_of_cost(result_cost)
+def needs_case(needs, result_cost, units=0, result_units=0, amps=0, context_cost=None):
+    """A step that names `needs` steps (u1..uN). Its base costs exactly its base cap, counted as compose
+    counts it: the whole context with every result still zero-length. With `context_cost`, the base is
+    sized so that the whole context costs that instead. Returns the base's filler length, the result's
+    filler length and the context the step must receive."""
+    result_fill, result = result_of_cost(result_cost, result_units)
 
     def context(fill, results):
         up = ",".join('"u%d":%s' % (i + 1, r) for i, r in enumerate(results))
-        return NEEDS_HEAD + chain(fill) + NEEDS_TAIL[:-1] + ',"upstream":{' + up + "}}"
+        return NEEDS_HEAD + blob(fill, units, amps, "contract-3c") + NEEDS_TAIL[:-1] + ',"upstream":{' + up + "}}"
 
-    empty = wire.cost(context(0, [""] * needs))
-    fill = wire.base_cap(needs) - empty
-    assert wire.cost(context(fill, [""] * needs)) == wire.base_cap(needs)
+    front = len(UNIT) * units + amps
+    if context_cost is None:
+        fill = front + wire.base_cap(needs) - wire.cost(context(front, [""] * needs))
+        assert wire.cost(context(fill, [""] * needs)) == wire.base_cap(needs)
+    else:
+        fill = front + context_cost - wire.cost(context(front, [result] * needs))
     text = context(fill, [result] * needs)
     assert json.loads(text)["upstream"]["u%d" % needs]["status"] == "ok"
-    return fill, len(result) - len(RESULT_HEAD) - len(RESULT_TAIL), text
+    return fill, result_fill, text
+
+
+def go_json_length(value):
+    """The length of a value as Go's encoding/json writes it (the workflow engine's encoder): compact, UTF-8,
+    with &, < and > as six-byte escapes."""
+    text = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    return len(text.encode()) + 5 * sum(text.count(c) for c in "&<>")
 
 
 def needs_workflow(needs, pad):
     """The Workflow of such a step. `pad` characters in an env value bring the step's own definition up to
     the template budget, so the case is as hard as the contract allows."""
     absent = r'"{\"version\":1,\"status\":\"absent\"}"'
-    joined = "".join(' + "%s\\"u%d\\":" + sprig.default(%s, tasks.u%d.outputs.parameters["kaos-result"])'
+    joined = "".join(' + "%s\\"u%d\\":" + sprig.default(%s, tasks["u%d"].outputs.parameters["kaos-result"])'
                      % ("," if i else "", i + 1, absent, i + 1) for i in range(needs))
-    expr = ('{{=sprig.trimSuffix("}", tasks.compose.outputs.parameters["kaos-context-train"]) + ",\\"upstream\\":{"'
+    expr = ('{{=sprig.trimSuffix("}", tasks["compose"].outputs.parameters["kaos-context-train"]) + ",\\"upstream\\":{"'
             + joined + ' + "}" + "}"}}')
-    tasks = "".join('''
+    tasks = "".join("""
           - name: u%d
             template: producer
-            depends: compose''' % (i + 1) for i in range(needs))
+            depends: compose""" % (i + 1) for i in range(needs))
     depends = " && ".join(["compose"] + ["u%d" % (i + 1) for i in range(needs)])
-    return '''apiVersion: argoproj.io/v1alpha1
+    build = """
+            set -e
+            mkdir -p /work/output
+            fill={{workflow.parameters.%sfill}}; units={{workflow.parameters.%sunits}}; amps=%s
+            : > /work/blob
+            i=0; while [ $i -lt $units ]; do printf %%s '%s' >> /work/blob; i=$((i+1)); done
+            i=0; while [ $i -lt $amps ]; do printf %%s '&' >> /work/blob; i=$((i+1)); done
+            h=%s; n=$(wc -c < /work/blob)
+            while [ $n -lt $fill ]; do
+              h=$(printf %%s "$h" | sha256sum | cut -c1-64); printf %%s "$h" >> /work/blob; n=$((n+64))
+            done
+            { printf %%s '%s'; head -c $fill /work/blob; printf %%s '%s'; } > %s"""
+    compose = build % ("", "", "{{workflow.parameters.amps}}", UNIT, "contract-3c", NEEDS_HEAD, NEEDS_TAIL, "/work/context.json")
+    producer = build % ("result-", "result-", "0", UNIT, "contract-3c-result", RESULT_HEAD, RESULT_TAIL,
+                        "/work/output/kaos-result.json")
+    return """apiVersion: argoproj.io/v1alpha1
 kind: Workflow
 metadata:
   generateName: contract-3c-needs-
@@ -136,22 +173,17 @@ spec:
   arguments:
     parameters:
       - name: fill
+      - name: units
+      - name: amps
       - name: result-fill
+      - name: result-units
   templates:
     - name: compose
       container:
         image: alpine:3.20
         command: [sh, -c]
         args:
-          - |
-            set -e
-            mkdir -p /work
-            fill={{workflow.parameters.fill}}
-            h=contract-3c; n=0; : > /work/blob
-            while [ $n -lt $fill ]; do
-              h=$(printf %%s "$h" | sha256sum | cut -c1-64); printf %%s "$h" >> /work/blob; n=$((n+64))
-            done
-            { printf %%s '%s'; head -c $fill /work/blob; printf %%s '%s'; } > /work/context.json
+          - |%s
       outputs:
         parameters:
           - name: kaos-context-train
@@ -161,15 +193,7 @@ spec:
         image: alpine:3.20
         command: [sh, -c]
         args:
-          - |
-            set -e
-            mkdir -p /work/output
-            fill={{workflow.parameters.result-fill}}
-            h=contract-3c-result; n=0; : > /work/blob
-            while [ $n -lt $fill ]; do
-              h=$(printf %%s "$h" | sha256sum | cut -c1-64); printf %%s "$h" >> /work/blob; n=$((n+64))
-            done
-            { printf %%s '%s'; head -c $fill /work/blob; printf %%s '%s'; } > /work/output/kaos-result.json
+          - |%s
       outputs:
         parameters:
           - name: kaos-result
@@ -201,4 +225,4 @@ spec:
               parameters:
                 - name: kaos-context
                   value: %s
-''' % (NEEDS_HEAD, NEEDS_TAIL, RESULT_HEAD, RESULT_TAIL, "p" * pad, tasks, depends, json.dumps(expr))
+""" % (compose, producer, "p" * pad, tasks, depends, json.dumps(expr))

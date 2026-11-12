@@ -4,6 +4,7 @@
 #   prepare   an upstream step: writes its result file, read as the output `kaos-result`
 #   argument  the context is assembled in the DAG task argument `kaos-context`; the container's
 #             KAOS_STEP_CONTEXT is that input, unchanged
+#   first     a step with no needs=: the same expression with an empty `upstream`
 #   env       the DAG passes the pieces as separate arguments; the context is assembled in the
 #             container's env value
 #
@@ -84,9 +85,18 @@ spec:
               parameters:
                 - name: kaos-context
                   value: >-
-                    {{=sprig.trimSuffix("}", tasks.compose.outputs.parameters["kaos-context-train"])
-                    + ",\"upstream\":{\"prepare\":" + tasks.prepare.outputs.parameters["kaos-result"]
+                    {{=sprig.trimSuffix("}", tasks["compose"].outputs.parameters["kaos-context-train"])
+                    + ",\"upstream\":{\"prepare\":" + tasks["prepare"].outputs.parameters["kaos-result"]
                     + "}" + "}"}}
+          - name: first
+            template: consumer
+            depends: compose
+            arguments:
+              parameters:
+                - name: kaos-context
+                  value: >-
+                    {{=sprig.trimSuffix("}", tasks["compose"].outputs.parameters["kaos-context-train"])
+                    + ",\"upstream\":{" + "}" + "}"}}
           - name: env
             template: consumer-env
             depends: "compose && prepare"
