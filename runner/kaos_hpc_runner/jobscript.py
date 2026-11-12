@@ -52,6 +52,8 @@ def batch_lines(scope, scratch):
         # A host takes only jobs whose header carries its own scope.
         '# kaos-job v2 scope=' + scope,
         'set +e',
+        # Every file and folder this job creates is private to the site user (also what the programs it starts create).
+        'umask 077',
         # The job this step belongs to: its own on its own node; on a shared node
         # the host sets it to this step's job. Every per-job path keys on it.
         # Exported: the checkpoint copier (a child python3) writes the job comment for THIS job id (live job
@@ -80,7 +82,12 @@ def batch_lines(scope, scratch):
         'SCR=' + scratch,
         'export APPTAINER_CACHEDIR=$SCR/kaos-apptainer-cache'
         ' APPTAINER_TMPDIR=$SCR/kaos-tmp',
-        'mkdir -p $APPTAINER_CACHEDIR $APPTAINER_TMPDIR $SCR/sif-cache',
+        'mkdir -p $APPTAINER_CACHEDIR $APPTAINER_TMPDIR $SCR/sif-cache $SCR/kaos-work $SCR/data-cache',
+        # The caches are shared between the jobs of this user on purpose, so they are readable by this user only. The
+        # staged-image folder and the data cache are made by the login-node staging tool (not this repository), so
+        # their modes are set here, on every job, to what a private cache needs.
+        'chmod 700 "$SCR/kaos-apptainer-cache" "$SCR/kaos-tmp" "$SCR/sif-cache" "$SCR/kaos-work" "$SCR/data-cache" 2>/dev/null',
+        '[ -n "$IMAGE_STAGED" ] && chmod 700 "${IMAGE_STAGED%/*}" 2>/dev/null',
         'KEY=$(printf %s "$IMAGE_REF" | sha256sum | cut -c1-16)',
         'SIF=$SCR/sif-cache/$KEY.sif',
         # The step's inputs (spec.inputs), each a whole dataset commit, presented to the step under one root,
@@ -134,7 +141,9 @@ def batch_lines(scope, scratch):
         # D-74/D-75: every step gets a checkpoint folder (KAOS_CHECKPOINT_DIR in the container). The payload
         # keeps at most two copies of it on scratch, each ONE tar archive + manifest (file quota), and
         # restores the newest verified one here when the step is a continuation.
-        'export KAOS_CKPT_ROOT=$SCR/kaos-ckpt KAOS_SCR=$SCR; mkdir -p $KAOS_WORK/ckpt',
+        'export KAOS_CKPT_ROOT=$SCR/kaos-ckpt KAOS_SCR=$SCR; mkdir -p $KAOS_WORK/ckpt "$KAOS_CKPT_ROOT"',
+        # This job's work and checkpoint folders are private (they may hold the dataset a step wrote and its checkpoints).
+        'chmod 700 "$KAOS_WORK" "$KAOS_WORK/output" "$KAOS_WORK/ckpt" "$KAOS_CKPT_ROOT"',
         'export APPTAINERENV_KAOS_CHECKPOINT_DIR=/work/ckpt',
         'CKPTPY=$KAOS_WORK/.kaos-ckpt.py; HAVE_CKPT=0',
         'if [ -n "$CKPT_B64" ] && command -v python3 >/dev/null; then'

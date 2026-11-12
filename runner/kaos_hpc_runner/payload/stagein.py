@@ -1,5 +1,6 @@
 
 import concurrent.futures, json, os, pathlib, sys, time, urllib.parse, urllib.request
+os.umask(0o077)   # every file and folder of a copy is private to the site user (the data cache is shared between ITS jobs only)
 EP = os.environ['LAKEFS_ENDPOINT'].rstrip('/')
 H = {'Authorization': 'Bearer ' + os.environ['LAKEFS_BEARER_TOKEN']}
 REPO = os.environ['DATASET_REPO']

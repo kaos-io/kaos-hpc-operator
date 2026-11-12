@@ -49,6 +49,7 @@ class FakeLakeFS:
         self.branches = set()
         self.fail_uploads = 0  # answer this many uploads with 500
         self.truncate = False  # serve object downloads one byte short
+        self.bearer = "wallet"  # the token the fake accepts
         srv = self
 
         class H(BaseHTTPRequestHandler):
@@ -69,7 +70,7 @@ class FakeLakeFS:
                 return u.path.split("/")[3:], dict(urllib.parse.parse_qsl(u.query))
 
             def do_POST(self):
-                assert self.headers["Authorization"] == "Bearer wallet"
+                assert self.headers["Authorization"] == "Bearer " + srv.bearer
                 parts, q = self._parts()
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 # repositories/<repo>/branches
@@ -106,7 +107,7 @@ class FakeLakeFS:
                 self._send(404, {})
 
             def do_DELETE(self):
-                assert self.headers["Authorization"] == "Bearer wallet"
+                assert self.headers["Authorization"] == "Bearer " + srv.bearer
                 parts, q = self._parts()
                 if parts[2] == "branches" and parts[4:] == ["objects"]:
                     return self._send(204 if srv.objects.pop((parts[3], q["path"]), None) is not None else 404, b"")
@@ -118,7 +119,7 @@ class FakeLakeFS:
                 self._send(404, {})
 
             def do_GET(self):
-                assert self.headers["Authorization"] == "Bearer wallet"
+                assert self.headers["Authorization"] == "Bearer " + srv.bearer
                 parts, q = self._parts()
                 if parts[2] == "commits":
                     return self._send(200, {"id": parts[3]}) if parts[3] in srv.commits else self._send(404, {})

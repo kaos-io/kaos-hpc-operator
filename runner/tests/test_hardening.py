@@ -114,3 +114,144 @@ def test_the_registry_token_is_not_put_in_the_job_for_a_host_that_may_not_have_i
         finally:
             runmod.wallet.fetch_workdir = old
         assert ("REG_TOKEN=" + REGISTRY in env) is has
+
+
+# ---------------------------------------------------------------- 2/3. the node: step environment, files, modes
+
+# The fake Apptainer of test_step_contract, except that --cleanenv is honoured: the step gets only what the
+# script passed as APPTAINERENV_<name> (and a PATH, as the image has), exactly the contract of Apptainer.
+CLEAN_APPTAINER = tsc.APPTAINER.replace('exec "$@"\n', '''ENVS=()
+for v in $(compgen -v APPTAINERENV_); do
+  val=${!v}; case "$val" in /*) val=$ROOT$val ;; esac
+  ENVS+=("${v#APPTAINERENV_}=$val")
+done
+case "$CLEAN" in 1) exec env -i PATH=/usr/bin:/bin "${ENVS[@]}" "$@" ;; esac
+exec "$@"
+''').replace('exec) shift ;;', 'exec) shift; CLEAN=0; for a in "$@"; do [ "$a" = --cleanenv ] && CLEAN=1; done ;;')
+
+# The step writes the environment it was given, and what the platform needs to see it did its work.
+STEP = r'''
+import json, os, pathlib, sys, time
+pathlib.Path(%(saw)r).write_text(json.dumps(dict(os.environ)))
+mode = %(mode)r
+if mode == "sleep":
+    pathlib.Path(%(started)r).write_text(str(os.getpid()))
+    time.sleep(60)
+out = pathlib.Path(os.environ["KAOS_CHECKPOINT_DIR"]).parent / "output" / "kaos-result.json"
+if mode in ("result", "fail"):
+    out.write_text(%(result)r)
+sys.exit(3 if mode == "fail" else 0)
+'''
+
+FILE_TOKENS = (WALLET, REGISTRY)
+
+
+class HSite(tsc.Site):
+    def __init__(self, tmp_path, lakefs, shared, monkeypatch, does="result", image=GAR, inputs=()):
+        monkeypatch.setattr(tsc, "APPTAINER", CLEAN_APPTAINER)
+        super().__init__(tmp_path, lakefs, shared, helpers.fixture("context-one-upstream.wire"), inputs=inputs,
+                         does=does, monkeypatch=monkeypatch)
+        lakefs.bearer = WALLET
+        self.cfg_image = image
+        self.cfg.image = image
+        self.runner._mint = lambda: WALLET
+        self.runner.cfg = self.cfg
+        (tmp_path / "step.py").write_text(STEP % dict(saw=str(self.saw), mode=does, started=str(tmp_path / "started"),
+                                                      result=helpers.fixture("result-model.wire")))
+        self.started = tmp_path / "started"
+
+    def start(self, jid="5001"):
+        self.runner.prepare_handback()
+        batch, env, _, _ = self.runner.site_job(REGISTRY, "")
+        self.batch, self.env = batch, env
+        node = dict(e.split("=", 1) for e in env)
+        node.update(PATH=str(self.tmp / "bin") + os.pathsep + os.environ["PATH"], SLURM_JOB_ID=jid, HOME=str(self.home),
+                    FAKE_ROOT=str(self.tmp / "rootfs"), KAOS_HANDBACK_RETRY_SLEEP="0", KAOS_COMMENT_RETRY_SLEEP="0")
+        if self.shared:
+            node["KAOS_IN_STEP"] = "1"
+        (self.tmp / "job.sh").write_text(batch)
+        return subprocess.Popen(["bash", str(self.tmp / "job.sh")], cwd=str(self.home), env=node, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+
+    def run(self, jid="5001"):
+        p = self.start(jid)
+        self.out = p.communicate(timeout=120)[0].decode(errors="replace")
+        return p.returncode
+
+    def cancel(self, jid="5001"):
+        """Slurm's cancel: TERM to every process of the job."""
+        p = self.start(jid)
+        deadline = time.time() + 60
+        while not self.started.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert self.started.exists(), "the step never started"
+        os.killpg(p.pid, signal.SIGTERM)
+        self.kill_step()
+        self.out = p.communicate(timeout=60)[0].decode(errors="replace")
+        return p.returncode
+
+    def kill_step(self):
+        """The step runs in a process group of its own (set -m); the site's cancel ends the whole job."""
+        try:
+            os.killpg(int(self.started.read_text()), signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
+
+    def leaked(self):
+        """Every file under the node's folders (but the harness's own copy of the script) that holds a token."""
+        found = []
+        for root in (self.scratch, self.home, self.tmp / "rootfs"):
+            for dirpath, _, names in os.walk(str(root), followlinks=False):
+                for n in names:
+                    path = os.path.join(dirpath, n)
+                    if os.path.islink(path):
+                        continue
+                    try:
+                        data = open(path, "rb").read()
+                    except OSError:
+                        continue
+                    if any(t.encode() in data for t in FILE_TOKENS):
+                        found.append(path)
+        return found
+
+
+@pytest.fixture
+def lakefs():
+    srv = FakeLakeFS()
+    yield srv
+    srv.httpd.shutdown()
+
+
+def _modes(root):
+    return {os.path.relpath(os.path.join(d, n), str(root)): stat.S_IMODE(os.lstat(os.path.join(d, n)).st_mode)
+            for d, dirs, files in os.walk(str(root)) for n in dirs + files if not os.path.islink(os.path.join(d, n))}
+
+
+@tsc.MODES
+def test_everything_the_job_creates_is_private_to_the_site_user(tmp_path, lakefs, monkeypatch, shared):
+    site = HSite(tmp_path, lakefs, shared, monkeypatch, does="fail")
+    os.chmod(str(site.scratch), 0o700)
+    assert site.run() == 3, site.out
+    modes = _modes(site.scratch)
+    assert modes, "the job made folders"
+    loose = {p: oct(m) for p, m in modes.items() if m & 0o077}
+    assert loose == {}, "readable by group or others"
+    for folder in ("kaos-work", "kaos-work/5001", "kaos-work/5001/ckpt", "kaos-work/5001/output", "kaos-ckpt",
+                   "sif-cache", "kaos-tmp", "data-cache"):
+        assert modes[folder] == 0o700, folder
+
+
+def test_a_folder_an_older_job_left_open_is_closed(tmp_path, lakefs, monkeypatch):
+    site = HSite(tmp_path, lakefs, False, monkeypatch, does="fail")
+    for d in ("kaos-work", "sif-cache", "data-cache", "kaos-ckpt"):
+        (site.scratch / d).mkdir()
+        os.chmod(str(site.scratch / d), 0o755)
+    site.run()
+    for d in ("kaos-work", "sif-cache", "data-cache", "kaos-ckpt"):
+        assert stat.S_IMODE(os.stat(str(site.scratch / d)).st_mode) == 0o700, d
+
+
+def test_the_script_sets_the_umask_before_it_makes_anything():
+    lines = jobscript.batch_lines("-", "/scr")
+    assert lines.index("umask 077") < min(i for i, l in enumerate(lines) if "mkdir" in l or "base64 -d >" in l)
+    assert lines.index("umask 077") == 3, "right after the header, so the sharing exports still follow line 3"
