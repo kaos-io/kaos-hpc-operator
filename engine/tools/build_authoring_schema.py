@@ -25,7 +25,7 @@ def _described(authoring) -> dict[str, dict]:
     """The hand-written part: {option: {type, doc, ...live constraints}}."""
     return {
         "name": {"type": "string", "pattern": authoring._STEP_NAME_RE.pattern, "maxLength": authoring.MAX_NAME,
-                 "doc": "DNS-label step name: the Argo template, the steps/<dir> folder and the image-<step> parameter."},
+                 "doc": "DNS-label step name: the step's folder under steps/ and part of its image name."},
         "kind": {"type": "string", "enum": list(authoring.KINDS),
                  "doc": "Required. What the step does; the platform labels the step's pod and HPC job with it. "
                         "ingest, publish and control steps never run on an HPC class."},
@@ -43,7 +43,7 @@ def _described(authoring) -> dict[str, dict]:
         "gpu": {"type": "boolean", "doc": "The step needs one GPU."},
         "disk": {"type": "string", "pattern": authoring._DISK_QUANTITY_RE.pattern,
                  "doc": "Ephemeral-storage request as a Kubernetes quantity, e.g. '20Gi'."},
-        "when": {"type": "string", "doc": "An Argo `when` expression; the step is skipped when it is false."},
+        "when": {"type": "string", "doc": "A condition on the run's form values; the step is skipped when it is false."},
         "walltime": {"type": "string", "pattern": authoring._WALLTIME_RE.pattern,
                      "doc": "The step's run limit when it runs on an HPC class: '90m', '12h' or '720' (minutes)."},
         "resumable": {"type": ["boolean", "string"], "pattern": authoring._WALLTIME_RE.pattern,
@@ -70,7 +70,8 @@ def build() -> dict:
         if name not in described:
             raise SystemExit(f"step() option {name!r} has no entry in build_authoring_schema._described")
         default = None if p.default is inspect.Parameter.empty else p.default
-        params.append({"name": name, "required": p.default is inspect.Parameter.empty, "default": default,
+        required = p.default is inspect.Parameter.empty or name == "kind"   # kind= is keyword-only and has no valid default
+        params.append({"name": name, "required": required, "default": default,
                        **described[name]})
     extra = set(described) - {p["name"] for p in params}
     if extra:
@@ -91,7 +92,7 @@ def build() -> dict:
             "checkpoint_every": authoring.CHECKPOINT_EVERY_ANNOTATION,
             "idle_timeout": authoring.IDLE_TIMEOUT_ANNOTATION,
         },
-        "constants": {"compose_step": authoring.COMPOSE_STEP, "params_path": authoring.PARAMS_PATH},
+        "constants": {"compose_step": authoring.COMPOSE_STEP},
     }
 
 

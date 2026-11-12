@@ -3,6 +3,7 @@ variant of a step on the same contract as its pod, and the size of a rendered st
 Run:  python -m pytest tests/ -v
 """
 import copy
+import json
 import sys
 from pathlib import Path
 
@@ -149,31 +150,188 @@ def test_every_task_an_expression_reads_is_in_the_depends_of_the_task_that_reads
 
 
 # What a rendered step or follower definition refers to besides its context. Each is a short value the
-# platform or the form supplies (an image reference, a class name, a resource quantity, the run's name);
-# none is sized by a step's data. A reference that is not listed here fails the test: decide whether its
+# platform or the form supplies (an image reference, a class name, a number the engine computes, the run's
+# name); none is sized by a step's data. A reference that is not listed here fails the test: decide whether its
 # value is bounded before adding it.
 KNOWN_REFERENCES = {
     "inputs.parameters.kaos-context",
     "workflow.name", "workflow.uid",
-    "inputs.parameters.gpus", "inputs.parameters.step-name", "inputs.parameters.image",
+    "inputs.parameters.gpus", "inputs.parameters.cpu", "inputs.parameters.mem",
+    "inputs.parameters.step-name", "inputs.parameters.image",
     "inputs.parameters.step-command", "inputs.parameters.step-kind", "inputs.parameters.time-limit",
     "inputs.parameters.deadline-seconds", "inputs.parameters.hpc-class", "inputs.parameters.resumable-lead",
     "inputs.parameters.resumable", "inputs.parameters.idle-timeout",
 }
-KNOWN_FORM_REFERENCES = ("image-", "-class", "-cpu", "-mem", "-disk")   # workflow.parameters.<step>... of the step
+
+
+def references(text: str) -> set:
+    """Every `{{...}}` of `text` and every name an expression `{{= ... }}` reads, as dotted names:
+    `workflow.parameters['x-class']` is `workflow.parameters.x-class`."""
+    import re
+    found = set()
+    for body in re.findall(r"\{\{(.+?)\}\}", text, re.S):
+        for root, tail in re.findall(r"\b(inputs\.parameters|workflow\.parameters|workflow\.name|workflow\.uid|tasks)"
+                                     r"((?:\.[A-Za-z0-9_-]+|\[['\"][^'\"]+['\"]\])*)", body):
+            found.add(root + re.sub(r"\[['\"]([^'\"]+)['\"]\]", r".\1", tail))
+    return found
+
+
+def test_the_reference_finder_sees_names_inside_expressions():
+    expression = "{{=workflow.parameters['train-class'] in ['gpu-t4'] ? '1' : tasks[\"a-b\"].outputs.parameters[\"x\"]}}"
+    assert references(expression) == {"workflow.parameters.train-class", "tasks.a-b.outputs.parameters.x"}
+    assert references("a {{ inputs.parameters.cpu }} b {{workflow.name}}") == {"inputs.parameters.cpu", "workflow.name"}
+    assert references("{{=sprig.trimSuffix(\"}\", inputs.parameters[\"kaos-context\"])}}") == {"inputs.parameters.kaos-context"}
 
 
 def test_a_definition_refers_to_nothing_sized_at_run_time_but_its_context():
-    import re
     wft = _enhanced(_pipeline)
     found = set()
     for template in wft["spec"]["templates"]:
         if "container" not in template or template["name"] == "compose-and-validate":
             continue
-        text = yaml.safe_dump(template)
-        found |= set(re.findall(r"\{\{\s*=?\s*([A-Za-z0-9_.\-\[\]']+?)\s*\}\}", text))
+        found |= references(yaml.safe_dump(template, width=10 ** 6))
     form = {r for r in found if r.startswith("workflow.parameters.")}
     assert found - form <= KNOWN_REFERENCES, found - form - KNOWN_REFERENCES
     for reference in form:
         name = reference[len("workflow.parameters."):]
-        assert name.startswith("image-") or name.endswith(KNOWN_FORM_REFERENCES[1:]), reference
+        assert name.startswith("image-") or name.endswith("-class"), reference   # nothing else is a form field of a step
+
+
+# ---------------------------------------------------------------- a step gets the node of its class
+
+def _task(wft, name):
+    return _tasks(wft)[name]
+
+
+def _arg(task, name):
+    return next(p["value"] for p in task["arguments"]["parameters"] if p["name"] == name)
+
+
+def _template(wft, name):
+    return next(t for t in wft["spec"]["templates"] if t["name"] == name)
+
+
+def test_the_run_form_has_no_cpu_memory_or_disk_field():
+    wft = _enhanced(_pipeline)
+    names = [p["name"] for p in wft["spec"]["arguments"]["parameters"]]
+    assert not [n for n in names if n.endswith(("-cpu", "-mem", "-disk"))], names
+    assert "train-class" in names and "alone-class" in names
+    info = next(p["value"] for p in wft["spec"]["arguments"]["parameters"] if p["name"] == "pipeline-info")
+    assert "{step}-cpu" not in info and "{step}-mem" not in info and "dial" not in info
+
+
+def test_a_cpu_step_gets_what_a_node_of_its_class_offers_and_the_numbers_follow_the_class_it_is_given():
+    wft = _enhanced(lambda: authoring.step("one", kind="transform"))
+    template = _template(wft, "one")
+    resources = template["container"]["resources"]
+    assert resources["requests"]["cpu"] == resources["limits"]["cpu"] == "7"
+    assert resources["requests"]["memory"] == resources["limits"]["memory"] == "27Gi", "the default class, cpu-standard"
+    assert {p["name"]: p.get("default") for p in template["inputs"]["parameters"]} == {
+        "kaos-context": None, "cpu": "7", "mem": "27Gi"}
+    patch = yaml.safe_load(template["podSpecPatch"])["containers"][0]
+    assert patch == {"name": "main", "resources": {
+        "requests": {"cpu": "{{inputs.parameters.cpu}}", "memory": "{{inputs.parameters.mem}}"},
+        "limits": {"cpu": "{{inputs.parameters.cpu}}", "memory": "{{inputs.parameters.mem}}"}}}
+    task = _task(wft, "one")
+    assert _arg(task, "cpu") == ('{{=({"cpu-standard": "7", "kubecorecpu": "7", "gpu-t4": "7"}'
+                                 "[workflow.parameters['one-class']]) ?? \"7\"}}")
+    assert _arg(task, "mem") == ('{{=({"cpu-standard": "27Gi", "kubecorecpu": "27Gi", "gpu-t4": "25Gi"}'
+                                 "[workflow.parameters['one-class']]) ?? \"27Gi\"}}")
+
+
+def test_a_gpu_step_gets_its_gpu_and_the_node_numbers_in_one_patch():
+    wft = _enhanced(lambda: authoring.step("one", kind="train", gpu=True))
+    template = _template(wft, "one")
+    assert template["container"]["resources"]["requests"]["memory"] == "25Gi", "the default of a gpu step is gpu-t4"
+    assert {p["name"]: p.get("default") for p in template["inputs"]["parameters"]} == {
+        "kaos-context": None, "cpu": "7", "mem": "25Gi", "gpus": "1"}
+    patch = yaml.safe_load(template["podSpecPatch"])["containers"]
+    assert len(patch) == 1 and patch[0]["resources"]["requests"] == {
+        "cpu": "{{inputs.parameters.cpu}}", "memory": "{{inputs.parameters.mem}}",
+        "nvidia.com/gpu": "{{inputs.parameters.gpus}}"}
+    assert patch[0]["resources"]["limits"]["nvidia.com/gpu"] == "{{inputs.parameters.gpus}}"
+    assert '"?? "25Gi"' not in _arg(_task(wft, "one"), "mem")
+    assert _arg(_task(wft, "one"), "mem").endswith('?? "25Gi"}}')
+
+
+def test_a_step_pinned_to_one_class_has_plain_resources_and_no_runtime_numbers():
+    with authoring.pipeline("t") as p:
+        authoring.step("pinned", kind="train", gpu=True)
+    raw = yaml.safe_load(p.wt.to_yaml())
+    _template(raw, "pinned")["metadata"]["annotations"] = {"platform.kubecore.io/compute-class": "gpu-t4"}
+    wft = enhance.enhance(raw, _context())
+    template = _template(wft, "pinned")
+    assert template["container"]["resources"]["requests"] == {
+        "cpu": "7", "memory": "25Gi", "ephemeral-storage": "10Gi", "nvidia.com/gpu": "1"}
+    assert "podSpecPatch" not in template
+    assert [p["name"] for p in template["inputs"]["parameters"]] == ["kaos-context"]
+    assert not any(p["name"] in ("cpu", "mem") for p in _task(wft, "pinned")["arguments"]["parameters"])
+    assert "pinned-class" not in [p["name"] for p in wft["spec"]["arguments"]["parameters"]]
+
+
+def test_an_hpc_class_is_not_in_the_table_and_its_cluster_task_never_runs():
+    wft = _enhanced(lambda: authoring.step("one", kind="train"))
+    assert "meluxina" not in _arg(_task(wft, "one"), "cpu")
+    assert "hasPrefix(workflow.parameters['one-class'], 'meluxina-')" in _task(wft, "one")["when"]
+    follower = _template(wft, "hpc-follower")
+    assert "cpu" not in [p["name"] for p in follower["inputs"]["parameters"]], "HPC is sized by its own class"
+
+
+def test_a_pool_with_one_class_per_tier_and_a_pool_with_one_class_only():
+    ctx = _context()
+    ctx["computeClasses"]["all"] = [c for c in ctx["computeClasses"]["all"] if c["name"] == "cpu-standard"]
+    ctx["computeClasses"].pop("gpu")
+    wft = _enhanced(lambda: authoring.step("one", kind="transform"), ctx)
+    assert _arg(_task(wft, "one"), "cpu") == "{{=({\"cpu-standard\": \"7\"}[workflow.parameters['one-class']]) ?? \"7\"}}"
+
+
+def test_a_class_the_platform_cannot_size_fails_the_render_naming_it():
+    ctx = _context()
+    ctx["computeClasses"]["all"].append({"name": "arm-big", "tier": "cpu", "machineType": "c7g.4xlarge"})
+    with pytest.raises(enhance.EnhanceError) as exc:
+        _enhanced(lambda: authoring.step("one", kind="transform"), ctx)
+    assert str(exc.value) == (
+        "the pool offers the compute class 'arm-big' (machine type 'c7g.4xlarge'), but the platform cannot say how "
+        "much of such a node a pod may use, so a step could not be sized on it. The operator knows the sizes of the "
+        "machine types in its table only: ask the platform team to add the machine type.")
+    ctx["computeClasses"]["all"].append({"name": "arm-huge", "tier": "cpu", "machineType": "c7g.8xlarge"})
+    with pytest.raises(enhance.EnhanceError, match="classes 'arm-big' .*'arm-huge' .*sized on them"):
+        _enhanced(lambda: authoring.step("one", kind="transform"), ctx)
+
+
+def test_disk_is_declared_in_code_and_is_ten_gi_otherwise():
+    wft = _enhanced(lambda: (authoring.step("small", kind="transform"), authoring.step("big", kind="transform", disk="40Gi")))
+    assert _template(wft, "small")["container"]["resources"]["requests"]["ephemeral-storage"] == "10Gi"
+    assert _template(wft, "big")["container"]["resources"]["requests"]["ephemeral-storage"] == "40Gi"
+    assert "ephemeral-storage" not in _template(wft, "big").get("podSpecPatch", "")
+
+
+def test_a_disk_larger_than_the_default_classs_boot_disk_fails_the_render():
+    """The one disk check that exists: against the class the step defaults to (or is pinned to). A class chosen
+    on the form later is not checked: `computeClasses.all` entries carry no diskSizeGb."""
+    with pytest.raises(enhance.EnhanceError) as exc:
+        _enhanced(lambda: authoring.step("big", kind="transform", disk="80Gi"))
+    assert str(exc.value) == ("step 'big' requests 80Gi ephemeral-storage but compute class 'cpu-standard' (n2-standard-8) "
+                              "has only a 50GB boot disk — the pod would never schedule. Lower disk= or pick a bigger class.")
+
+
+def test_the_render_refuses_a_produced_dataset_the_lake_cannot_hold_in_this_app():
+    ctx = _context()
+    ctx["app"] = "a" * 30
+
+    def build(length):
+        return lambda: authoring.step("prepare", kind="transform", produces=[authoring.dataset("n" * length)])
+    assert _enhanced(build(17), ctx)                   # 30 + 1 + 17 = 48: the lake's limit
+    with pytest.raises(enhance.EnhanceError) as exc:
+        _enhanced(build(18), ctx)                      # 49
+    assert str(exc.value) == (f"step 'prepare': dataset('{'n' * 18}') in app '{'a' * 30}' is the repository "
+                              f"'dataset-{'a' * 30}-{'n' * 18}', and the lake allows 3 to 48 characters after 'dataset-': "
+                              f"'{'a' * 30}-{'n' * 18}' has 49. Shorten the dataset name ('{'n' * 18}') or the app's name "
+                              f"('{'a' * 30}').")
+
+
+def test_the_step_table_lists_the_short_name_and_the_context_the_repository():
+    wft = _enhanced(lambda: authoring.step("prepare", kind="transform", produces=[authoring.dataset("clean")]))
+    compose = _template(wft, "compose-and-validate")["container"]["args"]
+    table = json.loads(compose[compose.index("--steps") + 1])
+    assert table[0]["produces"] == [{"name": "clean", "type": "dataset"}], "the table has no repository: compose names it"

@@ -25,23 +25,21 @@ def test_should_render_the_fixture_app_and_print_the_engine_line(tmp_path):
     assert raw_template(repo)["kind"] == "WorkflowTemplate"
 
 
-@pytest.mark.parametrize("module", ["authoring", "derive_tree", "compose", "enhance", "meluxina", "resilience"])
-def test_should_render_when_a_vendored_module_raises_on_import(tmp_path, baseline, module):
+@pytest.mark.parametrize("profile", ["hera", "yolo", "legacy-v1", "yolo-v1", "bogus"])
+@pytest.mark.parametrize("content", ["", TRAP], ids=["empty-folder", "a-copy-of-the-engine"])
+def test_an_app_with_a_kubecore_folder_of_its_own_fails_the_render_with_the_migration_message(tmp_path, profile, content):
+    """AC-01, whatever profile CI passes (the charts still know the two retired ones): the app is told what
+    to delete, and nothing of its folder is ever imported."""
+    from kubecore.step_contract import MIGRATION_GUIDE_URL
     repo = copy_app(tmp_path / "app")
     (repo / "kubecore").mkdir()
-    (repo / "kubecore" / f"{module}.py").write_text(TRAP)
-    res = run_render(repo)
-    assert res.returncode == 0, res.stderr
-    assert raw_template(repo) == baseline
-
-
-def test_should_render_when_the_vendored_package_init_raises(tmp_path, baseline):
-    repo = copy_app(tmp_path / "app")
-    (repo / "kubecore").mkdir()
-    (repo / "kubecore" / "__init__.py").write_text(TRAP)
-    res = run_render(repo)
-    assert res.returncode == 0, res.stderr
-    assert raw_template(repo) == baseline
+    (repo / "kubecore" / "authoring.py").write_text(content)
+    res = run_render(repo, profile=profile)
+    assert res.returncode == 1 and not (repo / "out").exists()
+    assert ("kaos-engine: this app has a kubecore/ folder of its own. The platform renders pipeline.py with its own "
+            "engine and an app carries no copy of it: delete the kubecore/ folder; `from kubecore.authoring import "
+            f"pipeline, step` in pipeline.py keeps working. See {MIGRATION_GUIDE_URL}") in res.stderr
+    assert "the vendored copy was imported" not in res.stderr
 
 
 def test_should_render_when_a_toplevel_kubecore_alias_is_on_the_path(tmp_path, baseline):

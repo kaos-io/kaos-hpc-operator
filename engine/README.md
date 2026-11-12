@@ -51,22 +51,25 @@ Per kind: `ingest`, `publish` and `control` steps are offered no HPC class and g
 step takes no `inputs=` and no `produces=`.
 
 A dataset reference names the dataset's repository, `dataset-<name>@<version>`, wherever one is written: on the
-form, in `config/`, in `kaosctl`. `produces=[dataset("clean")]` names the dataset whose repository is
-`dataset-clean`. A later step of the same run reads what was just written by its produced name; any other run or
-pipeline reads it like every dataset, through a config value:
+form, in `config/`, in `kaosctl`. A dataset an app produces is named per app, so two apps of a project never
+collide on one: `produces=[dataset("clean")]` in the app `hera1` is the repository `dataset-hera1-clean`, and the
+engine computes that name in one place (`step_contract.produced_repo`) and writes it into the step's context. The
+engineer writes the short name everywhere in the app (`dataset("clean")`, `step.output("clean")`, `step.input("clean")`,
+`plan.promote.clean`). A later step of the same run reads what was just written by its produced name; any other
+run, pipeline or app reads it by its repository, through a config value:
 
 ```python
 # pipeline A
 prepare = step("prepare", kind="transform", inputs=["raw"], produces=[dataset("clean")])
 train   = step("train", kind="train", needs=[prepare])    # in the step: step.input("clean")
 
-# pipeline B, config/data.yaml:   clean: dataset-clean@latest
+# pipeline B, config/data.yaml:   clean: dataset-<app>-clean@latest      (the app that produces it; here dataset-hera1-clean@latest)
 step("evaluate", kind="evaluate", inputs=["clean"])       # in the step: step.input("clean")
 ```
 
 Refused at render, each with a message that names the step and what to write: a missing or unknown `kind=`;
 `outputs=` and `hpc_time_limit=` (removed; the message says what replaces them and points at
-`authoring.MIGRATION_GUIDE_URL`, a placeholder until the guide has an address); a step or produced name that
+`authoring.MIGRATION_GUIDE_URL`, the address of the migration guide); a step or produced name that
 starts with `kaos-`; a config tree that defines `plan` or `pipeline-version`, or a leaf whose form field would
 get one of those names; a step (or the HPC follower) whose rendered definition is over 24 KiB, counted as the
 workflow engine encodes it (`&`, `<` and `>` cost six bytes each); an app name over 55 characters; a
@@ -102,11 +105,47 @@ with the sentinel: a skipped or omitted step has an empty output. Section 10 of 
 - reads the run's own key in the ADVANCED override: `plan.promote.<dataset>: true` (the name in `produces=`;
   `true` or `false` in any letter case) puts `promote: true` on that produced dataset in the producing step's context. `plan.use`, `plan.target` and `pipeline-version` are
   reserved and refused until they ship, so a run never silently ignores one;
+- refuses a config that uses a resolver (`${oc.env:NAME}` and every other `${resolver:...}`; the render refuses it
+  first, naming the key) and resolves the config with an empty environment besides, because this pod holds the
+  platform's credentials and a value must never read them into a step's context;
+- refuses an ADVANCED override over 16 KiB, and a dataset reference whose version is over 255 characters or whose
+  repository id is over 63;
 - refuses a step whose base context costs more than 96 KiB less 8 KiB for each step it needs (cost: the bytes
   plus one for each quote and backslash, what the value takes inside a step's definition).
 
 The enhancer gives compose the run's identity (`--app`, `--project`); authoring gives it the run's name and the
 step table (`--run`, `--steps`).
+
+**A step gets the node of its class.** The class is the node. The run form has a class for every step
+(`<step>-class`, an enum of the pool's classes, plus the HPC classes for a kind that may run there) and nothing to
+type: no cpu, memory or disk field. A step's pod asks for what a node of the class it was given offers a pod,
+cpu and memory, and the limits equal the requests.
+
+- **Where the numbers come from.** The operator computes them per class (`allocatable` in the pipeline context,
+  `kubecore-operator` `internal/operators/kubeapp/phases/reconciling.go`, `gkeAllocatable`): the machine's capacity
+  less GKE's reservation for the node system, the DaemonSets measured on every node (1.22 GiB and 0.586 cpu, which is
+  more than the 1.13 GiB and 0.52 cpu a live dev node carries today), a safety margin (0.5 GiB, 0.25 cpu) and, on a
+  GPU node, the accelerator's headroom (1.8 GiB, 0.35 cpu), rounded down to whole units. The engine knows no machine
+  type and adds nothing: `step_contract` has no table, `enhance.node_sizes` reads the context. The checkpoint
+  helper's sidecar (10m, 64Mi) and the workflow executor's containers (no requests) live inside the margin.
+- **At run time.** The class is chosen at submit, so the numbers follow it the way the GPU does: the template takes
+  inputs `cpu` and `mem`, a `podSpecPatch` puts them into the main container's requests and limits, and each task
+  that runs the step computes them from `<step>-class` with an expression over a table of the pool's classes
+  (`{"cpu-standard": "7", "gpu-t4": "7"}[workflow.parameters['train-class']]`, with the default class's number as
+  the fallback for a class not in the table: an HPC class, whose cluster task never runs). A step pinned to one class
+  has the same numbers as plain container resources.
+- **Limits equal requests** so a step that overruns its memory is stopped inside its own cgroup instead of pressing on
+  the node's daemons, and cannot starve them. A step cannot ask for more than its class has, so no pod waits for a node
+  that cannot hold it. Several cluster steps no longer share a node by lowering fields by hand; HPC node sharing is
+  unchanged.
+- **Disk** is `disk=` in `pipeline.py`, a request of 10Gi otherwise. The one check is at render, against the class the
+  step defaults to or is pinned to (`validate_scheduling`: `disk=` above the class's boot disk fails the render). A
+  class picked on the form later is not checked, because `computeClasses.all` entries carry no `diskSizeGb` (only the
+  tier defaults do): a gap on the operator's side.
+- **A class that cannot be sized fails the render.** The operator's table holds GCE machine types; any other (an AWS
+  type, a GCE type not in the table) has no `allocatable`, and a pool that offers such a class fails the render naming
+  it. Before, the same class crashed the render with a `KeyError` when it was a step's default, and sized the step as
+  the default class when it was picked on the form.
 
 **What a definition refers to besides its context, and the limit that leaves.** A step's definition must stay
 under what the workflow engine can hand a pod (131057 bytes). The context is bounded by the caps above and the
@@ -119,16 +158,18 @@ holds a reference that is not in this list:
 | every step | `inputs.parameters.kaos-context` | the context caps |
 | every step | `workflow.parameters.image-<step>` | the app's image record, written by CI |
 | every step | `workflow.parameters.<step>-class` | a form field with an `enum`: the pool's classes, plus the HPC classes for a kind that may run there. A step pinned to one class has no such field |
-| every step | `workflow.parameters.<step>-cpu`, `-mem`, `-disk` | free-text form fields. Their defaults are checked against the class at render; a submitted value is checked only by Kubernetes, which refuses a pod whose quantity it cannot read. Nothing bounds their length |
+| a step that is not pinned to one class | `inputs.parameters.cpu`, `inputs.parameters.mem` | computed by the engine from the class (a lookup table of the pool's classes written at render): a number and a quantity like `7` and `27Gi` |
 | GPU steps | `inputs.parameters.gpus` | `0` or `1`, set by the engine |
 | steps with checkpoint copies, the follower | `workflow.name`, `workflow.uid` | the workflow engine |
 | the follower | `inputs.parameters.step-name`, `image`, `step-command`, `step-kind`, `time-limit`, `deadline-seconds`, `hpc-class`, `resumable-lead`, `resumable`, `idle-timeout` | written by the engine at render, or one of the form fields above |
 
-The compose step is the one definition that carries the run's free text: every form field is one of its
-arguments, and so is the ADVANCED override (`workflow.parameters.config`). Its rendered definition is about
-5 KiB, so an override of roughly 60 KiB or more (less when it holds many quotes) makes the compose step itself
-too large to start. That is the first step, before any GPU; the run ends with the workflow engine's error, not
-with a message of ours. Nothing in the engine can check it: the value is only known when the run is submitted.
+The compose step is the one definition that carries the run's free text: every config leaf of the form is one of
+its arguments, and so is the ADVANCED override (`workflow.parameters.config`). Compose refuses an override above
+16 KiB (`the override is too large; put the values in the app's config`). Its rendered definition is about 5 KiB, so
+an override of roughly 60 KiB or more (less when it holds many quotes) makes the compose step too large to start
+before it can refuse anything: that run ends with the workflow engine's error, not with a message of ours. Nothing
+in the engine can check it, the value is only known when the run is submitted; the charts package looks at
+validating the size at submit.
 
 **The step table, for CI and the form.** The compose step's argument after `--steps` is one JSON array, written
 at render, with one object per step in pipeline order. It is the place to read what a pipeline declares without
@@ -151,10 +192,28 @@ produced = [e["name"] for step in steps for e in step["produces"] if e["type"] =
 
 Every name in `input_names` is a form field of the same name (`spec.arguments.parameters[].name`): an input is a
 top-level config value, and a top-level scalar keeps its name on the form. Those are the fields that hold a
-dataset reference, so those are the fields to fill with the catalog's choices (`dataset-<name>@<version>`). The
+dataset reference, so those are the fields to fill with the catalog's choices (`dataset-<name>@<version>`; for a dataset an app produces, `dataset-<app>-<name>`). The
 field named `dataset` is no longer special: a pipeline may have none, or several under other names. `produced`
-lists the datasets the pipeline writes (repository `dataset-<name>`), for whoever sets up what the app may write.
+lists the datasets the pipeline writes (repository `dataset-<app>-<name>`: `step_contract.dataset_repo`), for whoever sets up what the app may write.
 The value is in wire form: plain JSON to any parser.
+
+**For the charts package (W4).**
+
+- The run form no longer has `<step>-cpu`, `<step>-mem` or `<step>-disk`; anything that fills, validates or lists them
+  goes. The class (`<step>-class`) stays an enum.
+- The input names are in the step table (above). The field named `dataset` is no longer special.
+- `files/engine.py:50,149,151` still names the profiles `legacy-v1` and `yolo-v1` and reads the app's own
+  `kubecore/derive_tree.py` to choose one. Both go: an app that carries a `kubecore/` folder now fails the render
+  with the migration message whatever profile is passed (the runner checks the folder before it checks the profile),
+  and the profile is `yolo` when the config tree has a `quantization` section, else `hera`.
+- `tests/connections` fixtures and goldens (14 files) hold the old step shape: `step-outputs`, `dataset-pin`,
+  `data-lock`, `compose-and-validate.outputs.parameters.params`. Regenerate them from the engine.
+- `_helpers.tpl` `add_step_token` adds a volume (232 bytes with a 100-character audience), a mount (83) and an
+  environment value (74) to a step's template after the engine's size check: at most 423 bytes with the keys, against
+  the 8000 bytes the budget keeps free (131057 less 96 KiB less 24 KiB is 8177).
+- The compose step no longer has an output named `params`; its outputs are `kaos-ledger` and one
+  `kaos-context-<step>`. The composed config is written to a file only when `--output` is passed (`kaosctl`'s local
+  run does), never in the cluster.
 
 **The HPC variant** (`kubecore/meluxina.py`). The `<step>-hpc` task gets the same `kaos-context` argument as the
 step's own task, and the follower receives it as `KAOS_STEP_CONTEXT`. The follower template has two outputs:
@@ -236,7 +295,8 @@ the `engine-tests` stage of `Dockerfile.engine` (the Go CI container has no Pyth
 | `tests/test_step_contract.py` | Loads `docs/step-contract/fixtures/`: the wire writer equals every `.wire` file; a context assembled from compose's base and upstream results equals the context fixtures byte for byte, a skipped upstream included; the ledger; the follower's side of the `hpc-job` fixture |
 | `tests/test_authoring_contract.py` | Every keyword and every render refusal, with its message |
 | `tests/test_compose_inputs.py` | Pinned inputs, contexts, `plan`, the size cap, every compose refusal with its message, the compose entry point |
-| `tests/template/test_step_contract_enhance.py` | The per-kind HPC rules, the result pair of a step with an HPC variant, the size of a rendered step |
+| `tests/template/test_step_contract_enhance.py` | The per-kind HPC rules, the result pair of a step with an HPC variant, the size of a rendered step, the references in a definition, the node sizing of every class shape |
+| `tests/test_compose_kaos_lib.py` | Compose against the real kaos-lib 0.5 (skipped without it: `make test-engine ENGINE_KAOS_LIB=<kaos-lib checkout>`) |
 | `tests/test_follower_contract.py`, Go `internal/follower/engine_contract_test.go` | The golden follower template against what the follower reads |
 | the rest | The enhancer, resilience, the runner contract incl. the booby-trap (a `kubecore/authoring.py` in the app that raises still renders: it is never imported), the wheel, the authoring schema |
 

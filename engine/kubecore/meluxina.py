@@ -81,8 +81,12 @@ HPC_RESUMABLE_ANNOTATION = "platform.kubecore.io/hpc-resumable"
 POD_LOSS_MESSAGES = ("imminent node shutdown|node is shutting down|node is draining"
                      "|The node was low on resource|The node had condition"
                      "|Pod was rejected|Evicted|evicted|pod deleted|Pod was deleted")
-POD_LOSS_RETRY = ("lastRetry.status == 'Error' or lastRetry.message matches '.*(%s).*'"
-                  % POD_LOSS_MESSAGES)
+# A step that ends well without writing its result is an Error of the executor ("no such file ...
+# kaos-result.json"). It is deterministic: the same step ends the same way again, and a re-run would
+# spend the GPU twice. It is not retried; a node lost with the step is.
+NO_RESULT_MESSAGE = "kaos-result.json"
+POD_LOSS_RETRY = ("(lastRetry.status == 'Error' or lastRetry.message matches '.*(%s).*')"
+                  " and not (lastRetry.message contains '%s')" % (POD_LOSS_MESSAGES, NO_RESULT_MESSAGE))
 
 
 def sharing_env(ctx: dict) -> list:

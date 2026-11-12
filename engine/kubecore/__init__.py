@@ -1,8 +1,7 @@
 """kubecore — seeded, PLATFORM-OWNED ML-pipeline authoring helpers. DO NOT EDIT.
 
-Vendored into the app repo (OQ1: vendored-first — offline local render, no
-registry dependency). The platform replaces this directory wholesale on
-upgrade; anything you change here is lost.
+Platform-owned: an app carries no copy. CI imports this package from the platform's engine image, and
+`kaosctl` from the engine wheel; an app that has a `kubecore/` folder of its own fails the render.
 
 Public surface for pipeline.py:
 

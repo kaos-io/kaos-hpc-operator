@@ -15,7 +15,7 @@
     "writes": []
   },
   "produces": [
-    {"name": "embeddings", "type": "dataset", "repo": "dataset-embeddings"}
+    {"name": "embeddings", "type": "dataset", "repo": "dataset-hera-demo-embeddings"}
   ],
   "upstream": {}
 }

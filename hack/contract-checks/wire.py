@@ -150,9 +150,13 @@ def shape_of_write(e):
         return "fields must be %s (and optionally line, path), in that order" % ", ".join(WRITE_FIELDS)
     if not _name(e["name"]) or e["type"] not in TYPES or not COMMIT.match(str(e["commit"])):
         return "name, type or commit is not valid"
-    want_repo = "dataset-" + e["name"] if e["type"] == "dataset" else "outputs-"
-    if not str(e["repo"]).startswith(want_repo):
-        return "repo must be dataset-<name> for a dataset and outputs-<app> otherwise"
+    repo = str(e["repo"])
+    if e["type"] == "dataset":
+        # dataset-<app>-<name>: the app is named in the repository, the ledger does not know it, so only the shape is checked
+        if not (repo.startswith("dataset-") and repo.endswith("-" + e["name"]) and len(repo) > len("dataset-") + len(e["name"]) + 1):
+            return "repo must be dataset-<app>-<name> for a dataset"
+    elif not repo.startswith("outputs-"):
+        return "repo must be outputs-<app> for anything else"
     return ""
 
 

@@ -24,7 +24,7 @@ def test_should_list_every_step_option_in_signature_order_with_its_default():
                          "resumable", "checkpoint_every", "idle_timeout"], "the keywords of the step contract"
     for entry in SCHEMA["params"]:
         param = sig[entry["name"]]
-        assert entry["required"] == (param.default is inspect.Parameter.empty)
+        assert entry["required"] == (param.default is inspect.Parameter.empty or entry["name"] == "kind")
         assert entry["doc"] and entry["type"]
 
 
