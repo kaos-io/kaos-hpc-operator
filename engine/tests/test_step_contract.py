@@ -232,7 +232,7 @@ def test_every_step_runs_the_same_entry_with_one_value_and_hands_back_one_result
         env = {e["name"]: e.get("value") for e in step["container"]["env"]}
         assert env["KAOS_STEP_CONTEXT"] == "{{inputs.parameters.kaos-context}}"
         assert "KAOS_LIB_LOCK" not in env
-        sizing = ("gpus", "cpu", "mem", "disk")
+        sizing = ("gpus", "cpu", "mem", "disk", "deadline")
         assert [p["name"] for p in step["inputs"]["parameters"] if p["name"] not in sizing] == ["kaos-context"]
         # no default: a step that ends well without a result fails in the workflow engine
         assert step["outputs"]["parameters"] == [{"name": "kaos-result", "valueFrom": {
@@ -244,14 +244,16 @@ def test_compose_writes_one_context_per_step_and_the_runs_ledger(rendered):
     outputs = {o["name"]: o["valueFrom"]["path"] for o in compose["outputs"]["parameters"]}
     assert outputs == {"kaos-ledger": "/work/kaos-ledger.json",
                        "kaos-context-dataset-loading": "/work/context/dataset-loading.json",
-                       "kaos-context-hello-world": "/work/context/hello-world.json"}
+                       "kaos-context-hello-world": "/work/context/hello-world.json",
+                       "kaos-run-settings": "/work/kaos-run-settings.json"}
     args = compose["container"]["args"]
     assert args[args.index("--run") + 1] == "{{workflow.name}}"
     assert args[args.index("--app") + 1] == "PLACEHOLDER-app" and args[args.index("--project") + 1]
     assert "--offline" not in args, "a rendered pipeline never composes offline"
     steps = json.loads(args[args.index("--steps") + 1])
     assert steps == [
-        {"name": "dataset-loading", "kind": "ingest", "reads": [], "inputs": ["dataset"], "needs": [], "produces": []},
+        {"name": "dataset-loading", "kind": "ingest", "reads": [], "inputs": ["dataset"], "needs": [],
+         "produces": [{"name": "loaded", "type": "dataset"}]},
         {"name": "hello-world", "kind": "transform", "reads": ["experiment"], "inputs": ["dataset"],
          "needs": ["dataset-loading"],
          "produces": [{"name": "report", "type": "artifact"}]}]

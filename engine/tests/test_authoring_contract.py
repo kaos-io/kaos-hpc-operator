@@ -8,7 +8,7 @@ import textwrap
 import pytest
 import yaml
 
-from helpers import copy_app, run_render
+from helpers import copy_app, run_render, valid
 from kubecore.step_contract import OLD_APP_MARKER, OLD_APP_NOTICE
 
 
@@ -41,7 +41,7 @@ def test_a_pipeline_where_every_step_lacks_a_kind_is_an_app_from_before_the_cont
 
 
 def test_one_step_without_a_kind_among_steps_that_have_one_is_not_an_old_app():
-    message = refused(lambda a: (a.step("one", kind="transform"), a.step("two"), a.step("three", kind="train")))
+    message = refused(lambda a: (a.step("one", kind="evaluate"), a.step("two"), a.step("three", kind="evaluate")))
     assert message == ("step 'two' has no kind=, which every step declares: one of ingest, transform, train, "
                        "evaluate, publish, control.")
     assert OLD_APP_MARKER not in message
@@ -55,8 +55,9 @@ def test_an_unknown_kind_fails_the_render_naming_the_kinds():
 
 @pytest.mark.parametrize("kind", ["ingest", "transform", "train", "evaluate", "publish", "control"])
 def test_every_pod_carries_its_real_kind(kind):
-    wft = render(lambda a: a.step("one", kind=kind))
+    wft = render(lambda a: a.step("one", kind=kind, **valid(a, kind)))
     labels = next(t for t in wft["spec"]["templates"] if t["name"] == "one")["metadata"]["labels"]
+    labels.pop("platform.kubecore.io/produces-dataset", None)    # the ingest step produces a dataset
     assert labels == {"platform.kubecore.io/step": "one", "platform.kubecore.io/step-kind": kind}
     compose = next(t for t in wft["spec"]["templates"] if t["name"] == "compose-and-validate")
     assert compose["metadata"]["labels"]["platform.kubecore.io/step-kind"] == "control"
@@ -70,25 +71,33 @@ def test_the_keywords_after_the_name_are_given_by_name():
             authoring.step("one", ["experiment"])
     with pytest.raises(TypeError, match="unexpected keyword argument 'walltime_minutes'"):
         with authoring.pipeline("p"):
-            authoring.step("one", kind="train", walltime_minutes=5)
+            authoring.step("one", kind="evaluate", walltime_minutes=5)
 
 
 # ---------------------------------------------------------------- removed keywords (AC-01)
 
-def test_outputs_is_an_app_from_before_the_contract():
-    message = refused(lambda a: a.step("prepare", kind="transform", outputs=["dataset-info"]))
-    assert message == "step 'prepare': outputs= is no longer part of step(). " + OLD_APP_NOTICE
+def test_outputs_says_what_to_write_instead():
+    message = refused(lambda a: a.step("prepare", kind="evaluate", outputs=["dataset-info"]))
+    assert message == ("step 'prepare': outputs= is gone. Declare what the step writes with produces=[...] and "
+                       "hand it on with step.result().")
 
 
-def test_hpc_time_limit_is_an_app_from_before_the_contract():
-    message = refused(lambda a: a.step("train", kind="train", hpc_time_limit="12h"))
-    assert message == "step 'train': hpc_time_limit= is no longer part of step(). " + OLD_APP_NOTICE
+def test_hpc_time_limit_says_what_to_write_instead():
+    message = refused(lambda a: a.step("train", kind="evaluate", hpc_time_limit="12h"))
+    assert message == "step 'train': hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\"."
 
 
-def test_disk_is_refused_and_a_step_gets_the_disk_of_its_class():
-    message = refused(lambda a: a.step("train", kind="train", disk="20Gi"))
-    assert message == ("step 'train': disk is no longer declared; a step gets the disk of the machine its class "
-                       "runs on. " + OLD_APP_NOTICE)
+def test_disk_says_a_step_gets_the_disk_of_its_class():
+    message = refused(lambda a: a.step("train", kind="evaluate", disk="20Gi"))
+    assert message == "step 'train': disk= is gone. The step gets the disk of the machine class it runs on."
+
+
+def test_any_other_unknown_keyword_lists_the_keywords_that_exist():
+    with pytest.raises(TypeError) as exc:
+        render(lambda a: a.step("one", kind="evaluate", gpus=1))
+    assert str(exc.value) == ("step() got an unexpected keyword argument 'gpus'. The keywords are: name, kind, reads, "
+                              "inputs, needs, produces, gpu, when, walltime, resumable, checkpoint_every, "
+                              "idle_timeout.")
 
 
 def test_an_app_on_the_old_contract_fails_the_render_and_writes_nothing(tmp_path):
@@ -104,15 +113,15 @@ def test_an_app_on_the_old_contract_fails_the_render_and_writes_nothing(tmp_path
     """))
     done = run_render(repo)
     assert done.returncode == 1
-    assert "outputs= is no longer part of step()" in done.stderr and OLD_APP_MARKER in done.stderr
+    assert "step 'dataset-loading': outputs= is gone." in done.stderr
     assert not (repo / "out").exists()
 
 
 def test_walltime_takes_the_values_hpc_time_limit_took():
-    wft = render(lambda a: a.step("train", kind="train", walltime="12h"))
+    wft = render(lambda a: a.step("train", kind="evaluate", walltime="12h"))
     step = next(t for t in wft["spec"]["templates"] if t["name"] == "train")
     assert step["metadata"]["annotations"] == {"platform.kubecore.io/hpc": "12h"}
-    assert "walltime='1d' must be minutes or hours" in refused(lambda a: a.step("train", kind="train", walltime="1d"))
+    assert "walltime='1d' must be minutes or hours" in refused(lambda a: a.step("train", kind="evaluate", walltime="1d"))
 
 
 # ---------------------------------------------------------------- produces=
@@ -164,22 +173,23 @@ def test_a_dataset_has_one_producer_in_the_pipeline():
 # ---------------------------------------------------------------- inputs= and needs=
 
 def test_an_input_names_a_top_level_config_value():
-    wft = render(lambda a: a.step("load", kind="ingest", inputs=["dataset"]))
+    wft = render(lambda a: a.step("load", kind="ingest", inputs=["dataset"], **valid(a, "ingest")))
     assert wft["kind"] == "WorkflowTemplate"
-    assert refused(lambda a: a.step("load", kind="ingest", inputs=["raw"])).startswith(
+    assert refused(lambda a: a.step("load", kind="ingest", inputs=["raw"], **valid(a, "ingest"))).startswith(
         "step 'load' declares the input 'raw', but the config tree has no top-level value 'raw' "
         "(top-level keys: experiment, dataset). Add `raw: <dataset>@<version>` to config/")
-    assert refused(lambda a: a.step("load", kind="ingest", inputs=["experiment"])).startswith(
+    assert refused(lambda a: a.step("load", kind="ingest", inputs=["experiment"], **valid(a, "ingest"))).startswith(
         "step 'load' declares the input 'experiment', but the config value 'experiment' is a section.")
-    assert "inputs= holds 'data.raw'" in refused(lambda a: a.step("load", kind="ingest", inputs=["data.raw"]))
+    assert "inputs= holds 'data.raw'" in refused(
+        lambda a: a.step("load", kind="ingest", inputs=["data.raw"], **valid(a, "ingest")))
     assert "inputs= names dataset more than once" in refused(
-        lambda a: a.step("load", kind="ingest", inputs=["dataset", "dataset"]))
+        lambda a: a.step("load", kind="ingest", inputs=["dataset", "dataset"], **valid(a, "ingest")))
 
 
 def test_an_input_and_something_a_needed_step_produces_may_not_share_a_name():
     def build(a):
         prepare = a.step("prepare", kind="transform", produces=[a.dataset("dataset")])
-        a.step("train", kind="train", inputs=["dataset"], needs=[prepare])
+        a.step("train", kind="evaluate", inputs=["dataset"], needs=[prepare])
     assert refused(build) == (
         "step 'train': dataset is both an input (inputs=) and something the step it needs, 'prepare', produces. "
         "A step reads both by name, so the two must differ: rename the config value or the produced thing.")
@@ -188,7 +198,7 @@ def test_an_input_and_something_a_needed_step_produces_may_not_share_a_name():
 def test_two_needed_steps_may_not_produce_the_same_name():
     def build(a):
         one = a.step("one", kind="train", produces=[a.model("model")])
-        two = a.step("two", kind="train", produces=[a.artifact("model")])
+        two = a.step("two", kind="transform", produces=[a.artifact("model")])
         a.step("three", kind="evaluate", needs=[one, two])
     assert refused(build) == (
         "step 'three': the steps it needs, 'one' and 'two', both produce 'model'. A step reads what the steps it "
@@ -196,7 +206,7 @@ def test_two_needed_steps_may_not_produce_the_same_name():
 
     def fine(a):   # the same name from steps this one does not both need
         one = a.step("one", kind="train", produces=[a.model("model")])
-        a.step("two", kind="train", produces=[a.artifact("model")])
+        a.step("two", kind="transform", produces=[a.artifact("model")])
         a.step("three", kind="evaluate", needs=[one])
     assert render(fine)
 
@@ -205,7 +215,7 @@ def test_a_step_may_need_at_most_ten_steps():
     """Each needed step's result takes 8 KiB of the context; ten leave the 16 KiB the rest needs."""
     def build(count):
         def inner(a):
-            a.step("last", kind="evaluate", needs=[a.step(f"s{i}", kind="transform") for i in range(count)])
+            a.step("last", kind="evaluate", needs=[a.step(f"s{i}", kind="evaluate") for i in range(count)])
         return inner
     assert render(build(10))
     assert refused(build(11)).startswith(
@@ -226,12 +236,12 @@ def test_a_control_step_takes_no_data():
 @pytest.mark.parametrize("name", ["x-hpc", "hpc-hpc", "compose-and-validate", "train-hpc", "main", "hpc-follower",
                                   "kaos-step", "kaos-result"])
 def test_a_step_may_not_take_a_name_the_platform_keeps(name):
-    message = refused(lambda a: a.step(name, kind="train"))
+    message = refused(lambda a: a.step(name, kind="evaluate"))
     assert message.startswith(f"step name '{name}' is reserved") and "'kaos-'" in message
 
 
 def test_a_step_called_hpc_is_fine():
-    assert render(lambda a: a.step("hpc", kind="train"))
+    assert render(lambda a: a.step("hpc", kind="evaluate"))
 
 
 @pytest.mark.parametrize("key", ["plan", "pipeline-version"])
@@ -259,7 +269,7 @@ def test_a_config_leaf_whose_form_field_would_be_a_reserved_name_fails_the_rende
 
 def test_a_step_that_needs_a_conditional_step_waits_for_it_to_end_either_way():
     def build(a):
-        export = a.step("export", kind="transform", when="experiment-name == yes")
+        export = a.step("export", kind="evaluate", when="experiment-name == yes")
         a.step("evaluate", kind="evaluate", needs=[export])
     wft = render(build)
     tasks = {t["name"]: t for t in next(t for t in wft["spec"]["templates"] if "dag" in t)["dag"]["tasks"]}
@@ -272,7 +282,7 @@ def test_a_step_that_needs_a_conditional_step_waits_for_it_to_end_either_way():
 
 
 def _when_of(when, **more):
-    wft = render(lambda a: a.step("export", kind="transform", when=when, **more))
+    wft = render(lambda a: a.step("export", kind="evaluate", when=when, **more))
     return {t["name"]: t for t in next(t for t in wft["spec"]["templates"] if "dag" in t)["dag"]["tasks"]}["export"]
 
 
@@ -327,7 +337,7 @@ def _example():
     "experiment-name == 'open",
 ])
 def test_a_when_that_is_not_a_comparison_is_refused_with_an_example(written):
-    assert refused(lambda a: a.step("export", kind="transform", when=written)) == (
+    assert refused(lambda a: a.step("export", kind="evaluate", when=written)) == (
         f"step 'export': when={written!r} is not a run-form field compared with a value, "
         f'for example when="mode != off". Join comparisons with and / or; no parentheses.')
 
@@ -337,18 +347,18 @@ def test_a_when_that_is_not_a_comparison_is_refused_with_an_example(written):
     "experiment-name == 'a}}'",
 ])
 def test_the_workflow_systems_own_syntax_in_when_is_refused(written):
-    assert refused(lambda a: a.step("export", kind="transform", when=written)) == (
+    assert refused(lambda a: a.step("export", kind="evaluate", when=written)) == (
         "step 'export': when= is written with the name of a run-form field, for example when=\"mode != off\". "
         "Write the field's name instead of {{workflow.parameters.<field>}}.")
 
 
 def test_a_when_that_is_not_text_is_refused():
     assert "is not a run-form field compared with a value" in refused(
-        lambda a: a.step("export", kind="transform", when=True))
+        lambda a: a.step("export", kind="evaluate", when=True))
 
 
 def test_a_when_naming_a_field_the_run_form_does_not_have_is_refused_with_the_fields_it_has():
-    message = refused(lambda a: a.step("export", kind="transform", when="quantization-mode != off"))
+    message = refused(lambda a: a.step("export", kind="evaluate", when="quantization-mode != off"))
     assert message.startswith("step 'export': when='quantization-mode != off' names 'quantization-mode', "
                               "which is not a field of the run form. The fields are: ")
     assert message.endswith("The fields are: experiment-name, experiment-description, dataset.")
@@ -358,8 +368,8 @@ def test_a_when_naming_a_field_the_run_form_does_not_have_is_refused_with_the_fi
 
 @pytest.mark.parametrize("name", ["Train", "train_model", "a" * 41, "-train", "train-", "tr.ain", ""])
 def test_a_step_name_is_lowercase_letters_digits_and_hyphens_at_most_40(name):
-    assert f"step name {name!r} is invalid" in refused(lambda a: a.step(name, kind="train"))
-    assert render(lambda a: a.step("a" * 40, kind="train"))
+    assert f"step name {name!r} is invalid" in refused(lambda a: a.step(name, kind="evaluate"))
+    assert render(lambda a: a.step("a" * 40, kind="evaluate"))
 
 
 @pytest.mark.parametrize("make", ["model", "artifact", "dataset"])
@@ -372,9 +382,9 @@ def test_a_produced_name_follows_the_same_rule(make, name):
 
 @pytest.mark.parametrize("make", ["model", "artifact", "dataset"])
 def test_a_produced_name_of_40_characters_is_accepted_and_41_is_not(make):
-    assert render(lambda a: a.step("one", kind="train", produces=[getattr(a, make)("a" * 40)]))
+    assert render(lambda a: a.step("one", kind="transform", produces=[getattr(a, make)("a" * 40)]))
     assert "the name is invalid" in refused(
-        lambda a: a.step("one", kind="train", produces=[getattr(a, make)("a" * 41)]))
+        lambda a: a.step("one", kind="transform", produces=[getattr(a, make)("a" * 41)]))
 
 
 def test_no_name_the_engine_accepts_makes_a_job_the_definition_refuses():
@@ -399,12 +409,12 @@ def test_no_name_the_engine_accepts_makes_a_job_the_definition_refuses():
 
 @pytest.mark.parametrize("name", ["train_data", "Raw", "a" * 41])
 def test_an_input_name_follows_the_same_rule(name):
-    message = refused(lambda a: a.step("one", kind="train", inputs=[name]))
+    message = refused(lambda a: a.step("one", kind="evaluate", inputs=[name]))
     assert f"inputs= holds {name!r}" in message and message.endswith("at most 40 characters. Rename the config value.")
 
 
 def test_an_input_name_may_not_start_with_the_platforms_prefix():
-    assert refused(lambda a: a.step("one", kind="train", inputs=["kaos-data"])) == (
+    assert refused(lambda a: a.step("one", kind="evaluate", inputs=["kaos-data"])) == (
         "step 'one': the input 'kaos-data' starts with 'kaos-', which is reserved for the platform. "
         "Rename the config value.")
 
@@ -421,7 +431,7 @@ def test_a_step_may_read_at_most_sixteen_datasets_by_name(tmp_path, monkeypatch)
     def build(inputs, extra):
         def inner(a):
             up = a.step("up", kind="transform", produces=[a.dataset(f"made{i}") for i in range(extra)] + [a.model("m")])
-            a.step("last", kind="train", inputs=inputs, needs=[up])
+            a.step("last", kind="evaluate", inputs=inputs, needs=[up])
         return inner
     assert render(build(names, 0)) and render(build(names[:10], 6))
     assert refused(build(names, 1)) == (
@@ -452,23 +462,23 @@ def test_the_same_app_fails_compose_with_the_same_message(tmp_path, monkeypatch)
 
 
 def test_a_rendered_pipeline_carries_no_platform_value():
-    wft = render(lambda a: a.step("one", kind="train", reads=["experiment"]))
+    wft = render(lambda a: a.step("one", kind="evaluate", reads=["experiment"]))
     assert "platform." not in yaml.safe_dump(wft).replace("platform.kubecore.io", "")
 
 
 # ---------------------------------------------------------------- walltime= and the dataset name
 
 @pytest.mark.parametrize("kind", ["ingest", "publish", "control"])
-def test_walltime_on_a_step_that_never_runs_on_hpc_is_refused(kind):
-    assert refused(lambda a: a.step("one", kind=kind, walltime="2h")) == (
-        f"step 'one': walltime= is the run limit on an HPC class, and a {kind} step never runs on one. "
-        "Remove walltime= from the step.")
+def test_walltime_on_a_step_that_never_runs_on_hpc_is_accepted(kind):
+    wft = render(lambda a: a.step("one", kind=kind, walltime="2h", **valid(a, kind)))
+    step = next(t for t in wft["spec"]["templates"] if t["name"] == "one")
+    assert step["metadata"]["annotations"]["platform.kubecore.io/hpc"] == "2h"
 
 
 @pytest.mark.parametrize("kind", ["transform", "train", "evaluate"])
 def test_walltime_on_any_step_that_may_run_on_hpc_is_accepted_with_or_without_a_gpu(kind):
     for gpu in (False, True):
-        wft = render(lambda a, kind=kind, gpu=gpu: a.step("one", kind=kind, gpu=gpu, walltime="2h"))
+        wft = render(lambda a, kind=kind, gpu=gpu: a.step("one", kind=kind, gpu=gpu, walltime="2h", **valid(a, kind)))
         step = next(t for t in wft["spec"]["templates"] if t["name"] == "one")
         assert step["metadata"]["annotations"]["platform.kubecore.io/hpc"] == "2h"
 
@@ -504,24 +514,24 @@ def render_produced(make, name):
 
 def test_a_step_may_not_name_the_same_needed_step_twice():
     def build(a):
-        up = a.step("up", kind="transform")
-        a.step("last", kind="train", needs=[up, up])
+        up = a.step("up", kind="evaluate")
+        a.step("last", kind="evaluate", needs=[up, up])
     assert refused(build) == "step 'last': needs= names up more than once."
 
 
 @pytest.mark.parametrize("value", ["0", "0m", "0h", "00"])
 def test_walltime_of_zero_is_refused_at_render_for_every_step(value):
-    for kind in ("train", "transform", "evaluate"):
-        message = refused(lambda a, kind=kind: a.step("one", kind=kind, walltime=value))
+    for kind in ("train", "transform", "evaluate", "ingest"):
+        message = refused(lambda a, kind=kind: a.step("one", kind=kind, walltime=value, **valid(a, kind)))
         assert message == (f"step 'one': walltime={value!r} must be minutes or hours as a string like '90m', '12h' or "
-                           "'720', at least one minute (the run limit when this step runs on an HPC class; the step is "
+                           "'720', at least one minute (the step's time limit, wherever it runs; the step is "
                            "ended when it elapses).")
-    assert render(lambda a: a.step("one", kind="train", walltime="1m"))
+    assert render(lambda a: a.step("one", kind="evaluate", walltime="1m"))
 
 
 @pytest.mark.parametrize("value", [90, "90s", "1d", "", "-5", None.__class__])
 def test_a_walltime_of_the_wrong_shape_is_refused_at_render(value):
-    assert "must be minutes or hours as a string" in refused(lambda a: a.step("one", kind="train", walltime=value))
+    assert "must be minutes or hours as a string" in refused(lambda a: a.step("one", kind="evaluate", walltime=value))
 
 
 def test_no_message_a_client_reads_names_the_workflow_engine():
@@ -532,8 +542,8 @@ def test_no_message_a_client_reads_names_the_workflow_engine():
     from paths import ENGINE
     schema = (ENGINE / "kaos_pipeline_engine" / "authoring-schema.json").read_text()
     assert "Argo" not in schema and "Workflow" not in json.loads(schema)["doc"]
-    for build in (lambda a: a.step("Bad Name", kind="train"), lambda a: a.step("one"), lambda a: a.step("one", kind="x"),
-                  lambda a: a.step("one", kind="train", outputs=["x"]), lambda a: a.step("main", kind="train")):
+    for build in (lambda a: a.step("Bad Name", kind="evaluate"), lambda a: a.step("one"), lambda a: a.step("one", kind="x"),
+                  lambda a: a.step("one", kind="evaluate", outputs=["x"]), lambda a: a.step("main", kind="evaluate")):
         assert "Argo" not in refused(build)
     assert not hasattr(authoring, "MIGRATION_GUIDE_URL")
 
@@ -565,6 +575,58 @@ def test_the_old_app_marker_is_one_sentence_the_notice_ends_with():
 
 
 def test_an_honest_mistake_in_a_new_pipeline_does_not_carry_the_old_app_marker():
-    for build in (lambda a: a.step("one", kind="training"), lambda a: a.step("Bad Name", kind="train"),
-                  lambda a: a.step("a" * 41, kind="train"), lambda a: a.step("kaos-x", kind="train")):
+    for build in (lambda a: a.step("one", kind="training"), lambda a: a.step("Bad Name", kind="evaluate"),
+                  lambda a: a.step("a" * 41, kind="evaluate"), lambda a: a.step("kaos-x", kind="evaluate")):
         assert OLD_APP_MARKER not in refused(build)
+
+
+# ---------------------------------------------------------------- what each kind requires (docs/step-contract.md)
+
+KIND_REFUSALS = [
+    ("ingest", {}, "step 'x': an ingest step brings data in, so it produces a dataset. "
+                   "Add produces=[dataset(\"name\")]."),
+    ("ingest", {"models": 1}, "step 'x': an ingest step brings data in, so it produces a dataset. "
+                              "Add produces=[dataset(\"name\")]."),
+    ("transform", {}, "step 'x': a transform step turns data into something. Add produces=[...] with a dataset, "
+                      "a model or an artifact."),
+    ("train", {}, "step 'x': a train step produces a model. Add produces=[model(\"name\")], or give the step the "
+                  "kind of the work it does (ingest, transform, evaluate, publish, control)."),
+    ("train", {"artifacts": 1}, "step 'x': a train step produces a model. Add produces=[model(\"name\")], or give "
+                                "the step the kind of the work it does (ingest, transform, evaluate, publish, "
+                                "control)."),
+    ("evaluate", {"models": 1}, "step 'x': an evaluate step writes reports only, so it may not produce a dataset "
+                                "or a model. Use kind=\"transform\" for a step that makes a dataset, kind=\"train\" "
+                                "for one that makes a model."),
+    ("evaluate", {"datasets": 1}, "step 'x': an evaluate step writes reports only, so it may not produce a "
+                                  "dataset or a model. Use kind=\"transform\" for a step that makes a dataset, "
+                                  "kind=\"train\" for one that makes a model."),
+    ("publish", {"artifacts": 1}, "step 'x': a publish step delivers a result and produces nothing here. Remove "
+                                  "produces=, or give the step the kind of the work it does."),
+]
+
+
+def _produced(a, spec):
+    return ([a.model("m") for _ in range(spec.get("models", 0))]
+            + [a.artifact("a") for _ in range(spec.get("artifacts", 0))]
+            + [a.dataset("data") for _ in range(spec.get("datasets", 0))])
+
+
+@pytest.mark.parametrize("kind, spec, sentence", KIND_REFUSALS)
+def test_a_step_that_breaks_the_contract_of_its_kind_is_refused_with_what_to_do(kind, spec, sentence):
+    assert refused(lambda a: a.step("x", kind=kind, produces=_produced(a, spec))) == sentence
+
+
+def test_a_control_step_keeps_its_own_sentence():
+    assert refused(lambda a: a.step("x", kind="control", produces=[a.artifact("a")])) == (
+        "step 'x': a control step steers the run and handles no data, so it takes no inputs= and no produces=. "
+        "Give the step the kind of the work it does (ingest, transform, train, evaluate, publish).")
+
+
+@pytest.mark.parametrize("kind, spec", [
+    ("ingest", {"datasets": 1}), ("transform", {"datasets": 1}), ("transform", {"models": 1}),
+    ("transform", {"artifacts": 1}), ("train", {"models": 1}), ("train", {"models": 1, "artifacts": 1}),
+    ("evaluate", {}), ("evaluate", {"artifacts": 1}), ("publish", {}), ("control", {})])
+def test_the_minimal_valid_step_of_each_kind_is_accepted(kind, spec):
+    wft = render(lambda a: a.step("x", kind=kind, produces=_produced(a, spec)))
+    labels = next(t for t in wft["spec"]["templates"] if t["name"] == "x")["metadata"]["labels"]
+    assert labels["platform.kubecore.io/step-kind"] == kind

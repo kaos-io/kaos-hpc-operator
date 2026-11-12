@@ -39,7 +39,6 @@ from kubecore.step_contract import (
     CONTEXT_OUTPUT_PREFIX,
     CONTEXT_PARAM,
     DATASET_PREFIX,
-    CLUSTER_ONLY_KINDS,
     KINDS,
     MAX_INPUTS,
     MAX_NAME,
@@ -87,18 +86,19 @@ _current = None
 # Kubernetes resource quantity ("10Gi", "512Mi", "2G"); anchored so a typo
 # ("10 Gi", "10GB") fails the render instead of rendering an invalid manifest.
 _WALLTIME_RE = re.compile(r"^[0-9]+[mh]?$")
-# Keywords the step contract removed, with what to write instead.
+# Keywords the step contract removed, with what to write instead (the render says it after "step '<name>': ").
 _REMOVED_KEYWORDS = {
-    "outputs": "outputs= is no longer part of step()",
-    "hpc_time_limit": "hpc_time_limit= is no longer part of step()",
-    "disk": "disk is no longer declared; a step gets the disk of the machine its class runs on",
+    "outputs": "outputs= is gone. Declare what the step writes with produces=[...] and hand it on with "
+               "step.result().",
+    "hpc_time_limit": "hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\".",
+    "disk": "disk= is gone. The step gets the disk of the machine class it runs on.",
 }
 
 
 # step(resumable=True) gets the stop signal this long before its HPC wall time.
 DEFAULT_RESUMABLE_LEAD = "10m"
 HPC_RESUMABLE_ANNOTATION = "platform.kubecore.io/hpc-resumable"
-# step(walltime=...): the run limit on an HPC class (read by kubecore/meluxina.py).
+# step(walltime=...): the step's time limit (read by kubecore/enhance.py and kubecore/meluxina.py).
 WALLTIME_ANNOTATION = "platform.kubecore.io/hpc"
 RESUMABLE_OFF = "off"   # the annotation value of resumable=False
 CHECKPOINT_EVERY_ANNOTATION = "platform.kubecore.io/checkpoint-every"
@@ -261,6 +261,27 @@ def _check_kind(name, kind):
         )
 
 
+def _kind_problem(kind, types):
+    """What a step's kind requires of what it produces (docs/step-contract.md, "Step kinds"), or ''. `types`
+    are the types it produces. A control step is checked by its own rule."""
+    others = ", ".join(k for k in KINDS if k != kind)
+    if kind == "ingest" and "dataset" not in types:
+        return 'an ingest step brings data in, so it produces a dataset. Add produces=[dataset("name")].'
+    if kind == "transform" and not types:
+        return ("a transform step turns data into something. Add produces=[...] with a dataset, a model or an "
+                "artifact.")
+    if kind == "train" and "model" not in types:
+        return (f'a train step produces a model. Add produces=[model("name")], or give the step the kind of the '
+                f'work it does ({others}).')
+    if kind == "evaluate" and types & {"dataset", "model"}:
+        return ('an evaluate step writes reports only, so it may not produce a dataset or a model. Use '
+                'kind="transform" for a step that makes a dataset, kind="train" for one that makes a model.')
+    if kind == "publish" and types:
+        return ("a publish step delivers a result and produces nothing here. Remove produces=, or give the step "
+                "the kind of the work it does.")
+    return ""
+
+
 def _check_data(name, kind, inputs, needs, produces):
     """The names a step reads and writes: each well formed, each once, and no name with two meanings."""
     for entry in inputs:
@@ -294,6 +315,10 @@ def _check_data(name, kind, inputs, needs, produces):
             f"step {name!r}: a control step steers the run and handles no data, so it takes no inputs= and "
             f"no produces=. Give the step the kind of the work it does ({', '.join(k for k in KINDS if k != 'control')})."
         )
+    types = {entry.type for entry in produces}
+    problem = _kind_problem(kind, types)
+    if problem:
+        raise AuthoringError(f"step {name!r}: {problem}")
     needed = [need.name for need in needs]
     again = sorted({n for n in needed if needed.count(n) > 1})
     if again:
@@ -348,10 +373,9 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
         raise RuntimeError("step() must be called inside `with pipeline(...):`")
     for keyword in removed:
         if keyword not in _REMOVED_KEYWORDS:
-            raise TypeError(f"step() got an unexpected keyword argument {keyword!r}")
-        raise AuthoringError(
-            f"step {name!r}: {_REMOVED_KEYWORDS[keyword]}. {OLD_APP_NOTICE}"
-        )
+            raise TypeError(f"step() got an unexpected keyword argument {keyword!r}. The keywords are: name, "
+                            f"{', '.join(step.__kwdefaults__)}.")
+        raise AuthoringError(f"step {name!r}: {_REMOVED_KEYWORDS[keyword]}")
     if not _well_formed(name):
         raise AuthoringError(
             f"step name {name!r} is invalid — use a DNS-label name: lowercase "
@@ -365,11 +389,6 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
             f"'{RESERVED_PREFIX}'. Choose another name."
         )
     _check_kind(name, kind)
-    if walltime is not None and kind in CLUSTER_ONLY_KINDS:
-        raise AuthoringError(
-            f"step {name!r}: walltime= is the run limit on an HPC class, and a {kind} step never runs on one. "
-            f"Remove walltime= from the step."
-        )
     reads, inputs, needs, produces = list(reads or []), list(inputs or []), list(needs or []), list(produces or [])
     _check_data(name, kind, inputs, needs, produces)
     if any(s.name == name for s in _current.steps):
@@ -382,8 +401,8 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
     ):
         raise AuthoringError(
             f"step {name!r}: walltime={walltime!r} must be minutes or hours as a "
-            f"string like '90m', '12h' or '720', at least one minute (the run limit when this step "
-            f"runs on an HPC class; the step is ended when it elapses)."
+            f"string like '90m', '12h' or '720', at least one minute (the step's time limit, wherever it "
+            f"runs; the step is ended when it elapses)."
         )
     if resumable is True:
         resumable = DEFAULT_RESUMABLE_LEAD
@@ -494,9 +513,8 @@ class pipeline:
                                if DATASET_PRODUCERS_STAY_ON_CLUSTER and any(e.type == "dataset" for e in s.produces)
                                else {})},
                     resources=Resources(gpus=1) if s.gpu else None,
-                    # Read by kubecore/meluxina.py: the run limit when
-                    # this step runs on an HPC class (developer-set; the
-                    # enhancer defaults it otherwise).
+                    # Read by kubecore/enhance.py (the step's deadline on the cluster) and kubecore/meluxina.py
+                    # (the run limit on an HPC class): developer-set; the enhancer defaults it otherwise.
                     # and, for step(resumable=...), how long before it the step
                     # is told to save (kaos_lib.checkpoint).
                     annotations={k: v for k, v in (

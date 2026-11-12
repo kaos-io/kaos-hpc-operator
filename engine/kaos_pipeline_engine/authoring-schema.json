@@ -81,7 +81,7 @@
    "default": null,
    "type": "string",
    "pattern": "^[0-9]+[mh]?$",
-   "doc": "The step's run limit when it runs on an HPC class: '90m', '12h' or '720' (minutes)."
+   "doc": "The step's time limit, on the cluster and on an HPC class: '90m', '12h' or '720' (minutes)."
   },
   {
    "name": "resumable",
@@ -121,9 +121,9 @@
   }
  ],
  "removed": {
-  "outputs": "outputs= is no longer part of step()",
-  "hpc_time_limit": "hpc_time_limit= is no longer part of step()",
-  "disk": "disk is no longer declared; a step gets the disk of the machine its class runs on"
+  "outputs": "outputs= is gone. Declare what the step writes with produces=[...] and hand it on with step.result().",
+  "hpc_time_limit": "hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\".",
+  "disk": "disk= is gone. The step gets the disk of the machine class it runs on."
  },
  "produced": {
   "model": "a trained model, stored with the run",

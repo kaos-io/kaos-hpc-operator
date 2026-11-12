@@ -33,6 +33,7 @@ import re
 
 from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
+from kubecore.run_settings import setting
 from kubecore.step_contract import (
     CLUSTER_ONLY_KINDS,
     DATASET_PRODUCER_LABEL,
@@ -296,6 +297,7 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
             raise ValueError("meluxina: task %r passes no %s, so step %r cannot get its HPC variant"
                              % (task["name"], CONTEXT_PARAM, step["name"]))
         minutes = step_time_limit(step)
+        limit = setting(step["name"], "walltime")
         lead = step_resumable_lead(step)
         if lead >= minutes:
             raise ValueError("step %s: resumable lead %d min is not shorter than its wall time %d min"
@@ -317,9 +319,9 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
                 {"name": "image", "value": container.get("image", "")},
                 {"name": "step-command", "value": json.dumps(cmd, separators=(",", ":"))},
                 {"name": "step-kind", "value": ((step.get("metadata") or {}).get("labels") or {}).get(STEP_KIND_LABEL, "")},
-                {"name": "time-limit", "value": str(minutes)},
-                {"name": "deadline-seconds",
-                 "value": str(jobs * (minutes + QUEUE_ALLOWANCE_MINUTES) * 60)},
+                # The job's limit is the run form's `<step>-walltime` (compose's output).
+                {"name": "time-limit", "value": "{{=%s}}" % limit},
+                {"name": "deadline-seconds", "value": "{{=%d * (%s + %d) * 60}}" % (jobs, limit, QUEUE_ALLOWANCE_MINUTES)},
                 {"name": "resumable-lead", "value": str(lead)},
                 # "0" = resumable=False; "auto" lets the controller discover resumability (D-74)
                 {"name": "resumable", "value": "0" if step_resumable_opt_out(step) else "auto"},

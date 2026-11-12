@@ -92,11 +92,7 @@ SCHEMA_SECTIONS = ("data", "quantization")
 ADVANCED_PARAM_KWARGS = dict(
     name="config",
     value="",
-    description=(
-        "ADVANCED: override YAML merged LAST over the composed config "
-        "(OmegaConf.merge). Overrides everything above — intended for "
-        "scripted submissions (argo submit -p config=...)."
-    ),
+    description="Extra settings for this run, as YAML. They replace the values above.",
 )
 
 
@@ -289,6 +285,61 @@ def _walk_scalars(node: dict, path: str = "") -> list:
     return out
 
 
+_KEY_LINE = re.compile(r"^(\s*)(?:([A-Za-z0-9_.-]+)|\"([^\"]+)\"|'([^']+)'):(?:\s|$)")
+
+
+def _trailing_comment(rest: str) -> str:
+    """The `# ...` that ends a value's line, outside quotes; '' when there is none."""
+    quote = ""
+    for i, char in enumerate(rest):
+        if quote:
+            quote = "" if char == quote else quote
+        elif char in "\"'":
+            quote = char
+        elif char == "#" and (i == 0 or rest[i - 1] in " \t"):
+            return rest[i + 1:].strip()
+    return ""
+
+
+def _file_comments(text: str, prefix: str = "") -> dict:
+    """{dotted setting: its comment} for one YAML file: the `# ...` at the end of the setting's line, else the
+    comment lines directly above it (no blank line between), joined into one line. Hydra drops YAML comments,
+    so the form reads them from the file text."""
+    found, stack, above = {}, [], []
+    for line in text.splitlines():
+        comment = re.match(r"^\s*#\s?(.*)$", line)
+        if comment:
+            above.append(comment.group(1).strip())
+            continue
+        key = _KEY_LINE.match(line)
+        if key:
+            indent = len(key.group(1))
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            name = key.group(2) or key.group(3) or key.group(4)
+            stack.append((indent, name))
+            text_here = _trailing_comment(line[key.end():]) or " ".join(c for c in above if c)
+            # A description is shown, never evaluated: keep template braces from being read as a template.
+            text_here = text_here.replace("{{", "{ {").replace("}}", "} }")
+            if text_here:
+                found[".".join(([prefix] if prefix else []) + [n for _, n in stack])] = text_here
+        above = []
+    return found
+
+
+def _comments() -> dict:
+    """{dotted setting: comment} over the config tree: the files at its root, and the option files of each
+    group (the default option last, so its comments win)."""
+    found = {}
+    for path in sorted(CONFIG_DIR.glob("*.yaml")):
+        found.update(_file_comments(path.read_text()))
+    for group, default in sorted(_group_choices().items()):
+        options = sorted((CONFIG_DIR / group).glob("*.yaml"), key=lambda p: p.stem == default)
+        for path in options:
+            found.update(_file_comments(path.read_text(), group.replace("/", ".")))
+    return found
+
+
 def derive() -> DerivedForm:
     # Hera imported HERE (render time only) — keeps the run-time compose image
     # free of Hera. See module docstring / the hera-note above the imports.
@@ -324,21 +375,21 @@ def derive() -> DerivedForm:
                 name=name,
                 value=default,  # arguments.parameters need `value`, not `default`
                 enum=options,
-                description=f"Config group '{group}': swaps the whole subtree "
-                f"(options: {', '.join(options)}).",
+                description=f"One of: {', '.join(options)}.",
             )
         )
         form.tokens.append(f"{group}={{{{workflow.parameters.{name}}}}}")
         form.render_defaults[group] = default
 
-    # scalar leaves -> fields
+    # scalar leaves -> fields; the description is the comment written next to the setting in config/
+    comments = _comments()
     for dotted, value in _walk_scalars(tree):
         name = _mapped(dotted)
         claim(name, f"config leaf {dotted}")
         default = _value_str(value)
         enum = [str(m.value) for m in type(value)] if isinstance(value, Enum) else None
         form.parameters.append(
-            Parameter(name=name, value=default, enum=enum, description=f"Config: {dotted}")
+            Parameter(name=name, value=default, enum=enum, description=comments.get(dotted, ""))
         )
         form.tokens.append(f"{dotted}={{{{workflow.parameters.{name}}}}}")
         form.render_defaults[dotted] = default
@@ -374,7 +425,7 @@ def refuse_resolvers(node, path: str = "") -> None:
 
 
 def refuse_reserved_keys(tree: dict) -> None:
-    """The platform keeps a few top-level config keys for the run itself (which data a run promotes, which
+    """The platform keeps a few top-level config keys for the run itself (the run's plan, which
     pipeline version it runs). An app's config tree may not define them."""
     for key in RESERVED_CONFIG_KEYS:
         if key in tree:

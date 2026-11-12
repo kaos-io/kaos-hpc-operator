@@ -32,3 +32,27 @@ def run_render(repo: Path, profile: str = "hera", extra_args=(), extra_env=None,
 def raw_template(repo: Path) -> dict:
     """The parsed out/raw-workflow-template.yaml the render wrote."""
     return yaml.safe_load((repo / RAW).read_text())
+
+
+def evaluate(expression: str, settings: dict):
+    """The value of a `{{=...}}` argument the engine renders for a number compose wrote (kaos-run-settings):
+    the expressions use arithmetic, `int` and `fromJSON` of compose's output only, so Python can read them."""
+    import json
+    import re
+
+    body = re.fullmatch(r"\{\{=(.*)\}\}", expression, re.S).group(1)
+    body = re.sub(r'fromJSON\(tasks\["compose-and-validate"\]\.outputs\.parameters\["kaos-run-settings"\]\)',
+                  f"json.loads({json.dumps(settings)!r})", body)
+    return eval(body, {"json": json, "int": int})  # noqa: S307 - the engine's own output, in a test
+
+
+def valid(authoring, kind: str) -> dict:
+    """The keywords that make a step of `kind` valid on its own: what its kind requires it to produce
+    (docs/step-contract.md, "Step kinds")."""
+    if kind == "ingest":
+        return {"produces": [authoring.dataset("clean")]}
+    if kind == "transform":
+        return {"produces": [authoring.artifact("report")]}
+    if kind == "train":
+        return {"produces": [authoring.model("model")]}
+    return {}

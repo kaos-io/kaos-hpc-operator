@@ -49,26 +49,92 @@ Everything after `name` is keyword-only.
 | Keyword | Meaning |
 |---|---|
 | `name` | The step's name. |
-| `kind=` | Required. One of `ingest`, `transform`, `train`, `evaluate`, `publish`, `control`. The engine labels every pod and HPC job with it (`platform.kubecore.io/step-kind`). |
+| `kind=` | Required. One of `ingest`, `transform`, `train`, `evaluate`, `publish`, `control`; each has a contract (below). The engine labels every pod and HPC job with it (`platform.kubecore.io/step-kind`). |
 | `reads=` | The config sections the step reads. They are the step's `params`. |
 | `inputs=` | The names of the config values that hold a dataset reference. An input name is a top-level config key: no dotted paths. Compose pins each to one commit when the run starts. Step code names the input, never a version. |
 | `needs=` | The steps this step runs after, at most ten. Each one's result reaches this step in `upstream`. |
 | `produces=` | What the step writes: `model("name")`, `artifact("name")`, `dataset("name")`. A dataset an app produces is the repository `dataset-<app>-<name>`: `dataset("clean")` in the app `hera1` is `dataset-hera1-clean`. The name is per app because every app made from a template declares the same names and a dataset has exactly one producer; two apps of a project never share one. |
 | `gpu=` | Unchanged. |
 | `when=` | A condition in plain words: the name of a run-form field, `==` or `!=`, and a value: `when="quantization-mode != off"`. The field is a setting's path with dashes, as the run form shows it. The value is a bare word or number (`off`, `3`) or a quoted string (`"two words"`). Comparisons join with `and` / `or` (`and` binds tighter; no parentheses, no other operators). The engine writes it as one condition on the step's task and on its HPC variant, comparing the field's value as text: `quantization-mode != off` becomes `{{=workflow.parameters['quantization-mode'] != 'off'}}` (`and` becomes `&&`, `or` becomes a double bar, in the order written). The step is skipped when it is false. |
-| `walltime=` | The run limit on an HPC class: `'90m'`, `'12h'` or `'720'` (minutes). |
-| `resumable=`, `checkpoint_every=`, `idle_timeout=` | Unchanged. |
+| `walltime=` | The step's time limit, on any kind: `'90m'`, `'12h'` or `'720'` (minutes). It is the default of the step's run-form field `<step>-walltime` (below). |
+| `resumable=`, `idle_timeout=` | Unchanged. |
+| `checkpoint_every=` | How often the step's checkpoint is saved: `'20m'`, `'1h'` or `20` (minutes); `False` for no copies. It is the default of the run-form field `<step>-checkpoint-every`. |
 
 Removed, with no alias: `outputs=` (the result replaces it), `hpc_time_limit=` (`walltime=` replaces it) and
 `disk=`: a step is not told its disk, it gets the disk of the machine its class runs on (the usable disk of that
 class, less a fixed reserve for the container images, or 10Gi where the platform does not say). A step that
-passes `disk=` is refused.
+that passes one is refused with what to write instead: "step 'x': outputs= is gone. Declare what the step writes with produces=[...] and hand it on with step.result()."; "step 'x': hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\"."; "step 'x': disk= is gone. The step gets the disk of the machine class it runs on." Any other unknown keyword is refused with a sentence that lists the keywords that exist.
+
+**Step kinds.** A kind says what the step is for, and the engine refuses a step that does not do it:
+
+| Kind | Must | May not | Runs on |
+|---|---|---|---|
+| `ingest` | produce at least one dataset | | the cluster only |
+| `transform` | produce at least one thing (dataset, model or artifact) | | the cluster or HPC |
+| `train` | produce at least one model | | the cluster or HPC |
+| `evaluate` | | produce a dataset or a model (artifacts only) | the cluster or HPC |
+| `publish` | | produce anything | the cluster only |
+| `control` | | take `inputs=` or produce anything | the cluster only |
+
+Each rule has one sentence, naming the step, what its kind requires and what to do:
+`step 'x': an ingest step brings data in, so it produces a dataset. Add produces=[dataset("name")].`;
+`step 'x': a transform step turns data into something. Add produces=[...] with a dataset, a model or an artifact.`;
+`step 'x': a train step produces a model. Add produces=[model("name")], or give the step the kind of the work it does (ingest, transform, evaluate, publish, control).`;
+`step 'x': an evaluate step writes reports only, so it may not produce a dataset or a model. Use kind="transform" for a step that makes a dataset, kind="train" for one that makes a model.`;
+`step 'x': a publish step delivers a result and produces nothing here. Remove produces=, or give the step the kind of the work it does.`;
+and, for `control`, `step 'x': a control step steers the run and handles no data, so it takes no inputs= and no produces=. ...`.
+(An ingest step that produces a dataset runs on the cluster either way: section "Placement of a step that produces a dataset".)
+
+**The run form.** The form speaks to the developer, in this order: `pipeline-info` (how to fill the form, the machine
+classes, the developer's steps; no account, provider or platform step), the `experiment-*` fields, the other settings
+in the order of `config/`, the dataset fields (the config values `inputs=` names), then for each step, in pipeline order,
+`<step>-class`, `<step>-walltime` and `<step>-checkpoint-every`, then the `promote-<dataset>` choices, `config`
+("Extra settings for this run, as YAML. They replace the values above.") and last the `image-<step>` fields, each
+described "Set by the platform. Do not change." (the delivery pipeline reads them to check each step has its folder).
+A setting's description is the comment written next to it in `config/*.yaml`: the `# ...` at the end of its line, else
+the comment lines directly above it with no blank line between; with no comment the description is empty. The
+platform's own compose step has no class field (it runs on the default class, fixed in the template) and the platform
+endpoints are not form fields.
+
+**Time limit and checkpoint interval on the run form.** Every step of the developer's pipeline has one time limit,
+wherever it runs, and the run form shows it: a field `<step>-walltime` for every step, with the description "The
+longest the step may run, as minutes or hours: 90m, 12h. Default from pipeline.py." Its default is the step's
+`walltime=`, else `4h` (the same default as an HPC class). On a cluster machine the value is the step's deadline; on
+an HPC class it is the job's limit. The platform's own compose step has a fixed limit of 30 minutes and no field.
+Waiting for a machine does not count: a step that never gets one is bounded by the platform's pending reaper, not by
+this limit. A step that declares `checkpoint_every=` (not `False`) also has `<step>-checkpoint-every` ("How often
+the 'x' step's checkpoint is saved: minutes or hours, for example 10m or 1h."), default the value in code. Both are
+text: minutes (`90`, `90m`) or hours (`12h`), at least one minute; compose refuses any other value before a step
+starts, naming the field: `<step>-walltime is '1d'. Write minutes or hours, for example 90, 90m or 12h: at least
+one minute, at most 30 days, no other unit.` Compose writes the numbers as its output `kaos-run-settings` (`{"<step>": {"walltime":
+minutes, "checkpoint-every": minutes}}`), which the deadline, the HPC job's limit and the checkpoint copies read.
+A step with a checkpoint interval has the field `checkpoint_every` (minutes, a number) in its context, after
+`produces`; a step without one has no such field.
+
+**A long job continues instead of starting over.** A step that declares `resumable=` is run again, and continues
+from its newest checkpoint, in each of three cases, on a cluster machine and on an HPC class, at most five times
+after the first run: it reaches its time limit, its machine is lost, or it asks to be restarted (exit code 85,
+`kaos_lib.checkpoint.exit_for_restart`). The time limit applies to each run of the step, not to the sum: on the
+cluster each run is a new pod with the full deadline; on an HPC class each continuation is a new job with the full
+limit, and the follower's own deadline covers the queue and every continuation. On the cluster the step is run
+again by the step's retry rule (a step that does not declare `resumable=` is retried only when its machine is lost)
+and restores its checkpoint folder in the init container; on HPC the controller sends the stop signal the declared
+lead (`resumable=`) before the limit and submits the continuation. The form's `<step>-walltime` must be longer than
+that lead: compose refuses a smaller value, naming the field.
 
 **Classes on the run form.** A step is offered the GPU classes of the cluster only when its code declares
 `gpu=True`. A step with `gpu=True` is offered the GPU and the CPU classes (it can run CPU-only on a CPU class); a step
 without it, the platform's own compose step included, is offered the CPU classes only, or every class the pool has
 when the pool declares no CPU class. The default class of a step does not change. The HPC classes are offered by the
 rules below.
+
+A class the form does not offer a step is refused when the run starts, before the first step, whoever submitted
+the run: `step '<name>' cannot run on class '<class>': <reason>. <what to do>`. For a GPU class and a step without
+`gpu=True` the sentence is "step 'x' cannot run on class 'gpu-t4': it is a GPU machine and the step does not
+declare gpu=True. Add gpu=True to the step in pipeline.py to run it on a GPU machine."; an HPC class and an ingest,
+publish or control step, or a step that produces a dataset, "... a publish step never runs on HPC (Slurm). Choose
+one of: ..."; a name that is no class of the cluster, "... it is not a machine class of this cluster. Choose one
+of: ...". The form's choice and the check come from one function, so they cannot differ.
 
 **Placement of a step that produces a dataset.** A step whose `produces=` holds a `dataset(...)` is not
 offered an HPC class and has no HPC variant, the way `ingest`, `publish` and `control` steps are not: a job on
@@ -77,8 +143,7 @@ produced dataset. The step runs on the cluster until jobs there hold the app's o
 A step that produces a dataset and is pinned to an HPC class is refused. A step that produces only a model or
 an artifact is not affected.
 
-**Apps made before the current pipelines.** An app that still uses a keyword the contract removed (a pipeline
-in which no step has a `kind=`, `outputs=`, `hpc_time_limit=`, `disk=`), lists the `platform` config group or defines a
+**Apps made before the current pipelines.** An app in which no step has a `kind=`, that lists the `platform` config group or defines a
 top-level `platform` section, or carries a `kubecore/` folder of its own, is not moved to this contract. The
 render refuses it with a message that ends: "This app was made before the current pipelines. Create it again
 from the template." A step without `kind=` in a pipeline where other steps have one forgot it: its message ends at
@@ -93,7 +158,7 @@ naming the step, both names and the limit. Names that start with `kaos-` are the
 `dataset-<name>@<ref>`, for example `dataset-raw-images@latest`. The config value an input names holds one.
 A dataset another app produced is referenced by its repository, `dataset-<app>-<name>@<ref>`. Within the app that
 produces it the engineer writes the short name: `dataset("clean")`, `step.output("clean")`, `step.input("clean")`,
-`plan.promote.clean`.
+the run form's `promote-clean`.
 
 **What the engine refuses when it renders the pipeline**, each time naming the step and the rule:
 
@@ -176,11 +241,12 @@ Rules:
   `inputs=`, its `upstream` its `needs=`.
 - A dataset an upstream step produced in this run is read from `upstream.<step>.writes`, not from `ledger`.
 - `promote` says whether this run moves the dataset's `latest` (the head of its `main` branch) to the version
-  the step seals. The run asks for it: compose sets `promote` from the reserved config key
-  `plan.promote.<dataset>` of the run request, where `<dataset>` is the `produces` name and the value is
-  a YAML boolean (`true`, `false`, and the forms YAML reads as booleans, such as `yes` and `no`); the text
-  `"true"` or `"false"` in any letter case is read the same way. Anything else is refused. The step never decides and step code
-  cannot set it. With `promote` false or absent the step still seals its version; `latest` stays where it
+  the step seals. The run asks for it: the run form has a choice `promote-<dataset>` (`false` or `true`, default `false`;
+  "Make this run's version of <dataset> the one other pipelines read as latest.") for each `dataset(...)` a step
+  produces, `<dataset>` being the `produces` name, and compose sets `promote` from it. Anything but `true` or
+  `false` is refused, naming the field. The run key `plan.promote` of the ADVANCED override is gone: an override that
+  holds it is refused with "'plan.promote' is no longer read. Tick the field promote-<dataset> of the run form, one
+  for each dataset a step produces." The step never decides and step code cannot set it. With `promote` false or absent the step still seals its version; `latest` stays where it
   was (PRD D-06).
 
 Fixtures: `context-no-upstream`, `context-promote`, `context-one-upstream`, `context-skipped-upstream`,
@@ -421,7 +487,7 @@ Fixture: `hpc-job` (its `spec.context` is `context-one-upstream.wire`, its `stat
 
 | What | Reserved |
 |---|---|
-| Config keys | `plan` and `pipeline-version`. Under `plan`: `plan.promote.<dataset>` works in the wave; `plan.use.<artifact>` and `plan.target` are reserved for Use and Target, and until those ship compose refuses every `plan` key other than `plan.promote.<dataset>` with a message that it is not available yet. |
+| Config keys | `plan` and `pipeline-version`. `plan.use.<artifact>` and `plan.target` are reserved for Use and Target; until those ship compose refuses every `plan` key (`plan.promote` with a message that names the run-form field `promote-<dataset>`, any other with a message that it is not available yet). |
 | Step names, input names, `produces` names, `values` keys | everything that starts with `kaos-` |
 | Step names | also `compose-and-validate`, `main`, `hpc-follower` and names ending in `-hpc`, as before |
 | Output names of a step | `kaos-result`; of compose, `kaos-ledger` and `kaos-context-<step>` |

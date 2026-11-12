@@ -44,8 +44,8 @@ release-gate rule):
                                       the ConfigMap indirection
   platform.kubecore.io/shm            /dev/shm emptyDir sizeLimit (e.g. "4Gi")
   platform.kubecore.io/workspace      per-run RWO PVC at /workspace (e.g. "50Gi")
-  platform.kubecore.io/hpc            the step's run limit on an HPC class
-                                      (authoring: walltime=)
+  platform.kubecore.io/hpc            the step's time limit, on the cluster and on an
+                                      HPC class (authoring: walltime=)
   platform.kubecore.io/checkpoint-every  minutes between checkpoint copies of
                                       the step's KAOS_CHECKPOINT_DIR; "off"
                                       removes the persistence helper (see
@@ -78,10 +78,33 @@ import yaml
 
 from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
-from kubecore.meluxina import HPC_TWIN_TEMPLATE, enhance_hpc, hpc_classes, runs_on_hpc
+from kubecore.meluxina import (
+    HPC_TWIN_TEMPLATE,
+    STEP_KIND_LABEL,
+    enhance_hpc,
+    hpc_classes,
+    parse_time_limit,
+    runs_on_hpc,
+    step_resumable_lead,
+)
 from kubecore.outputs_repo import outputs_repo
-from kubecore.resilience import enhance_resilience, shared_templates, write_helper_configmap
+from kubecore.run_settings import (
+    DEFAULT_WALLTIME,
+    PROMOTE_CHOICES,
+    SETTINGS_PARAM,
+    SETTINGS_PATH,
+    WALLTIME_EXAMPLE,
+    add_input,
+    add_task_argument,
+    checkpoint_field,
+    class_field,
+    promote_field,
+    setting,
+    walltime_field,
+)
+from kubecore.resilience import enhance_resilience, every_minutes, shared_templates, write_helper_configmap
 from kubecore.step_contract import (
+    CLUSTER_ONLY_KINDS,
     CONTEXT_PARAM,
     DATASET_PRODUCER_LABEL,
     DATASET_PRODUCERS_STAY_ON_CLUSTER,
@@ -282,6 +305,11 @@ def step_templates(spec: dict) -> list:
 # ----------------------------------------------------------------- arguments
 
 
+# The description of a field the developer does not choose: the platform stamps the step's image (the CI chart reads
+# this field to check every step has a folder).
+PLATFORM_OWNED = "Set by the platform. Do not change."
+
+
 def enhance_arguments(spec: dict, ctx: dict, steps: list) -> None:
     args = spec.setdefault("arguments", {})
     parameters = args.setdefault("parameters", [])
@@ -293,10 +321,6 @@ def enhance_arguments(spec: dict, ctx: dict, steps: list) -> None:
             parameters.append(param)
             existing.add(param["name"])
 
-    add({"name": "mlflow-endpoint", "value": ctx["mlflow"]["trackingUri"]})
-    add({"name": "lakefs-endpoint", "value": ctx["lakefs"]["endpoint"]})
-    add({"name": "lakefs-repo", "value": ctx["lakefs"]["repository"]})
-
     for step in steps:
         annots = platform_annotations(step)
         if "image" in annots:
@@ -306,6 +330,7 @@ def enhance_arguments(spec: dict, ctx: dict, steps: list) -> None:
         add(
             {
                 "name": f"image-{step_name}",
+                "description": PLATFORM_OWNED,
                 "valueFrom": {
                     "configMapKeyRef": {
                         "name": cm,
@@ -587,7 +612,47 @@ def enhance_gpu_routing(spec: dict, step: dict, ctx: dict, annots: dict) -> None
                 params.append({"name": "gpus", "value": expr})
 
 
-def enhance_class_param(spec: dict, step: dict, ctx: dict, annots: dict) -> None:
+def class_offer(step: dict, ctx: dict, annots: dict) -> dict:
+    """The classes the run form offers `step`, and why it withholds each other class of the platform:
+    {"offered": [names], "refused": {class: [reason, what to do]}}. The `{step}-class` choice is `offered`;
+    compose refuses a run whose class is not (run_settings.class_problem). One function, so the two agree.
+
+    The pool catalog is ALWAYS attached (#865): the old tier-filtered list collapsed to length 1 on a
+    one-class-per-tier pool, and enum-only-when->1 then rendered a FREE-TEXT box (typo -> forever-Pending
+    run). Cross-tier entries are legitimate choices: a gpu-capable step submitted with a cpu class runs
+    CPU-only (see the gpus routing in enhance_gpu_routing). A step that does not declare gpu=True is offered the
+    cluster's cpu classes only: a gpu class would put it on a machine it cannot use. A pool with no cpu class at
+    all keeps offering what exists. The HPC classes are offered to a step that can run on HPC (meluxina.py
+    runs_on_hpc: not an ingest, publish or control step, not a step that produces a dataset)."""
+    default = tier_default(ctx, step)["name"]
+    catalog = ctx["computeClasses"]["all"]
+    offered = catalog
+    if not is_gpu_step(step):
+        offered = [c for c in catalog if c.get("tier", "cpu") == "cpu"] or catalog
+    options = [c["name"] for c in offered]
+    if default not in options:
+        options.insert(0, default)
+    hpc_all = [c["name"] for c in hpc_classes(ctx)]
+    if runs_on_hpc(step):
+        options += [n for n in hpc_all if n not in options]
+    choose = f"Choose one of: {', '.join(options)}."
+    labels = (step.get("metadata") or {}).get("labels") or {}
+    refused = {}
+    for cls in catalog:
+        if cls["name"] not in options:
+            refused[cls["name"]] = ["it is a GPU machine and the step does not declare gpu=True",
+                                    "Add gpu=True to the step in pipeline.py to run it on a GPU machine."]
+    for name in hpc_all:
+        if name not in options:
+            if labels.get(STEP_KIND_LABEL) in CLUSTER_ONLY_KINDS:
+                reason = f"a {labels.get(STEP_KIND_LABEL)} step never runs on HPC (Slurm)"
+            else:
+                reason = "a step that produces a dataset runs on the cluster for now"
+            refused[name] = [reason, choose]
+    return {"offered": options, "refused": refused}
+
+
+def enhance_class_param(spec: dict, step: dict, ctx: dict, annots: dict, offer: dict) -> None:
     """Per-step compute-class dropdown ({step}-class), matching the live WFT.
 
     Default = the step's tier class; enum = the pool's cpu and gpu classes for a
@@ -601,39 +666,19 @@ def enhance_class_param(spec: dict, step: dict, ctx: dict, annots: dict) -> None
     param_name = f"{step_name}-class"
     if param_name in existing:
         return
-    tier = step_tier(step)
     default = tier_default(ctx, step)["name"]
-    # The pool catalog, ALWAYS attached (#865): the old
-    # tier-filtered list collapsed to length 1 on a one-class-per-tier pool,
-    # and enum-only-when->1 then rendered a FREE-TEXT box (typo -> forever-
-    # Pending run). Cross-tier entries are legitimate choices: a gpu-capable
-    # step submitted with a cpu class runs CPU-only (see the gpus routing in
-    # enhance_gpu_routing).
-    sizes = node_sizes(ctx)   # refuses a pool with a class that cannot be sized, so none is offered unsized
-    # A step that does not declare gpu=True is offered the cluster's cpu classes only: a gpu class would put
-    # it on a machine it cannot use. A pool with no cpu class at all keeps offering what exists.
-    catalog = ctx["computeClasses"]["all"]
-    if not is_gpu_step(step):
-        catalog = [c for c in catalog if c.get("tier", "cpu") == "cpu"] or catalog
-    options = [c["name"] for c in catalog]
-    if default not in options:
-        options.insert(0, default)
-    # HPC classes: a step can be placed on the
-    # HPC provider per run — the class is provider-prefixed (meluxina-gpu),
-    # and kubecore/meluxina.py gates the in-cluster/Slurm twin pair on it.
-    # A step whose kind never runs on HPC (ingest, publish, control) is offered none.
-    hpc_names = [c["name"] for c in hpc_classes(ctx)] if runs_on_hpc(step) else []
-    options += [n for n in hpc_names if n not in options]
+    node_sizes(ctx)   # refuses a pool with a class that cannot be sized, so none is offered unsized
+    options = offer["offered"]
+    hpc_names = [n for n in options if n in {c["name"] for c in hpc_classes(ctx)}]
     param = {
         "name": param_name,
         "value": default,
         "enum": options,
         "description": (
-            f"Compute class for the '{step_name}' step "
-            f"(the KubePool's class catalog; default = its {tier} tier"
-            + ("; meluxina-* classes run the step as a Slurm job on MeluXina — "
-               "queue time applies, see pipeline-info" if hpc_names else "")
-            + ")."
+            f"The machine class the '{step_name}' step runs on. Default: {default}."
+            + (" Classes that start with "
+               f"'{hpc_names[0].split('-')[0]}-' run the step as a job on HPC (Slurm): queue time applies."
+               if hpc_names else "")
         ),
     }
     parameters.append(param)
@@ -702,19 +747,87 @@ def enhance_env(step: dict, ctx: dict, annots: dict) -> None:
         add({"name": KAOS_LIB_SUPPORT_ENV, "value": support_value(ctx)})
 
 
-# How long a step may sit Pending before the platform calls it unschedulable.
-# A step whose node cannot be created (cloud capacity stockout, exhausted quota,
-# a class whose pool is at max) otherwise waits FOREVER with no signal: Argo does
-# not time out a Pending pod, and the developer sees a run that is neither
-# succeeding nor failing. Alexandra's run sat Pending 17 HOURS this way
-# (2026-07-15), and a GPU stockout reproduced it exactly (2026-07-16: 105
-# FailedScaleUp over 2d5h, still Pending).
+# The platform's own compose step keeps a short fixed limit. Every step of the developer's pipeline has one time
+# limit instead, the run form's `<step>-walltime` (enhance_walltime), wherever it runs.
 #
-# GPU steps get longer: accelerator pools legitimately take minutes to scale from
-# zero, and a transient stockout often clears. The point is not to fail fast —
-# it is to fail *visibly* instead of hanging silently until someone notices.
-PENDING_DEADLINE_SECONDS = 1800  # CPU steps: 30 min
-GPU_PENDING_DEADLINE_SECONDS = 5400  # GPU steps: 90 min (scale-from-zero + retries)
+# That limit is not what bounds a step that never gets a machine (cloud stockout, exhausted quota, a pool at
+# max): a deadline counts from the pod's start, so a Pending pod accrues none. The CI workflows chart's
+# pending reaper stops a run whose step sits Pending past its threshold (45 minutes).
+COMPOSE_STEP = "compose-and-validate"
+COMPOSE_DEADLINE_SECONDS = 1800
+
+
+def declared_walltime(annots: dict) -> str:
+    """The step's walltime= as written in pipeline.py, else the default: the form field's default."""
+    return annots.get("hpc") or DEFAULT_WALLTIME
+
+
+def enhance_walltime(spec: dict, step: dict, annots: dict) -> None:
+    """A step of the developer's pipeline is ended when the run form's `<step>-walltime` elapses: its deadline
+    is an input of the template, which every DAG task of the step gives from what compose wrote
+    (`kaos-run-settings`). The step's walltime= (else 4h) is the form's default (enhance_run_form)."""
+    if step["name"] == COMPOSE_STEP:
+        return
+    add_input(step, "deadline", str(parse_time_limit(declared_walltime(annots)) * 60))
+    step["activeDeadlineSeconds"] = "{{inputs.parameters.deadline}}"
+    add_task_argument(spec, step["name"], "deadline", "{{=%s * 60}}" % setting(step["name"], "walltime"))
+
+
+def enhance_run_form(spec: dict, steps: list, offers: dict) -> None:
+    """The run form's own fields for the steps that declare walltime= and checkpoint_every=: `<step>-walltime`
+    and `<step>-checkpoint-every`, whose default is the value in code. Compose gets each value (checks it,
+    and writes the numbers as its output `kaos-run-settings`)."""
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
+    if compose is None:
+        return
+    args = compose["container"].setdefault("args", [])
+    parameters = spec["arguments"]["parameters"]
+    existing = _param_names(parameters)
+    declared = False
+
+    def field(name: str, value: str, description: str, flag: str, key: str, enum: list = None) -> None:
+        nonlocal declared
+        if name in existing:
+            raise EnhanceError(f"the run form already has a field '{name}'; rename the setting or the step "
+                               f"that would give the form a second one")
+        parameters.append({"name": name, "value": value, **({"enum": enum} if enum else {}),
+                           "description": description})
+        existing.add(name)
+        args.extend([flag, "%s={{workflow.parameters.%s}}" % (key, name)])
+        declared = True
+
+    for step in steps:
+        step_name = step["name"]
+        if step_name == COMPOSE_STEP:
+            continue
+        annots = platform_annotations(step)
+        field(walltime_field(step_name), declared_walltime(annots),
+              f"The longest the step may run, as minutes or hours: {WALLTIME_EXAMPLE}. Default from pipeline.py.",
+              "--walltime", step_name)
+        lead = step_resumable_lead(step)
+        if lead:
+            args.extend(["--resumable-lead", f"{step_name}={lead}"])
+        every = every_minutes(annots)
+        if every.isdigit():
+            field(checkpoint_field(step_name), f"{every}m",
+                  f"How often the '{step_name}' step's checkpoint is saved: minutes or hours, "
+                  f"for example 10m or 1h.", "--checkpoint-every", step_name)
+    table = json.loads(args[args.index("--steps") + 1]) if "--steps" in args else []
+    chosen = {name: offer for name, offer in offers.items() if offer and name != COMPOSE_STEP}
+    for name in chosen:
+        args.extend(["--class", "%s={{workflow.parameters.%s}}" % (name, class_field(name))])
+    if chosen:
+        args.extend(["--class-offers", json.dumps(chosen, separators=(",", ":"))])
+    for entry in table:
+        for produced in entry["produces"]:
+            if produced["type"] == "dataset":
+                field(promote_field(produced["name"]), "false",
+                      f"Make this run's version of {produced['name']} the one other pipelines read as latest.",
+                      "--promote", produced["name"], list(PROMOTE_CHOICES))
+    if declared:
+        args.extend(["--settings-output", SETTINGS_PATH])
+        compose.setdefault("outputs", {}).setdefault("parameters", []).append(
+            {"name": SETTINGS_PARAM, "valueFrom": {"path": SETTINGS_PATH}})
 
 
 def enhance_scheduling(step: dict, ctx: dict, annots: dict) -> None:
@@ -756,12 +869,9 @@ def enhance_scheduling(step: dict, ctx: dict, annots: dict) -> None:
         for key, value in selector.items():
             step["nodeSelector"].setdefault(key, value)
 
-    # Bound how long this step may sit unschedulable (see the constants above).
-    # fill-absent: a developer who set their own deadline keeps it.
-    step.setdefault(
-        "activeDeadlineSeconds",
-        GPU_PENDING_DEADLINE_SECONDS if gpu else PENDING_DEADLINE_SECONDS,
-    )
+    # The compose step's fixed limit; a developer's step has its walltime (enhance_walltime).
+    if step["name"] == COMPOSE_STEP:
+        step.setdefault("activeDeadlineSeconds", COMPOSE_DEADLINE_SECONDS)
 
     tolerations = step.setdefault("tolerations", [])
     # Tolerate EVERY catalog class's taint, not just the default class's
@@ -1007,7 +1117,7 @@ def enhance_compose_identity(steps: list, ctx: dict) -> None:
         raise EnhanceError(
             f"the app name '{ctx['app']}' is {len(ctx['app'])} characters; an app that runs pipelines may have at "
             f"most {MAX_APP_NAME}. Create the app under a shorter name.")
-    compose = next((s for s in steps if s["name"] == "compose-and-validate"), None)
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
     if compose is None:
         return
     args = compose["container"].setdefault("args", [])
@@ -1075,17 +1185,17 @@ def enhance_image_guard(steps: list) -> None:
 
 
 def enhance_pipeline_info(spec: dict, ctx: dict, steps: list) -> None:
-    """Read-only documentation parameter, first in the form (like the
-    live WFT's pipeline-info)."""
+    """The text at the top of the run form: how to run, the machine classes, the developer's steps. It is a
+    field because the form shows nothing else; it speaks about the developer's pipeline, not the platform."""
     parameters = spec["arguments"]["parameters"]
     if "pipeline-info" in _param_names(parameters):
         return
+    own = [s for s in steps if s["name"] != COMPOSE_STEP]
     lines = [
-        "HOW TO RUN: defaults are runnable as-is — just press Submit.",
-        "PER-STEP COMPUTE: {step}-class picks the node class; the step gets that node "
-        "(what it offers a pod, less the platform's reserve). Only a step that declares gpu=True is offered "
-        "the GPU classes; any other step is offered the CPU classes.",
-        "COMPUTE CLASSES on this pool:",
+        "The defaults run as they are: press Submit.",
+        "Each step has a class (the machine it runs on) and a time limit (the longest it may run, as minutes or "
+        "hours). Only a step that declares gpu=True is offered the GPU classes.",
+        "Machine classes:",
     ]
     for cls in ctx["computeClasses"]["all"]:
         acc = cls.get("guestAccelerator")
@@ -1093,28 +1203,78 @@ def enhance_pipeline_info(spec: dict, ctx: dict, steps: list) -> None:
         lines.append(f"  - {cls['name']} ({cls.get('tier', 'cpu')}) — {cls['machineType']}{acc_txt}")
     hpc = hpc_classes(ctx)
     if hpc:
-        account = (ctx.get("hpc") or {}).get("account") or ""
         lines.append(
-            "MELUXINA (HPC): pick a meluxina-* class in any {step}-class dropdown and "
-            "that step runs as a Slurm job on MeluXina"
-            + (f" (account {account})" if account else "")
-            + " — queue time applies; the pipeline waits, stages the dataset in and the "
-            "step's result back; walltime= in pipeline.py caps the job. Classes:")
+            "HPC (Slurm) classes: pick one in a step's class field and the step runs there as a job. Queue time "
+            "applies; the step's time limit is the job's limit. Classes:")
         for c in hpc:
             lines.append(f"  - {c['name']} ({c.get('tier', 'cpu')}) — partition {c.get('partition')}"
                          f"{', ' + str(c.get('gpus')) + ' GPUs' if c.get('gpus') else ''}"
                          f", {c.get('cpus', '?')} cores, {c.get('memoryGiB', '?')} GiB"
                          f"{' — ' + c['description'] if c.get('description') else ''}")
-    lines.append("STEPS: " + " -> ".join(s["name"] for s in steps))
-    lines.append("(This field is informational — leave it unchanged.)")
-    parameters.insert(
-        0,
-        {
-            "name": "pipeline-info",
-            "value": "\n".join(lines),
-            "description": "Read-only: live pool compute classes + how to fill this form. Leave unchanged.",
-        },
-    )
+    lines.append("Steps: " + " -> ".join(s["name"] for s in own))
+    parameters.insert(0, {"name": "pipeline-info", "value": "\n".join(lines),
+                          "description": "How to fill this form."})
+
+
+def enhance_compose_class(spec: dict, steps: list, ctx: dict) -> None:
+    """The platform's own compose step runs on the default class, fixed in the template: it is not a field the
+    developer chooses. Its class parameter is replaced by that class's name wherever the template reads it."""
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
+    if compose is None:
+        return
+    field = class_field(COMPOSE_STEP)
+    chosen = tier_default(ctx, compose)["name"]
+    replacements = (("{{workflow.parameters.%s}}" % field, chosen),
+                    ("workflow.parameters['%s']" % field, "'%s'" % chosen))
+
+    def fixed(node):      # in place: the templates are shared with the passes that follow
+        items = node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ()
+        for key, value in list(items):
+            if isinstance(value, str):
+                for old, new in replacements:
+                    value = value.replace(old, new)
+                node[key] = value
+            else:
+                fixed(value)
+
+    fixed(spec["templates"])
+    parameters = spec["arguments"]["parameters"]
+    parameters[:] = [p for p in parameters if p["name"] != field]
+
+
+def order_form(spec: dict, steps: list) -> None:
+    """The form in the order a developer reads it: the text, the experiment fields, the settings in config
+    order, the dataset fields, then each step's class, time limit and checkpoint interval, the promote ticks,
+    the extra YAML, and last what the platform owns."""
+    parameters = spec["arguments"]["parameters"]
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
+    table = json.loads(compose["container"]["args"][compose["container"]["args"].index("--steps") + 1]) \
+        if compose and "--steps" in compose["container"]["args"] else []
+    inputs = [name for entry in table for name in entry["inputs"]]
+    own = [e["name"] for e in table]
+    rank = {}
+
+    def place(name: str, group: int, index: int = 0) -> None:
+        rank[name] = (group, index)
+
+    for p in parameters:
+        name = p["name"]
+        if name == "pipeline-info":
+            place(name, 0)
+        elif name.startswith("experiment-"):
+            place(name, 1)
+        elif name in inputs:
+            place(name, 3)
+        elif name.startswith("promote-"):
+            place(name, 5)
+        elif name == "config":
+            place(name, 6)
+        elif name.startswith("image-"):
+            place(name, 7)
+    for i, step in enumerate(own):
+        for suffix in ("class", "walltime", "checkpoint-every"):
+            place(f"{step}-{suffix}", 4, i * 3 + ("class", "walltime", "checkpoint-every").index(suffix))
+    parameters.sort(key=lambda p: rank.get(p["name"], (2, 0)))     # sort is stable: config order within a group
 
 
 def connection_env_from(ctx: dict) -> list:
@@ -1174,6 +1334,7 @@ def enhance(wft: dict, ctx: dict) -> dict:
     steps = step_templates(spec)
     enhance_arguments(spec, ctx, steps)
     gpu_step_names: set = set()
+    offers: dict = {}    # step -> what its {step}-class choice offers (None: pinned to one class)
     shared = shared_templates(spec)  # before enhance_hpc adds twin tasks
     for step in steps:
         annots = platform_annotations(step)  # validates; raises on unknown keys
@@ -1184,10 +1345,14 @@ def enhance(wft: dict, ctx: dict) -> dict:
             gpu_step_names.add(step["name"])
         enhance_image(step, ctx, annots)
         enhance_env(step, ctx, annots)
-        enhance_class_param(spec, step, ctx, annots)
+        # Before enhance_gpu_routing strips the typed request, which class_offer reads.
+        offer = class_offer(step, ctx, annots) if "compute-class" not in annots else None
+        offers[step["name"]] = offer
+        enhance_class_param(spec, step, ctx, annots, offer)
         compute_class = resolve_compute_class(step, ctx, annots)
         enhance_class_sizing(spec, step, ctx, annots)  # the node of the chosen class
         enhance_scheduling(step, ctx, annots)
+        enhance_walltime(spec, step, annots)
         # After scheduling fill, so the final requests (developer-set or
         # platform whole-node) are what get checked against the class budget.
         validate_scheduling(step, compute_class, gpu, env_has_gpu=bool(gpu_class_names(ctx)))
@@ -1201,7 +1366,10 @@ def enhance(wft: dict, ctx: dict) -> dict:
     enhance_image_guard(steps)
     enhance_workspace_pvc(spec, steps)
     enhance_compose_identity(steps, ctx)
+    enhance_run_form(spec, steps, offers)
+    enhance_compose_class(spec, steps, ctx)
     enhance_pipeline_info(spec, ctx, steps)
+    order_form(spec, steps)
     # PRD-1016: the MeluXina leg — must run LAST (twin tasks copy each routed
     # step's FINAL container image/command, and the depends rewrite needs the
     # final DAG). See kubecore/meluxina.py.
