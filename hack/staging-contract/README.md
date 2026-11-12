@@ -19,9 +19,13 @@ Python 3.12+ (the runner's). With `STAGER=<checkout of the platform repository>/
 | Scenario | Runner dir | stager.py | Proves |
 |---|---|---|---|
 | `any-shape` | `runner` | `$STAGER/stager.py` | A dataset with no `data.yaml`, `images/` or `labels/` is complete on the site; the next version is a delta; a whole copy is a cache hit |
-| `old-partial` | `runner` | `$STAGER/stager.py` | A copy made when only the YOLO folders were staged is never served and never a base; a job that still reads it keeps its files; it goes when the lease ends |
+| `old-partial` | `runner` | `$STAGER/stager.py` | A copy made when only the YOLO folders were staged is never served and never a base; one a job leases or that was used in the last day stays; the same commit is completed in the folder the job reads |
 | `reserved-name` | `runner` | `$STAGER/stager.py` | A dataset with a root name under `.kaos-` stops the run before anything is staged, with and without the staging key |
 | `unsafe-name` | `runner` | `$STAGER/stager.py` | A dataset with an object path that leaves its folder (`a/../../../escape.txt`) stops the run before anything is staged or written, with and without the staging key |
+| `uncopyable` | `runner` | `$STAGER/stager.py` | A file that is also a folder, and a file name too long for the site, stop the run before anything is staged, with and without the staging key |
+| `folder-marker` | `runner` | `$STAGER/stager.py` | Zero-byte folder markers (`docs/`) are skipped and the dataset is complete |
+| `file-folder-delta` | `runner` | `$STAGER/stager.py` | A version in which a folder became a file and a file became a folder is staged as a delta |
+| `tool-absent` | `runner` | a path that does not exist | The runner asks for 20 minutes (of a fake clock), then stops with the "not installed" sentence |
 | `new-runner-old-tool` | `runner` | a `stager.py` from before the contract | The runner stops with `StagingMismatch`; nothing is staged |
 | `old-runner-new-tool` | a `runner/` from before the contract | `$STAGER/stager.py` | The staging tool refuses the runner; nothing is staged (that runner then stages in-job, as it always did) |
 
@@ -36,6 +40,27 @@ mkdir /tmp/old-runner && git archive fd730c0 runner | tar -x -C /tmp/old-runner 
 ```
 
 When the contract number changes again, use the commits just before that change.
+
+## names.py: one table of names, three implementations
+
+```
+python3 hack/staging-contract/names.py runner $STAGER
+```
+
+`name_rule` decides which object names are copied. It is the same code in `runner/kaos_hpc_runner/staging.py`,
+`runner/kaos_hpc_runner/payload/stagein.py` and the staging tool's `stager.py`. `names.json` (here, and the same
+file next to the staging tool) is the table each repository's tests feed to its own copies; this script feeds it
+to all three, and checks that the two copies of the table and the three functions are the same.
+
+## race.py: a copy being completed against another job's cleanup
+
+```
+python3 hack/staging-contract/race.py runner
+```
+
+An in-job copy from before `.kaos-complete`, last used 20 days ago, is completed by the real stage-in while the
+real cleanup lines of the job script run again and again. The folder must not be taken from under the stage-in
+and the copy must be marked only when it is the whole commit (`docs/extreme-cases.md` 3.18).
 
 ## stagein36.py: the in-job stage-in under Python 3.6
 

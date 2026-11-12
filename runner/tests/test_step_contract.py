@@ -343,7 +343,10 @@ def test_a_staged_copy_without_its_record_is_not_served_the_job_downloads_the_co
 @MODES
 def test_an_input_that_cannot_be_staged_ends_the_job_232_before_the_step(tmp_path, lakefs, monkeypatch, shared):
     site = Site(tmp_path, lakefs, shared, helpers.fixture("context-no-upstream.wire"), inputs=TWO_INPUTS[:1], monkeypatch=monkeypatch)
-    assert site.run() == 232, site.out          # the commit is not in lakeFS: the download fails
+    lakefs.commits[LABELS] = {"train/a.csv": b"aaaa"}
+    lakefs.truncate = True                      # the download comes one byte short: the copy is not the commit
+    assert site.run() == 232, site.out
+    assert "downloaded 3 bytes" in site.out
     assert not site.saw.exists(), "the step never starts without its data"
 
 

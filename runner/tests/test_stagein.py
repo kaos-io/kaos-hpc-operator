@@ -2,9 +2,12 @@
 downloads the whole tree of the pinned commit, whatever its shape, and completes a copy an older stage-in left
 with only data.yaml, images/ and labels/ instead of serving it. The real payload runs against a fake lakeFS."""
 import json
+import os
+import pathlib
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -23,6 +26,8 @@ class _LakeFS:
 
     def __init__(self, objects):
         self.objects, self.downloads = objects, []
+        self.hook = None       # called with the path before each download is answered
+        self.short = set()     # paths answered with one byte less than the listing says
         fake = self
 
         class H(BaseHTTPRequestHandler):
@@ -35,7 +40,11 @@ class _LakeFS:
                                        "pagination": {"has_more": False}}).encode()
                 elif url.path.endswith("/refs/%s/objects" % COMMIT) and q["path"][0] in fake.objects:
                     fake.downloads.append(q["path"][0])
+                    if fake.hook:
+                        fake.hook(q["path"][0])
                     body = fake.objects[q["path"][0]]
+                    if q["path"][0] in fake.short:
+                        body = body[:-1]
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -83,7 +92,7 @@ def _stage_in(tmp_path, fake):
 
 def _tree(dest):
     return {str(f.relative_to(dest)): f.read_bytes() for f in dest.rglob("*")
-            if f.is_file() and f.name not in (".kaos-complete", ".kaos-ready")}
+            if f.is_file() and str(f.relative_to(dest)) not in (".kaos-complete", ".kaos-ready")}
 
 
 def test_a_tree_without_data_yaml_images_or_labels_is_downloaded_whole(tmp_path, lakefs):
@@ -94,7 +103,7 @@ def test_a_tree_without_data_yaml_images_or_labels_is_downloaded_whole(tmp_path,
     # What the step finds the folder by (kaos-lib staged_dir): the repository, the commit, the whole tree.
     assert json.loads((dest / ".kaos-ready").read_text()) == {"repo": "ds", "commit": COMMIT, "full": True}
     assert not (dest / ".kaos-commit").exists()
-    assert [f.name for f in dest.iterdir() if "kaos-part" in f.name] == [], "the record is renamed into place"
+    assert [f.name for f in dest.iterdir() if f.name.startswith(".kaos-ready.")] == [], "the record is renamed into place"
 
 
 def test_an_old_partial_copy_is_completed_not_served(tmp_path, lakefs):
@@ -164,6 +173,203 @@ def test_a_folder_of_the_copy_that_is_a_link_to_elsewhere_is_never_written_throu
     assert p.returncode != 0 and "outside the dataset's folder" in p.stderr and "scenes/0001/" in p.stderr
     assert list(outside.iterdir()) == [], "nothing was written through the link"
     assert not (dest / ".kaos-complete").exists()
+
+
+def test_the_name_rule_agrees_with_the_shared_table(tmp_path, lakefs):
+    """The stage-in is a program, not a module: each name of hack/staging-contract/names.json is its own commit of
+    one object, and the verdict is what the program does with it. test_staging.py tests the runner's name_rule
+    against the same table, the staging tool's repository tests its own."""
+    table = json.loads((pathlib.Path(__file__).resolve().parents[2] / "hack" / "staging-contract" / "names.json")
+                       .read_text())["names"]
+    said = {"unsafe": "outside the dataset's folder", "reserved": "reserved for the platform",
+            "long": "longer than 245 bytes"}
+    for i, (path, size, verdict) in enumerate(table):
+        if "\x00" in path or path == "":
+            continue      # not a name the fake lakeFS can serve in a URL; the rule's text is the same in all three
+        fake = lakefs({path: b"x" * size})
+        (tmp_path / str(i)).mkdir()
+        p = _run(tmp_path / str(i), fake)
+        dest = tmp_path / str(i) / "data-cache" / "ds" / COMMIT
+        if verdict == "":
+            assert p.returncode == 0 and _tree(dest) == {path: b"x" * size}, (path[:60], p.stderr)
+        elif verdict == "marker":
+            assert p.returncode == 0 and _tree(dest) == {} and fake.downloads == [], (path, p.stderr)
+        else:
+            assert p.returncode != 0 and said[verdict] in p.stderr and fake.downloads == [], (path[:60], p.stderr)
+
+
+def test_a_file_that_is_also_a_folder_fails_the_stage_in_before_any_download(tmp_path, lakefs):
+    fake = lakefs({"a": b"x", "a-b": b"w", "a/b": b"y", "z.txt": b"z"})
+    p = _run(tmp_path, fake)
+    assert p.returncode != 0 and fake.downloads == []
+    assert "an object named 'a'" in p.stderr and "'a/b'" in p.stderr and "a file or a folder" in p.stderr
+
+
+def test_a_folder_marker_is_skipped_and_the_rest_is_downloaded(tmp_path, lakefs):
+    dest, _ = _stage_in(tmp_path, lakefs({"docs/": b"", "docs/a.txt": b"a", "empty/": b""}))
+    assert _tree(dest) == {"docs/a.txt": b"a"} and (dest / ".kaos-complete").exists()
+
+
+# ------------------------------------------------ a copy is marked only when it IS the commit
+
+def test_a_download_shorter_than_the_listing_is_a_failure_not_a_marker(tmp_path, lakefs):
+    fake = lakefs(NOT_YOLO)
+    fake.short.add("scenes/0001/points.ply")
+    p = _run(tmp_path, fake)
+    dest = tmp_path / "data-cache" / "ds" / COMMIT
+    assert p.returncode != 0 and not (dest / ".kaos-complete").exists()
+    assert not (dest / "scenes" / "0001" / "points.ply").exists(), "the short file never took the name"
+
+
+def test_files_that_vanish_while_the_copy_is_made_are_a_failure_not_a_marker(tmp_path, lakefs):
+    """Whatever removes them (review of 2026-11-12: another job's cleanup removed the folder under the stage-in,
+    which then marked 3410 of 10001 files as the whole dataset)."""
+    fake = lakefs(NOT_YOLO)
+    dest = tmp_path / "data-cache" / "ds" / COMMIT
+
+    def remove_what_is_there(path):
+        if path == "splits.csv":            # the last in path order: the others are on disk or being written
+            for f in dest.glob("scenes/*/*"):
+                f.unlink()
+    fake.hook = remove_what_is_there
+    for _ in range(3):                      # the download order is not fixed: until the hook removed something
+        p = _run(tmp_path, fake)
+        if p.returncode != 0:
+            break
+        (dest / ".kaos-complete").unlink()
+        (dest / "splits.csv").unlink()
+    assert p.returncode != 0 and "is not the commit" in p.stderr and "was not marked complete" in p.stderr
+    assert not (dest / ".kaos-complete").exists()
+
+
+def test_a_file_the_commit_does_not_have_is_a_failure_not_a_marker(tmp_path, lakefs):
+    dest = tmp_path / "data-cache" / "ds" / COMMIT
+    (dest / "scenes").mkdir(parents=True)
+    (dest / "scenes" / "stray.bin").write_bytes(b"?")
+    p = _run(tmp_path, lakefs(NOT_YOLO))
+    assert p.returncode != 0 and "'scenes/stray.bin'" in p.stderr and not (dest / ".kaos-complete").exists()
+
+
+def test_half_downloaded_files_do_not_stay_and_are_not_taken_for_the_dataset(tmp_path, lakefs):
+    dest, _ = _stage_in(tmp_path, lakefs(NOT_YOLO))
+    assert list((dest / ".kaos-parts").iterdir()) == []
+    assert not [f for f in dest.rglob("*") if ".part-" in f.name]
+
+
+# ------------------------------------------------ the cleanup of unused copies and a stage-in at the same folder
+
+def _cleanup_lines():
+    from kaos_hpc_runner import jobscript
+    lines = [l for l in jobscript.batch_lines("-", "/scr") if l.startswith("find $SCR/data-cache")]
+    assert len(lines) == 2, lines
+    return "\n".join(lines)
+
+
+def _cleanup(tmp_path):
+    env = dict(os.environ, SCR=str(tmp_path), USER=os.environ.get("USER") or os.getlogin())
+    subprocess.run(["bash", "-c", _cleanup_lines()], env=env, check=True)
+
+
+def _old_copy(tmp_path, marker=".complete", days=20):
+    """An in-job copy of the YOLO folders with its marker last used `days` ago."""
+    dest = tmp_path / "data-cache" / "ds" / COMMIT
+    for rel, body in YOLO.items():
+        (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+        (dest / rel).write_bytes(body)
+    (dest / marker).write_text("")
+    old = time.time() - days * 86400
+    os.utime(str(dest / marker), (old, old))
+    return dest
+
+
+@pytest.mark.parametrize("marker", [".complete", ".kaos-complete"])
+def test_an_unused_copy_is_removed_by_the_cleanup_and_nothing_is_left_beside_it(tmp_path, marker):
+    dest = _old_copy(tmp_path, marker)
+    _cleanup(tmp_path)
+    assert list(dest.parent.iterdir()) == []
+
+
+def test_a_copy_that_is_being_completed_is_never_removed_by_another_jobs_cleanup(tmp_path, lakefs):
+    """The race of the review: the old copy's .complete is 20 days old; while the stage-in fills the folder, the
+    cleanup lines of another job run (here: at every download). The old marker is gone before the first download,
+    so the cleanup has nothing to match."""
+    dest = _old_copy(tmp_path)
+    fake = lakefs(dict(YOLO, **REST))
+    seen = []
+
+    def another_jobs_cleanup(path):
+        seen.append((dest / ".complete").exists())
+        _cleanup(tmp_path)
+    fake.hook = another_jobs_cleanup
+    p = _run(tmp_path, fake)
+    assert p.returncode == 0, p.stderr
+    assert seen and not any(seen), "the old marker was removed before the first download"
+    assert _tree(dest) == dict(YOLO, **REST) and (dest / ".kaos-complete").exists()
+    assert sorted(f.name for f in dest.parent.iterdir()) == [COMMIT]
+
+
+def test_a_dataset_file_named_complete_that_is_old_does_not_let_the_cleanup_take_the_folder(tmp_path, lakefs):
+    tree = dict(YOLO, **{".complete": b"", "more.bin": b"m"})
+    dest = _old_copy(tmp_path)              # .complete: empty and 20 days old, and also a file of this dataset
+    fake = lakefs(tree)
+    fake.hook = lambda path: _cleanup(tmp_path)
+    p = _run(tmp_path, fake)
+    assert p.returncode == 0, p.stderr
+    assert _tree(dest) == {k: v for k, v in tree.items()} and (dest / ".kaos-complete").exists()
+
+
+def test_a_cleanup_that_holds_the_folder_is_waited_for_and_the_copy_is_made_again(tmp_path, lakefs):
+    """The cleanup took the folder (its marker was old), then a job arrives that wants it. The job touches the
+    marker, sees the cleanup, waits, and starts over on what is there: nothing, so it downloads."""
+    dest = _old_copy(tmp_path, ".kaos-complete")
+    lock = pathlib.Path(str(dest) + ".kaos-clean")
+    lock.mkdir()
+    fake = lakefs(NOT_YOLO)
+    env = {"LAKEFS_ENDPOINT": fake.url, "LAKEFS_BEARER_TOKEN": "w", "DATASET_REPO": "ds", "DATASET_COMMIT": COMMIT,
+           "DATASET_CACHE": str(tmp_path / "data-cache"), "DATASET_DIRFILE": str(tmp_path / "dirfile"),
+           "SLURM_JOB_ID": "9"}
+    p = subprocess.Popen([sys.executable, "-"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, env=env, text=True)
+    p.stdin.write(payloads.STAGEIN)
+    p.stdin.close()
+    time.sleep(1.5)
+    assert p.poll() is None and fake.downloads == [], "it waits for the cleanup; it does not use the folder"
+    os.rename(str(dest), str(dest) + ".kaos-trash-1")       # what the cleanup does next, in this order
+    lock.rmdir()
+    assert p.wait(60) == 0, p.stderr.read()
+    assert "cache hit" not in p.stdout.read() and _tree(dest) == NOT_YOLO and (dest / ".kaos-complete").exists()
+
+
+def test_a_lock_left_by_a_killed_cleanup_is_not_obeyed_for_ever(tmp_path, lakefs):
+    dest = tmp_path / "data-cache" / "ds" / COMMIT
+    lock = pathlib.Path(str(dest) + ".kaos-clean")
+    lock.mkdir(parents=True)
+    old = time.time() - 1200
+    os.utime(str(lock), (old, old))
+    dest, _ = _stage_in(tmp_path, lakefs(NOT_YOLO))
+    assert _tree(dest) == NOT_YOLO
+    _old = _old_copy(tmp_path / "x", ".kaos-complete")
+    stale = pathlib.Path(str(_old) + ".kaos-clean")
+    stale.mkdir()
+    os.utime(str(stale), (old, old))
+    _cleanup(tmp_path / "x")                # removes the stale lock; the next cleanup takes the folder
+    assert not stale.exists() and _old.exists()
+    _cleanup(tmp_path / "x")
+    assert list(_old.parent.iterdir()) == []
+
+
+def test_a_cache_hit_renews_both_markers(tmp_path, lakefs):
+    """A job script from before .kaos-complete cleans by .complete: a copy this job uses must not look unused
+    to it."""
+    fake = lakefs(NOT_YOLO)
+    dest, _ = _stage_in(tmp_path, fake)
+    (dest / ".complete").write_text("")     # written by a job of the older generation that used the copy
+    old = time.time() - 20 * 86400
+    for m in (".complete", ".kaos-complete"):
+        os.utime(str(dest / m), (old, old))
+    _, out = _stage_in(tmp_path, fake)
+    assert "cache hit" in out
+    assert all(time.time() - (dest / m).stat().st_mtime < 60 for m in (".complete", ".kaos-complete"))
 
 
 def test_the_platforms_own_folder_is_downloaded(tmp_path, lakefs):

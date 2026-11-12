@@ -26,6 +26,8 @@ class H(http.server.BaseHTTPRequestHandler):
 httpd = socketserver.ThreadingTCPServer(('127.0.0.1', 0), H); httpd.daemon_threads = True
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
 tmp = tempfile.mkdtemp()
+import atexit, shutil
+atexit.register(shutil.rmtree, tmp, True)
 dest = os.path.join(tmp, 'cache', 'ds', COMMIT)
 for rel, body in YOLO.items():                      # the copy an older stage-in left, with its .complete marker
     os.makedirs(os.path.dirname(os.path.join(dest, rel)), exist_ok=True)

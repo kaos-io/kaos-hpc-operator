@@ -188,11 +188,22 @@ def batch_lines(scope, scratch):
         # Staged layers are only a way to build the SIF (the stager evicts them under
         # space pressure too): unused for 3 days they go.
         '[ -n "$IMAGE_STAGED" ] && find "${IMAGE_STAGED%/*}" -maxdepth 1 -name "*.tar" -user "$USER" -mtime +2 -delete 2>/dev/null',
-        'find $SCR/data-cache -mindepth 3 -maxdepth 3 -name .kaos-complete -user "$USER" -mtime +14'
-        ' -printf "%h\\n" 2>/dev/null | xargs -r rm -rf',
-        # A copy with only the marker of before (.complete) and no .kaos-complete was never completed since.
-        'find $SCR/data-cache -mindepth 3 -maxdepth 3 -name .complete -user "$USER" -mtime +14'
-        ' -printf "%h\\n" 2>/dev/null | while read -r d; do [ -e "$d/.kaos-complete" ] || rm -rf "$d"; done',
+        # In-job copies: a folder goes when its marker is 14 days old. The marker is .kaos-complete, or .complete
+        # for a copy from before it that was never completed since. The stage-in (payload/stagein.py) may be at
+        # the same folder, so each one is taken (mkdir <folder>.kaos-clean, atomic; one left by a killed cleanup
+        # is removed after 10 minutes), its marker's age is read AGAIN, and the folder is moved away in one
+        # rename before the lock is let go. The stage-in changes the marker first and looks for the lock after,
+        # so one of the two always sees the other: a folder being filled or just used is never removed.
+        'find $SCR/data-cache -mindepth 3 -maxdepth 3 \\( -name .kaos-complete -o -name .complete \\) -user "$USER"'
+        ' -mtime +14 -printf "%h\\n" 2>/dev/null | sort -u | while read -r d; do'
+        ' mkdir "$d.kaos-clean" 2>/dev/null ||'
+        ' { find "$d.kaos-clean" -maxdepth 0 -mmin +10 -exec rmdir {} \\; 2>/dev/null; continue; };'
+        ' m="$d/.kaos-complete"; [ -e "$m" ] || m="$d/.complete";'
+        ' [ -n "$(find "$m" -maxdepth 0 -mtime +14 2>/dev/null)" ] && mv "$d" "$d.kaos-trash-$$" 2>/dev/null;'
+        ' rmdir "$d.kaos-clean" 2>/dev/null; done',
+        # The slow part, outside the lock: what the line above (of this or of a killed job) moved away.
+        'find $SCR/data-cache -mindepth 2 -maxdepth 2 -name "*.kaos-trash-*" -user "$USER"'
+        ' -exec rm -rf {} + 2>/dev/null',
         # AC-65: the layer cache is only a by-product of a pull (the SIF is the cache that counts). Files older
         # than a day go every time (younger ones may belong to a build on another node); the stager's cleanup
         # does the same from the login node when no job runs.

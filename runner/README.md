@@ -17,7 +17,7 @@ Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /ru
 | `settings.py` | all inputs, read once from the controller's env; identity, class, dataset, sharing, resume |
 | `slurm.py` | slurmrestd/slurmdbd client (token re-read per request), comment/share parsing, `host_gone` |
 | `wallet.py` | Zitadel wallet mint (RS256 in stdlib, no PyJWT), image WORKDIR lookup |
-| `staging.py` | `Stager` (ssh to the forced-command stager), dataset staging (every object of the pinned commit, whatever the dataset's shape; `CONTRACT` is the staging contract the runner checks against the staging tool's `version` and sends with every `status` and `stage`), `staging_record` (the bounded `status.run.staging`: kind first/delta/cached, files, bytes, seconds; the follower prints one line from it) |
+| `staging.py` | `Stager` (ssh to the forced-command stager), dataset staging (every object of the pinned commit, whatever the dataset's shape; `CONTRACT` is the staging contract the runner checks against the staging tool's `version` and sends with every `status` and `stage`; `name_rule` and `Names` refuse, before anything is staged or submitted, the object names that cannot be copied), `staging_record` (the bounded `status.run.staging`: kind first/delta/cached, files, bytes, seconds; the follower prints one line from it) |
 | `image.py` | registry client, docker-archive streaming, `image_key` (tar name = SIF name = `kaos-image=` lease, always in the job comment), `cleanup_images` (asks the stager's `gc` when an attempt is over; AC-65) |
 | `jobscript.py` | the batch script (+ KAOS_METRIC sampler, tar deletion after SIF build) |
 | `payload/` | on-node programs: stagein/stageout/ckpt/slots/idlewatch (`payloads.py` loads them) |
@@ -57,8 +57,9 @@ The job script and the runner reserve these codes; the controller turns them int
 | 237 | runner | staging does not fit the project's scratch quota (reported FAILED, no site job) | `InsufficientQuota` |
 | 238 | runner | the site refused the submit for its per-user cap (reported FAILED, no site job; the message has the cap and the count read from the site) | `SubmitLimit` |
 | 239 | runner | the step's image reference can never be pulled (reported FAILED, no site job) | `InvalidImage` |
-| 242 | runner | the dataset holds an object whose name is reserved for the platform, or whose path could leave the dataset's folder (reported FAILED, nothing staged, no site job) | `ReservedName` |
-| 241 | runner | the site's staging tool speaks another staging contract (reported FAILED, nothing staged, no site job) | `StagingMismatch` |
+| 240 | runner | the slot manager stopped the step for computing on a GPU outside its set, on a node shared by several steps | `GPUViolation` |
+| 241 | runner | the site's staging tool speaks another staging contract, or is not installed for the project after 20 minutes of asking (reported FAILED, nothing staged, no site job) | `StagingMismatch` |
+| 242 | runner | the dataset holds an object that cannot be copied to the site: a name reserved for the platform, a path that could leave the dataset's folder, a name too long, or a file that is also a folder (reported FAILED, nothing staged, no site job) | `ReservedName` |
 
 ## The site job's name, adopt, and a site that does not answer
 The site job is named `kaos-[<scope>-]<workflow uid>-<step>-<first 8 of the HPC job id>-a<attempt>`. A job script rewrites
