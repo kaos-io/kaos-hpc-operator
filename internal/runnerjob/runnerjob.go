@@ -141,42 +141,43 @@ func ValidateContract(spec *hpcv1alpha1.HPCArgoWorkflowJobSpec) (string, error) 
 	return "", nil
 }
 
-var (
-	imageDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	imageTagRe  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
-)
+// imageRef is the whole grammar of a step image: <host>/<repository>[:<tag>][@sha256:<64 hex>], lowercase,
+// with a tag or a digest. It is the same grammar as the runner's (settings.IMAGE_REF), so a reference that passes
+// here is one the runner parses. Nothing else is accepted: no space, control character, quote, `$` or other
+// character a shell or a URL could read as more than a name. The job script is written from this reference.
+var imageRef = regexp.MustCompile(`^(localhost(?::[0-9]{1,5})?|[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::[0-9]{1,5})?|[a-z0-9-]+:[0-9]{1,5})` +
+	`/([a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*)` +
+	`(?::([A-Za-z0-9_][A-Za-z0-9_.-]{0,127}))?(?:@(sha256:[0-9a-f]{64}))?$`)
 
 // ValidateImage checks that the step's image is <registry-host>/<repository> with a tag or a sha256 digest (the
-// runner checks the same, settings.image_problem): a reference that is not can never be pulled, so the job is
-// refused as InvalidImage before anything is booked or submitted.
+// runner checks the same, settings.image_problem): a reference that is not can never be pulled, and one with a
+// space or a shell character must never reach a job script, so the job is refused as InvalidImage before
+// anything is booked or submitted.
 func ValidateImage(ref string) error {
 	bad := func(why string) error {
 		return fmt.Errorf("the step image %q cannot be pulled: %s; nothing was booked or submitted. "+
 			"Fix the image the step names (registry/repository:tag or @sha256 digest)", ref, why)
 	}
-	name, digest, hasDigest := strings.Cut(ref, "@")
-	if hasDigest {
-		if !imageDigest.MatchString(digest) {
-			return bad("the digest is not sha256:<64 hex digits>")
-		}
-		// name:tag@digest is normalised to the digest form by the runner: the tag is dropped.
-		if i := strings.LastIndex(name, "/"); i >= 0 {
-			if c := strings.LastIndex(name, ":"); c > i {
-				name = name[:c]
-			}
-		}
-	} else {
-		i := strings.LastIndex(name, "/")
-		c := strings.LastIndex(name, ":")
-		if c <= i || !imageTagRe.MatchString(name[c+1:]) {
-			return bad("it has no tag or digest")
-		}
-		name = name[:c]
+	if strings.IndexFunc(ref, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._:/@-", r))
+	}) >= 0 {
+		return bad("it holds a space, a control character or another character an image reference never has")
 	}
-	host, repo, ok := strings.Cut(name, "/")
-	isRegistry := strings.ContainsAny(host, ".:") || host == "localhost"
-	if !ok || host == "" || repo == "" || strings.HasPrefix(repo, "/") || strings.HasSuffix(repo, "/") || !isRegistry {
-		return bad("it has no registry host and repository (want <registry>/<repository>:<tag>)")
+	if _, digest, ok := strings.Cut(ref, "@"); ok && !strings.HasPrefix(digest, "sha256:") ||
+		ok && len(digest) != len("sha256:")+64 {
+		return bad("the digest is not sha256:<64 hex digits>")
+	}
+	m := imageRef.FindStringSubmatch(ref)
+	if m == nil {
+		name, _, _ := strings.Cut(ref, "@")
+		host, _, found := strings.Cut(name, "/")
+		if !found || host == "" || !(strings.ContainsAny(host, ".:") || host == "localhost") {
+			return bad("it has no registry host and repository (want <registry>/<repository>:<tag>)")
+		}
+		return bad("it is not a lowercase <registry>/<repository>:<tag> reference")
+	}
+	if m[3] == "" && m[4] == "" {
+		return bad("it has no tag or digest")
 	}
 	return nil
 }

@@ -478,6 +478,20 @@ func TestValidateImage(t *testing.T) {
 		{"should_refuse_an_empty_tag", "zot.example/proj/app:", false},
 		{"should_refuse_a_short_digest", "zot.example/proj/app@sha256:abc", false},
 		{"should_refuse_the_empty_reference", "", false},
+		// The job script is written from the reference: nothing a shell or a URL reads as more than a name.
+		{"should_refuse_a_space", "zot.example/proj/app x:v1", false},
+		{"should_refuse_a_space_in_the_repository_with_a_registry_path", "evil.example/x -docker.pkg.dev/p/app:v1", false},
+		{"should_refuse_a_newline", "zot.example/proj/app:v1\nrm -rf /", false},
+		{"should_refuse_a_trailing_newline", "zot.example/proj/app:v1\n", false},
+		{"should_refuse_a_control_character", "zot.example/proj/app:v1\x1b[0m", false},
+		{"should_refuse_command_substitution", "zot.example/proj/$(id):v1", false},
+		{"should_refuse_backticks", "zot.example/proj/`id`:v1", false},
+		{"should_refuse_a_semicolon", "zot.example/proj/app:v1;id", false},
+		{"should_refuse_a_quote", "zot.example/proj/app:v1'", false},
+		{"should_refuse_userinfo", "user@zot.example/proj/app:v1", false},
+		{"should_refuse_an_uppercase_repository", "zot.example/Proj/app:v1", false},
+		{"should_refuse_a_double_slash", "zot.example//app:v1", false},
+		{"should_refuse_a_dot_dot_part", "zot.example/../app:v1", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if err := ValidateImage(c.ref); (err == nil) != c.ok {

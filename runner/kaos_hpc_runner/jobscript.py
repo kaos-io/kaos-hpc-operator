@@ -177,11 +177,14 @@ def batch_lines(scope, scratch):
         # GCP token ONLY for GAR hosts: presenting it to Zot turns an
         # anonymous-OK pull into 401 authentication required (live job
         # 5140432 vs the anonymous F-01 pull that worked on the same repo).
-        '    case "$IMAGE_REF" in *-docker.pkg.dev/*)'
-        ' [ -n "$REG_TOKEN" ] && export'
-        ' APPTAINER_DOCKER_USERNAME=oauth2accesstoken'
-        ' APPTAINER_DOCKER_PASSWORD=$REG_TOKEN;; esac',
-        '    apptainer pull "$SIF_TMP" docker://$IMAGE_REF || { rm -f "$SIF_TMP"; fail 231; }',
+        # The token goes only to Artifact Registry: the HOST of the reference (its text up to the first slash, never
+        # a glob over the whole reference) must be <one label>-docker.pkg.dev. Anything else pulls anonymously.
+        '    KAOS_REG_HOST=${IMAGE_REF%%/*}; KAOS_REG_LABEL=${KAOS_REG_HOST%-docker.pkg.dev}',
+        '    if [ -n "$REG_TOKEN" ] && [ "$KAOS_REG_LABEL" != "$KAOS_REG_HOST" ]; then',
+        '      case "$KAOS_REG_LABEL" in ""|-*|*-|*[!a-z0-9-]*) ;; *)'
+        ' export APPTAINER_DOCKER_USERNAME=oauth2accesstoken APPTAINER_DOCKER_PASSWORD="$REG_TOKEN";; esac',
+        '    fi',
+        '    apptainer pull "$SIF_TMP" "docker://$IMAGE_REF" || { rm -f "$SIF_TMP"; fail 231; }',
         '    mv -n "$SIF_TMP" "$SIF"; kaos_sif_label; rm -f "$SIF_TMP"',
         '  fi',
         'fi',

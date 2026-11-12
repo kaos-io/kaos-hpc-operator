@@ -21,6 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .settings import registry_token_host  # noqa: F401  (the GCP token goes to Artifact Registry hosts only)
 from .staging import EX_NOSPACE, EX_RETRY, InsufficientQuota, human_bytes, ssh_present
 
 IMAGE_STAGE_BUDGET_S = 45 * 60
@@ -29,12 +30,6 @@ IMAGE_MANIFEST_ACCEPT = ', '.join([
     'application/vnd.docker.distribution.manifest.list.v2+json',
     'application/vnd.oci.image.manifest.v1+json',
     'application/vnd.docker.distribution.manifest.v2+json'])
-
-
-def registry_token_host(host):
-    # Same rule as the job script: the GCP token goes to GAR hosts only;
-    # presenting it to Zot turns an anonymous-OK pull into 401.
-    return host.endswith('-docker.pkg.dev')
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

@@ -138,7 +138,7 @@ def fetch_workdir(image, reg_token):
             'application/vnd.docker.distribution.manifest.list.v2+json',
             'application/vnd.oci.image.manifest.v1+json',
             'application/vnd.docker.distribution.manifest.v2+json'])}
-        if reg_token and ref_host.endswith('-docker.pkg.dev'):
+        if reg_token and settings.registry_token_host(ref_host):
             hdr['Authorization'] = 'Bearer ' + reg_token
         base = 'https://' + ref_host + '/v2/' + path
 

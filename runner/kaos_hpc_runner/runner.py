@@ -24,7 +24,8 @@ from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone
                     share_state, site_time, submit_limit_refusal)
 from .settings import (CHECKPOINT_EXIT, CONTEXT_ENV, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT,
                        INVALID_IMAGE_EXIT, INVALID_RESULT_EXIT, OFFER_S, ROLE_POLL_S, RESERVED_NAME_EXIT,
-                       RESULT_NOT_HANDED_BACK_EXIT, STAGING_MISMATCH_EXIT, SUBMIT_LIMIT_EXIT, Settings, image_problem)
+                       RESULT_NOT_HANDED_BACK_EXIT, STAGING_MISMATCH_EXIT, SUBMIT_LIMIT_EXIT, Settings, image_problem,
+                       registry_token_host)
 
 POLL_S = 30
 # --cancel-only (the controller's orphan sweep, PRD AC-08): how long one such runner works before it gives up
@@ -231,6 +232,13 @@ class Runner:
         cfg = self.cfg
         hpc = cfg.hpc_class()
         ident = cfg.identity()
+        # Nothing of a reference that does not parse is ever written into a script; the registry token only
+        # goes into the job when the reference's host is one it may be presented to.
+        problem = image_problem(cfg.image)
+        if problem:
+            raise ValueError('the step image %r cannot be used: %s' % (cfg.image, problem))
+        if not registry_token_host(cfg.image.partition('/')[0]):
+            reg = ''
         batch = '\n'.join(jobscript.batch_lines(cfg.scope if cfg.sharing else '-', ident['scratch']))
         env = ['PATH=/usr/bin:/bin:/usr/local/bin', 'HOME=' + ident['home'],
                'USER=' + ident['user'], 'IMAGE_REF=' + cfg.image, 'REG_TOKEN=' + reg,
