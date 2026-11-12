@@ -111,7 +111,15 @@ replaces, by shape or by exact value and never by "the line has the word key or 
 * the value of `NAME_TOKEN=`, `NAME_SECRET=`, `NAME_PASSWORD=`, `NAME_API_KEY=` (upper case) and of the exact words
   `password`, `secret`, `token`, `api_key`, `access_token`, `refresh_token`, `client_secret`, `private_key` in `k=v`, JSON,
   a Python repr, escaped JSON and a query string;
-* a private key block, also one written as a single JSON string.
+* a private key block (PEM or PGP), also one written as a single JSON string. A block is bounded: it ends at its `END` line
+  or at the first line that is not key material, never after 100 lines, and a marker in the middle of prose starts none, so
+  a stray `-----BEGIN ... PRIVATE KEY-----` never silences the log stream or the GPU metric lines;
+* the held bearers also in hex and with JSON-escaped slashes, signed-URL `X-Goog-Signature=`/`X-Amz-Signature=` values,
+  `--password`/`--token` command-line values, `aws_secret_access_key`.
+
+The value after a secret's name is redacted only when it looks like a secret (16 or more characters, or 6 or more with
+letters and digits mixed; never a plain word, a number, a path or a boolean). A credential split over two lines is not
+recognised.
 
 `max_new_tokens=512`, `tokenizer=...`, `num_keypoints=17`, `monkey=3`, `"primary_key": "id"` and "The Bearer token expired"
 are left alone. Every pattern is linear in the length of the line. The redaction runs on the last 64 KiB of the output

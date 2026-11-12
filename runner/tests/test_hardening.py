@@ -29,6 +29,7 @@ from test_runner import FakeSlurm, rig  # noqa: F401
 
 from kaos_hpc_runner import jobscript, payloads, settings
 from kaos_hpc_runner import runner as runmod
+from kaos_hpc_runner.redact import Redactor
 
 WALLET = "WALLET-SECRET-" + "w" * 24          # stands in for the data/MLflow bearer
 REGISTRY = "REGISTRY-SECRET-" + "r" * 24       # stands in for the registry token
@@ -423,7 +424,7 @@ SECRETS = [
     ("abc123", '{\\"access_token\\": \\"abc123\\", \\"n\\": 1}'),            # JSON inside a JSON string
     ("abc123", "GET /v1/files?token=abc123&x=1"),
     ("dXNlcjpwYXNzd29yZDEyMzQ=", "Authorization: Basic dXNlcjpwYXNzd29yZDEyMzQ="),
-    ("TOKEN-VALUE", "Token=TOKEN-VALUE"),
+    ("TOKEN-V4LUE", "Token=TOKEN-V4LUE"),
     ("p4ssw0rd", "cloning https://alice:p4ssw0rd@git.example/org/repo.git"),
     ("k3y-value", "X-Api-Key: k3y-value"),
     ("k3y-value", "request headers {'X-Api-Key': 'k3y-value'}"),
@@ -431,6 +432,16 @@ SECRETS = [
     ("ghp_" + "a1B2" * 9, "pushing with ghp_" + "a1B2" * 9),
     ("github_pat_" + "A1" * 30, "GH github_pat_" + "A1" * 30),
     ("a=1; sessionid=zz9", "Cookie: a=1; sessionid=zz9"),
+    ("hunter2x9", "run.py --password hunter2x9 --lr 1"),
+    ("abcdefghij0123456789", "run.py --token abcdefghij0123456789"),
+    ("abcdefghij0123456789", "run.py --token=abcdefghij0123456789"),
+    ("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "aws_secret_access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+    ("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+    ("3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",
+     "GET https://s.example/o?X-Amz-Algorithm=A&X-Amz-Signature=3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b&x=1"),
+    ("0f1e2d3c4b5a69788796a5b4c3d2e1f0", "https://storage.example/o?X-Goog-Signature=0f1e2d3c4b5a69788796a5b4c3d2e1f0"),
+    ("mQENBF2sZ0wBCADexample0123456789abcdefghij", "-----BEGIN PGP PRIVATE KEY BLOCK-----\nVersion: GnuPG v2\n\n"
+     "mQENBF2sZ0wBCADexample0123456789abcdefghij\n=abcd\n-----END PGP PRIVATE KEY BLOCK-----"),
     ("MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo", PEM),
     ("MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo", PEM.replace("\n", "\\n")),         # one JSON string: escaped newlines
 ]
@@ -449,6 +460,9 @@ ORDINARY = [
     '{"primary_key": "id", "keys": 3}', "The Bearer token expired", "Basic principles of design", "n_tokens: 2048",
     "token count 17", "keyboard=us", "using key frame 4", "secretary=Ann", "passwordless login enabled",
     "sha256 " + "ab" * 32, "-----BEGIN CERTIFICATE-----", "see https://example.org/a/b?page=2",
+    "token: 3 of 128", "unexpected token: '}'", "secret: False", "authorization: required", "PRIVATE_KEY=unset",
+    "GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json", "password: None", "token=None", "secret=true",
+    "error: expected -----BEGIN RSA PRIVATE KEY----- header in file",
 ]
 
 
@@ -723,7 +737,7 @@ ODD = ("kaos-priv/host-", "kaos-priv/host-12a", "kaos-priv/host-x", "kaos-priv/o
        "kaos-tmp/in-1 2")
 
 
-def _sweep(tmp_path, queue, root=None, self_id=None, age="0", folders=SWEPT):
+def _sweep(tmp_path, queue, root=None, self_id=None, age="0", folders=SWEPT, allow_empty=False):
     """kaos_sweep on a scratch root with these folders (each with a file), a fake squeue that answers `queue` (a list of
     ids, or None for a squeue that fails). Returns (root, what is left of the folders)."""
     scr = tmp_path / "scr"
@@ -732,13 +746,17 @@ def _sweep(tmp_path, queue, root=None, self_id=None, age="0", folders=SWEPT):
         (scr / f / "job.sh").write_text("secret")
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
-    answer = "\n".join(queue) + "\n" if queue else ""
-    (bindir / "squeue").write_text('#!/bin/bash\n%s\nprintf %%b %r\n' % ("exit 1" if queue is None else ":", answer))
+    rows = [q.split(":") if ":" in q else [q, "RUNNING"] for q in (queue or [])]
+    answer = "".join("%s %s\n" % (i, st) for i, st in rows)
+    (bindir / "squeue").write_text('#!/bin/bash\necho "$@" > "%s"\n%s\nprintf %%b %r\n' % (
+        tmp_path / "squeue.args", "exit 1" if queue is None else ":", answer))
     (bindir / "squeue").chmod(0o755)
     env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], USER=os.environ.get("USER") or "me",
                KAOS_SWEEP_MIN_AGE_MIN=age)
-    if self_id:
+    if self_id is not None:
         env["KAOS_SWEEP_SELF"] = self_id
+    if allow_empty:
+        env["KAOS_SWEEP_ALLOW_EMPTY"] = "1"
     script = "\n".join(jobscript.SWEEP_HELPER) + '\nkaos_sweep "%s"\n' % (str(scr) if root is None else root)
     assert subprocess.run(["bash", "-c", script], env=env).returncode == 0
     return scr, sorted(f for f in folders if (scr / f).exists())
@@ -760,6 +778,44 @@ def test_the_sweep_distrusts_an_answer_that_lacks_the_job_that_is_asking(tmp_pat
     assert len(left) == 5
     _, left = _sweep(tmp_path / "b", ["777"], self_id="777")
     assert left == [], "an answer that names the asking job is believed"
+
+
+def test_the_sweep_asks_for_every_job_of_the_user_that_is_not_finished(tmp_path):
+    """squeue without -t lists only pending, running and completing jobs, and without -a leaves out hidden partitions
+    (Slurm squeue documentation: `-t`: "If no state is specified then pending, running, and completing jobs are
+    reported"; `-a`: "information about jobs ... in all partitions ... configured as hidden")."""
+    queue = ["100:SUSPENDED", "200:COMPLETING", "300:REQUEUED", "400:CANCELLED", "500:COMPLETED", "9:FAILED"]
+    scr, left = _sweep(tmp_path, queue)
+    args = (tmp_path / "squeue.args").read_text().split()
+    assert "-a" in args and args[args.index("-t") + 1] == "all", args
+    assert left == ["kaos-priv/host-100", "kaos-priv/host-200", "kaos-tmp/in-300"], \
+        "a job in any state that is not finished keeps its folders; finished ones do not"
+
+
+def test_the_sweep_with_an_empty_answer_and_no_asking_job_removes_nothing_unless_told_it_may(tmp_path):
+    _, left = _sweep(tmp_path, [])
+    assert len(left) == 5, "an empty answer cannot be told from a squeue that lost the queue"
+    _, left = _sweep(tmp_path / "b", [], allow_empty=True)
+    assert left == [], "a caller that checked the queue itself says so with KAOS_SWEEP_ALLOW_EMPTY=1"
+
+
+def test_the_sweep_does_nothing_when_the_asking_job_has_an_empty_id(tmp_path):
+    _, left = _sweep(tmp_path, ["9"], self_id="")
+    assert len(left) == 5
+    # and the job script's own call is guarded the same way
+    call = next(ln for ln in jobscript.batch_lines("-", "/scr") if "kaos_sweep" in ln and ln.startswith("[ -z"))
+    assert 'SLURM_JOB_ID' in call and call.startswith('[ -z "$SLURM_JOB_ID" ] ||')
+    scr = tmp_path / "c" / "scr"
+    (scr / "kaos-tmp" / "in-300").mkdir(parents=True)
+    (tmp_path / "c" / "bin").mkdir()
+    (tmp_path / "c" / "bin" / "squeue").write_text('#!/bin/bash\nprintf "9 RUNNING\\n"\n')
+    (tmp_path / "c" / "bin" / "squeue").chmod(0o755)
+    env = dict(os.environ, PATH=str(tmp_path / "c" / "bin") + os.pathsep + os.environ["PATH"],
+               USER=os.environ.get("USER") or "me",
+               KAOS_SWEEP_MIN_AGE_MIN="0", SLURM_JOB_ID="", SCR=str(scr))
+    env.pop("KAOS_SWEEP_SELF", None)
+    assert subprocess.run(["bash", "-c", "\n".join(jobscript.SWEEP_HELPER) + "\n" + call], env=env).returncode == 0
+    assert (scr / "kaos-tmp" / "in-300").is_dir()
 
 
 def test_the_sweep_leaves_young_folders_alone(tmp_path):
@@ -849,3 +905,68 @@ def test_a_reference_with_an_empty_tag_is_not_rewritten_into_a_valid_one_before_
     ref = "zot.example/p/app:@sha256:" + "a" * 64
     assert settings.normalize_image(ref) == ref and settings.image_problem(settings.normalize_image(ref)) != ""
     assert settings.normalize_image("zot.example/p/app:v1@sha256:" + "a" * 64) == "zot.example/p/app@sha256:" + "a" * 64
+
+
+def test_a_slot_memory_figure_with_a_leading_zero_is_decimal_and_a_bad_one_never_aborts_the_step(tmp_path, lakefs, monkeypatch):
+    slot = {"KUBECORE_SLOT_SHARED": "1", "KUBECORE_SLOT_GPUS": "1", "KUBECORE_SLOT_CPUS": "08", "KAOS_STEP_GPUS": "2",
+            "CUDA_VISIBLE_DEVICES": "2", "SLURM_STEP_ID": "3"}
+    for figure, want in (("08", str(8 * 1024)), ("09", str(9 * 1024)), ("100", str(100 * 1024)), ("0x10", None), ("-5", None),
+                         ("1e3", None), ("99999999999999999999", None), ("", None)):
+        where = tmp_path / ("m" + (figure.replace("-", "n") or "empty"))
+        where.mkdir()
+        site = HSite(where, lakefs, True, monkeypatch)
+        assert site.run(extra=dict(HOST_WIDE, KUBECORE_SLOT_MEM_GIB=figure, **slot)) == 0, (figure, site.out)
+        assert site.step_saw().get("SLURM_MEM_PER_NODE") == want, figure
+        assert "syntax error" not in site.out and "value too great" not in site.out, site.out
+
+
+# ---- a private key block is bounded; a marker in prose is not a block
+
+EIGHT = ["step 1 done", "loss=0.5", 'KAOS_METRIC {"t":1,"gpus":[],"load":[0,0,0],"mem_available_kb":1}', "epoch 2", "epoch 3",
+         "checkpoint saved", "step 4 done", "finished"]
+
+
+def test_a_begin_marker_without_an_end_does_not_silence_what_follows():
+    text = "error: expected -----BEGIN RSA PRIVATE KEY----- header in file\n" + "\n".join(EIGHT) + "\n"
+    for out in (_node_redact(text), Redactor().text(text)):
+        assert out == text, "nothing is a secret here, and every later line (the metric line too) is kept: " + out
+
+
+def test_a_block_that_starts_a_line_is_dropped_up_to_its_end_and_no_further():
+    body = ["MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo", "4lgOEePzNm0tRgeLezV6ffAt0gunAAAA", "AQIDAQAB"]
+    text = "\n".join(["before", "  -----BEGIN RSA PRIVATE KEY-----"] + body + ["-----END RSA PRIVATE KEY-----"] + EIGHT) + "\n"
+    out = _node_redact(text)
+    assert out == "before\n[redacted: private key]\n" + "\n".join(EIGHT) + "\n", out
+
+
+def test_a_block_with_no_end_ends_at_the_first_line_that_is_not_key_material_and_a_metric_line_is_never_dropped():
+    lines = ["-----BEGIN PRIVATE KEY-----", "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo", EIGHT[2], "after"]
+    out = _node_redact("\n".join(lines) + "\n").split("\n")
+    assert out[0] == "[redacted: private key]" and out[1:3] == [EIGHT[2], "after"], out
+
+
+def test_a_block_swallows_at_most_a_hundred_lines():
+    lines = ["-----BEGIN PRIVATE KEY-----"] + ["A" * 64] * 150 + ["done"]
+    out = _node_redact("\n".join(lines) + "\n").split("\n")
+    assert out[0] == "[redacted: private key]" and out[-2] == "done", "the stream resumes"
+    assert len(out) - 2 < 100 and sum(1 for ln in out if ln == "A" * 64) >= 50, "lines past the bound are shown, not swallowed"
+
+
+def test_a_marker_in_the_middle_of_prose_starts_no_block():
+    r = Redactor()
+    assert r.line("see the -----BEGIN RSA PRIVATE KEY----- line") == "see the -----BEGIN RSA PRIVATE KEY----- line"
+    assert r.line("next line is shown") == "next line is shown"
+
+
+def test_the_held_bearers_are_redacted_in_hex_and_with_json_escaped_slashes():
+    import binascii
+    held = "ab/cd+ef/gh-ijklmnop0123456789"
+    import base64
+    b64 = base64.b64encode(held.encode()).decode()
+    spellings = [binascii.hexlify(held.encode()).decode(), binascii.hexlify(held.encode()).decode().upper(),
+                 held.replace("/", "\\/"), b64.replace("/", "\\/"), b64]
+    text = "".join("[%s]\n" % sp for sp in spellings)
+    out = _node_redact(text, env={"LAKEFS_BEARER_TOKEN": held})
+    for sp in spellings:
+        assert sp not in out, sp
+    assert out.count("[redacted]") == len(spellings)

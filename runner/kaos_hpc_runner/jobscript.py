@@ -72,17 +72,26 @@ REDACT_HELPER = [
 # copy of its script (holds the job's bearer), the folder inputs are presented in, the folder the step's variables are
 # written to. `kaos_sweep <project scratch root>` removes those whose Slurm job is no longer queued or running.
 # Small and self-contained so the login-node stager and manual cleanups can run the same text. Rules: it removes nothing
-# unless squeue answered (unknown never means delete), only folders named exactly host-<digits> / in-<digits> /
-# env-<digits> directly under <root>/kaos-priv and <root>/kaos-tmp that belong to the caller and are older than
-# KAOS_SWEEP_MIN_AGE_MIN (default 10), never follows a link, never works on an empty or root path. KAOS_SWEEP_SELF, when
-# set (a job sets its own id), must appear in squeue's answer, or the answer is not trusted.
+# unless squeue answered (unknown never means delete). It lists EVERY job of the user that is not finished: `-a` includes
+# hidden partitions and `-t all` replaces squeue's default of only pending, running and completing jobs (Slurm squeue
+# manual: "-t: If no state is specified then pending, running, and completing jobs are reported"; "-a: ... partitions that
+# are configured as hidden"); the states that mean finished are filtered out here, so a suspended, requeued or otherwise
+# unusual live job keeps its folders. An empty answer is believed only when KAOS_SWEEP_SELF names a job that must be in it
+# (a caller that is itself a job; set but empty = do nothing) or the caller says KAOS_SWEEP_ALLOW_EMPTY=1 after its own
+# queue check. Only folders named exactly host-<digits> / in-<digits> / env-<digits> directly under <root>/kaos-priv and
+# <root>/kaos-tmp that belong to the caller and are older than KAOS_SWEEP_MIN_AGE_MIN (default 10) are removed; a link is
+# never followed; an empty or root path does nothing.
 SWEEP_HELPER = [
     'kaos_sweep(){',
     '  local root=$1 live d id kind',
     '  case "$root" in /?*) ;; *) return 0;; esac',
     '  [ -d "$root" ] && [ ! -L "$root" ] || return 0',
-    '  live=$(squeue -h -u "$USER" -t PENDING,RUNNING,SUSPENDED,COMPLETING,CONFIGURING -o %A 2>/dev/null) || return 0',
-    '  [ -n "${KAOS_SWEEP_SELF:-}" ] && { printf "%s\n" "$live" | grep -qx "$KAOS_SWEEP_SELF" || return 0; }',
+    '  [ -z "${KAOS_SWEEP_SELF+x}" ] || [ -n "$KAOS_SWEEP_SELF" ] || return 0',
+    '  live=$(squeue -a -h -u "$USER" -t all -o "%A %T" 2>/dev/null) || return 0',
+    '  live=$(printf "%s\n" "$live" | awk \'NF && $2 !~ /^(COMPLETED|CANCELLED|FAILED|TIMEOUT|NODE_FAIL|PREEMPTED|BOOT_FAIL'
+    '|DEADLINE|OUT_OF_MEMORY)$/ {print $1}\')',
+    '  if [ -n "${KAOS_SWEEP_SELF:-}" ]; then printf "%s\n" "$live" | grep -qx "$KAOS_SWEEP_SELF" || return 0;',
+    '  elif [ -z "$live" ] && [ "${KAOS_SWEEP_ALLOW_EMPTY:-0}" != 1 ]; then return 0; fi',
     '  for kind in kaos-priv/host kaos-tmp/in kaos-tmp/env; do',
     '    [ -d "$root/${kind%/*}" ] && [ ! -L "$root/${kind%/*}" ] || continue',
     '    find "$root/${kind%/*}" -mindepth 1 -maxdepth 1 -type d -name "${kind#*/}-[0-9]*" -user "$USER"'
@@ -164,7 +173,7 @@ def batch_lines(scope, scratch):
         # What a job killed without a trap (SIGKILL, node loss) left behind: the private copy of a host script with
         # the bearer in it, the input and variable folders of jobs that are over. Asks squeue; if it cannot
         # answer, removes nothing. A job's own id must be in the answer or the answer is not trusted.
-        'KAOS_SWEEP_SELF=$SLURM_JOB_ID kaos_sweep "$SCR"',
+        '[ -z "$SLURM_JOB_ID" ] || KAOS_SWEEP_SELF=$SLURM_JOB_ID kaos_sweep "$SCR"',
         # Diagnostics without SSH (live job 5143859: exit 231 with no way to
         # see WHY): on any failure, tail this job's own output file into its
         # job COMMENT — readable over REST from the waiter and by operators.
@@ -414,8 +423,8 @@ def batch_lines(scope, scratch):
         '    unset SLURM_CPUS_PER_TASK SLURM_CPUS_ON_NODE SLURM_MEM_PER_NODE SLURM_NTASKS SLURM_GPUS_ON_NODE SLURM_JOB_GPUS;',
         '    case "$KUBECORE_SLOT_CPUS" in ""|*[!0-9]*) ;; *) export SLURM_CPUS_PER_TASK=$KUBECORE_SLOT_CPUS'
         ' SLURM_CPUS_ON_NODE=$KUBECORE_SLOT_CPUS;; esac;',
-        '    case "$KUBECORE_SLOT_MEM_GIB" in ""|*[!0-9]*) ;;'
-        ' *) export SLURM_MEM_PER_NODE=$((KUBECORE_SLOT_MEM_GIB * 1024));; esac;',
+        '    case "$KUBECORE_SLOT_MEM_GIB" in ""|*[!0-9]*|???????*) ;;'
+        ' *) export SLURM_MEM_PER_NODE=$((10#$KUBECORE_SLOT_MEM_GIB * 1024));; esac;',
         '    export SLURM_NTASKS=1; [ -n "$KAOS_STEP_GPUS" ] && export SLURM_JOB_GPUS=$KAOS_STEP_GPUS'
         ' SLURM_GPUS_ON_NODE=$(echo "$KAOS_STEP_GPUS" | tr "," "\\n" | grep -c .);',
         '  fi;',
