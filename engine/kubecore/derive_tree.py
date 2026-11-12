@@ -152,8 +152,6 @@ elif SCHEMA_PROFILE == "yolo":
 
     @dataclass
     class DataConfig:
-        source: DataSource = DataSource.lakefs
-        path_override: str = ""
         sample_size: str = ""
         seed: int = 42
 
