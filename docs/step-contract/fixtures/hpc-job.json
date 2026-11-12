@@ -1,0 +1,42 @@
+{
+  "apiVersion": "hpc.kaos.io/v1alpha1",
+  "kind": "HPCArgoWorkflowJob",
+  "metadata": {
+    "name": "hpc-0123456789abcdef0123",
+    "namespace": "ml-vision"
+  },
+  "spec": {
+    "class": "meluxina-gpu",
+    "image": "registry.example/vision/hera-demo/train@sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    "command": [
+      "python",
+      "-m",
+      "app.entry"
+    ],
+    "wallTimeMinutes": 720,
+    "stepName": "train",
+    "workflow": {
+      "name": "hera-demo-x7k2p",
+      "uid": "0b7f6c1e-1111-2222-3333-444455556666"
+    },
+    "app": "hera-demo",
+    "inputs": [
+      {
+        "name": "labels",
+        "repo": "dataset-labels",
+        "commit": "2222222222222222222222222222222222222222222222222222222222222222",
+        "ref": "v3"
+      },
+      {
+        "name": "embeddings",
+        "repo": "dataset-embeddings",
+        "commit": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    ],
+    "context": "{\"version\":1,\"run\":\"hera-demo-x7k2p\",\"app\":\"hera-demo\",\"project\":\"vision\",\"step\":\"train\",\"kind\":\"train\",\"experiment\":\"baseline\",\"params\":{\"train\":{\"epochs\":3,\"lr\":0.001}},\"ledger\":{\"version\":2,\"reads\":[{\"name\":\"labels\",\"repo\":\"dataset-labels\",\"owner\":null,\"ref\":\"v3\",\"commit\":\"2222222222222222222222222222222222222222222222222222222222222222\"}],\"writes\":[]},\"produces\":[{\"name\":\"model\",\"type\":\"model\",\"repo\":\"outputs-hera-demo\"}],\"upstream\":{\"prepare\":{\"version\":1,\"status\":\"ok\",\"values\":{\"rows\":1200,\"dropped\":14},\"reads\":[{\"name\":\"raw\",\"repo\":\"dataset-raw-images\",\"owner\":null,\"ref\":\"latest\",\"commit\":\"1111111111111111111111111111111111111111111111111111111111111111\"}],\"writes\":[{\"name\":\"embeddings\",\"type\":\"dataset\",\"repo\":\"dataset-embeddings\",\"commit\":\"3333333333333333333333333333333333333333333333333333333333333333\"}]}}}"
+  },
+  "status": {
+    "phase": "Succeeded",
+    "result": "{\"version\":1,\"status\":\"ok\",\"values\":{\"accuracy\":0.93,\"best_epoch\":2},\"reads\":[{\"name\":\"labels\",\"repo\":\"dataset-labels\",\"owner\":null,\"ref\":\"v3\",\"commit\":\"2222222222222222222222222222222222222222222222222222222222222222\"},{\"name\":\"embeddings\",\"repo\":\"dataset-embeddings\",\"owner\":null,\"ref\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"commit\":\"3333333333333333333333333333333333333333333333333333333333333333\"}],\"writes\":[{\"name\":\"model\",\"type\":\"model\",\"repo\":\"outputs-hera-demo\",\"commit\":\"4444444444444444444444444444444444444444444444444444444444444444\"}]}"
+  }
+}

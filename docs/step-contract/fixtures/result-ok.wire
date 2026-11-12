@@ -1,0 +1,1 @@
+{"version":1,"status":"ok","values":{"rows":1200,"dropped":14},"reads":[{"name":"raw","repo":"dataset-raw-images","owner":null,"ref":"latest","commit":"1111111111111111111111111111111111111111111111111111111111111111"}],"writes":[{"name":"embeddings","type":"dataset","repo":"dataset-embeddings","commit":"3333333333333333333333333333333333333333333333333333333333333333"}]}

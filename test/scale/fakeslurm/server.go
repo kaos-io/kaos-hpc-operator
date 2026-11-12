@@ -1031,6 +1031,27 @@ func (s *Site) States() map[string]int {
 	return out
 }
 
+// JobEnv returns the environment the job named name was submitted with: of the newest such job when the
+// name was submitted more than once, nil when the site holds no such job.
+func (s *Site) JobEnv(name string) map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var newest *Job
+	for _, j := range s.jobs {
+		if j.Name == name && (newest == nil || j.ID > newest.ID) {
+			newest = j
+		}
+	}
+	if newest == nil {
+		return nil
+	}
+	out := make(map[string]string, len(newest.Env))
+	for k, v := range newest.Env {
+		out[k] = v
+	}
+	return out
+}
+
 // JobNames returns the sorted names of the jobs the site holds.
 func (s *Site) JobNames() []string {
 	s.mu.Lock()

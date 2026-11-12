@@ -1,0 +1,22 @@
+# The rights the Argo executor needs in the checks' namespace: it reports each step's outputs as a
+# WorkflowTaskResult. Bound to the namespace's default service account, which the check Workflows use.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: contract-checks-executor
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["workflowtaskresults"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: contract-checks-executor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: contract-checks-executor
+subjects:
+  - kind: ServiceAccount
+    name: default

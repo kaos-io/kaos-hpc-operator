@@ -1,0 +1,108 @@
+# Check 3(a): the step context is assembled as ONE JSON value from task outputs.
+#
+#   compose   writes the step's base context (every field but `upstream`) as one output
+#   prepare   an upstream step: writes its result file, read as the output `kaos-result`
+#   argument  the context is assembled in the DAG task argument `kaos-context`; the container's
+#             KAOS_STEP_CONTEXT is that input, unchanged
+#   first     a step with no needs=: the same expression with an empty `upstream`
+#   env       the DAG passes the pieces as separate arguments; the context is assembled in the
+#             container's env value
+#
+# Both consumers print the byte count and the sha256 of what they received in KAOS_STEP_CONTEXT.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: contract-3a-
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: base-b64     # the base context, wire form, base64
+      - name: result-b64   # the upstream step's result, wire form, base64
+  templates:
+    - name: compose
+      container:
+        image: alpine:3.20
+        command: [sh, -c]
+        args: ["mkdir -p /work && printf %s '{{workflow.parameters.base-b64}}' | base64 -d > /work/context.json"]
+      outputs:
+        parameters:
+          - name: kaos-context-train
+            valueFrom: {path: /work/context.json}
+
+    - name: producer
+      container:
+        image: alpine:3.20
+        command: [sh, -c]
+        args: ["mkdir -p /work/output && printf %s '{{workflow.parameters.result-b64}}' | base64 -d > /work/output/kaos-result.json"]
+      outputs:
+        parameters:
+          - name: kaos-result
+            valueFrom:
+              path: /work/output/kaos-result.json
+              default: '{"version":1,"status":"absent"}'
+
+    - name: consumer
+      inputs:
+        parameters:
+          - name: kaos-context
+      container:
+        image: alpine:3.20
+        command: [sh, -c]
+        args: ['printf "BYTES=%s\n" "$(printf %s "$KAOS_STEP_CONTEXT" | wc -c)"; printf "SHA256=%s\n" "$(printf %s "$KAOS_STEP_CONTEXT" | sha256sum | cut -c1-64)"; printf "VALUE=%s\n" "$KAOS_STEP_CONTEXT"']
+        env:
+          - name: KAOS_STEP_CONTEXT
+            value: "{{inputs.parameters.kaos-context}}"
+
+    - name: consumer-env
+      inputs:
+        parameters:
+          - name: kaos-base
+          - name: upstream-prepare
+      container:
+        image: alpine:3.20
+        command: [sh, -c]
+        args: ['printf "BYTES=%s\n" "$(printf %s "$KAOS_STEP_CONTEXT" | wc -c)"; printf "SHA256=%s\n" "$(printf %s "$KAOS_STEP_CONTEXT" | sha256sum | cut -c1-64)"; printf "VALUE=%s\n" "$KAOS_STEP_CONTEXT"']
+        env:
+          - name: KAOS_STEP_CONTEXT
+            value: >-
+              {{=sprig.trimSuffix("}", inputs.parameters["kaos-base"])
+              + ",\"upstream\":{\"prepare\":" + inputs.parameters["upstream-prepare"]
+              + "}" + "}"}}
+
+    - name: main
+      dag:
+        tasks:
+          - name: compose
+            template: compose
+          - name: prepare
+            template: producer
+            depends: compose
+          - name: argument
+            template: consumer
+            depends: "compose && prepare"
+            arguments:
+              parameters:
+                - name: kaos-context
+                  value: >-
+                    {{=sprig.trimSuffix("}", tasks["compose"].outputs.parameters["kaos-context-train"])
+                    + ",\"upstream\":{\"prepare\":" + tasks["prepare"].outputs.parameters["kaos-result"]
+                    + "}" + "}"}}
+          - name: first
+            template: consumer
+            depends: compose
+            arguments:
+              parameters:
+                - name: kaos-context
+                  value: >-
+                    {{=sprig.trimSuffix("}", tasks["compose"].outputs.parameters["kaos-context-train"])
+                    + ",\"upstream\":{" + "}" + "}"}}
+          - name: env
+            template: consumer-env
+            depends: "compose && prepare"
+            arguments:
+              parameters:
+                - name: kaos-base
+                  value: "{{tasks.compose.outputs.parameters.kaos-context-train}}"
+                - name: upstream-prepare
+                  value: "{{tasks.prepare.outputs.parameters.kaos-result}}"
