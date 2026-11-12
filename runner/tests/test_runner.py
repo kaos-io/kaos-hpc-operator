@@ -1539,3 +1539,17 @@ def test_a_runner_killed_between_the_fetch_and_the_report_leaves_the_result_for_
     assert rig.kube.run["state"] == "COMPLETED" and rig.kube.run["terminal"]
     assert rig.kube.status["result"] == helpers.fixture("result-model.wire")
     assert rig.net.deleted, "deleted after the accepted terminal report"
+
+
+def test_a_host_job_ended_by_term_is_judged_by_its_comment_not_by_its_exit_code(rig):
+    """The job script ends every TERM, HUP and INT with exit 143 (cancel, the time limit), so Slurm records 143 for a
+    host job that ended normally. The runner reads the step's result from the job comment (kaos-state=done rc=...),
+    never from the host job's exit code (docs/job-environment.md)."""
+    for job_rc, comment, state, code in ((143, HOST_DONE, "COMPLETED", 0), (0, "kaos-state=done rc=1", "COMPLETED", 0)):
+        step_over = acc("RUNNING", comment=comment, start=1762300800, end=0)
+        job_over = acc("FAILED" if job_rc else "COMPLETED", rc=job_rc, comment=comment, start=1762300800, end=1762300980)
+        rig.make(FakeSlurm({"5001": [step_over, step_over, job_over]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+        rig.runner.run()
+        first = terminal_reports(rig)[0]
+        want = ("COMPLETED", 0) if comment == HOST_DONE else ("FAILED", 1)
+        assert (first["state"], first["exitCode"]) == want, "%s with job exit %s: %s" % (comment, job_rc, first)

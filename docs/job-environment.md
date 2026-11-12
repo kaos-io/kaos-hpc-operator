@@ -9,7 +9,9 @@ A step's image is parsed once (`settings.parse_image`, and the same grammar in `
 `<host>/<repository>[:<tag>][@sha256:<digest>]`, lowercase, with a tag or a digest, and only the characters
 `A-Za-z0-9._:/@-`. A reference that does not parse (a space, a control character, a quote, `$`, a backtick, `;`, userinfo)
 is refused as `InvalidImage` by the controller before anything is booked, and by the runner before any network call;
-`Runner.site_job` refuses again before it writes a script. The script quotes every use of the reference.
+`Runner.site_job` refuses again before it writes a script. The script quotes every use of the reference. The image stager
+(`image.parse_image`) and the workdir lookup (`wallet.fetch_workdir`) read host, repository and tag or digest from that same
+function; an empty tag before a digest (`host/app:@sha256:...`) is refused everywhere, in Go too.
 
 The registry token is minted for Artifact Registry only. It is presented to a host that is exactly
 `<one label>-docker.pkg.dev` (`settings.registry_token_host`; the script applies the same rule to the host it cuts from
@@ -17,7 +19,8 @@ the reference, not to a pattern over the whole reference). Any other host is pul
 put in the job at all. The script unsets it (and Apptainer's copy of it) as soon as the image exists.
 
 ## What the step container receives
-`apptainer exec --cleanenv`: the container sees `jobscript.STEP_ENV` and nothing of the job's environment.
+`apptainer exec --cleanenv`: the container sees `jobscript.STEP_ENV` (when the job has the variable) and nothing of the
+job's environment.
 
 | variable | why |
 |---|---|
@@ -28,12 +31,44 @@ put in the job at all. The script unsets it (and Apptainer's copy of it) as soon
 | `CUDA_VISIBLE_DEVICES`, `NVIDIA_VISIBLE_DEVICES` | GPU selection (renumbered by the script on a fenced shared node) |
 | `KUBECORE_SLOT_GPUS`, `_CPUS`, `_MEM_GIB`, `_SHARED` | the slot's share of the node (`kaos_lib.runtime`) |
 | `SLURM_JOB_ID`, `SLURM_STEP_ID`, `KAOS_STEP_GPUS` | the slot manager finds a step's processes in `/proc/<pid>/environ` by these (memory kill, GPU trespass watchdog) |
-| `SLURM_CPUS_ON_NODE` | plain fact for sizing workers |
+| `SLURM_CPUS_ON_NODE`, `SLURM_CPUS_PER_TASK`, `SLURM_GPUS_ON_NODE`, `SLURM_JOB_GPUS`, `SLURM_NTASKS`, `SLURM_MEM_PER_NODE`, `SLURM_JOB_NODELIST`, `SLURM_TMPDIR` | plain facts for sizing workers (see below for a shared node) |
+| `http_proxy`, `https_proxy`, `HTTP_PROXY`, `HTTPS_PROXY`, `no_proxy`, `NO_PROXY` | the site's way out to the network |
+| `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` | the site's certificate authority |
+| `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `LANG`, `LC_ALL`, `TZ`, `PYTHONUNBUFFERED`, `XDG_CACHE_HOME`, `NVIDIA_DRIVER_CAPABILITIES`, `GPU_DEVICE_ORDINAL` | settings a job sets for its programs |
 | `KAOS_STAGED_ROOT`, `KAOS_CHECKPOINT_DIR`, `KAOS_RESUME_PATH` | set by the script when there are inputs, a checkpoint folder, a continuation |
 
-The registry token, the checkpoint/hand-back/stage-in programs, the idle watchdog, the job's own settings and every other
-variable are not passed. The two bearers (`LAKEFS_BEARER_TOKEN`, `MLFLOW_TRACKING_TOKEN`) are the only credentials in the
-container's environment, because the library cannot read either from a file; they are in no file the runner writes.
+Not passed, on purpose: `HOME` (Apptainer gives the container its own `HOME`, the site user's home folder, bound in; the
+host's value would only repeat it), `USER`, `PATH` (the image's own), `LD_LIBRARY_PATH` and `LD_PRELOAD` (they would point
+the image's loader at host libraries; `--nv` binds the driver's), the registry token, the checkpoint/hand-back/stage-in
+programs, the idle watchdog, the job's own settings and every other variable.
+
+On a shared node the step is not given the host job's Slurm figures (srun hands every step the host job's variables).
+`SLURM_CPUS_PER_TASK` and `SLURM_CPUS_ON_NODE` are the slot's cores, `SLURM_MEM_PER_NODE` the slot's memory in MB,
+`SLURM_NTASKS` is 1, `SLURM_JOB_GPUS` and `SLURM_GPUS_ON_NODE` are the step's own GPU set; a figure the slot manager did
+not give is left out, never replaced by the host's. A job alone on its node gets Slurm's own values.
+
+### How a value gets into the container
+Apptainer 1.1.0 and later evaluate an `APPTAINERENV_<name>` value (and an `--env` or `--env-file` value) in the
+container's startup shell unless `--no-eval` is given (`--no-eval` appeared in 1.1.0; the Apptainer user guide, "Escaping
+and Evaluation of Environment Variables"): `$(...)`, backticks, `$VAR` and backslashes in a value are run or changed. A
+step's context carries run parameters, so the script does not hand the dangerous values to Apptainer at all, and does not
+depend on the flag or on the site's Apptainer version:
+
+* the context, the two bearers and `KAOS_LIB_SUPPORT` always travel as files, byte for byte;
+* any other value travels as `APPTAINERENV_<name>` only when every character is one of `A-Za-z0-9_.,:/+=@%[]-`, which
+  evaluation leaves as it is; a value with any other character (a proxy with `$` in the password, a path with a space)
+  travels as a file too;
+* the files are written with `printf %s` into `$SCR/kaos-tmp/env-<job>/` (folder 0700, one file per variable, 0600), the
+  folder is bound read-only at `/kaos/env`, and a small loader in the container's own `/bin/sh` reads each file and exports
+  it before the step command runs (`$(cat file; printf x)`, so a trailing newline survives);
+* the folder is removed when the step ends and by the job's exit trap; the sweep below removes one a killed job left;
+* a value that cannot be written ends the step with exit 233 before it starts.
+
+So for as long as the step runs the two bearers are in a 0600 file of a 0700 folder as well as in the container's
+environment (the library reads them from the environment only; nothing the runner writes holds them after the step).
+
+The tests (`runner/tests/test_hardening.py`) run the whole script against a fake Apptainer that models the evaluation, and
+prove a 100 KB context holding `$HOME $(...)`, backticks, `\` and `"` arrives byte for byte and runs nothing.
 
 ## Files
 * `umask 077` at the top of every script, and in every program the script starts: files are 0600, folders 0700.
@@ -45,13 +80,43 @@ container's environment, because the library cannot read either from a file; the
   copy holds the job's credentials). The copy and the slot-manager program live in `$SCR/kaos-priv/host-<job>/` (0700,
   files 0600), not in `/tmp`, and the folder is removed on every way out of the script: end, `fail()`, TERM/HUP/INT.
   A guest's script copy in the claim folder is removed when its step ends or is handed back.
-* A failed job keeps its work folder (the developer needs it); it holds no credential file.
+* A failed job keeps its work folder; it holds no credential file. It is private to the site user (0700): only that
+  account, which the platform's staging tool uses, can read it.
+* A job killed without a trap (SIGKILL, node loss) leaves `kaos-priv/host-<job>` (the bearer), `kaos-tmp/in-<job>` and
+  `kaos-tmp/env-<job>`. Every job script starts with `kaos_sweep "$SCR"` (`jobscript.SWEEP_HELPER`, self-contained shell):
+  it removes those whose Slurm job is no longer queued or running. It asks `squeue -u $USER`; when squeue cannot answer, or
+  its answer lacks the asking job itself, it removes nothing. Only folders named exactly `host-<digits>`, `in-<digits>`,
+  `env-<digits>` directly under `<root>/kaos-priv` and `<root>/kaos-tmp`, owned by the caller, older than
+  `KAOS_SWEEP_MIN_AGE_MIN` (10) minutes; a link is never followed; an empty, relative or missing root does nothing. Any
+  other caller (a cleanup workflow, the login-node staging tool) can run the same function: define it from
+  `SWEEP_HELPER`, call `kaos_sweep <project scratch root>`.
+
+## Exit codes of a host job
+The script ends every TERM, HUP and INT with exit 143 (a cancel, the job's time limit), so the Slurm exit code of a
+shared-node host job after a TERM is always 143 whatever its step did. The runner does not read that code: the step's own
+result is in the job comment (`kaos-state=done rc=...`, written by the slot manager), and that is what the runner reports
+(`test_runner.py::test_a_host_job_ended_by_term_is_judged_by_its_comment_not_by_its_exit_code`).
 
 ## What a failed job shows
-The last 700 bytes of the job's output go into the job comment after `kaos_redact` replaced Bearer/Basic values, `ya29.`
-access tokens, JWTs (`eyJ...`), and the value of any `...key=`, `...token=`, `...password=`, `...secret=` word or JSON
-member. The redaction runs on the last 4 KiB, before the last 700 bytes are cut, so a token cut by the window is still
-redacted whole.
+The last 700 bytes of the job's output go into the job comment after `redact.py` (shipped to the node as `REDACT_B64`)
+replaced credentials. The same program redacts every line of the live log stream before the runner prints it. What it
+replaces, by shape or by exact value and never by "the line has the word key or token in it":
+
+* the exact values of the credentials the job holds (the data and MLflow bearer) and their base64, URL-safe base64, Basic
+  (`oauth2accesstoken:<token>`) and percent-encoded forms;
+* `Bearer`/`Basic` values of 16 or more characters, the value after `Authorization:`, `Proxy-Authorization:`,
+  `X-...-Key/Token/Secret:`, `Api-Key:`, a `Cookie:` header;
+* JWTs (`eyJ...`), Google access tokens (`ya29.`, which is also the registry token's shape), GitHub tokens (`ghp_`,
+  `github_pat_`...), AWS access key ids (`AKIA...`), the password of `scheme://user:password@host`;
+* the value of `NAME_TOKEN=`, `NAME_SECRET=`, `NAME_PASSWORD=`, `NAME_API_KEY=` (upper case) and of the exact words
+  `password`, `secret`, `token`, `api_key`, `access_token`, `refresh_token`, `client_secret`, `private_key` in `k=v`, JSON,
+  a Python repr, escaped JSON and a query string;
+* a private key block, also one written as a single JSON string.
+
+`max_new_tokens=512`, `tokenizer=...`, `num_keypoints=17`, `monkey=3`, `"primary_key": "id"` and "The Bearer token expired"
+are left alone. Every pattern is linear in the length of the line. The redaction runs on the last 64 KiB of the output
+before the last 700 bytes are cut, so a token or a key block cut by the small window is still redacted whole. A node with
+no `python3` shows none of the output (`[output withheld ...]`): unknown never means show it.
 
 ## What this does not do
 * Jobs of one project run as ONE site user. The site sees one user, so no mode separates two jobs of that user from each

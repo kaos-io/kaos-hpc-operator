@@ -21,6 +21,9 @@ HANDBACK = _read('handback')
 CKPT = _read('ckpt')
 SLOTS = _read('slots')
 IDLEWATCH = _read('idlewatch')
+# One redaction program for the node (the failure tail) and the runner (the log stream): redact.py is a module of the
+# runner AND a node program (Python 3.6, stdlib only), so it is read from the package, not from payload/.
+REDACT = (_DIR.parent / 'redact.py').read_text()
 
 
 def b64(text):

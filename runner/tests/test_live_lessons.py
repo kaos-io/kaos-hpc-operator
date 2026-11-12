@@ -109,17 +109,19 @@ def test_fetch_workdir_presents_the_token_only_to_gar_hosts__live_job_5140432(re
 
 def _exec_script(tmp_path, workdir, gpus, extra_env=None, probe_ok=True):
     """The batch script's PWD_OPT/NV lines and the `apptainer exec`, run against a recording fake apptainer."""
-    block = _span('PWD_OPT=""', '( for KAOS_V in') + ['wait']
+    block = ['fail(){ exit "$1"; }'] + _span('PWD_OPT=""', '  exec apptainer exec') + ['wait']
     # The fence probe is `apptainer exec --nv --nvccli img.sif true`; the step's own exec records args and env.
     _fake(tmp_path / 'bin', 'apptainer',
           '[ "$*" = "exec --nv --nvccli img.sif true" ] && exit %d\n' % (0 if probe_ok else 1) +
           'echo "$@" > "$OUT"; env | grep "^APPTAINERENV_" | sort >> "$OUT.env"\n'
           'env | grep -E "^(CUDA_VISIBLE_DEVICES|NVIDIA_VISIBLE_DEVICES|KUBECORE_SLOT_GPUS)=" | sort > "$OUT.host"\n')
     env = dict(os.environ, PATH=str(tmp_path / 'bin') + os.pathsep + os.environ['PATH'], OUT=str(tmp_path / 'args'),
-               SIF='img.sif', BIND='', STEP_CMD='true', STEP_WORKDIR=workdir, **(extra_env or {}))
+               SIF='img.sif', BIND='', STEP_CMD='true', STEP_WORKDIR=workdir, SCR=str(tmp_path), KAOS_JOB_ID='1',
+               **(extra_env or {}))
     env.pop('HPC_GPUS', None)
     if gpus is not None:
         env['HPC_GPUS'] = str(gpus)
+    (tmp_path / 'kaos-tmp').mkdir(exist_ok=True)
     subprocess.run([BASH, '-c', '\n'.join(block)], env=env, check=True, cwd=tmp_path)
     return (tmp_path / 'args').read_text().split()
 

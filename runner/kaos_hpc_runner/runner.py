@@ -120,7 +120,7 @@ class Runner:
         self.slurm = slurm or Slurm(cfg)
         self.stager = stager or staging.Stager(cfg)
         self.reporter = reporter or Reporter(cfg)
-        self.logs = logs or LogStreamer(cfg, self.stager, self.reporter)
+        self.logs = logs or LogStreamer(cfg, self.stager, self.reporter, secrets=lambda: (self.wallet,))
         self._mint = mint or (lambda: wallet.mint_wallet(cfg.env))
         self.jid = None
         self.submitted_at = 0.0      # when the current site job was submitted (its queue time starts here)
@@ -265,6 +265,7 @@ class Runner:
             env += ['KAOS_RESUME_REF=' + cfg.resume[0], 'KAOS_RESUME_PREFIX=' + cfg.resume[1]]
         # D-74, D-75: the checkpoint copier every job carries (the step's KAOS_CHECKPOINT_DIR). Quota ids: the
         # project's Lustre project id is the digits of its account.
+        env.append('REDACT_B64=' + payloads.b64(payloads.REDACT))     # the job's failure tail is redacted with it
         env += ['CKPT_B64=' + payloads.b64(payloads.CKPT), 'KAOS_CKPT_BUDGET_PCT=%d' % cfg.ckpt_budget_pct,
                 'KAOS_PROJID=' + ''.join(c for c in ident['account'] if c.isdigit())]
         if cfg.env.get('KAOS_LIB_SUPPORT'):      # the one variable a job's spec.env may hand to the step

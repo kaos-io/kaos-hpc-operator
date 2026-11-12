@@ -99,7 +99,6 @@ def image_problem(ref):
     ref = ref or ''
     if not IMAGE_CHARS.fullmatch(ref):
         return 'it holds a space, a control character or another character an image reference never has'
-    ref = normalize_image(ref)
     name, _, digest = ref.partition('@')
     if digest:
         if not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
@@ -124,7 +123,8 @@ def normalize_image(img):
     - normalize to the digest-only form, which Apptainer accepts and which is the stronger pin."""
     if '@' in img:
         name, digest = img.split('@', 1)
-        if ':' in name.rsplit('/', 1)[-1]:
+        tag = name.rsplit('/', 1)[-1].partition(':')[2]
+        if tag:       # `name:@digest` (an empty tag) is not a reference: it stays as written, and the grammar refuses it
             name = name.rsplit(':', 1)[0]
         img = name + '@' + digest
     return img

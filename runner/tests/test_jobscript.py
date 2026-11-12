@@ -332,13 +332,13 @@ def test_per_job_paths_key_on_the_steps_own_job():
     assert lines.index("set +e") < lines.index("export KAOS_JOB_ID=${KAOS_JOB_ID:-$SLURM_JOB_ID}") \
         < next(i for i, l in enumerate(lines) if l.startswith("fail(){"))
     # The batch step's own id is used only by the default itself, the pull's private
-    # temp name (unique per process anyway) and the host hook (F-03), which runs in the
-    # batch step before any step exists.
+    # temp name (unique per process anyway), the sweep (it must find its own job in squeue's answer: the job the
+    # step runs in) and the host hook (F-03), which runs in the batch step before any step exists.
     hook = lines[lines.index('if [ -z "$KAOS_IN_STEP" ] && [ -n "$KAOS_SLOTS_B64" ]; then'):]
     hook = hook[:hook.index("fi") + 1]
     uses = [l for l in lines if "$SLURM_JOB_ID" in l and l not in hook]
-    assert len(uses) == 2 and any(l.startswith("export KAOS_JOB_ID=") for l in uses) \
-        and any("SIF_TMP=" in l for l in uses), uses
+    assert len(uses) == 3 and any(l.startswith("export KAOS_JOB_ID=") for l in uses) \
+        and any("SIF_TMP=" in l for l in uses) and any("kaos_sweep" in l for l in uses), uses
     assert any("kaos-work/$KAOS_JOB_ID" in l for l in lines)
     assert any("ds-$KAOS_JOB_ID-$IN_NAME.dir" in l for l in lines)
 
@@ -352,7 +352,8 @@ def test_a_failure_comment_keeps_the_dataset_lease(tmp_path, commit, expected_pr
     (bindir / "scontrol").chmod(0o755)
     (tmp_path / "slurm-4242.out").write_text("pulling\nboom\n")
     env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], OUT=str(tmp_path / "args"),
-               KAOS_JOB_ID="4242", KAOS_LEASES=("kaos-commit=" + commit) if commit else "")
+               KAOS_JOB_ID="4242", KAOS_LEASES=("kaos-commit=" + commit) if commit else "",
+               REDACT_B64=payloads.b64(payloads.REDACT))
     rc = subprocess.run(["bash", "-c", fail + "\nfail 7"], cwd=tmp_path, env=env).returncode
     assert rc == 7
     args = (tmp_path / "args").read_text().split("\n")
@@ -423,9 +424,10 @@ def _run(tmp_path, step_cmd):
         '#!/bin/bash\nsleep 60 & echo $! > fuse.pid\n'
         'while [ "$1" != "$SIF" ]; do shift; done; shift; exec "$@"\n')
     (bindir / "apptainer").chmod(0o755)
-    script = "\n".join(_block('[ -n "$STEP_CMD" ] || STEP_CMD="nvidia-smi -L || nproc"', "trap - USR1")
+    script = "\n".join(['fail(){ exit "$1"; }'] + _block('[ -n "$STEP_CMD" ] || STEP_CMD="nvidia-smi -L || nproc"', "trap - USR1")
                        + ['exit $rc'])
-    env = dict(os.environ, SIF="img.sif", STEP_CMD=step_cmd, NV="", PWD_OPT="", BIND="",
+    (tmp_path / "kaos-tmp").mkdir(exist_ok=True)
+    env = dict(os.environ, SIF="img.sif", STEP_CMD=step_cmd, NV="", PWD_OPT="", BIND="", SCR=str(tmp_path), KAOS_JOB_ID="1",
                PATH=str(bindir) + os.pathsep + os.environ["PATH"])
     p = subprocess.Popen(["bash", "-c", script], cwd=tmp_path, env=env)
     for _ in range(200):
@@ -491,7 +493,8 @@ def _ckpt_env(tmp_path, **extra):
                SCONTROL_LOG=str(tmp_path / "scontrol.log"), SLURM_JOB_ID="4242", KAOS_LEASES="kaos-commit=c0ffee12",
                SITE_JOB="4242", SITE_FILE=str(tmp_path / "site.comment"),
                KAOS_WORK=str(work), KAOS_CKPT_ROOT=str(scr / "kaos-ckpt"), KAOS_SCR=str(scr), WF_UID="wf1",
-               STEP_NAME="train", KAOS_ATTEMPT="1", CKPTPY=str(py), HAVE_CKPT="1", STEP_OUTPUTS="", USER="u1")
+               STEP_NAME="train", KAOS_ATTEMPT="1", CKPTPY=str(py), HAVE_CKPT="1", STEP_OUTPUTS="", USER="u1",
+               REDACT_B64=payloads.b64(payloads.REDACT))
     env.update(extra)
     return env
 

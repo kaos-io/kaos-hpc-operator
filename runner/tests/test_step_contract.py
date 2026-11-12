@@ -188,8 +188,12 @@ def test_an_upload_that_blips_is_tried_again(tmp_path, lakefs):
 # ---------------------------------------------------------------- the whole job script, run
 
 # A stand-in for Apptainer. `exec` builds the step's view of the file system under $FAKE_ROOT from its -B
-# binds (a link per bind), passes on APPTAINERENV_ variables without the prefix as Apptainer does (paths under
-# the fake root), and runs the command. pull/build leave a file.
+# binds (a link per bind), passes on APPTAINERENV_ variables without the prefix as Apptainer does, and runs the command.
+# pull/build leave a file.
+# It models what the real one does to those values (Apptainer 1.1.0+, docs "Escaping and Evaluation of Environment
+# Variables"): unless --no-eval is given, a value is EVALUATED by the container's startup shell, so `$VAR`, `$(...)`,
+# backticks and backslashes in it are expanded or run. Paths under the fake root: a value that is an absolute path is
+# mapped under it, and so is `/kaos/env` in the command (the container's own absolute path of the variable folder).
 APPTAINER = r'''#!/bin/bash
 case "$1" in
   pull|build) : > "$2"; exit 0 ;;
@@ -197,7 +201,9 @@ case "$1" in
   *) exit 0 ;;
 esac
 ROOT=$FAKE_ROOT; rm -rf "$ROOT"; mkdir -p "$ROOT"
+NOEVAL=0
 while [ $# -gt 0 ] && [ "${1%.sif}" = "$1" ]; do
+  [ "$1" = --no-eval ] && NOEVAL=1
   if [ "$1" = "-B" ]; then
     shift; src=${1%%:*}; rest=${1#*:}; dst=${rest%%:*}
     if [ -L "$ROOT$(dirname "$dst")" ]; then
@@ -215,10 +221,13 @@ while [ $# -gt 0 ] && [ "${1%.sif}" = "$1" ]; do
 done
 shift
 for v in $(compgen -v APPTAINERENV_); do
-  val=${!v}; case "$val" in /*) val=$ROOT$val ;; esac
+  val=${!v}
+  [ "$NOEVAL" = 1 ] || val=$(eval "printf %s \"${val//\"/\\\"}\"")
+  case "$val" in /*) val=$ROOT$val ;; esac
   export "${v#APPTAINERENV_}=$val"
 done
-exec "$@"
+ARGS=(); for a in "$@"; do ARGS+=("${a//\/kaos\/env/$ROOT/kaos/env}"); done
+exec "${ARGS[@]}"
 '''
 
 # The step: what kaos-lib does with what it is given: it reads KAOS_STEP_CONTEXT, finds each input under

@@ -12,6 +12,9 @@ reported in status.run.gpuUtilization with the log offset, which the controller 
 kaos_hpc_job_gpu_utilization_percent (AC-69). The offset of the last complete line is kept in status.run.logOffset (at
 most every 30 s, and when the runner stops), so a restarted runner resumes without printing lines
 again (AC-70). A stager without `log` disables streaming with one warning; the job is not affected.
+
+Every line is redacted (redact.py: the credentials this job holds by exact value, and secret shapes) before it is
+printed, kept in the tail or sent anywhere: a step's output is as private as the job comment.
 """
 
 import base64
@@ -20,6 +23,7 @@ import json
 import threading
 import time
 
+from .redact import Redactor
 from .staging import EX_USAGE
 
 POLL_S = 30   # one stager call per 30 s per running step, over the shared SSH connection (AC-68: < 60 s)
@@ -53,8 +57,10 @@ class GpuSamples:
 
 class LogStreamer:
     def __init__(self, cfg, stager, reporter, out=None, poll_s=POLL_S, persist_s=PERSIST_S,
-                 clock=time.monotonic):
+                 clock=time.monotonic, secrets=lambda: ()):
         self.cfg, self.stager, self.reporter = cfg, stager, reporter
+        self.secrets = secrets     # the credential values this job holds, asked for when a line is redacted
+        self._held, self._redactor = None, None
         self.out = out or (lambda line: print(line, flush=True))
         self.poll_s, self.persist_s, self.clock = poll_s, persist_s, clock
         self.lock = threading.RLock()
@@ -81,6 +87,7 @@ class LogStreamer:
         """Follow this Slurm job from offset (0 for a new one). Called with the lock free."""
         with self.lock:
             self.job, self.offset, self.carry = str(job), int(offset or 0), b''
+            self._redactor = None          # a new job: no private key block is open
             self.persisted = self.offset
             self.gpu, self.persisted_gpu, self.reporter.gpu_util = GpuSamples(), None, None
             self.reporter.log_offset = self.offset if offset else None
@@ -108,8 +115,17 @@ class LogStreamer:
             print('log stream: unreadable stager answer (%s)' % e, flush=True)
             return None
 
+    def _redact(self, text):
+        """The line with every credential replaced, or None for a line inside a private key block."""
+        held = tuple(v for v in self.secrets() if v)
+        if self._redactor is None or held != self._held:
+            self._held, self._redactor = held, Redactor(held)
+        return self._redactor.line(text)
+
     def _line(self, raw):
-        text = raw.decode('utf-8', 'replace').rstrip('\r')
+        text = self._redact(raw.decode('utf-8', 'replace').rstrip('\r'))
+        if text is None:
+            return
         obj = {'hpc_job': self.job, 'step': self.cfg.step, 'workflow': self.cfg.wf_name,
                'attempt': self.cfg.attempt, 'msg': text}
         if text.startswith(METRIC_PREFIX):

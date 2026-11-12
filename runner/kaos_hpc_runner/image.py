@@ -21,6 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import settings
 from .settings import registry_token_host  # noqa: F401  (the GCP token goes to Artifact Registry hosts only)
 from .staging import EX_NOSPACE, EX_RETRY, InsufficientQuota, human_bytes, ssh_present
 
@@ -104,18 +105,13 @@ class Registry:
 
 
 def parse_image(ref):
-    # name@sha256:... (or name:tag) -> (registry host, repository, reference).
-    name, _, digest = ref.partition('@')
-    tag = ''
-    if not digest:
-        head, _, last = name.rpartition('/')
-        if ':' in last:
-            last, _, tag = last.partition(':')
-            name = head + '/' + last
-    host, _, repo = name.partition('/')
-    if not repo or not ('.' in host or ':' in host or host == 'localhost'):
+    # name@sha256:... (or name:tag) -> (registry host, repository, reference): the platform's one reference
+    # grammar (settings.parse_image), the reference being the digest when there is one, else the tag.
+    parsed = settings.parse_image(ref)
+    if parsed is None:
         raise ValueError('not a registry host reference: ' + ref)
-    return host, repo, digest or tag or 'latest'
+    host, repo, tag, digest = parsed
+    return host, repo, digest or tag
 
 
 def image_manifest(reg, repo, ref):

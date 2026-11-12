@@ -492,6 +492,7 @@ func TestValidateImage(t *testing.T) {
 		{"should_refuse_an_uppercase_repository", "zot.example/Proj/app:v1", false},
 		{"should_refuse_a_double_slash", "zot.example//app:v1", false},
 		{"should_refuse_a_dot_dot_part", "zot.example/../app:v1", false},
+		{"should_refuse_an_empty_tag_before_a_digest", "zot.example/proj/app:@" + digest, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if err := ValidateImage(c.ref); (err == nil) != c.ok {
