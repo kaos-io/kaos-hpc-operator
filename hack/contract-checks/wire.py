@@ -144,6 +144,8 @@ def shape_of_read(e):
         return "name, repo (dataset-...) or commit (64 hex) is not valid"
     if not (e["owner"] is None or isinstance(e["owner"], str)) or not isinstance(e["ref"], str) or not e["ref"]:
         return "owner must be a project or null, ref a non-empty string"
+    if not isinstance(e.get("line", ""), str):
+        return "line must be a string"
     return ""
 
 
@@ -152,6 +154,8 @@ def shape_of_write(e):
         return "fields must be %s (and optionally line, path), in that order" % ", ".join(WRITE_FIELDS)
     if not _name(e["name"]) or e["type"] not in TYPES or not COMMIT.match(str(e["commit"])):
         return "name, type or commit is not valid"
+    if not all(isinstance(e.get(k, ""), str) for k in ("line", "path")):
+        return "line and path must be strings"
     repo = str(e["repo"])
     if e["type"] == "dataset":
         # dataset-<app>-<name>: the app is named in the repository, the ledger does not know it, so only the shape is checked
@@ -181,7 +185,7 @@ def shape_of_ledger(v):
 def shape_of_result(v):
     if v == ABSENT:
         return ""
-    if not isinstance(v, dict) or list(v) != RESULT_FIELDS or v["version"] != 1 or v["status"] != "ok":
+    if not isinstance(v, dict) or list(v) != RESULT_FIELDS or type(v["version"]) is not int or v["version"] != 1 or v["status"] != "ok":
         return "a result is {version: 1, status: ok, values, reads, writes} or the sentinel"
     if not isinstance(v["values"], dict) or any(k.startswith("kaos-") for k in v["values"]):
         return "values must be an object without kaos- keys"

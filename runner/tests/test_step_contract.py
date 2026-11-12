@@ -80,8 +80,8 @@ def test_the_fields_come_out_in_the_contracts_order_whatever_order_the_step_wrot
     assert list(json.loads(scrambled)) != list(want)
     assert result.check(scrambled) == helpers.fixture("result-model.wire")
     extra = dict(want, later="a field of a later contract")
-    assert list(json.loads(result.check(json.dumps(extra, sort_keys=True).encode()))) == list(want) + ["later"], \
-        "a field this runner does not know is kept, after the ones it knows"
+    with pytest.raises(result.InvalidResult, match="unknown field `later`"):
+        result.check(json.dumps(extra, sort_keys=True).encode())
 
 
 def test_a_result_at_the_cap_passes_and_one_byte_over_does_not():
@@ -492,3 +492,89 @@ def test_no_dollar_is_ever_written_in_a_result():
     text = result.check(raw)
     assert "$" not in text
     assert json.loads(text) == json.loads(raw.decode())
+
+
+# ---------------------------------------------------------------- result.check: the whole shape, not the top level
+
+OK_READ = {"name": "raw", "repo": "dataset-raw-images", "owner": None, "ref": "latest", "commit": "1" * 64}
+OK_WRITE = {"name": "embeddings", "type": "dataset", "repo": "dataset-hera-demo-embeddings", "commit": "3" * 64}
+
+
+def _result_file(**over):
+    value = {"version": 1, "status": "ok", "values": {"rows": 1}, "reads": [OK_READ], "writes": [OK_WRITE]}
+    value.update(over)
+    return json.dumps(value).encode()
+
+
+def _without(entry, key):
+    return {k: v for k, v in entry.items() if k != key}
+
+
+BAD_RESULTS = [
+    (b'{"version":1.0,"status":"ok","values":{},"reads":[],"writes":[]}', "version 1.0"),
+    (b'{"version":1e0,"status":"ok","values":{},"reads":[],"writes":[]}', "version 1.0"),
+    (b'{"version":true,"status":"ok","values":{},"reads":[],"writes":[]}', "version True"),
+    (b'{"version":1,"status":"ok","values":{"f":1E400},"reads":[],"writes":[]}', "not finite"),
+    (b'{"version":1,"status":"ok","values":{"f":-1e999},"reads":[],"writes":[]}', "not finite"),
+    (b'{"version":1,"status":"ok","values":{"a":1,"a":2},"reads":[],"writes":[]}', "appears twice"),
+    (b'{"version":1,"status":"ok","values":{},"reads":[],"writes":[],"writes":[]}', "appears twice"),
+    (b'{"version":1,"status":"ok","values":{},"reads":[{"name":"raw","name":"raw"}],"writes":[]}', "appears twice"),
+    (b'{"version":1,"status":"ok","values":{},"reads":[],"writes":[],"extra":1}', "unknown field `extra`"),
+    (b'{"version":1,"status":"ok","values":{"kaos-x":1},"reads":[],"writes":[]}', "may not start with kaos-"),
+    (b'{"version":1,"status":"ok","values":{},"reads":[1,"x"],"writes":[]}', "reads[0]"),
+    (b'{"version":1,"status":"ok","values":{},"reads":[],"writes":[null]}', "writes[0]"),
+    (_result_file(reads=[_without(OK_READ, "commit")]), "no `commit`"),
+    (_result_file(reads=[dict(OK_READ, extra=1)]), "unknown `extra`"),
+    (_result_file(reads=[dict(OK_READ, commit="abc")]), "commit (64 hex"),
+    (_result_file(reads=[dict(OK_READ, repo="raw")]), "repo (dataset-"),
+    (_result_file(reads=[dict(OK_READ, owner=3)]), "owner"),
+    (_result_file(reads=[dict(OK_READ, ref="")]), "ref"),
+    (_result_file(reads=[dict(OK_READ, name="Raw")]), "name"),
+    (_result_file(reads=[dict(OK_READ, line=3)]), "not a string"),
+    (_result_file(writes=[dict(OK_WRITE, type="table")]), "type (model, artifact or dataset)"),
+    (_result_file(writes=[dict(OK_WRITE, repo="dataset-embeddings")]), "dataset-<app>-<name>"),
+    (_result_file(writes=[dict(OK_WRITE, type="model", repo="dataset-hera-demo-embeddings")]), "outputs-<app>"),
+    (_result_file(writes=[_without(OK_WRITE, "type")]), "no `type`"),
+    (_result_file(writes=[dict(OK_WRITE, path=7)]), "not a string"),
+]
+
+
+@pytest.mark.parametrize("raw, said", BAD_RESULTS)
+def test_a_result_with_a_wrong_shape_anywhere_is_refused_naming_what_is_wrong(raw, said):
+    with pytest.raises(result.InvalidResult) as e:
+        result.check(raw)
+    assert said in str(e.value)
+
+
+def test_a_well_formed_result_with_every_optional_field_and_any_field_order_is_accepted():
+    scrambled = {"writes": [dict(OK_WRITE, path="m/", line="x")], "reads": [dict(OK_READ, owner="other", line="x")],
+                 "values": {}, "status": "ok", "version": 1}
+    text = result.check(json.dumps(scrambled).encode())
+    assert json.loads(text) == scrambled and list(json.loads(text)) == ["version", "status", "values", "reads", "writes"]
+
+
+def test_the_runners_check_and_the_reference_checker_agree_on_the_shape_of_every_case():
+    """wire.py's shape_of_result is the fixtures' checker: the runner accepts exactly what it accepts, for every
+    case that the reference can read (finite numbers, no key twice, the fields in the contract's order; the runner
+    is lenient about the order only, by design: rule 6)."""
+    ref = reference_wire()
+    cases = [raw for raw, _ in BAD_RESULTS] + [_result_file(), helpers.fixture("result-ok.json").encode(),
+                                                helpers.fixture("result-model.json").encode()]
+    compared = 0
+    for raw in cases:
+        if b"E400" in raw or b"e999" in raw:
+            continue    # the reference checks shapes; finiteness is the runner's (and the parse's) job
+        try:
+            value = json.loads(raw.decode(), parse_constant=lambda c: 1 / 0, object_pairs_hook=lambda pairs: dict(pairs) if len(dict(pairs)) == len(pairs) else 1 / 0)
+        except (ValueError, ZeroDivisionError):
+            continue
+        if not isinstance(value, dict) or list(value) != ref.RESULT_FIELDS:
+            continue
+        try:
+            result.check(raw)
+            runner_ok = True
+        except result.InvalidResult:
+            runner_ok = False
+        assert runner_ok == (ref.shape_of_result(value) == ""), raw
+        compared += 1
+    assert compared >= 20

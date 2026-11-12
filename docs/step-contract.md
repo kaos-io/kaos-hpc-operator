@@ -201,7 +201,10 @@ A step that fails hands back nothing: the steps that need it do not run.
 
 **Who checks a result.** In the cluster nothing between two steps does: kaos-lib writes it, and the `start()`
 of each step that needs it checks the shape of the entry and fails naming the upstream step. On HPC the
-runner checks it before it is handed back (section 8).
+runner checks it before it is handed back (section 8): the whole shape, not the top level. `version` is the
+integer 1, `values` is an object, every entry of `reads` and `writes` has the fields and types of section 5, every
+number is finite, no object holds a key twice, and a field the contract does not give is refused. A result that
+fails any of this fails the job and the message names what is wrong.
 
 Fixtures: `result-ok` (one read, one write), `result-model`, `result-absent`.
 

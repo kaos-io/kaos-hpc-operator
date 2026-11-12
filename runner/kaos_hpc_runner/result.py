@@ -7,6 +7,8 @@ replaced by "no result": the job fails, and the sentence says what is wrong (PRD
 """
 
 import json
+import math
+import re
 
 RESULT_CAP = 8 * 1024        # the most a result may cost
 RESULT_FILE = '/work/output/kaos-result.json'   # where the step writes it, in every container
@@ -29,12 +31,23 @@ class _Float(float):
 
     def __new__(cls, text):
         self = super().__new__(cls, text)
+        if not math.isfinite(self):
+            raise ValueError('the number %s is not finite' % text)
         self.text = text
         return self
 
 
 def _no_constant(name):
     raise ValueError('%s is not a JSON number' % name)
+
+
+def _no_duplicates(pairs):
+    out = {}
+    for k, v in pairs:
+        if k in out:
+            raise ValueError('the key %r appears twice in one object' % k)
+        out[k] = v
+    return out
 
 
 def _string(text):
@@ -74,33 +87,100 @@ WRITE_FIELDS = ('name', 'type', 'repo', 'commit', 'line', 'path')          # sec
 
 
 def _ordered(obj, fields):
-    """obj with the contract's fields first, in the contract's order; a field it does not know stays, after them."""
-    out = {k: obj[k] for k in fields if k in obj}
-    out.update((k, v) for k, v in obj.items() if k not in out)
-    return out
+    """obj with its fields in the contract's order (check() has refused any field the contract does not give)."""
+    return {k: obj[k] for k in fields if k in obj}
+
+
+NAME = re.compile(r'^[a-z0-9]([a-z0-9-]*[a-z0-9])?$')
+COMMIT = re.compile(r'^[0-9a-f]{64}$')
+TYPES = ('model', 'artifact', 'dataset')
+
+
+def _name(text):
+    return isinstance(text, str) and len(text) <= 40 and bool(NAME.match(text)) and not text.startswith('kaos-')
+
+
+def _fields(entry, required, optional):
+    """What is wrong with the field names of an object ('' when nothing): all of `required`, no field but those
+    and `optional`. The order is not asked of the step: the runner writes the contract's order (rule 6)."""
+    if not isinstance(entry, dict):
+        return 'is not an object'
+    missing = [k for k in required if k not in entry]
+    extra = [k for k in entry if k not in required and k not in optional]
+    if missing or extra:
+        return 'must have the fields %s (and optionally %s)%s%s' % (
+            ', '.join(required), ', '.join(optional) or 'none',
+            ''.join('; it has no `%s`' % k for k in missing), ''.join('; it has an unknown `%s`' % k for k in extra))
+    if any(k in entry and not isinstance(entry[k], str) for k in optional):
+        return 'has a %s that is not a string' % ' or '.join(optional)
+    return ''
+
+
+def _bad_read(e):
+    """docs/step-contract.md, section 5 (a read); the same rules as shape_of_read in hack/contract-checks/wire.py."""
+    bad = _fields(e, READ_FIELDS[:5], READ_FIELDS[5:])
+    if bad:
+        return bad
+    if not _name(e['name']) or not isinstance(e['repo'], str) or not e['repo'].startswith('dataset-') \
+            or not isinstance(e['commit'], str) or not COMMIT.match(e['commit']):
+        return 'has a name, a repo (dataset-...) or a commit (64 hex characters) that is not valid'
+    if not (e['owner'] is None or isinstance(e['owner'], str)) or not isinstance(e['ref'], str) or not e['ref']:
+        return 'has an owner that is not a project name or null, or a ref that is not a non-empty string'
+    return ''
+
+
+def _bad_write(e):
+    """Section 5 (a write); the same rules as shape_of_write in hack/contract-checks/wire.py."""
+    bad = _fields(e, WRITE_FIELDS[:4], WRITE_FIELDS[4:])
+    if bad:
+        return bad
+    if not _name(e['name']) or e['type'] not in TYPES or not isinstance(e['commit'], str) or not COMMIT.match(e['commit']):
+        return 'has a name, a type (model, artifact or dataset) or a commit (64 hex characters) that is not valid'
+    repo = e['repo']
+    if not isinstance(repo, str):
+        return 'has a repo that is not a string'
+    if e['type'] == 'dataset':
+        if not (repo.startswith('dataset-') and repo.endswith('-' + e['name']) and len(repo) > len('dataset-') + len(e['name']) + 1):
+            return 'is a dataset, so its repo must be dataset-<app>-<name>'
+    elif not repo.startswith('outputs-'):
+        return 'is not a dataset, so its repo must be outputs-<app>'
+    return ''
 
 
 def check(raw):
     """The result file's bytes as the text for status.result (wire form), or InvalidResult saying what is wrong.
-    A result is a JSON object with version 1, status "ok", an object `values` and the lists `reads` and
-    `writes`, and costs at most 8 KiB."""
+    A result is a JSON object (docs/step-contract.md, section 4) with the integer version 1, status "ok", an
+    object `values` (no key starting with kaos-), the lists `reads` and `writes` of ledger entries (section 5),
+    only finite numbers and no key twice in one object; and it costs at most 8 KiB."""
     try:
-        value = json.loads(raw.decode('utf-8'), parse_float=_Float, parse_constant=_no_constant)
+        value = json.loads(raw.decode('utf-8'), parse_float=_Float, parse_constant=_no_constant,
+                           object_pairs_hook=_no_duplicates)
     except (UnicodeDecodeError, ValueError) as e:
         raise InvalidResult('the step\'s result file is not JSON (%s)' % e)
     if not isinstance(value, dict):
         raise InvalidResult('the step\'s result file holds %s, not a JSON object' % type(value).__name__)
-    if isinstance(value.get('version'), bool) or value.get('version') != 1:
-        raise InvalidResult('the step\'s result has version %r; this platform reads version 1' % (value.get('version'),))
+    if type(value.get('version')) is not int or value.get('version') != 1:
+        raise InvalidResult('the step\'s result has version %r; this platform reads the integer 1' % (value.get('version'),))
     if value.get('status') != 'ok':
         raise InvalidResult('the step\'s result has status %r; a step hands back status "ok"' % (value.get('status'),))
     for field, kind, word in (('values', dict, 'an object'), ('reads', list, 'a list'), ('writes', list, 'a list')):
         if not isinstance(value.get(field), kind):
             raise InvalidResult('the step\'s result has no `%s` that is %s' % (field, word))
+    unknown = [k for k in value if k not in RESULT_FIELDS]
+    if unknown:
+        raise InvalidResult('the step\'s result has the unknown field `%s`; a result has %s' % (unknown[0], ', '.join(RESULT_FIELDS)))
+    reserved = [k for k in value['values'] if k.startswith('kaos-')]
+    if reserved:
+        raise InvalidResult('the step\'s result has the value `%s`; a name may not start with kaos-' % reserved[0])
+    for field, table, bad in (('reads', 'read', _bad_read), ('writes', 'write', _bad_write)):
+        for i, entry in enumerate(value[field]):
+            why = bad(entry)
+            if why:
+                raise InvalidResult('the step\'s result: %s[%d] (a ledger %s) %s' % (field, i, table, why))
     # Wire form, rule 6: the fields in the order the contract's tables give them, whatever order the step wrote.
     value = _ordered(value, RESULT_FIELDS)
-    value['reads'] = [_ordered(e, READ_FIELDS) if isinstance(e, dict) else e for e in value['reads']]
-    value['writes'] = [_ordered(e, WRITE_FIELDS) if isinstance(e, dict) else e for e in value['writes']]
+    value['reads'] = [_ordered(e, READ_FIELDS) for e in value['reads']]
+    value['writes'] = [_ordered(e, WRITE_FIELDS) for e in value['writes']]
     text = wire(value)
     if cost(text) > RESULT_CAP:
         raise InvalidResult('the step\'s result costs %d bytes, more than the %d (8 KiB) a result may cost. Metrics '
