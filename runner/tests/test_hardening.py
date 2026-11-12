@@ -83,6 +83,55 @@ def test_the_token_goes_only_to_an_artifact_registry_region_host(host, ok):
     assert settings.registry_token_host(host) is ok
 
 
+def _pull_with_token(tmp_path, ref):
+    """The image block of the script, a fake Apptainer that writes the credentials it was given. Returns the
+    password the pull was made with, or None for an anonymous pull."""
+    lines = jobscript.batch_lines("-", "/scr")
+    start = lines.index('if [ ! -f "$SIF" ]; then')
+    end = next(i for i, l in enumerate(lines) if l.startswith("unset REG_TOKEN"))
+    scr = tmp_path / "scr"
+    (scr / "sif-cache").mkdir(parents=True)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "apptainer").write_text('#!/bin/bash\nif [ "$1" = pull ]; then printf "%s" "${APPTAINER_DOCKER_PASSWORD-none}" > "$SCR/pw"; '
+                                      'printf "%s" "$3" > "$SCR/ref"; printf sif > "$2"; fi\n')
+    (bindir / "apptainer").chmod(0o755)
+    script = "\n".join(['fail(){ exit "$1"; }', 'kaos_sif_label(){ :; }'] + lines[start:end + 1]
+                       + ['printf "%s:%s" "${REG_TOKEN-unset}" "${APPTAINER_DOCKER_PASSWORD-unset}" > "$SCR/after"'])
+    env = dict(os.environ, SCR=str(scr), SIF=str(scr / "sif-cache" / "k.sif"), IMAGE_REF=ref, SLURM_JOB_ID="1",
+               REG_TOKEN=REGISTRY, STEP_NAME="s", PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+    assert subprocess.run(["bash", "-c", script], env=env, stdout=subprocess.PIPE).returncode == 0
+    return (scr / "pw").read_text(), (scr / "ref").read_text(), (scr / "after").read_text()
+
+
+def test_the_script_presents_the_token_to_an_artifact_registry_host(tmp_path):
+    pw, ref, after = _pull_with_token(tmp_path, GAR)
+    assert pw == REGISTRY and ref == "docker://" + GAR
+    assert after == "unset:unset", "the token is gone from the script's environment as soon as the image is there"
+
+
+@pytest.mark.parametrize("ref", [
+    "evil.example/x-docker.pkg.dev/p/app:v1",            # the old glob matched this: the token went to evil.example
+    "evil.example/europe-docker.pkg.dev/p/app:v1",
+    "europe-docker.pkg.dev.evil.example/p/app:v1",
+    "x.europe-docker.pkg.dev/p/app:v1",
+    "zot.example:5000/europe-docker.pkg.dev/app:v1",
+    "-docker.pkg.dev/p/app:v1",
+    "Europe-docker.pkg.dev/p/app:v1",
+])
+def test_the_script_never_presents_the_token_to_another_host(tmp_path, ref):
+    pw, pulled, after = _pull_with_token(tmp_path, ref)
+    assert pw == "none", "an anonymous pull"
+    assert after == "unset:unset"
+
+
+def test_the_reference_is_quoted_where_it_is_used(tmp_path):
+    # Spaces never reach a script (the checks above), and the script does not rely on it: every use is quoted.
+    pw, pulled, _ = _pull_with_token(tmp_path, "zot.example/p/a b:v1")
+    assert pulled == "docker://zot.example/p/a b:v1", "one argument, as written"
+    assert not any(" docker://$IMAGE_REF" in l for l in jobscript.batch_lines("-", "/scr"))
+
+
 @pytest.mark.parametrize("ref", HOSTILE[:12], ids=range(12))
 def test_a_hostile_reference_is_refused_before_any_network_call_or_submit(rig, ref):  # noqa: F811
     calls = []
@@ -222,6 +271,87 @@ def lakefs():
     srv.httpd.shutdown()
 
 
+SHELL_ADDED = {"PWD", "OLDPWD", "SHLVL", "_", "LC_CTYPE"}      # what the shell that runs the step command adds itself
+STEP_ALLOWED = set(jobscript.STEP_ENV) | {"PATH", "KAOS_STAGED_ROOT", "KAOS_CHECKPOINT_DIR", "KAOS_RESUME_PATH"}
+
+
+@tsc.MODES
+def test_the_step_receives_the_allow_list_and_nothing_else(tmp_path, lakefs, monkeypatch, shared):
+    site = HSite(tmp_path, lakefs, shared, monkeypatch)
+    assert site.run() == 0, site.out
+    saw = site.step_saw()
+    assert set(saw) - SHELL_ADDED <= STEP_ALLOWED, "outside the allow-list: " + ", ".join(sorted(set(saw) - SHELL_ADDED - STEP_ALLOWED))
+    assert "REG_TOKEN" not in saw and REGISTRY not in json.dumps(saw), "the registry token never reaches the step"
+    for k in ("KAOS_STEP_CONTEXT", "LAKEFS_ENDPOINT", "LAKEFS_BEARER_TOKEN", "KAOS_CHECKPOINT_DIR"):
+        assert saw.get(k), k + " is what the step needs"
+    assert saw["LAKEFS_BEARER_TOKEN"] == WALLET
+    assert saw["KAOS_STEP_CONTEXT"] == helpers.fixture("context-one-upstream.wire"), "the context, unchanged"
+    assert not {"WF_UID", "STEP_NAME", "STEP_CMD", "IMAGE_REF", "CKPT_B64", "HANDBACK_B64", "STAGEIN_B64", "IDLEWATCH_B64",
+                "KAOS_OUTPUTS_REPO", "HPC_GPUS", "KAOS_WORK", "SAW", "FAKE_ROOT"} & set(saw)
+
+
+@tsc.MODES
+@pytest.mark.parametrize("does", ["result", "fail"])
+def test_no_file_on_the_site_holds_a_token_when_the_job_ends(tmp_path, lakefs, monkeypatch, shared, does):
+    site = HSite(tmp_path, lakefs, shared, monkeypatch, does=does)
+    rc = site.run()
+    assert rc == (0 if does == "result" else 3), site.out
+    if does == "fail":
+        assert (site.scratch / "kaos-work" / "5001").is_dir(), "a failed job keeps its work folder for the developer"
+    assert site.leaked() == []
+    assert not [p for p in os.listdir("/tmp") if p.startswith(("kaos-job-5001", "kaos-slots-5001"))]
+
+
+@tsc.MODES
+def test_no_file_holds_a_token_after_a_cancel(tmp_path, lakefs, monkeypatch, shared):
+    site = HSite(tmp_path, lakefs, shared, monkeypatch, does="sleep")
+    site.cancel()
+    assert site.leaked() == []
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["ends", "cancelled"])
+def test_a_shared_node_host_removes_the_copy_of_its_script_on_every_way_out(tmp_path, lakefs, monkeypatch, cancel):
+    """The host's script is copied (credentials in it) for the slot manager to run. The copy is in a folder only
+    the user enters, never in /tmp, mode 0600, and gone when the host script ends or is cancelled."""
+    site = HSite(tmp_path, lakefs, True, monkeypatch)
+    seen = tmp_path / "seen.json"
+    slots = (
+        "import json, os, stat, sys, time\n"
+        "p = sys.argv[1]\n"
+        "d = os.path.dirname(p)\n"
+        "json.dump({'copy': p, 'copy_mode': stat.S_IMODE(os.stat(p).st_mode), 'dir_mode': stat.S_IMODE(os.stat(d).st_mode),\n"
+        "           'token_in_copy': %r in open(p).read(), 'umask': os.umask(0o077)}, open(%r, 'w'))\n"
+        "if %r:\n    open(%r, 'w').write('1'); time.sleep(60)\n"
+        "sys.exit(7)\n" % (WALLET, str(seen), cancel, str(site.started)))
+    (tmp_path / "bin" / "scontrol").write_text('#!/bin/bash\n[ "$1 $2" = "write batch_script" ] && cp "$HOME/../job.sh" "$4"; exit 0\n')
+    site.runner.prepare_handback()
+    batch, env, _, _ = site.runner.site_job(REGISTRY, "")
+    assert "export KAOS_SLOTS_B64=" in batch, "a sharing host: the slot manager rides in the script"
+    import base64
+    import shlex
+    batch = "\n".join("export KAOS_SLOTS_B64=" + shlex.quote(base64.b64encode(slots.encode()).decode())
+                      if l.startswith("export KAOS_SLOTS_B64=") else l for l in batch.split("\n"))
+    (tmp_path / "job.sh").write_text(batch)
+    node = dict(e.split("=", 1) for e in env)
+    node.update(PATH=str(tmp_path / "bin") + os.pathsep + os.environ["PATH"], SLURM_JOB_ID="5001", HOME=str(site.home))
+    proc = subprocess.Popen(["bash", str(tmp_path / "job.sh")], cwd=str(site.home), env=node, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, start_new_session=True)
+    if cancel:
+        deadline = time.time() + 60
+        while not site.started.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        os.killpg(proc.pid, signal.SIGTERM)
+    out = proc.communicate(timeout=60)[0].decode(errors="replace")
+    info = json.loads(seen.read_text())
+    print(out)
+    assert info["token_in_copy"] is True, "the copy is a real copy of the script: " + out
+    assert info["copy_mode"] == 0o600 and info["dir_mode"] == 0o700 and info["umask"] == 0o077
+    assert str(site.scratch / "kaos-priv") in info["copy"] and not info["copy"].startswith("/tmp/")
+    assert not os.path.exists(info["copy"]) and not os.path.exists(os.path.dirname(info["copy"])), "gone"
+    assert proc.returncode == (143 if cancel else 7)
+    assert site.leaked() == []
+
+
 def _modes(root):
     return {os.path.relpath(os.path.join(d, n), str(root)): stat.S_IMODE(os.lstat(os.path.join(d, n)).st_mode)
             for d, dirs, files in os.walk(str(root)) for n in dirs + files if not os.path.islink(os.path.join(d, n))}
@@ -255,3 +385,11 @@ def test_the_script_sets_the_umask_before_it_makes_anything():
     lines = jobscript.batch_lines("-", "/scr")
     assert lines.index("umask 077") < min(i for i, l in enumerate(lines) if "mkdir" in l or "base64 -d >" in l)
     assert lines.index("umask 077") == 3, "right after the header, so the sharing exports still follow line 3"
+
+
+def test_the_two_places_that_run_the_step_name_the_same_variables():
+    # The allow-list is one tuple; the script's loop and the contract text read it.
+    line = next(l for l in jobscript.batch_lines("-", "/scr") if l.startswith("KAOS_STEP_ENV="))
+    assert line == 'KAOS_STEP_ENV="%s"' % " ".join(jobscript.STEP_ENV)
+    assert "LAKEFS_BEARER_TOKEN" in jobscript.STEP_ENV and "REG_TOKEN" not in jobscript.STEP_ENV
+    assert sys.version_info >= (3, 6)

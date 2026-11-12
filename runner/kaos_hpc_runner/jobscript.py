@@ -7,7 +7,31 @@ lines into the job output (D-65) and deletion of the staged image tar after a su
 build (D-62).
 
 `batch_lines()` returns the script lines; they are joined with newlines by the caller.
+
+PRD kaos#1911 hardening: every script and file the job writes is private to the site user (umask 077, folders 0700);
+the step runs with `--cleanenv` and receives only STEP_ENV (below); the registry token is presented only to a host
+parsed out of the reference and is unset once the image is there; the job's private folder (the script copy a
+shared-node host keeps) is removed on every way out of the script; the failure tail copied into the job comment is
+redacted first. One limit stays: jobs of one project run as ONE site user, and the site sees one user, so no folder
+mode separates two of them from each other (see docs/job-environment.md).
 """
+
+from .settings import CONTEXT_ENV
+
+# What the step container receives, and nothing else (Apptainer --cleanenv + APPTAINERENV_<name>).
+#  - the step context, the data store's endpoint and bearer, the MLflow endpoint and bearer: kaos-lib reads these
+#    from the ENVIRONMENT only (lakefs.py LAKEFS_BEARER_TOKEN, mlflow.py MLFLOW_TRACKING_TOKEN), there is no
+#    *_FILE form of either, so these two credentials are in the container's environment and nowhere else;
+#  - KAOS_LIB_SUPPORT (the one variable a job's spec.env may hand over);
+#  - the GPU selection and the slot's share of the node (kaos_lib.runtime reads KUBECORE_SLOT_*);
+#  - SLURM_JOB_ID, SLURM_STEP_ID, KAOS_STEP_GPUS: the slot manager finds a step's processes (memory use, GPU
+#    trespass) by these in /proc/<pid>/environ, so without them inside the container the watchdogs go blind;
+#  - SLURM_CPUS_ON_NODE: plain facts apps use to size their workers.
+# KAOS_STAGED_ROOT, KAOS_CHECKPOINT_DIR and KAOS_RESUME_PATH are set by the script itself as APPTAINERENV_*.
+STEP_ENV = (CONTEXT_ENV, 'LAKEFS_ENDPOINT', 'LAKEFS_BEARER_TOKEN', 'MLFLOW_TRACKING_URI', 'MLFLOW_TRACKING_TOKEN',
+            'KAOS_LIB_SUPPORT', 'CUDA_VISIBLE_DEVICES', 'NVIDIA_VISIBLE_DEVICES', 'KUBECORE_SLOT_GPUS',
+            'KUBECORE_SLOT_CPUS', 'KUBECORE_SLOT_MEM_GIB', 'KUBECORE_SLOT_SHARED', 'KAOS_STEP_GPUS',
+            'SLURM_JOB_ID', 'SLURM_STEP_ID', 'SLURM_CPUS_ON_NODE')
 
 
 # The ONLY code that writes this job's comment from the node (fail(), the checkpoint copier). It never
@@ -62,6 +86,12 @@ def batch_lines(scope, scratch):
         # The one writer of the job comment (see COMMENT_HELPER), exported for the copier.
         *COMMENT_HELPER,
         'export -f kaos_comment',
+        'SCR=' + scratch,
+        # The job's private folder, only a shared-node host makes one. It is removed on every way out of this
+        # script: the end, fail(), a signal (Slurm's TERM at cancel or at the time limit).
+        'kaos_cleanup(){ [ -n "$KAOS_PRIV" ] && rm -rf "$KAOS_PRIV"; [ -n "$KAOS_IN_ROOT" ] && rm -rf "$KAOS_IN_ROOT"; return 0; }',
+        'trap kaos_cleanup EXIT',
+        'trap "exit 143" TERM HUP INT',
         # Diagnostics without SSH (live job 5143859: exit 231 with no way to
         # see WHY): on any failure, tail this job's own output file into its
         # job COMMENT — readable over REST from the waiter and by operators.
@@ -71,15 +101,20 @@ def batch_lines(scope, scratch):
         # this same script as one Slurm job step per slot (its own step and taken
         # guests' scripts), each with KAOS_IN_STEP=1 and that step's KAOS_JOB_ID.
         'if [ -z "$KAOS_IN_STEP" ] && [ -n "$KAOS_SLOTS_B64" ]; then',
-        '  printf %s "$KAOS_SLOTS_B64" | base64 -d > /tmp/kaos-slots-$SLURM_JOB_ID.py',
-        '  scontrol write batch_script $SLURM_JOB_ID /tmp/kaos-job-$SLURM_JOB_ID.sh >/dev/null || fail 233',
-        '  exec python3 /tmp/kaos-slots-$SLURM_JOB_ID.py /tmp/kaos-job-$SLURM_JOB_ID.sh',
+        # The copy of this script holds the job's credentials (a host reads a script, never an environment), so it
+        # lives in a folder only this user can enter, is not left in /tmp, and goes with kaos_cleanup (no exec: the
+        # shell stays to run the trap).
+        '  KAOS_PRIV=$SCR/kaos-priv/host-$SLURM_JOB_ID',
+        '  mkdir -p "$SCR/kaos-priv" && chmod 700 "$SCR/kaos-priv" && rm -rf "$KAOS_PRIV" && mkdir "$KAOS_PRIV" || fail 233',
+        '  printf %s "$KAOS_SLOTS_B64" | base64 -d > "$KAOS_PRIV/slots.py"',
+        '  scontrol write batch_script $SLURM_JOB_ID "$KAOS_PRIV/job.sh" >/dev/null || fail 233',
+        '  chmod 600 "$KAOS_PRIV/job.sh" "$KAOS_PRIV/slots.py"',
+        '  python3 "$KAOS_PRIV/slots.py" "$KAOS_PRIV/job.sh"; exit $?',
         'fi',
         'for f in /usr/share/lmod/lmod/init/bash /etc/profile.d/lmod.sh; do'
         ' [ -r "$f" ] && source "$f" && break; done',
         'module load Apptainer 2>/dev/null || module load apptainer 2>/dev/null',
         'command -v apptainer >/dev/null || fail 210',
-        'SCR=' + scratch,
         'export APPTAINER_CACHEDIR=$SCR/kaos-apptainer-cache'
         ' APPTAINER_TMPDIR=$SCR/kaos-tmp',
         'mkdir -p $APPTAINER_CACHEDIR $APPTAINER_TMPDIR $SCR/sif-cache $SCR/kaos-work $SCR/data-cache',
@@ -197,6 +232,8 @@ def batch_lines(scope, scratch):
         '    mv -n "$SIF_TMP" "$SIF"; kaos_sif_label; rm -f "$SIF_TMP"',
         '  fi',
         'fi',
+        # The registry token has done its work (or never will): it is gone from this script's environment.
+        'unset REG_TOKEN APPTAINER_DOCKER_USERNAME APPTAINER_DOCKER_PASSWORD',
         # PRD-HPC-1461 AC-65: whatever way the SIF came to exist (built here, built by another job first,
         # already cached) the staged tar is useless now, so it goes in every case, not only after this
         # job's own build (live 2026-11-10: tars of jobs that found the SIF cached piled up).
@@ -284,7 +321,14 @@ def batch_lines(scope, scratch):
         ' "$(date +%s)" "$g" "${l:-0,0,0}" "${m:-0}" 2>/dev/null;'
         ' sleep 30 & S=$!; wait $S; done; }',
         'set -m',
-        'apptainer exec $NV $PWD_OPT $BIND "$SIF" /bin/sh -c "trap \'\' USR1; $STEP_CMD" &',
+        # --cleanenv: the step sees STEP_ENV and nothing of the job's environment (the registry token, the checkpoint
+        # and hand-back programs, the job's own settings). A name the script already set as APPTAINERENV_ (the GPU
+        # fence renumbers CUDA_VISIBLE_DEVICES) is not overwritten. The exports live in the subshell that becomes
+        # the step's apptainer, so no other process of the job inherits them.
+        'KAOS_STEP_ENV="' + ' '.join(STEP_ENV) + '"',
+        '( for KAOS_V in $KAOS_STEP_ENV; do KAOS_A=APPTAINERENV_$KAOS_V;'
+        ' [ -n "${!KAOS_V+x}" ] && [ -z "${!KAOS_A+x}" ] && export "$KAOS_A=${!KAOS_V}"; done;'
+        ' exec apptainer exec --cleanenv $NV $PWD_OPT $BIND "$SIF" /bin/sh -c "trap \'\' USR1; $STEP_CMD" ) &',
         'STEP_PID=$!',
         'set +m',
         # D-65: every 30 s a KAOS_METRIC line in the job output (GPU, load, free memory). Best effort:
