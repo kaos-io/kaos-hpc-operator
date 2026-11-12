@@ -169,3 +169,23 @@ def test_the_checkpoint_interval_reaches_the_step_in_its_context():
     assert context["checkpoint_every"] == 20 and list(context)[-1] == "checkpoint_every"
     plain = yaml.safe_load(compose.step_contexts([step], "r", "a", "p", {}, {}, None, {})["one"])
     assert "checkpoint_every" not in plain
+
+
+# ------------------------------------------------------------------ promote-<name>
+
+def _with_dataset(**keywords):
+    with authoring.pipeline("t") as p:
+        authoring.step("one", kind="transform", produces=[authoring.dataset("embeddings"), authoring.model("m")])
+        authoring.step("two", kind="evaluate")
+    return enhance.enhance(yaml.safe_load(p.wt.to_yaml()), _context())
+
+
+def test_the_form_has_a_promote_choice_for_each_produced_dataset_and_for_nothing_else():
+    wft = _with_dataset()
+    form = _form(wft)
+    assert form["promote-embeddings"] == {
+        "name": "promote-embeddings", "value": "false", "enum": ["false", "true"],
+        "description": "Make this run's version of embeddings the one other pipelines read as latest."}
+    assert [n for n in form if n.startswith("promote-")] == ["promote-embeddings"]    # not the model
+    args = _template(wft, "compose-and-validate")["container"]["args"]
+    assert args[args.index("--promote") + 1] == "embeddings={{workflow.parameters.promote-embeddings}}"

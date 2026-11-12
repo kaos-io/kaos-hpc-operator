@@ -49,10 +49,9 @@ the run here.
 Config never reads the environment: a value that uses a resolver (`${oc.env:NAME}`) is refused, and the
 config is resolved with an empty environment besides, because this pod holds the platform's credentials.
 
-The run's own keys: the ADVANCED override may carry `plan`, which the platform reads
-and the app's config never defines. `plan.promote.<dataset>: true` asks the run to
-promote the dataset it produces; the step that produces it finds `promote` on that
-entry of its context.
+The run's own keys: `plan` and `pipeline-version` are the platform's; the ADVANCED override may carry
+neither. Whether a run promotes a dataset it produces is the run form's `promote-<dataset>` field
+(--promote); the step that produces it finds `promote` on that entry of its context.
 """
 
 import argparse
@@ -69,7 +68,14 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from omegaconf.nodes import BooleanNode, EnumNode, FloatNode, IntegerNode, StringNode
 
 from kubecore import derive_tree
-from kubecore.run_settings import checkpoint_field, minutes, time_problem, walltime_field
+from kubecore.run_settings import (
+    checkpoint_field,
+    minutes,
+    promote_field,
+    promote_problem,
+    time_problem,
+    walltime_field,
+)
 from kubecore.step_contract import (
     CONTEXT_CAP,
     CONTEXT_VERSION,
@@ -279,44 +285,45 @@ def _plain(value):
     return value
 
 
-def split_plan(advanced: str) -> tuple:
-    """(the ADVANCED override without the run's own keys, the run's plan).
+def check_advanced(advanced: str):
+    """The ADVANCED override, parsed, with the run's own keys refused.
 
     `plan` and `pipeline-version` are the platform's: they aim the run and are never part of the app's
-    config, so they are taken out before the override is merged into it. Only what this platform version
-    acts on is accepted: a key it would silently ignore fails the run instead.
+    config. This version acts on neither, so a key it would silently ignore fails the run instead.
+    `plan.promote` was the way to promote a dataset before the run form had a field for it.
     """
     if len(advanced.encode()) > MAX_OVERRIDE:
         raise ComposeError("the override is too large; put the values in the app's config")
     parsed = yaml.safe_load(advanced) if advanced.strip() else None
     if not isinstance(parsed, dict):
-        return parsed, {}
+        return parsed
     for key in RESERVED_CONFIG_KEYS:
         if key != PLAN_KEY and key in parsed:
             raise ComposeError(f"'{key}' is reserved for the platform and is not available yet; remove it "
                                f"from the ADVANCED override")
     plan = parsed.pop(PLAN_KEY, None)
     if plan is None:
-        return parsed, {}
-    if not isinstance(plan, dict):
-        raise ComposeError(f"'{PLAN_KEY}' must be a mapping, for example {PLAN_KEY}: {{{PLAN_PROMOTE}: {{<dataset>: true}}}}")
-    unknown = sorted(str(k) for k in plan if k != PLAN_PROMOTE)
-    if unknown:
-        raise ComposeError(f"'{PLAN_KEY}.{unknown[0]}' is reserved for the platform and is not available yet; "
-                           f"this version reads {PLAN_KEY}.{PLAN_PROMOTE}.<dataset> only")
-    promote = plan.get(PLAN_PROMOTE) or {}
-    refusal = ComposeError(f"'{PLAN_KEY}.{PLAN_PROMOTE}' must map a produced dataset to true or false, for example "
-                           f"{PLAN_KEY}: {{{PLAN_PROMOTE}: {{<dataset>: true}}}}")
-    if not isinstance(promote, dict):
-        raise refusal
+        return parsed
+    if isinstance(plan, dict) and PLAN_PROMOTE in plan:
+        raise ComposeError(f"'{PLAN_KEY}.{PLAN_PROMOTE}' is no longer read. Tick the field "
+                           f"{promote_field('<dataset>')} of the run form, one for each dataset a step produces.")
+    raise ComposeError(f"'{PLAN_KEY}' is reserved for the platform and is not available yet; remove it from the "
+                       f"ADVANCED override")
+
+
+def run_promote(steps: list, promotes: list) -> dict:
+    """{dataset: True or False} from the run form's `promote-<dataset>` fields, checked before any step starts."""
+    produced = sorted({e["name"] for step in steps for e in step["produces"] if e["type"] == "dataset"})
     flags = {}
-    for name, value in promote.items():
-        if isinstance(value, str) and value.lower() in ("true", "false"):   # any letter case
-            value = value.lower() == "true"
-        if not isinstance(value, bool):
-            raise refusal
-        flags[str(name)] = value
-    return parsed, {PLAN_PROMOTE: flags}
+    for name, value in _pairs(promotes).items():
+        if name not in produced:
+            raise ComposeError(f"{promote_field(name)}: no step of this pipeline produces the dataset '{name}' "
+                               f"(it produces: {', '.join(produced) or 'none'})")
+        problem = promote_problem(promote_field(name), value)
+        if problem:
+            raise ComposeError(problem)
+        flags[name] = value.strip().lower() == "true"
+    return flags
 
 
 @contextlib.contextmanager
@@ -334,7 +341,7 @@ def _no_environment():
 
 
 def compose_config(overrides: list, advanced=None, required: list = None, render_defaults: dict = None) -> dict:
-    """The resolved config as plain values. `advanced` is the ADVANCED override, parsed (split_plan)."""
+    """The resolved config as plain values. `advanced` is the ADVANCED override, parsed (check_advanced)."""
     cfg = derive_tree.compose_tree(order_overrides(overrides, render_defaults or {}))
 
     if advanced:
@@ -513,7 +520,7 @@ def base_context(step: dict, run: str, app: str, project: str, experiment: str, 
 
 
 def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict, reads: dict,
-                  plan: dict = None, settings: dict = None) -> dict:
+                  promote: dict = None, settings: dict = None) -> dict:
     """{step: its base context in wire form}, each within its cap.
 
     `params` holds the config sections the step names in reads=. The cap is checked on the real text,
@@ -526,12 +533,7 @@ def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict,
             problem = entry["type"] == "dataset" and dataset_name_problem(app, step["name"], entry["name"])
             if problem:
                 raise ComposeError(problem)
-    promote = dict((plan or {}).get(PLAN_PROMOTE) or {})
-    produced = {e["name"] for step in steps for e in step["produces"] if e["type"] == "dataset"}
-    unknown = sorted(set(promote) - produced)
-    if unknown:
-        raise ComposeError(f"{PLAN_KEY}.{PLAN_PROMOTE}.{unknown[0]}: no step of this pipeline produces the dataset "
-                           f"'{unknown[0]}' (it produces: {', '.join(sorted(produced)) or 'none'})")
+    promote = dict(promote or {})
     experiment = experiment_of(resolved, app)
     out = {}
     for step in steps:
@@ -588,6 +590,8 @@ def main(argv=None) -> None:
                         help="The run form's <step>-walltime (repeatable).")
     parser.add_argument("--checkpoint-every", action="append", default=[], metavar="STEP=VALUE",
                         help="The run form's <step>-checkpoint-every (repeatable).")
+    parser.add_argument("--promote", action="append", default=[], metavar="DATASET=VALUE",
+                        help="The run form's promote-<dataset>, true or false (repeatable).")
     parser.add_argument("--settings-output", default="",
                         help="Where to write the numbers the form gave each step: {step: {walltime, checkpoint-every}}.")
     parser.add_argument("--ledger-output", default="", help="Where to write the run's ledger: every pinned input.")
@@ -602,13 +606,14 @@ def main(argv=None) -> None:
     contexts, reads, settings = {}, {}, {}
     try:
         check_step_images(os.environ.get(STEP_IMAGES_ENV))
-        advanced, plan = split_plan(args.advanced)
+        advanced = check_advanced(args.advanced)
         resolved = compose_config(args.overrides, advanced, args.require, json.loads(args.render_defaults))
         if args.steps:
             steps = _steps(args.steps)
             settings = run_settings(steps, args.walltime, args.checkpoint_every)
+            promote = run_promote(steps, args.promote)
             reads = pin_inputs(resolved, steps)
-            contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, plan, settings)
+            contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, promote, settings)
     except Exception as exc:  # any composition failure = hard error, pre-GPU
         message = str(exc)
         if exc.__cause__ is not None:  # e.g. enum ValidationError inside Hydra's wrapper

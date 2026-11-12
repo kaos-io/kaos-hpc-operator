@@ -374,7 +374,7 @@ def refuse_resolvers(node, path: str = "") -> None:
 
 
 def refuse_reserved_keys(tree: dict) -> None:
-    """The platform keeps a few top-level config keys for the run itself (which data a run promotes, which
+    """The platform keeps a few top-level config keys for the run itself (the run's plan, which
     pipeline version it runs). An app's config tree may not define them."""
     for key in RESERVED_CONFIG_KEYS:
         if key in tree:

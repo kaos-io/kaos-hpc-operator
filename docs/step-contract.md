@@ -109,7 +109,7 @@ naming the step, both names and the limit. Names that start with `kaos-` are the
 `dataset-<name>@<ref>`, for example `dataset-raw-images@latest`. The config value an input names holds one.
 A dataset another app produced is referenced by its repository, `dataset-<app>-<name>@<ref>`. Within the app that
 produces it the engineer writes the short name: `dataset("clean")`, `step.output("clean")`, `step.input("clean")`,
-`plan.promote.clean`.
+the run form's `promote-clean`.
 
 **What the engine refuses when it renders the pipeline**, each time naming the step and the rule:
 
@@ -192,11 +192,12 @@ Rules:
   `inputs=`, its `upstream` its `needs=`.
 - A dataset an upstream step produced in this run is read from `upstream.<step>.writes`, not from `ledger`.
 - `promote` says whether this run moves the dataset's `latest` (the head of its `main` branch) to the version
-  the step seals. The run asks for it: compose sets `promote` from the reserved config key
-  `plan.promote.<dataset>` of the run request, where `<dataset>` is the `produces` name and the value is
-  a YAML boolean (`true`, `false`, and the forms YAML reads as booleans, such as `yes` and `no`); the text
-  `"true"` or `"false"` in any letter case is read the same way. Anything else is refused. The step never decides and step code
-  cannot set it. With `promote` false or absent the step still seals its version; `latest` stays where it
+  the step seals. The run asks for it: the run form has a choice `promote-<dataset>` (`false` or `true`, default `false`;
+  "Make this run's version of <dataset> the one other pipelines read as latest.") for each `dataset(...)` a step
+  produces, `<dataset>` being the `produces` name, and compose sets `promote` from it. Anything but `true` or
+  `false` is refused, naming the field. The run key `plan.promote` of the ADVANCED override is gone: an override that
+  holds it is refused with "'plan.promote' is no longer read. Tick the field promote-<dataset> of the run form, one
+  for each dataset a step produces." The step never decides and step code cannot set it. With `promote` false or absent the step still seals its version; `latest` stays where it
   was (PRD D-06).
 
 Fixtures: `context-no-upstream`, `context-promote`, `context-one-upstream`, `context-skipped-upstream`,
@@ -437,7 +438,7 @@ Fixture: `hpc-job` (its `spec.context` is `context-one-upstream.wire`, its `stat
 
 | What | Reserved |
 |---|---|
-| Config keys | `plan` and `pipeline-version`. Under `plan`: `plan.promote.<dataset>` works in the wave; `plan.use.<artifact>` and `plan.target` are reserved for Use and Target, and until those ship compose refuses every `plan` key other than `plan.promote.<dataset>` with a message that it is not available yet. |
+| Config keys | `plan` and `pipeline-version`. `plan.use.<artifact>` and `plan.target` are reserved for Use and Target; until those ship compose refuses every `plan` key (`plan.promote` with a message that names the run-form field `promote-<dataset>`, any other with a message that it is not available yet). |
 | Step names, input names, `produces` names, `values` keys | everything that starts with `kaos-` |
 | Step names | also `compose-and-validate`, `main`, `hpc-follower` and names ending in `-hpc`, as before |
 | Output names of a step | `kaos-result`; of compose, `kaos-ledger` and `kaos-context-<step>` |

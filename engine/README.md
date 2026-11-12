@@ -56,7 +56,7 @@ form, in `config/`, in `kaosctl`. A dataset an app produces is named per app, so
 collide on one: `produces=[dataset("clean")]` in the app `hera1` is the repository `dataset-hera1-clean`, and the
 engine computes that name in one place (`step_contract.produced_repo`) and writes it into the step's context. The
 engineer writes the short name everywhere in the app (`dataset("clean")`, `step.output("clean")`, `step.input("clean")`,
-`plan.promote.clean`). A later step of the same run reads what was just written by its produced name; any other
+the form's `promote-clean`). A later step of the same run reads what was just written by its produced name; any other
 run, pipeline or app reads it by its repository, through a config value:
 
 ```python
@@ -123,9 +123,10 @@ with the sentinel: a skipped or omitted step has an empty output. Section 10 of 
   sections the step names in `reads=`, `ledger` holds the step's own inputs,
   `experiment` is config `experiment.name` or else the app's name, `produces` names each repository;
 - writes the run's ledger at version 2, every pinned input, as the output `kaos-ledger`;
-- reads the run's own key in the ADVANCED override: `plan.promote.<dataset>: true` (the name in `produces=`;
-  `true` or `false` in any letter case) puts `promote: true` on that produced dataset in the producing step's context. `plan.use`, `plan.target` and `pipeline-version` are
-  reserved and refused until they ship, so a run never silently ignores one;
+- reads the run form's `promote-<dataset>` (`true` puts `promote: true` on that produced dataset in the producing
+  step's context), `<step>-walltime` and `<step>-checkpoint-every` (checked, written as the output `kaos-run-settings`);
+  `plan` and `pipeline-version` in the ADVANCED override are reserved and refused (`plan.promote` with a sentence that
+  names the form field), so a run never silently ignores one;
 - refuses a config that uses a resolver (`${oc.env:NAME}` and every other `${resolver:...}`; the render refuses it
   first, naming the key) and resolves the config with an empty environment besides, because this pod holds the
   platform's credentials and a value must never read them into a step's context;

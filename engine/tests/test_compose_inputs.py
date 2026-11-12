@@ -150,10 +150,10 @@ RESOLVED = {"raw": "dataset-a@latest", "labels": "dataset-b@v3", "train": {"epoc
             "experiment": {"name": "baseline"}}
 
 
-def contexts(table, resolved=RESOLVED, plan=None):
+def contexts(table, resolved=RESOLVED, promote=None):
     reads = compose.pin_inputs(resolved, table, datasets=FakeDatasets())
     return {name: json.loads(text) for name, text in
-            compose.step_contexts(table, "run-1", "demo", "vision", resolved, reads, plan).items()}
+            compose.step_contexts(table, "run-1", "demo", "vision", resolved, reads, promote).items()}
 
 
 def test_a_step_context_holds_its_own_inputs_and_the_sections_it_reads():
@@ -193,47 +193,52 @@ def test_what_a_step_produces_names_its_repository():
         {"name": "embeddings", "type": "dataset", "repo": "dataset-demo-embeddings"}]
 
 
-def test_a_run_promotes_a_dataset_only_when_it_asks():
-    """D-06: plan.promote.<dataset> of the run request; absent means the step seals a version and latest stays."""
+def test_a_run_promotes_a_dataset_only_when_the_form_says_true():
+    """D-06: the run form's promote-<dataset>; false means the step seals a version and latest stays."""
     table = steps(("prepare", [], 0, [{"name": "embeddings", "type": "dataset"}, {"name": "model", "type": "model"}]))
-    asked = contexts(table, plan={"promote": {"embeddings": True}})["prepare"]["produces"]
+    asked = contexts(table, promote=compose.run_promote(table, ["embeddings=true"]))["prepare"]["produces"]
     assert asked[0] == {"name": "embeddings", "type": "dataset", "repo": "dataset-demo-embeddings", "promote": True}
     assert "promote" not in asked[1]
-    for plan in (None, {}, {"promote": {"embeddings": False}}):
-        assert "promote" not in contexts(table, plan=plan)["prepare"]["produces"][0]
+    for flags in ([], ["embeddings=false"]):
+        assert "promote" not in contexts(table, promote=compose.run_promote(table, flags))["prepare"]["produces"][0]
+    assert compose.run_promote(table, ["embeddings=True"]) == {"embeddings": True}
+
+
+@pytest.mark.parametrize("pairs, message", [
+    (["embedings=true"], "promote-embedings: no step of this pipeline produces the dataset 'embedings' "
+                         "(it produces: embeddings)"),
+    (["embeddings=maybe"], "promote-embeddings is 'maybe'. Choose true or false."),
+    (["embeddings="], "promote-embeddings is ''. Choose true or false."),
+])
+def test_a_promote_value_that_is_not_true_or_false_or_names_no_dataset_ends_the_run(pairs, message):
+    table = steps(("prepare", [], 0, [{"name": "embeddings", "type": "dataset"}]))
     with pytest.raises(compose.ComposeError) as exc:
-        contexts(table, plan={"promote": {"embedings": True}})
-    assert str(exc.value) == ("plan.promote.embedings: no step of this pipeline produces the dataset 'embedings' "
-                              "(it produces: embeddings)")
+        compose.run_promote(table, pairs)
+    assert str(exc.value) == message
 
 
 # ---------------------------------------------------------------- the run's own keys in the ADVANCED override
 
-def test_plan_is_taken_out_of_the_override_before_it_reaches_the_apps_config():
-    advanced, plan = compose.split_plan("train:\n  epochs: 5\nplan:\n  promote:\n    embeddings: true\n")
-    assert advanced == {"train": {"epochs": 5}} and plan == {"promote": {"embeddings": True}}
-    assert compose.split_plan("") == (None, {}) and compose.split_plan("train: {epochs: 5}")[1] == {}
-    for text, want in (("true", True), ("True", True), ("TRUE", True), ("false", False), ("False", False),
-                       ("'true'", True), ("'FALSE'", False)):
-        assert compose.split_plan(f"plan: {{promote: {{embeddings: {text}}}}}")[1] == {"promote": {"embeddings": want}}
+def test_the_override_is_parsed_and_an_empty_one_is_nothing():
+    assert compose.check_advanced("train:\n  epochs: 5\n") == {"train": {"epochs": 5}}
+    assert compose.check_advanced("") is None
 
 
 @pytest.mark.parametrize("advanced, message", [
     ("pipeline-version: abc", "'pipeline-version' is reserved for the platform and is not available yet; remove it "
                               "from the ADVANCED override"),
-    ("plan: {target: train}", "'plan.target' is reserved for the platform and is not available yet; this version "
-                              "reads plan.promote.<dataset> only"),
-    ("plan: {use: {model: abc}}", "'plan.use' is reserved for the platform and is not available yet; this version "
-                                  "reads plan.promote.<dataset> only"),
-    ("plan: yes", "'plan' must be a mapping, for example plan: {promote: {<dataset>: true}}"),
-    ("plan: {promote: {embeddings: 1}}", "'plan.promote' must map a produced dataset to true or false, for "
-                                         "example plan: {promote: {<dataset>: true}}"),
-    ("plan: {promote: {embeddings: maybe}}", "'plan.promote' must map a produced dataset to true or false, for "
-                                             "example plan: {promote: {<dataset>: true}}"),
+    ("plan: {promote: {embeddings: true}}", "'plan.promote' is no longer read. Tick the field promote-<dataset> of "
+                                            "the run form, one for each dataset a step produces."),
+    ("plan:\n  promote:\n    embeddings: false\n", "'plan.promote' is no longer read. Tick the field promote-<dataset> "
+                                                   "of the run form, one for each dataset a step produces."),
+    ("plan: {target: train}", "'plan' is reserved for the platform and is not available yet; remove it from the "
+                              "ADVANCED override"),
+    ("plan: yes", "'plan' is reserved for the platform and is not available yet; remove it from the ADVANCED "
+                  "override"),
 ])
 def test_a_run_key_this_version_does_not_act_on_fails_the_run_instead_of_being_ignored(advanced, message):
     with pytest.raises(compose.ComposeError) as exc:
-        compose.split_plan(advanced)
+        compose.check_advanced(advanced)
     assert str(exc.value) == message
 
 
@@ -288,7 +293,7 @@ def test_a_resolver_in_the_config_is_refused_naming_the_key_before_anything_is_r
 def test_a_resolver_in_the_advanced_override_or_a_form_value_is_refused_too(monkeypatch):
     monkeypatch.setenv(SECRET, "hunter2")
     tree_with(monkeypatch, "plain")
-    advanced, _ = compose.split_plan("train: {note: '${oc.env:LAKEFS_SECRET_KEY}'}")
+    advanced = compose.check_advanced("train: {note: '${oc.env:LAKEFS_SECRET_KEY}'}")
     with pytest.raises(compose.derive_tree.DeriveError, match="config value 'train.note' uses the resolver"):
         compose.compose_config([], advanced, ["train"])
     tree_with(monkeypatch, "${oc.env:LAKEFS_SECRET_KEY}", section="probe")
@@ -494,9 +499,9 @@ def test_the_engine_image_carries_what_kaos_lib_needs_so_the_compose_image_adds_
 
 def test_the_override_is_refused_above_16_kib():
     ok = "train: {note: " + "x" * 16000 + "}"
-    assert compose.split_plan(ok)[0] is not None
+    assert compose.check_advanced(ok) is not None
     with pytest.raises(compose.ComposeError) as exc:
-        compose.split_plan("train: {note: " + "x" * 16400 + "}")
+        compose.check_advanced("train: {note: " + "x" * 16400 + "}")
     assert str(exc.value) == "the override is too large; put the values in the app's config"
 
 
@@ -521,7 +526,7 @@ def test_two_apps_that_declare_the_same_dataset_name_get_two_repositories():
     repos = {}
     for app in ("hera1", "hera2"):
         reads = {}
-        text = compose.step_contexts(table, "run-1", app, "vision", RESOLVED, reads, {"promote": {"clean": True}})["prepare"]
+        text = compose.step_contexts(table, "run-1", app, "vision", RESOLVED, reads, {"clean": True})["prepare"]
         repos[app] = json.loads(text)["produces"][0]
     assert repos == {"hera1": {"name": "clean", "type": "dataset", "repo": "dataset-hera1-clean", "promote": True},
                      "hera2": {"name": "clean", "type": "dataset", "repo": "dataset-hera2-clean", "promote": True}}

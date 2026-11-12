@@ -82,12 +82,14 @@ from kubecore.meluxina import HPC_TWIN_TEMPLATE, enhance_hpc, hpc_classes, parse
 from kubecore.outputs_repo import outputs_repo
 from kubecore.run_settings import (
     DEFAULT_WALLTIME,
+    PROMOTE_CHOICES,
     SETTINGS_PARAM,
     SETTINGS_PATH,
     WALLTIME_EXAMPLE,
     add_input,
     add_task_argument,
     checkpoint_field,
+    promote_field,
     setting,
     walltime_field,
 )
@@ -751,12 +753,13 @@ def enhance_run_form(spec: dict, steps: list) -> None:
     existing = _param_names(parameters)
     declared = False
 
-    def field(name: str, value: str, description: str, flag: str, key: str) -> None:
+    def field(name: str, value: str, description: str, flag: str, key: str, enum: list = None) -> None:
         nonlocal declared
         if name in existing:
             raise EnhanceError(f"the run form already has a field '{name}'; rename the setting or the step "
                                f"that would give the form a second one")
-        parameters.append({"name": name, "value": value, "description": description})
+        parameters.append({"name": name, "value": value, **({"enum": enum} if enum else {}),
+                           "description": description})
         existing.add(name)
         args.extend([flag, "%s={{workflow.parameters.%s}}" % (key, name)])
         declared = True
@@ -774,6 +777,13 @@ def enhance_run_form(spec: dict, steps: list) -> None:
             field(checkpoint_field(step_name), f"{every}m",
                   f"How often the '{step_name}' step's checkpoint is saved: minutes or hours, "
                   f"for example 10m or 1h.", "--checkpoint-every", step_name)
+    table = json.loads(args[args.index("--steps") + 1]) if "--steps" in args else []
+    for entry in table:
+        for produced in entry["produces"]:
+            if produced["type"] == "dataset":
+                field(promote_field(produced["name"]), "false",
+                      f"Make this run's version of {produced['name']} the one other pipelines read as latest.",
+                      "--promote", produced["name"], list(PROMOTE_CHOICES))
     if declared:
         args.extend(["--settings-output", SETTINGS_PATH])
         compose.setdefault("outputs", {}).setdefault("parameters", []).append(
