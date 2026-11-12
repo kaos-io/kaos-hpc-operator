@@ -47,6 +47,7 @@ from kubecore.step_contract import (
     KINDS,
     MAX_INPUTS,
     MAX_NAME,
+    MIGRATION_GUIDE_URL,
     MIN_BASE_CONTEXT_CAP,
     LEDGER_PARAM,
     LEDGER_PATH,
@@ -72,8 +73,6 @@ class AuthoringError(Exception):
     pass
 COMPOSE_STEP = "compose-and-validate"
 PARAMS_PATH = "/work/params.yaml"
-# Where the app's migration guide to the step contract lives. Placeholder: set when the guide is published.
-MIGRATION_GUIDE_URL = "https://kaos.invalid/guides/migrate-to-the-step-contract"
 # Template names the platform renders itself: the DAG, and the HPC follower.
 RESERVED_STEP_NAMES = (COMPOSE_STEP, "main", "hpc-follower")
 # A step's HPC variant is the task `<step>-hpc` (kubecore/meluxina.py); a step may not take such a name.

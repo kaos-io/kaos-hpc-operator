@@ -64,7 +64,6 @@ def tree(tmp_path, monkeypatch):
     (cfg / "model" / "small.yaml").write_text("size: 8\n")
     (cfg / "model" / "named.yaml").write_text("size: tiny\n")
     monkeypatch.setattr(derive_tree, "CONFIG_DIR", cfg)
-    monkeypatch.setattr(derive_tree, "PLATFORM_SEARCHPATH", tmp_path)
     return cfg
 
 

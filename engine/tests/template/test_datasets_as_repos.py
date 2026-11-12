@@ -110,17 +110,6 @@ def test_the_compose_step_has_no_hpc_twin_and_its_class_choice_offers_no_hpc_cla
     assert not [c for c in params["compose-and-validate-class"]["enum"] if c.startswith("meluxina-")]
 
 
-def test_compose_gets_the_outputs_repository_as_platform_checkpoints():
-    ctx = yaml.safe_load(CTX_PATH.read_text())
-    ctx["app"] = "myapp"
-    raw = _raw()
-    raw["spec"]["templates"].append({"name": "compose-and-validate", "container": {"image": "i", "args": []}})
-    out = enhance(raw, ctx)
-    args = next(t for t in out["spec"]["templates"] if t["name"] == "compose-and-validate")["container"]["args"]
-    assert "platform.checkpoints.bucket=outputs-myapp" in args
-    assert "platform.checkpoints.prefix=main/checkpoints" in args
-
-
 def test_a_task_without_a_context_cannot_get_an_hpc_variant():
     """Every step authoring renders passes its context. A hand-made template that does not would start a job
     the controller refuses, so the render stops instead."""

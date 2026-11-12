@@ -46,8 +46,8 @@ class FakeDatasets:
         return COMMITS[ref.repo] if self.answer is None else self.answer[0]
 
 
-# What the steps of these tests name in reads=. `platform` is there to show it never reaches a step.
-READS = ["train", "experiment", "blob", "k", "lr", "platform", "plan"]
+# What the steps of these tests name in reads=.
+READS = ["train", "experiment", "blob", "k", "lr"]
 
 
 def steps(*specs):
@@ -159,8 +159,7 @@ def test_a_lock_in_the_compose_pods_own_environment_is_never_replayed(monkeypatc
 # ---------------------------------------------------------------- each step's context
 
 RESOLVED = {"raw": "dataset-a@latest", "labels": "dataset-b@v3", "train": {"epochs": 3},
-            "experiment": {"name": "baseline"},
-            "platform": {"lakefs": {"endpoint": "http://lakefs.internal"}, "mlflow": {"tracking_uri": "http://mlflow"}}}
+            "experiment": {"name": "baseline"}}
 
 
 def contexts(table, resolved=RESOLVED, plan=None):
@@ -169,7 +168,7 @@ def contexts(table, resolved=RESOLVED, plan=None):
             compose.step_contexts(table, "run-1", "demo", "vision", resolved, reads, plan).items()}
 
 
-def test_a_step_context_holds_its_own_inputs_and_never_an_endpoint():
+def test_a_step_context_holds_its_own_inputs_and_the_sections_it_reads():
     got = contexts(TWO_INPUTS)
     assert list(got["train"]) == ["version", "run", "app", "project", "step", "kind", "experiment", "params",
                                   "ledger", "produces"], "the contract's fields, in order, without upstream"
@@ -178,7 +177,6 @@ def test_a_step_context_holds_its_own_inputs_and_never_an_endpoint():
     assert got["train"]["ledger"]["version"] == 2 and got["train"]["ledger"]["writes"] == []
     assert got["train"]["run"] == "run-1" and got["train"]["app"] == "demo" and got["train"]["project"] == "vision"
     assert got["train"]["experiment"] == "baseline"
-    assert "platform" not in got["train"]["params"] and "lakefs.internal" not in json.dumps(got)
     assert got["train"]["params"] == {"train": {"epochs": 3}, "experiment": {"name": "baseline"}}, \
         "the sections the step names in reads=, in that order; an input's own config value is not one of them"
 
@@ -189,8 +187,7 @@ def test_a_step_gets_only_the_config_sections_it_reads():
     got = contexts(table)
     assert got["prepare"]["params"] == {} and got["train"]["params"] == {"train": {"epochs": 3}}
     assert got["prepare"]["experiment"] == "baseline", "the experiment does not depend on what the step reads"
-    assert compose.step_params({"reads": ["platform", "plan", "train"]}, {**RESOLVED, "plan": {"promote": {}}}) == {
-        "train": {"epochs": 3}}
+    assert compose.step_params({"reads": ["gone", "train"]}, RESOLVED) == {"train": {"epochs": 3}}
 
 
 def test_the_experiment_is_the_configs_experiment_name_else_the_app():
@@ -245,7 +242,6 @@ def test_plan_is_taken_out_of_the_override_before_it_reaches_the_apps_config():
                                          "example plan: {promote: {<dataset>: true}}"),
     ("plan: {promote: {embeddings: maybe}}", "'plan.promote' must map a produced dataset to true or false, for "
                                              "example plan: {promote: {<dataset>: true}}"),
-    ("platform: {lakefs: {repository: x}}", "ADVANCED override may not modify platform.*"),
 ])
 def test_a_run_key_this_version_does_not_act_on_fails_the_run_instead_of_being_ignored(advanced, message):
     with pytest.raises(compose.ComposeError) as exc:
@@ -337,7 +333,7 @@ def test_the_compose_entry_point_writes_params_each_context_and_the_ledger(tmp_p
     assert text == wire(context), "wire form, as written"
     assert context["step"] == "hello-world" and context["kind"] == "transform" and context["experiment"] == "exp-2"
     assert context["produces"] == [{"name": "report", "type": "artifact", "repo": "outputs-demo"}]
-    assert "upstream" not in context and "platform" not in context["params"]
+    assert "upstream" not in context and list(context["params"]) == ["experiment"]
     assert "kaos-engine: version=" in done.stderr
 
 

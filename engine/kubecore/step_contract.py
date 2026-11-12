@@ -32,6 +32,9 @@ MAX_INPUTS = 16                # what one step may read by name: its inputs= plu
 MAX_NAME = 40                  # characters of a step, input or produced name
 MAX_APP_NAME = 55              # an HPC job's app field holds no more
 
+# Where the app's migration guide to the step contract lives. Placeholder: set when the guide is published.
+MIGRATION_GUIDE_URL = "https://kaos.invalid/guides/migrate-to-the-step-contract"
+
 KINDS = ("ingest", "transform", "train", "evaluate", "publish", "control")
 # Kinds that never run on an HPC class: they move data in or out of the platform, or steer the run.
 CLUSTER_ONLY_KINDS = ("ingest", "publish", "control")

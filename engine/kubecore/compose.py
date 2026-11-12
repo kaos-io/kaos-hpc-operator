@@ -30,7 +30,6 @@ Failure modes concentrated here, all before any GPU time:
                                    ComposeError for an int/float/bool leaf
 - step reads= section missing   -> --require check below
 - ADVANCED override with unknown keys -> struct-mode merge rejects it
-- ADVANCED override touching platform.* -> hard error (below)
 - a declared input that does not resolve (empty, no such dataset or version,
   lakeFS unreachable, no credentials) -> hard error naming the input (below)
 - the app's config defines a key the platform reserves -> hard error naming it
@@ -282,8 +281,6 @@ def split_plan(advanced: str) -> tuple:
     parsed = yaml.safe_load(advanced) if advanced.strip() else None
     if not isinstance(parsed, dict):
         return parsed, {}
-    if "platform" in parsed:
-        raise ComposeError("ADVANCED override may not modify platform.*")
     for key in RESERVED_CONFIG_KEYS:
         if key != PLAN_KEY and key in parsed:
             raise ComposeError(f"'{key}' is reserved for the platform and is not available yet; remove it "
@@ -448,10 +445,8 @@ def experiment_of(resolved: dict, app: str) -> str:
 
 
 def step_params(step: dict, resolved: dict) -> dict:
-    """What a step gets of the run's config: the sections it names in reads=, in that order. Never the
-    platform's own section (the context holds no endpoint) and never the run's `plan`."""
-    return {section: resolved[section] for section in step["reads"]
-            if section in resolved and section not in derive_tree.PLATFORM_SECTIONS and section != PLAN_KEY}
+    """What a step gets of the run's config: the sections it names in reads=, in that order."""
+    return {section: resolved[section] for section in step["reads"] if section in resolved}
 
 
 def base_context(step: dict, run: str, app: str, project: str, experiment: str, params: dict, reads: dict,

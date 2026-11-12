@@ -305,3 +305,32 @@ def test_a_step_may_read_at_most_sixteen_datasets_by_name(tmp_path, monkeypatch)
     assert refused(build(names, 1)) == (
         "step 'last' can read 17 datasets by name (16 in inputs= and 1 produced by the steps it needs); a step may "
         "have at most 16. Split the step, or join datasets it reads.")
+
+
+# ---------------------------------------------------------------- the platform config group is gone
+
+def test_an_app_whose_config_still_names_the_platform_group_fails_the_render_with_what_to_delete(tmp_path):
+    from kubecore.step_contract import MIGRATION_GUIDE_URL
+    repo = copy_app(tmp_path / "app")
+    with (repo / "config" / "config.yaml").open("a") as f:
+        f.write("  - platform: live\n")
+    done = run_render(repo)
+    assert done.returncode == 1 and not (repo / "out").exists()
+    assert ("config/config.yaml still lists `- platform: live` in its defaults. The platform no longer adds a "
+            "`platform` section to an app's config: delete that line. A step gets the run, the app and where its "
+            f"results go from kaos_lib.step. See {MIGRATION_GUIDE_URL}") in done.stderr
+
+
+def test_the_same_app_fails_compose_with_the_same_message(tmp_path, monkeypatch):
+    from kubecore import compose, derive_tree
+    config = copy_app(tmp_path / "app") / "config"
+    with (config / "config.yaml").open("a") as f:
+        f.write("  - platform: live\n")
+    monkeypatch.setattr(derive_tree, "CONFIG_DIR", config)
+    with pytest.raises(derive_tree.DeriveError, match="delete that line"):
+        compose.compose_config([])
+
+
+def test_a_rendered_pipeline_carries_no_platform_value():
+    wft = render(lambda a: a.step("one", kind="train", reads=["experiment"]))
+    assert "platform." not in yaml.safe_dump(wft).replace("platform.kubecore.io", "")
