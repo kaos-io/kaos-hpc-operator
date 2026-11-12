@@ -590,8 +590,8 @@ def enhance_gpu_routing(spec: dict, step: dict, ctx: dict, annots: dict) -> None
 def enhance_class_param(spec: dict, step: dict, ctx: dict, annots: dict) -> None:
     """Per-step compute-class dropdown ({step}-class), matching the live WFT.
 
-    Default = the step's tier class; enum = every class of that tier from the
-    pool catalog. A `compute-class` annotation PINS the class (no dropdown —
+    Default = the step's tier class; enum = the pool's cpu and gpu classes for a
+    step that declares gpu=True, its cpu classes only for any other step. A `compute-class` annotation PINS the class (no dropdown —
     the nodeSelector uses the literal name)."""
     if "compute-class" in annots:
         return  # pinned: nodeSelector uses the literal name (enhance_scheduling)
@@ -603,14 +603,19 @@ def enhance_class_param(spec: dict, step: dict, ctx: dict, annots: dict) -> None
         return
     tier = step_tier(step)
     default = tier_default(ctx, step)["name"]
-    # Full pool catalog, ALL tiers, ALWAYS attached (#865): the old
+    # The pool catalog, ALWAYS attached (#865): the old
     # tier-filtered list collapsed to length 1 on a one-class-per-tier pool,
     # and enum-only-when->1 then rendered a FREE-TEXT box (typo -> forever-
     # Pending run). Cross-tier entries are legitimate choices: a gpu-capable
     # step submitted with a cpu class runs CPU-only (see the gpus routing in
     # enhance_gpu_routing).
     sizes = node_sizes(ctx)   # refuses a pool with a class that cannot be sized, so none is offered unsized
-    options = [c["name"] for c in ctx["computeClasses"]["all"]]
+    # A step that does not declare gpu=True is offered the cluster's cpu classes only: a gpu class would put
+    # it on a machine it cannot use. A pool with no cpu class at all keeps offering what exists.
+    catalog = ctx["computeClasses"]["all"]
+    if not is_gpu_step(step):
+        catalog = [c for c in catalog if c.get("tier", "cpu") == "cpu"] or catalog
+    options = [c["name"] for c in catalog]
     if default not in options:
         options.insert(0, default)
     # HPC classes: a step can be placed on the
@@ -1078,7 +1083,8 @@ def enhance_pipeline_info(spec: dict, ctx: dict, steps: list) -> None:
     lines = [
         "HOW TO RUN: defaults are runnable as-is — just press Submit.",
         "PER-STEP COMPUTE: {step}-class picks the node class; the step gets that node "
-        "(what it offers a pod, less the platform's reserve).",
+        "(what it offers a pod, less the platform's reserve). Only a step that declares gpu=True is offered "
+        "the GPU classes; any other step is offered the CPU classes.",
         "COMPUTE CLASSES on this pool:",
     ]
     for cls in ctx["computeClasses"]["all"]:

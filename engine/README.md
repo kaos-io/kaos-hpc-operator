@@ -137,7 +137,9 @@ The enhancer gives compose the run's identity (`--app`, `--project`); authoring 
 step table (`--run`, `--steps`).
 
 **A step gets the node of its class.** The class is the node. The run form has a class for every step
-(`<step>-class`, an enum of the pool's classes, plus the HPC classes for a kind that may run there) and nothing to
+(`<step>-class`, an enum of the pool's classes, plus the HPC classes for a kind that may run there; a step is offered
+the pool's GPU classes only when its code declares `gpu=True`, any other step the CPU classes only, or what the pool
+has when it declares no CPU class) and nothing to
 type: no cpu, memory or disk field. A step's pod asks for what a node of the class it was given offers a pod,
 cpu and memory, and the limits equal the requests.
 
