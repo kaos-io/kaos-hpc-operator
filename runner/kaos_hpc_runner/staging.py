@@ -2,7 +2,7 @@
 
 The runner stages the pinned dataset commit into the project's Lustre cache from a login node
 before the GPU job is submitted, so the job reads a resident copy instead of downloading on GPU
-time. It talks to the stager the platform installed (~/.kaos/stager.py) through a forced-command key
+time. It talks to the stager the platform installed (~/.kaos/stager-c2.py) through a forced-command key
 that can run nothing else (Secret meluxina-staging: key + verified host pin). The stager names a
 base (its newest ready commit of the repo); the runner lists only the lakeFS diff base..commit, or
 the whole commit for a first copy, and streams one JSON line per file: every object of the commit,
@@ -482,7 +482,7 @@ def stage_dataset(cfg, stager, mint_wallet, info=None):
         refuse_names(api, repo, commit, wallet)     # the in-job copy joins every name to its folder: check them all
         return ''
     began = time.time()
-    deadline, attempt = began + STAGE_BUDGET_S, 0
+    deadline, attempt, absent_since = began + STAGE_BUDGET_S, 0, None
     while True:
         attempt += 1
         try:
@@ -490,7 +490,9 @@ def stage_dataset(cfg, stager, mint_wallet, info=None):
         except (InsufficientQuota, StagingMismatch, ReservedName):
             raise
         except ToolAbsent as e:
-            if time.time() - began > TOOL_WAIT_S:
+            if absent_since is None:
+                absent_since = time.time()      # the 20 minutes count from the first "absent", not from the start
+            if time.time() - absent_since > TOOL_WAIT_S:
                 raise StagingMismatch(absent_message(e))
             print('stage: the staging tool is not installed or cannot be run (exit %s) - asking again' % e,
                   flush=True)

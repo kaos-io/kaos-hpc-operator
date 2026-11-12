@@ -62,6 +62,16 @@ An in-job copy from before `.kaos-complete`, last used 20 days ago, is completed
 real cleanup lines of the job script run again and again. The folder must not be taken from under the stage-in
 and the copy must be marked only when it is the whole commit (`docs/extreme-cases.md` 3.18).
 
+## race-hit.py: a cache hit against a cleanup that moves the folder at the worst moment
+
+```
+python3 hack/staging-contract/race-hit.py runner
+```
+
+A whole copy with a 20-day-old marker is hit by the real stage-in; right after it renews the marker, the cleanup's
+move of the folder is done (the second case: another stage-in has also begun filling the folder again). The
+stage-in must not fail, must not call it a cache hit, and must end with a whole copy.
+
 ## stagein36.py: the in-job stage-in under Python 3.6
 
 The in-job stage-in (`runner/kaos_hpc_runner/payload/stagein.py`) runs under the compute node's system Python

@@ -370,6 +370,28 @@ def test_a_staging_tool_that_is_not_installed_is_asked_for_a_while_then_the_run_
     assert _listings(_LakeFS({})) == []
 
 
+def test_the_twenty_minutes_of_asking_for_a_missing_tool_count_from_its_first_absent_answer(monkeypatch):
+    """The sentence says "for 20 minutes": they start when the login node first said the tool is absent, not when
+    staging began (the lakeFS checks and the wallet before it can take minutes)."""
+    class _Late(_Absent):
+        first = None
+
+        def __call__(self, words, feed=None, quiet=False):
+            if self.first is None:
+                clock[0] += 10 * 60                     # 10 minutes of staging before the first answer
+                self.first = clock[0]
+            return super().__call__(words, feed, quiet)
+
+    stager = _Late({"ready": True})
+    cfg = _twin(monkeypatch, _LakeFS(NOT_YOLO), stager)
+    clock = [1000.0]
+    monkeypatch.setattr(staging.time, "time", lambda: clock[0])
+    monkeypatch.setattr(staging.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    with pytest.raises(staging.StagingMismatch):
+        _stage(cfg, stager)
+    assert 20 * 60 < clock[0] - stager.first <= 30 * 60
+
+
 def test_a_staging_tool_installed_while_the_runner_asks_is_used(monkeypatch):
     stager = _Absent({"ready": True}, until=3)
     cfg = _twin(monkeypatch, _LakeFS({}), stager)

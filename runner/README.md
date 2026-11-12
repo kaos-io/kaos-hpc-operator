@@ -20,7 +20,7 @@ Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /ru
 | `staging.py` | `Stager` (ssh to the forced-command stager), dataset staging (every object of the pinned commit, whatever the dataset's shape; `CONTRACT` is the staging contract the runner checks against the staging tool's `version` and sends with every `status` and `stage`; `name_rule` and `Names` refuse, before anything is staged or submitted, the object names that cannot be copied), `staging_record` (the bounded `status.run.staging`: kind first/delta/cached, files, bytes, seconds; the follower prints one line from it) |
 | `image.py` | registry client, docker-archive streaming, `image_key` (tar name = SIF name = `kaos-image=` lease, always in the job comment), `cleanup_images` (asks the stager's `gc` when an attempt is over; AC-65) |
 | `jobscript.py` | the batch script (+ KAOS_METRIC sampler, tar deletion after SIF build) |
-| `payload/` | on-node programs: stagein/stageout/ckpt/slots/idlewatch (`payloads.py` loads them) |
+| `payload/` | on-node programs: stagein/stageout/ckpt/slots/idlewatch (`payloads.py` loads them). Stage-in believes a cache hit only if `.kaos-complete` is still in the folder after it looked for the cleanup's lock, and removes `name.part-*` files of a killed older writer that the commit does not list before it marks a copy |
 | `sharing.py` | PRD-1609 inputs-in-script |
 | `reporter.py` | status merge patches: `status.run`, `status.outputs` (<= 64 KiB), `status.pendingReason` |
 | `logs.py` | stager `log` streaming, JSON lines, `status.run.logOffset`, last/max GPU use of the sampler lines in `status.run.gpuUtilization` (AC-69) |
@@ -58,7 +58,7 @@ The job script and the runner reserve these codes; the controller turns them int
 | 238 | runner | the site refused the submit for its per-user cap (reported FAILED, no site job; the message has the cap and the count read from the site) | `SubmitLimit` |
 | 239 | runner | the step's image reference can never be pulled (reported FAILED, no site job) | `InvalidImage` |
 | 240 | runner | the slot manager stopped the step for computing on a GPU outside its set, on a node shared by several steps | `GPUViolation` |
-| 241 | runner | the site's staging tool speaks another staging contract, or is not installed for the project after 20 minutes of asking (reported FAILED, nothing staged, no site job) | `StagingMismatch` |
+| 241 | runner | the site's staging tool speaks another staging contract, or is not installed for the project after 20 minutes of asking (counted from the first answer that it is absent; reported FAILED, nothing staged, no site job) | `StagingMismatch` |
 | 242 | runner | the dataset holds an object that cannot be copied to the site: a name reserved for the platform, a path that could leave the dataset's folder, a name too long, or a file that is also a folder (reported FAILED, nothing staged, no site job) | `ReservedName` |
 
 ## The site job's name, adopt, and a site that does not answer
