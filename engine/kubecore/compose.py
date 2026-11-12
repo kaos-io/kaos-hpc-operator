@@ -70,6 +70,7 @@ from omegaconf.nodes import BooleanNode, EnumNode, FloatNode, IntegerNode, Strin
 from kubecore import derive_tree
 from kubecore.run_settings import (
     checkpoint_field,
+    class_problem,
     minutes,
     promote_field,
     promote_problem,
@@ -309,6 +310,22 @@ def check_advanced(advanced: str):
                            f"{promote_field('<dataset>')} of the run form, one for each dataset a step produces.")
     raise ComposeError(f"'{PLAN_KEY}' is reserved for the platform and is not available yet; remove it from the "
                        f"ADVANCED override")
+
+
+def run_classes(steps: list, chosen: list, offers: str) -> None:
+    """The class the form gives each step must be one the form offers it (the enhancer wrote what it offers
+    into `offers`): a run submitted around the form with another ends here, before the first step."""
+    known = {step["name"] for step in steps}
+    try:
+        table = json.loads(offers or "{}")
+    except ValueError as exc:
+        raise ComposeError(f"cannot read the classes the form offers (--class-offers: {exc})") from None
+    for step, value in _pairs(chosen).items():
+        if step not in known or step not in table:
+            raise ComposeError(f"class-{step}: the pipeline has no step '{step}' that takes a class")
+        problem = class_problem(step, value, table[step])
+        if problem:
+            raise ComposeError(problem)
 
 
 def run_promote(steps: list, promotes: list) -> dict:
@@ -590,6 +607,10 @@ def main(argv=None) -> None:
                         help="The run form's <step>-walltime (repeatable).")
     parser.add_argument("--checkpoint-every", action="append", default=[], metavar="STEP=VALUE",
                         help="The run form's <step>-checkpoint-every (repeatable).")
+    parser.add_argument("--class", dest="classes", action="append", default=[], metavar="STEP=CLASS",
+                        help="The run form's <step>-class (repeatable).")
+    parser.add_argument("--class-offers", default="",
+                        help="JSON {step: {offered, refused}}: the classes the form offers each step.")
     parser.add_argument("--promote", action="append", default=[], metavar="DATASET=VALUE",
                         help="The run form's promote-<dataset>, true or false (repeatable).")
     parser.add_argument("--settings-output", default="",
@@ -612,6 +633,7 @@ def main(argv=None) -> None:
             steps = _steps(args.steps)
             settings = run_settings(steps, args.walltime, args.checkpoint_every)
             promote = run_promote(steps, args.promote)
+            run_classes(steps, args.classes, args.class_offers)
             reads = pin_inputs(resolved, steps)
             contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, promote, settings)
     except Exception as exc:  # any composition failure = hard error, pre-GPU

@@ -78,7 +78,7 @@ import yaml
 
 from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
-from kubecore.meluxina import HPC_TWIN_TEMPLATE, enhance_hpc, hpc_classes, parse_time_limit, runs_on_hpc
+from kubecore.meluxina import HPC_TWIN_TEMPLATE, STEP_KIND_LABEL, enhance_hpc, hpc_classes, parse_time_limit, runs_on_hpc
 from kubecore.outputs_repo import outputs_repo
 from kubecore.run_settings import (
     DEFAULT_WALLTIME,
@@ -89,12 +89,14 @@ from kubecore.run_settings import (
     add_input,
     add_task_argument,
     checkpoint_field,
+    class_field,
     promote_field,
     setting,
     walltime_field,
 )
 from kubecore.resilience import enhance_resilience, every_minutes, shared_templates, write_helper_configmap
 from kubecore.step_contract import (
+    CLUSTER_ONLY_KINDS,
     CONTEXT_PARAM,
     DATASET_PRODUCER_LABEL,
     DATASET_PRODUCERS_STAY_ON_CLUSTER,
@@ -600,7 +602,47 @@ def enhance_gpu_routing(spec: dict, step: dict, ctx: dict, annots: dict) -> None
                 params.append({"name": "gpus", "value": expr})
 
 
-def enhance_class_param(spec: dict, step: dict, ctx: dict, annots: dict) -> None:
+def class_offer(step: dict, ctx: dict, annots: dict) -> dict:
+    """The classes the run form offers `step`, and why it withholds each other class of the platform:
+    {"offered": [names], "refused": {class: [reason, what to do]}}. The `{step}-class` choice is `offered`;
+    compose refuses a run whose class is not (run_settings.class_problem). One function, so the two agree.
+
+    The pool catalog is ALWAYS attached (#865): the old tier-filtered list collapsed to length 1 on a
+    one-class-per-tier pool, and enum-only-when->1 then rendered a FREE-TEXT box (typo -> forever-Pending
+    run). Cross-tier entries are legitimate choices: a gpu-capable step submitted with a cpu class runs
+    CPU-only (see the gpus routing in enhance_gpu_routing). A step that does not declare gpu=True is offered the
+    cluster's cpu classes only: a gpu class would put it on a machine it cannot use. A pool with no cpu class at
+    all keeps offering what exists. The HPC classes are offered to a step that can run on HPC (meluxina.py
+    runs_on_hpc: not an ingest, publish or control step, not a step that produces a dataset)."""
+    default = tier_default(ctx, step)["name"]
+    catalog = ctx["computeClasses"]["all"]
+    offered = catalog
+    if not is_gpu_step(step):
+        offered = [c for c in catalog if c.get("tier", "cpu") == "cpu"] or catalog
+    options = [c["name"] for c in offered]
+    if default not in options:
+        options.insert(0, default)
+    hpc_all = [c["name"] for c in hpc_classes(ctx)]
+    if runs_on_hpc(step):
+        options += [n for n in hpc_all if n not in options]
+    choose = f"Choose one of: {', '.join(options)}."
+    labels = (step.get("metadata") or {}).get("labels") or {}
+    refused = {}
+    for cls in catalog:
+        if cls["name"] not in options:
+            refused[cls["name"]] = ["it is a GPU machine and the step does not declare gpu=True",
+                                    "Add gpu=True to the step in pipeline.py to run it on a GPU machine."]
+    for name in hpc_all:
+        if name not in options:
+            if labels.get(STEP_KIND_LABEL) in CLUSTER_ONLY_KINDS:
+                reason = f"a {labels.get(STEP_KIND_LABEL)} step never runs on HPC (Slurm)"
+            else:
+                reason = "a step that produces a dataset runs on the cluster for now"
+            refused[name] = [reason, choose]
+    return {"offered": options, "refused": refused}
+
+
+def enhance_class_param(spec: dict, step: dict, ctx: dict, annots: dict, offer: dict) -> None:
     """Per-step compute-class dropdown ({step}-class), matching the live WFT.
 
     Default = the step's tier class; enum = the pool's cpu and gpu classes for a
@@ -616,27 +658,9 @@ def enhance_class_param(spec: dict, step: dict, ctx: dict, annots: dict) -> None
         return
     tier = step_tier(step)
     default = tier_default(ctx, step)["name"]
-    # The pool catalog, ALWAYS attached (#865): the old
-    # tier-filtered list collapsed to length 1 on a one-class-per-tier pool,
-    # and enum-only-when->1 then rendered a FREE-TEXT box (typo -> forever-
-    # Pending run). Cross-tier entries are legitimate choices: a gpu-capable
-    # step submitted with a cpu class runs CPU-only (see the gpus routing in
-    # enhance_gpu_routing).
-    sizes = node_sizes(ctx)   # refuses a pool with a class that cannot be sized, so none is offered unsized
-    # A step that does not declare gpu=True is offered the cluster's cpu classes only: a gpu class would put
-    # it on a machine it cannot use. A pool with no cpu class at all keeps offering what exists.
-    catalog = ctx["computeClasses"]["all"]
-    if not is_gpu_step(step):
-        catalog = [c for c in catalog if c.get("tier", "cpu") == "cpu"] or catalog
-    options = [c["name"] for c in catalog]
-    if default not in options:
-        options.insert(0, default)
-    # HPC classes: a step can be placed on the
-    # HPC provider per run — the class is provider-prefixed (meluxina-gpu),
-    # and kubecore/meluxina.py gates the in-cluster/Slurm twin pair on it.
-    # A step whose kind never runs on HPC (ingest, publish, control) is offered none.
-    hpc_names = [c["name"] for c in hpc_classes(ctx)] if runs_on_hpc(step) else []
-    options += [n for n in hpc_names if n not in options]
+    node_sizes(ctx)   # refuses a pool with a class that cannot be sized, so none is offered unsized
+    options = offer["offered"]
+    hpc_names = [n for n in options if n in {c["name"] for c in hpc_classes(ctx)}]
     param = {
         "name": param_name,
         "value": default,
@@ -741,7 +765,7 @@ def enhance_walltime(spec: dict, step: dict, annots: dict) -> None:
     add_task_argument(spec, step["name"], "deadline", "{{=%s * 60}}" % setting(step["name"], "walltime"))
 
 
-def enhance_run_form(spec: dict, steps: list) -> None:
+def enhance_run_form(spec: dict, steps: list, offers: dict) -> None:
     """The run form's own fields for the steps that declare walltime= and checkpoint_every=: `<step>-walltime`
     and `<step>-checkpoint-every`, whose default is the value in code. Compose gets each value (checks it,
     and writes the numbers as its output `kaos-run-settings`)."""
@@ -778,6 +802,11 @@ def enhance_run_form(spec: dict, steps: list) -> None:
                   f"How often the '{step_name}' step's checkpoint is saved: minutes or hours, "
                   f"for example 10m or 1h.", "--checkpoint-every", step_name)
     table = json.loads(args[args.index("--steps") + 1]) if "--steps" in args else []
+    chosen = {name: offer for name, offer in offers.items() if offer and name != COMPOSE_STEP}
+    for name in chosen:
+        args.extend(["--class", "%s={{workflow.parameters.%s}}" % (name, class_field(name))])
+    if chosen:
+        args.extend(["--class-offers", json.dumps(chosen, separators=(",", ":"))])
     for entry in table:
         for produced in entry["produces"]:
             if produced["type"] == "dataset":
@@ -1244,6 +1273,7 @@ def enhance(wft: dict, ctx: dict) -> dict:
     steps = step_templates(spec)
     enhance_arguments(spec, ctx, steps)
     gpu_step_names: set = set()
+    offers: dict = {}    # step -> what its {step}-class choice offers (None: pinned to one class)
     shared = shared_templates(spec)  # before enhance_hpc adds twin tasks
     for step in steps:
         annots = platform_annotations(step)  # validates; raises on unknown keys
@@ -1254,7 +1284,10 @@ def enhance(wft: dict, ctx: dict) -> dict:
             gpu_step_names.add(step["name"])
         enhance_image(step, ctx, annots)
         enhance_env(step, ctx, annots)
-        enhance_class_param(spec, step, ctx, annots)
+        # Before enhance_gpu_routing strips the typed request, which class_offer reads.
+        offer = class_offer(step, ctx, annots) if "compute-class" not in annots else None
+        offers[step["name"]] = offer
+        enhance_class_param(spec, step, ctx, annots, offer)
         compute_class = resolve_compute_class(step, ctx, annots)
         enhance_class_sizing(spec, step, ctx, annots)  # the node of the chosen class
         enhance_scheduling(step, ctx, annots)
@@ -1272,7 +1305,7 @@ def enhance(wft: dict, ctx: dict) -> dict:
     enhance_image_guard(steps)
     enhance_workspace_pvc(spec, steps)
     enhance_compose_identity(steps, ctx)
-    enhance_run_form(spec, steps)
+    enhance_run_form(spec, steps, offers)
     enhance_pipeline_info(spec, ctx, steps)
     # PRD-1016: the MeluXina leg — must run LAST (twin tasks copy each routed
     # step's FINAL container image/command, and the depends rewrite needs the

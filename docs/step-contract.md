@@ -86,6 +86,14 @@ without it, the platform's own compose step included, is offered the CPU classes
 when the pool declares no CPU class. The default class of a step does not change. The HPC classes are offered by the
 rules below.
 
+A class the form does not offer a step is refused when the run starts, before the first step, whoever submitted
+the run: `step '<name>' cannot run on class '<class>': <reason>. <what to do>`. For a GPU class and a step without
+`gpu=True` the sentence is "step 'x' cannot run on class 'gpu-t4': it is a GPU machine and the step does not
+declare gpu=True. Add gpu=True to the step in pipeline.py to run it on a GPU machine."; an HPC class and an ingest,
+publish or control step, or a step that produces a dataset, "... a publish step never runs on HPC (Slurm). Choose
+one of: ..."; a name that is no class of the cluster, "... it is not a machine class of this cluster. Choose one
+of: ...". The form's choice and the check come from one function, so they cannot differ.
+
 **Placement of a step that produces a dataset.** A step whose `produces=` holds a `dataset(...)` is not
 offered an HPC class and has no HPC variant, the way `ingest`, `publish` and `control` steps are not: a job on
 HPC holds a token the lake treats as admin, which would bypass the rule that only the producing app writes a
