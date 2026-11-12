@@ -56,7 +56,7 @@ Everything after `name` is keyword-only.
 | `produces=` | What the step writes: `model("name")`, `artifact("name")`, `dataset("name")`. A dataset an app produces is the repository `dataset-<app>-<name>`: `dataset("clean")` in the app `hera1` is `dataset-hera1-clean`. The name is per app because every app made from a template declares the same names and a dataset has exactly one producer; two apps of a project never share one. |
 | `gpu=` | Unchanged. |
 | `when=` | A condition in plain words: the name of a run-form field, `==` or `!=`, and a value: `when="quantization-mode != off"`. The field is a setting's path with dashes, as the run form shows it. The value is a bare word or number (`off`, `3`) or a quoted string (`"two words"`). Comparisons join with `and` / `or` (`and` binds tighter; no parentheses, no other operators). The engine writes it as one condition on the step's task and on its HPC variant, comparing the field's value as text: `quantization-mode != off` becomes `{{=workflow.parameters['quantization-mode'] != 'off'}}` (`and` becomes `&&`, `or` becomes a double bar, in the order written). The step is skipped when it is false. |
-| `walltime=` | The run limit on an HPC class: `'90m'`, `'12h'` or `'720'` (minutes). |
+| `walltime=` | The step's time limit wherever it runs, on any kind: `'90m'`, `'12h'` or `'720'` (minutes). On the cluster it is the step's deadline; on an HPC class it is the job's limit. A step that declares none keeps the platform's default (30 minutes on the cluster, 90 for a GPU step, 4 hours on an HPC class). |
 | `resumable=`, `checkpoint_every=`, `idle_timeout=` | Unchanged. |
 
 Removed, with no alias: `outputs=` (the result replaces it), `hpc_time_limit=` (`walltime=` replaces it) and

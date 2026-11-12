@@ -44,8 +44,8 @@ release-gate rule):
                                       the ConfigMap indirection
   platform.kubecore.io/shm            /dev/shm emptyDir sizeLimit (e.g. "4Gi")
   platform.kubecore.io/workspace      per-run RWO PVC at /workspace (e.g. "50Gi")
-  platform.kubecore.io/hpc            the step's run limit on an HPC class
-                                      (authoring: walltime=)
+  platform.kubecore.io/hpc            the step's time limit, on the cluster and on an
+                                      HPC class (authoring: walltime=)
   platform.kubecore.io/checkpoint-every  minutes between checkpoint copies of
                                       the step's KAOS_CHECKPOINT_DIR; "off"
                                       removes the persistence helper (see
@@ -78,7 +78,7 @@ import yaml
 
 from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
-from kubecore.meluxina import HPC_TWIN_TEMPLATE, enhance_hpc, hpc_classes, runs_on_hpc
+from kubecore.meluxina import HPC_TWIN_TEMPLATE, enhance_hpc, hpc_classes, parse_time_limit, runs_on_hpc
 from kubecore.outputs_repo import outputs_repo
 from kubecore.resilience import enhance_resilience, shared_templates, write_helper_configmap
 from kubecore.step_contract import (
@@ -717,6 +717,11 @@ PENDING_DEADLINE_SECONDS = 1800  # CPU steps: 30 min
 GPU_PENDING_DEADLINE_SECONDS = 5400  # GPU steps: 90 min (scale-from-zero + retries)
 
 
+def walltime_seconds(annots: dict) -> int:
+    """The step's declared walltime= in seconds, 0 when it declares none."""
+    return parse_time_limit(annots["hpc"]) * 60 if annots.get("hpc") else 0
+
+
 def enhance_scheduling(step: dict, ctx: dict, annots: dict) -> None:
     compute_class = resolve_compute_class(step, ctx, annots)
     gpu = is_gpu_step(step)
@@ -757,11 +762,10 @@ def enhance_scheduling(step: dict, ctx: dict, annots: dict) -> None:
             step["nodeSelector"].setdefault(key, value)
 
     # Bound how long this step may sit unschedulable (see the constants above).
-    # fill-absent: a developer who set their own deadline keeps it.
-    step.setdefault(
-        "activeDeadlineSeconds",
-        GPU_PENDING_DEADLINE_SECONDS if gpu else PENDING_DEADLINE_SECONDS,
-    )
+    # fill-absent: a developer who set their own deadline keeps it. A step that declares walltime= is ended
+    # when it elapses, on the cluster as on an HPC class; any other step keeps the default.
+    step.setdefault("activeDeadlineSeconds", walltime_seconds(annots) or (
+        GPU_PENDING_DEADLINE_SECONDS if gpu else PENDING_DEADLINE_SECONDS))
 
     tolerations = step.setdefault("tolerations", [])
     # Tolerate EVERY catalog class's taint, not just the default class's

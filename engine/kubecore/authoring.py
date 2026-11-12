@@ -39,7 +39,6 @@ from kubecore.step_contract import (
     CONTEXT_OUTPUT_PREFIX,
     CONTEXT_PARAM,
     DATASET_PREFIX,
-    CLUSTER_ONLY_KINDS,
     KINDS,
     MAX_INPUTS,
     MAX_NAME,
@@ -98,7 +97,7 @@ _REMOVED_KEYWORDS = {
 # step(resumable=True) gets the stop signal this long before its HPC wall time.
 DEFAULT_RESUMABLE_LEAD = "10m"
 HPC_RESUMABLE_ANNOTATION = "platform.kubecore.io/hpc-resumable"
-# step(walltime=...): the run limit on an HPC class (read by kubecore/meluxina.py).
+# step(walltime=...): the step's time limit (read by kubecore/enhance.py and kubecore/meluxina.py).
 WALLTIME_ANNOTATION = "platform.kubecore.io/hpc"
 RESUMABLE_OFF = "off"   # the annotation value of resumable=False
 CHECKPOINT_EVERY_ANNOTATION = "platform.kubecore.io/checkpoint-every"
@@ -365,11 +364,6 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
             f"'{RESERVED_PREFIX}'. Choose another name."
         )
     _check_kind(name, kind)
-    if walltime is not None and kind in CLUSTER_ONLY_KINDS:
-        raise AuthoringError(
-            f"step {name!r}: walltime= is the run limit on an HPC class, and a {kind} step never runs on one. "
-            f"Remove walltime= from the step."
-        )
     reads, inputs, needs, produces = list(reads or []), list(inputs or []), list(needs or []), list(produces or [])
     _check_data(name, kind, inputs, needs, produces)
     if any(s.name == name for s in _current.steps):
@@ -382,8 +376,8 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
     ):
         raise AuthoringError(
             f"step {name!r}: walltime={walltime!r} must be minutes or hours as a "
-            f"string like '90m', '12h' or '720', at least one minute (the run limit when this step "
-            f"runs on an HPC class; the step is ended when it elapses)."
+            f"string like '90m', '12h' or '720', at least one minute (the step's time limit, wherever it "
+            f"runs; the step is ended when it elapses)."
         )
     if resumable is True:
         resumable = DEFAULT_RESUMABLE_LEAD
@@ -494,9 +488,8 @@ class pipeline:
                                if DATASET_PRODUCERS_STAY_ON_CLUSTER and any(e.type == "dataset" for e in s.produces)
                                else {})},
                     resources=Resources(gpus=1) if s.gpu else None,
-                    # Read by kubecore/meluxina.py: the run limit when
-                    # this step runs on an HPC class (developer-set; the
-                    # enhancer defaults it otherwise).
+                    # Read by kubecore/enhance.py (the step's deadline on the cluster) and kubecore/meluxina.py
+                    # (the run limit on an HPC class): developer-set; the enhancer defaults it otherwise.
                     # and, for step(resumable=...), how long before it the step
                     # is told to save (kaos_lib.checkpoint).
                     annotations={k: v for k, v in (

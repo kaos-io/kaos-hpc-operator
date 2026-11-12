@@ -459,10 +459,10 @@ def test_a_rendered_pipeline_carries_no_platform_value():
 # ---------------------------------------------------------------- walltime= and the dataset name
 
 @pytest.mark.parametrize("kind", ["ingest", "publish", "control"])
-def test_walltime_on_a_step_that_never_runs_on_hpc_is_refused(kind):
-    assert refused(lambda a: a.step("one", kind=kind, walltime="2h")) == (
-        f"step 'one': walltime= is the run limit on an HPC class, and a {kind} step never runs on one. "
-        "Remove walltime= from the step.")
+def test_walltime_on_a_step_that_never_runs_on_hpc_is_accepted(kind):
+    wft = render(lambda a: a.step("one", kind=kind, walltime="2h"))
+    step = next(t for t in wft["spec"]["templates"] if t["name"] == "one")
+    assert step["metadata"]["annotations"]["platform.kubecore.io/hpc"] == "2h"
 
 
 @pytest.mark.parametrize("kind", ["transform", "train", "evaluate"])
@@ -511,10 +511,10 @@ def test_a_step_may_not_name_the_same_needed_step_twice():
 
 @pytest.mark.parametrize("value", ["0", "0m", "0h", "00"])
 def test_walltime_of_zero_is_refused_at_render_for_every_step(value):
-    for kind in ("train", "transform", "evaluate"):
+    for kind in ("train", "transform", "evaluate", "ingest"):
         message = refused(lambda a, kind=kind: a.step("one", kind=kind, walltime=value))
         assert message == (f"step 'one': walltime={value!r} must be minutes or hours as a string like '90m', '12h' or "
-                           "'720', at least one minute (the run limit when this step runs on an HPC class; the step is "
+                           "'720', at least one minute (the step's time limit, wherever it runs; the step is "
                            "ended when it elapses).")
     assert render(lambda a: a.step("one", kind="train", walltime="1m"))
 
