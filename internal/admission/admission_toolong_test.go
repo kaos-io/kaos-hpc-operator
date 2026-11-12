@@ -32,7 +32,7 @@ func TestDecideStepLongerThanTheLongestLane(t *testing.T) {
 	}{
 		{"should_refuse_too_long_not_resumable_with_numbers_and_both_fixes", 4320, nil,
 			hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonTooLongNotResumable,
-			[]string{"3 days (4320 min)", "2 days (2880 min)", "not resumable", "resumable=True", "walltime of 2880 minutes or less"}},
+			[]string{"3 days (4320 min)", "2 days (2880 min)", "not resumable", "resumable=True", "to 2880 minutes or less"}},
 		{"should_refuse_one_minute_over_the_lane_when_not_resumable", laneMax + 1, nil,
 			hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonTooLongNotResumable, nil},
 		{"should_admit_exactly_the_lane_maximum_without_resumable", laneMax, nil,

@@ -311,7 +311,7 @@ Controller flags (chart `controllerManager.container.args`, `runnerImage`, `runn
   alone and continued from its checkpoint, settled 0 (its host's booking covers the node); the continuation may host,
   guest or run alone. A resumable host's end is reported when its Slurm job ends, so the node time it held is settled to
   that end, and its job is not padded to twice its step. Details and tests: `docs/extreme-cases.md` 4.13-4.18.
-- **Steps longer than the longest lane (D-67, D-74):** a resumable step whose declared `walltime` is above the class or
+- **Steps longer than the longest lane (D-67, D-74):** a resumable step whose time limit (the run form's `<step>-walltime`) is above the class or
   site maximum is admitted and run as continuations of at most that maximum each (`status.placement.timeLimitMinutes`,
   one run booked at a time), up to the continuation cap + 1 runs in all; the follower prints "declared N min runs as
   continuations of up to M min each". A step that is not resumable is refused at admission (`TooLongNotResumable`).

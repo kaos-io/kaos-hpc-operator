@@ -37,13 +37,13 @@ func TestStopMessage(t *testing.T) {
 		want       string
 	}{
 		{"should_name_limit_and_site_maximum", 240, 2880, false,
-			"This step ran its full 4 h time limit and was stopped. Set a longer limit for it (`walltime`, up to 48 h on this site) or make it resumable so it continues automatically from a checkpoint."},
+			"This step ran its full 4 h time limit and was stopped. Set a longer limit for it on the run form (`<step>-walltime`, up to 48 h on this site) or make it resumable so it continues automatically from a checkpoint."},
 		{"should_use_minutes_for_odd_limits", 90, 1440, false,
-			"This step ran its full 90 min time limit and was stopped. Set a longer limit for it (`walltime`, up to 24 h on this site) or make it resumable so it continues automatically from a checkpoint."},
+			"This step ran its full 90 min time limit and was stopped. Set a longer limit for it on the run form (`<step>-walltime`, up to 24 h on this site) or make it resumable so it continues automatically from a checkpoint."},
 		{"should_not_promise_a_longer_limit_at_the_maximum", 2880, 2880, false,
 			"This step ran its full 48 h time limit and was stopped. Its limit is already the longest this site allows (48 h); make it resumable so it continues automatically from a checkpoint."},
 		{"should_omit_the_maximum_when_unknown", 60, 0, false,
-			"This step ran its full 1 h time limit and was stopped. Set a longer limit for it (`walltime`) or make it resumable so it continues automatically from a checkpoint."},
+			"This step ran its full 1 h time limit and was stopped. Set a longer limit for it on the run form (`<step>-walltime`) or make it resumable so it continues automatically from a checkpoint."},
 		{"should_explain_a_missing_checkpoint_for_a_resumable_step", 240, 2880, true,
 			"This step ran its full 4 h time limit and was stopped before it saved a checkpoint; save more often or ask to be signalled earlier."},
 	}
@@ -57,7 +57,7 @@ func TestStopMessage(t *testing.T) {
 }
 
 func TestWarnMessage(t *testing.T) {
-	if got, want := WarnMessage(240, false), "Warning: this step was stopped at its 4 h limit in an earlier run and will be again unless you raise its limit (`walltime`) or make it resumable."; got != want {
+	if got, want := WarnMessage(240, false), "Warning: this step was stopped at its 4 h limit in an earlier run and will be again unless you raise its limit on the run form (`<step>-walltime`) or make it resumable."; got != want {
 		t.Fatalf("got %q", got)
 	}
 	if got, want := WarnMessage(90, true), "Warning: this step was stopped at its 90 min limit in an earlier run before it saved a checkpoint; save more often or ask to be signalled earlier."; got != want {
