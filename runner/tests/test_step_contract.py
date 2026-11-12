@@ -121,6 +121,14 @@ def test_the_result_file_is_handed_back_unread_under_the_site_jobs_id(tmp_path, 
     assert "result hand-back: kaos-result.json, %d bytes" % len(raw) in p.stdout
 
 
+@pytest.mark.parametrize("raw", [b'{"a":1}\r\n--B\r\n--B--\r\n{"junk":true}', b"x\r\n--B--\r\n", b"\r\n--B", b'{"v":"\r\n--B"}'])
+def test_a_result_that_holds_the_upload_delimiter_is_handed_back_whole(tmp_path, lakefs, raw):
+    """The multipart boundary is random and not in the body: a result holding `\\r\\n--B` is not cut there."""
+    p = _handback(tmp_path, lakefs, write=raw)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert _handed(lakefs) == {"kaos-result.json": raw}
+
+
 def test_a_step_that_wrote_no_file_hands_back_the_record_that_there_is_none(tmp_path, lakefs):
     p = _handback(tmp_path, lakefs)
     assert p.returncode == 0 and list(_handed(lakefs)) == ["kaos-result.absent"]

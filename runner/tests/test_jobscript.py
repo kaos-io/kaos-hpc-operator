@@ -84,9 +84,17 @@ class FakeLakeFS:
                     if srv.fail_uploads:
                         srv.fail_uploads -= 1
                         return self._send(500, {})
+                    # As a real server reads it: the part ends at the FIRST delimiter line of the request's boundary,
+                    # and only the closing delimiter may follow.
+                    boundary = self.headers["Content-Type"].split("boundary=", 1)[1].encode()
+                    delimiter = b"\r\n--" + boundary
+                    assert body.startswith(b"--" + boundary + b"\r\n")
                     head, rest = body.split(b"\r\n\r\n", 1)
-                    assert rest.endswith(b"\r\n--B--\r\n") and b'name="content"' in head
-                    srv.objects[(parts[3], q["path"])] = rest[:-len(b"\r\n--B--\r\n")]
+                    assert b'name="content"' in head
+                    content, tail = rest.split(delimiter, 1)
+                    if tail != b"--\r\n":
+                        return self._send(400, {"message": "malformed multipart body"})
+                    srv.objects[(parts[3], q["path"])] = content
                     return self._send(201, {})
                 # repositories/<repo>/branches/<b>/commits
                 if parts[2] == "branches" and parts[4] == "commits":

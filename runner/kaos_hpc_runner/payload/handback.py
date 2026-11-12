@@ -68,11 +68,17 @@ call(urllib.request.Request(
     base + '/branches', method='POST',
     data=json.dumps({'name': branch, 'source': 'main'}).encode(),
     headers=dict(H, **{'Content-Type': 'application/json'})), ok=(409,))   # 409: the branch is there already
-body = (b'--B\r\nContent-Disposition: form-data; name="content"; filename="f"\r\n'
-        b'Content-Type: application/octet-stream\r\n\r\n' + data + b'\r\n--B--\r\n')
+# A random boundary that is not in the file: a server ends the part at the first delimiter line it meets, so a
+# result holding "\r\n--<boundary>" would be cut there and a valid prefix taken for the whole.
+while True:
+    boundary = os.urandom(16).hex().encode()
+    if boundary not in data:
+        break
+body = (b'--' + boundary + b'\r\nContent-Disposition: form-data; name="content"; filename="f"\r\n'
+        b'Content-Type: application/octet-stream\r\n\r\n' + data + b'\r\n--' + boundary + b'--\r\n')
 call(urllib.request.Request(
     base + '/branches/%s/objects?%s' % (branch, urllib.parse.urlencode({'path': prefix + name})), data=body, method='POST',
-    headers=dict(H, **{'Content-Type': 'multipart/form-data; boundary=B'})))
+    headers=dict(H, **{'Content-Type': 'multipart/form-data; boundary=' + boundary.decode()})))
 # A requeued job runs again under the same site job id: what its earlier run left must not stand beside this.
 call(urllib.request.Request(
     base + '/branches/%s/objects?%s' % (branch, urllib.parse.urlencode({'path': prefix + other})), method='DELETE',
