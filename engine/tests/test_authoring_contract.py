@@ -75,20 +75,29 @@ def test_the_keywords_after_the_name_are_given_by_name():
 
 # ---------------------------------------------------------------- removed keywords (AC-01)
 
-def test_outputs_is_an_app_from_before_the_contract():
+def test_outputs_says_what_to_write_instead():
     message = refused(lambda a: a.step("prepare", kind="transform", outputs=["dataset-info"]))
-    assert message == "step 'prepare': outputs= is no longer part of step(). " + OLD_APP_NOTICE
+    assert message == ("step 'prepare': outputs= is gone. Declare what the step writes with produces=[...] and "
+                       "hand it on with step.result().")
 
 
-def test_hpc_time_limit_is_an_app_from_before_the_contract():
+def test_hpc_time_limit_says_what_to_write_instead():
     message = refused(lambda a: a.step("train", kind="train", hpc_time_limit="12h"))
-    assert message == "step 'train': hpc_time_limit= is no longer part of step(). " + OLD_APP_NOTICE
+    assert message == "step 'train': hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\"."
 
 
-def test_disk_is_refused_and_a_step_gets_the_disk_of_its_class():
+def test_disk_says_a_step_gets_the_disk_of_its_class():
     message = refused(lambda a: a.step("train", kind="train", disk="20Gi"))
-    assert message == ("step 'train': disk is no longer declared; a step gets the disk of the machine its class "
-                       "runs on. " + OLD_APP_NOTICE)
+    assert message == "step 'train': disk= is gone. The step gets the disk of the machine class it runs on."
+
+
+def test_any_other_unknown_keyword_lists_the_keywords_that_exist():
+    from kubecore import authoring
+    with pytest.raises(TypeError) as exc:
+        render(lambda a: a.step("one", kind="train", gpus=1))
+    assert str(exc.value) == ("step() got an unexpected keyword argument 'gpus'. The keywords are: name, kind, reads, "
+                              "inputs, needs, produces, gpu, when, walltime, resumable, checkpoint_every, "
+                              "idle_timeout.")
 
 
 def test_an_app_on_the_old_contract_fails_the_render_and_writes_nothing(tmp_path):
@@ -104,7 +113,7 @@ def test_an_app_on_the_old_contract_fails_the_render_and_writes_nothing(tmp_path
     """))
     done = run_render(repo)
     assert done.returncode == 1
-    assert "outputs= is no longer part of step()" in done.stderr and OLD_APP_MARKER in done.stderr
+    assert "step 'dataset-loading': outputs= is gone." in done.stderr
     assert not (repo / "out").exists()
 
 

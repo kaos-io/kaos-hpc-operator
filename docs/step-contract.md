@@ -63,7 +63,7 @@ Everything after `name` is keyword-only.
 Removed, with no alias: `outputs=` (the result replaces it), `hpc_time_limit=` (`walltime=` replaces it) and
 `disk=`: a step is not told its disk, it gets the disk of the machine its class runs on (the usable disk of that
 class, less a fixed reserve for the container images, or 10Gi where the platform does not say). A step that
-passes `disk=` is refused.
+that passes one is refused with what to write instead: "step 'x': outputs= is gone. Declare what the step writes with produces=[...] and hand it on with step.result()."; "step 'x': hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\"."; "step 'x': disk= is gone. The step gets the disk of the machine class it runs on." Any other unknown keyword is refused with a sentence that lists the keywords that exist.
 
 **Time limit and checkpoint interval on the run form.** Every step of the developer's pipeline has one time limit,
 wherever it runs, and the run form shows it: a field `<step>-walltime` for every step, with the description "The
@@ -101,8 +101,7 @@ produced dataset. The step runs on the cluster until jobs there hold the app's o
 A step that produces a dataset and is pinned to an HPC class is refused. A step that produces only a model or
 an artifact is not affected.
 
-**Apps made before the current pipelines.** An app that still uses a keyword the contract removed (a pipeline
-in which no step has a `kind=`, `outputs=`, `hpc_time_limit=`, `disk=`), lists the `platform` config group or defines a
+**Apps made before the current pipelines.** An app in which no step has a `kind=`, that lists the `platform` config group or defines a
 top-level `platform` section, or carries a `kubecore/` folder of its own, is not moved to this contract. The
 render refuses it with a message that ends: "This app was made before the current pipelines. Create it again
 from the template." A step without `kind=` in a pipeline where other steps have one forgot it: its message ends at

@@ -86,11 +86,12 @@ _current = None
 # Kubernetes resource quantity ("10Gi", "512Mi", "2G"); anchored so a typo
 # ("10 Gi", "10GB") fails the render instead of rendering an invalid manifest.
 _WALLTIME_RE = re.compile(r"^[0-9]+[mh]?$")
-# Keywords the step contract removed, with what to write instead.
+# Keywords the step contract removed, with what to write instead (the render says it after "step '<name>': ").
 _REMOVED_KEYWORDS = {
-    "outputs": "outputs= is no longer part of step()",
-    "hpc_time_limit": "hpc_time_limit= is no longer part of step()",
-    "disk": "disk is no longer declared; a step gets the disk of the machine its class runs on",
+    "outputs": "outputs= is gone. Declare what the step writes with produces=[...] and hand it on with "
+               "step.result().",
+    "hpc_time_limit": "hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\".",
+    "disk": "disk= is gone. The step gets the disk of the machine class it runs on.",
 }
 
 
@@ -347,10 +348,9 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
         raise RuntimeError("step() must be called inside `with pipeline(...):`")
     for keyword in removed:
         if keyword not in _REMOVED_KEYWORDS:
-            raise TypeError(f"step() got an unexpected keyword argument {keyword!r}")
-        raise AuthoringError(
-            f"step {name!r}: {_REMOVED_KEYWORDS[keyword]}. {OLD_APP_NOTICE}"
-        )
+            raise TypeError(f"step() got an unexpected keyword argument {keyword!r}. The keywords are: name, "
+                            f"{', '.join(step.__kwdefaults__)}.")
+        raise AuthoringError(f"step {name!r}: {_REMOVED_KEYWORDS[keyword]}")
     if not _well_formed(name):
         raise AuthoringError(
             f"step name {name!r} is invalid — use a DNS-label name: lowercase "

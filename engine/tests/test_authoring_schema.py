@@ -45,7 +45,7 @@ def test_should_publish_patterns_that_agree_with_the_validators():
 
 def test_should_tell_the_linter_what_was_removed_and_what_to_write_instead():
     assert set(SCHEMA["removed"]) == {"outputs", "hpc_time_limit", "disk"}
-    assert "disk is no longer declared" in SCHEMA["removed"]["disk"]
+    assert SCHEMA["removed"]["disk"] == "disk= is gone. The step gets the disk of the machine class it runs on."
     assert not {"outputs", "hpc_time_limit", "disk"} & {p["name"] for p in SCHEMA["params"]}
     assert "migration_guide" not in SCHEMA
     assert SCHEMA["old_app_marker"] == "Create it again from the template."
