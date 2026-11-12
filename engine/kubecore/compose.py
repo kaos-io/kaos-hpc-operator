@@ -32,7 +32,9 @@ Failure modes concentrated here, all before any GPU time:
 - ADVANCED override with unknown keys -> struct-mode merge rejects it
 - a declared input that does not resolve (empty, no such dataset or version,
   lakeFS unreachable, no credentials) -> hard error naming the input (below)
-- the app's config defines a key the platform reserves -> hard error naming it
+- the ADVANCED override is over 16 KiB, or a dataset reference has a version over 255 characters or a
+  repository id over 63 -> hard error
+- the app's config uses a resolver, or defines a key the platform reserves -> hard error naming it
 - a step's context is over its size cap -> hard error naming the step,
   the size and the limit
 
@@ -42,8 +44,10 @@ Each is resolved ONCE here, with kaos-lib, to a commit. The step's context carri
 own inputs as a ledger (version 2, named reads), and --ledger-output holds all of them:
 the first part of the run's ledger. The whole run reads those commits whatever happens
 to a dataset meanwhile. Nothing is skipped: a reference that cannot be resolved fails
-the run here. --offline (for a laptop without the platform; never in a rendered
-pipeline) resolves nothing and writes empty ledgers.
+the run here.
+
+Config never reads the environment: a value that uses a resolver (`${oc.env:NAME}`) is refused, and the
+config is resolved with an empty environment besides, because this pod holds the platform's credentials.
 
 The run's own keys: the ADVANCED override may carry `plan`, which the platform reads
 and the app's config never defines. `plan.promote.<dataset>: true` asks the run to
@@ -52,6 +56,7 @@ entry of its context.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -69,11 +74,15 @@ from kubecore.step_contract import (
     CONTEXT_VERSION,
     DATASET_PREFIX,
     LEDGER_VERSION,
+    MAX_OVERRIDE,
+    MAX_REF_VERSION,
+    MAX_REPO,
     RESERVED_CONFIG_KEYS,
     RESULT_CAP,
     base_context_cap,
     base_cost,
     cost,
+    dataset_name_problem,
     produced_repo,
     wire,
 )
@@ -89,8 +98,6 @@ STEP_IMAGES_ENV = "KAOS_STEP_IMAGES"   # {"<step>": "<the image the run resolved
 _IMAGE_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?(/[A-Za-z0-9][A-Za-z0-9._-]*)+"
                         r"(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}(@sha256:[0-9a-f]{64})?|@sha256:[0-9a-f]{64})\Z")
 
-HERE = Path(__file__).parent  # kubecore/
-DEFAULT_OUTPUT = HERE.parent / "out" / "params.yaml"
 
 
 class ComposeError(Exception):
@@ -278,6 +285,8 @@ def split_plan(advanced: str) -> tuple:
     config, so they are taken out before the override is merged into it. Only what this platform version
     acts on is accepted: a key it would silently ignore fails the run instead.
     """
+    if len(advanced.encode()) > MAX_OVERRIDE:
+        raise ComposeError("the override is too large; put the values in the app's config")
     parsed = yaml.safe_load(advanced) if advanced.strip() else None
     if not isinstance(parsed, dict):
         return parsed, {}
@@ -309,6 +318,20 @@ def split_plan(advanced: str) -> tuple:
     return parsed, {PLAN_PROMOTE: flags}
 
 
+@contextlib.contextmanager
+def _no_environment():
+    """The config is resolved with an empty environment. The compose pod holds the platform's credentials
+    (the lake's key pair among them); whatever a config value might do, it cannot read them here. The
+    environment is back when the block ends: the run's inputs are pinned with it."""
+    saved = dict(os.environ)
+    os.environ.clear()
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
 def compose_config(overrides: list, advanced=None, required: list = None, render_defaults: dict = None) -> dict:
     """The resolved config as plain values. `advanced` is the ADVANCED override, parsed (split_plan)."""
     cfg = derive_tree.compose_tree(order_overrides(overrides, render_defaults or {}))
@@ -317,11 +340,10 @@ def compose_config(overrides: list, advanced=None, required: list = None, render
         # ADVANCED override merged LAST. Struct mode: unknown keys fail.
         cfg = OmegaConf.merge(cfg, OmegaConf.create(advanced))
 
-    resolved = _plain(OmegaConf.to_container(cfg, resolve=True))
-    for key in RESERVED_CONFIG_KEYS:
-        if key in resolved:
-            raise ComposeError(f"the config key '{key}' is reserved for the platform (reserved: "
-                               f"{', '.join(RESERVED_CONFIG_KEYS)}); rename '{key}' in the app's config/ tree")
+    derive_tree.refuse_resolvers(OmegaConf.to_container(cfg, resolve=False))
+    with _no_environment():
+        resolved = _plain(OmegaConf.to_container(cfg, resolve=True))
+    derive_tree.refuse_reserved_keys(resolved)
     for section in required or []:
         if section not in resolved:
             raise ComposeError(
@@ -329,13 +351,6 @@ def compose_config(overrides: list, advanced=None, required: list = None, render
                 f"'{section}' section (top-level sections: {', '.join(resolved)})"
             )
     return resolved
-
-
-def compose_and_validate(overrides: list, advanced: str = "", required: list = None,
-                         render_defaults: dict = None) -> str:
-    """Returns the resolved params.yaml text."""
-    resolved = compose_config(overrides, split_plan(advanced)[0], required, render_defaults)
-    return OmegaConf.to_yaml(OmegaConf.create(resolved), resolve=True)
 
 
 def check_step_images(raw) -> None:
@@ -372,15 +387,11 @@ LAKEFS_TIMEOUT_S = 30     # per request; kaos-lib retries a failing GET a few ti
 def _kaos_lib():
     """kaos-lib's datasets module and a lakeFS client with a short per-request timeout."""
     try:
-        from kaos_lib import datasets, lock
+        from kaos_lib import datasets
         from kaos_lib.lakefs import LakeFS
     except ImportError as exc:
         raise ComposeError(f"cannot resolve the run's inputs: kaos-lib is not installed in the compose image "
                            f"({exc}). The platform's compose image installs it.") from None
-    # A lock in this pod's own environment would be REPLAYED by kaos-lib: the resolve below would return its
-    # commit without asking lakeFS. This step is the one that decides the commit, so it never replays one.
-    os.environ.pop("KAOS_LIB_LOCK", None)
-    lock.reset()
     try:
         client = LakeFS.connect()
         client.timeout = LAKEFS_TIMEOUT_S
@@ -389,7 +400,7 @@ def _kaos_lib():
     return datasets, client
 
 
-def pin_inputs(resolved: dict, steps: list, offline: bool = False, datasets=None, client=None) -> dict:
+def pin_inputs(resolved: dict, steps: list, datasets=None, client=None) -> dict:
     """{input name: its ledger read} for every input a step declares, each resolved once to a commit.
 
     An input is the name of a top-level config value that holds a dataset reference,
@@ -401,7 +412,7 @@ def pin_inputs(resolved: dict, steps: list, offline: bool = False, datasets=None
     """
     names = [name for step in steps for name in step["inputs"]]
     names = list(dict.fromkeys(names))
-    if offline or not names:
+    if not names:
         return {}
     reads = {}
     for name in names:
@@ -413,6 +424,13 @@ def pin_inputs(resolved: dict, steps: list, offline: bool = False, datasets=None
                 f"{'empty' if wanted in (None, '') or isinstance(wanted, str) else 'not a dataset reference'}. "
                 f"Pick a dataset and a version for '{name}' on the form, for example dataset-default@{LATEST}")
         wanted = wanted.strip()
+        reference, _, version = wanted.partition("@")
+        repo = reference.rpartition("/")[2]
+        if len(version) > MAX_REF_VERSION or len(repo) > MAX_REPO:
+            raise ComposeError(
+                f"input '{name}' (step {users}): the reference is not valid: "
+                + (f"the version is {len(version)} characters, at most {MAX_REF_VERSION}" if len(version) > MAX_REF_VERSION
+                   else f"the repository id '{repo}' is {len(repo)} characters, at most {MAX_REPO}"))
         if datasets is None:
             datasets, client = _kaos_lib()
         try:
@@ -477,6 +495,11 @@ def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict,
     96 KiB less one full result (8 KiB) for each step it needs, so whatever those steps hand back, the
     step's definition stays under what a pod accepts and the step starts.
     """
+    for step in steps:
+        for entry in step["produces"]:
+            problem = entry["type"] == "dataset" and dataset_name_problem(app, step["name"], entry["name"])
+            if problem:
+                raise ComposeError(problem)
     promote = dict((plan or {}).get(PLAN_PROMOTE) or {})
     produced = {e["name"] for step in steps for e in step["produces"] if e["type"] == "dataset"}
     unknown = sorted(set(promote) - produced)
@@ -524,7 +547,9 @@ def main(argv=None) -> None:
                         help="Top-level section a step declared via reads= (repeatable).")
     parser.add_argument("--render-defaults", default="{}",
                         help="JSON manifest {override_key: render-time default} for elision.")
-    parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
+    parser.add_argument("--output", default="",
+                        help="Where to write the composed config as YAML (kaosctl's local run reads it); "
+                             "nothing is written without it.")
     parser.add_argument("--steps", default="",
                         help="The pipeline's steps (JSON): name, kind, reads, inputs, needs, produces. With it, every step's "
                              "context is written; --run, --app, --project and --context-dir are then required.")
@@ -533,8 +558,6 @@ def main(argv=None) -> None:
     parser.add_argument("--project", default="", help="The project.")
     parser.add_argument("--context-dir", default="", help="Where to write each step's context: <dir>/<step>.json.")
     parser.add_argument("--ledger-output", default="", help="Where to write the run's ledger: every pinned input.")
-    parser.add_argument("--offline", action="store_true",
-                        help="Resolve nothing and write empty ledgers (a laptop without the platform).")
     parser.add_argument("overrides", nargs="*", help="Hydra override tokens (key=value).")
     args = parser.parse_args(argv)
     if args.steps:
@@ -548,13 +571,9 @@ def main(argv=None) -> None:
         check_step_images(os.environ.get(STEP_IMAGES_ENV))
         advanced, plan = split_plan(args.advanced)
         resolved = compose_config(args.overrides, advanced, args.require, json.loads(args.render_defaults))
-        text = OmegaConf.to_yaml(OmegaConf.create(resolved), resolve=True)
         if args.steps:
             steps = _steps(args.steps)
-            if args.offline:
-                print("compose-and-validate: OFFLINE - no input was resolved; the ledgers are empty",
-                      file=sys.stderr)
-            reads = pin_inputs(resolved, steps, args.offline)
+            reads = pin_inputs(resolved, steps)
             contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, plan)
     except Exception as exc:  # any composition failure = hard error, pre-GPU
         message = str(exc)
@@ -563,10 +582,12 @@ def main(argv=None) -> None:
         print(f"compose-and-validate FAILED: {message}", file=sys.stderr)
         sys.exit(1)
 
-    out = Path(args.output)
-    out.parent.mkdir(exist_ok=True)
-    out.write_text(text)
-    print(f"wrote {out} ({len(text.encode())} bytes)")
+    if args.output:
+        text = OmegaConf.to_yaml(OmegaConf.create(resolved), resolve=True)
+        out = Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text)
+        print(f"wrote {out} ({len(text.encode())} bytes)")
     for name, read in reads.items():
         print(f"input {name}: {read['repo']}@{read['ref']} is commit {read['commit']}")
     for step, body in contexts.items():

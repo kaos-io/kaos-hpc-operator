@@ -70,7 +70,9 @@ def tree(tmp_path, monkeypatch):
 def resolved(tokens, render_defaults=None):
     """Full compose path; returns the params.yaml text parsed back (the
     downstream steps' view)."""
-    text = compose.compose_and_validate(tokens, render_defaults=render_defaults or {})
+    from omegaconf import OmegaConf
+    config = compose.compose_config(tokens, None, None, render_defaults or {})
+    text = OmegaConf.to_yaml(OmegaConf.create(config), resolve=True)   # what kaosctl's local run reads
     return text, yaml.safe_load(text)
 
 

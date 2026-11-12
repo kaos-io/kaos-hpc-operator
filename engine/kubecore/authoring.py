@@ -44,18 +44,19 @@ from kubecore.step_contract import (
     CONTEXT_OUTPUT_PREFIX,
     CONTEXT_PARAM,
     DATASET_PREFIX,
+    CLUSTER_ONLY_KINDS,
     KINDS,
     MAX_INPUTS,
     MAX_NAME,
+    MAX_NEEDS,
     MIGRATION_GUIDE_URL,
-    MIN_BASE_CONTEXT_CAP,
+    MIN_DATASET_NAME,
     LEDGER_PARAM,
     LEDGER_PATH,
     RESERVED_PREFIX,
     RESULT_PARAM,
     RESULT_PATH,
     SENTINEL,
-    base_context_cap,
     context_expression,
     wire,
 )
@@ -72,7 +73,6 @@ _STEP_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")   # also an input
 class AuthoringError(Exception):
     pass
 COMPOSE_STEP = "compose-and-validate"
-PARAMS_PATH = "/work/params.yaml"
 # Template names the platform renders itself: the DAG, and the HPC follower.
 RESERVED_STEP_NAMES = (COMPOSE_STEP, "main", "hpc-follower")
 # A step's HPC variant is the task `<step>-hpc` (kubecore/meluxina.py); a step may not take such a name.
@@ -160,11 +160,12 @@ def _well_formed(name) -> bool:
 
 
 def _produced(type, name):
-    if not _well_formed(name):
+    if not _well_formed(name) or (type == "dataset" and len(name) < MIN_DATASET_NAME):
         raise AuthoringError(
-            f"{type}({name!r}): the name is invalid — use lowercase letters, digits and hyphens, at most "
-            f"{MAX_NAME} characters, for example {type}('{'embeddings' if type == 'dataset' else type}'). "
-            + (f"The dataset is stored as {DATASET_PREFIX}<name>." if type == "dataset" else
+            f"{type}({name!r}): the name is invalid — use lowercase letters, digits and hyphens, "
+            f"{f'{MIN_DATASET_NAME} to ' if type == 'dataset' else 'at most '}{MAX_NAME} characters, for example "
+            f"{type}('{'embeddings' if type == 'dataset' else type}'). "
+            + (f"The dataset is stored as {DATASET_PREFIX}<app>-<name>, where <app> is the app's name." if type == "dataset" else
                "It is the folder the files are stored under.")
         )
     if name.startswith(RESERVED_PREFIX):
@@ -186,7 +187,8 @@ def artifact(name) -> Produced:
 
 
 def dataset(name, **options) -> Produced:
-    """produces=[dataset("name")]: a new version of the dataset `name`, written by this step and by no other."""
+    """produces=[dataset("name")]: a new version of the app's dataset `name` (the repository
+    `dataset-<app>-<name>`), written by this step and by no other."""
     if "of" in options:
         raise AuthoringError(
             f"dataset({name!r}, of={options['of']!r}): of= is reserved for a dataset stored as a variant of "
@@ -262,12 +264,15 @@ def _check_data(name, kind, inputs, needs, produces):
             f"step {name!r}: a control step steers the run and handles no data, so it takes no inputs= and "
             f"no produces=. Give the step the kind of the work it does ({', '.join(k for k in KINDS if k != 'control')})."
         )
-    if base_context_cap(len(needs)) < MIN_BASE_CONTEXT_CAP:
-        most = next(n for n in range(len(needs)) if base_context_cap(n + 1) < MIN_BASE_CONTEXT_CAP)
+    needed = [need.name for need in needs]
+    again = sorted({n for n in needed if needed.count(n) > 1})
+    if again:
+        raise AuthoringError(f"step {name!r}: needs= names {', '.join(again)} more than once.")
+    if len(needs) > MAX_NEEDS:
         raise AuthoringError(
-            f"step {name!r} needs {len(needs)} steps; a step may need at most {most}. Each needed step's "
-            f"result takes room in this step's context, and {len(needs)} would leave under "
-            f"{MIN_BASE_CONTEXT_CAP} bytes for the rest. Join some of the steps it needs, or put a step between."
+            f"step {name!r} needs {len(needs)} steps; a step may need at most {MAX_NEEDS}. Each needed step's "
+            f"result takes room in this step's context, and {len(needs)} would leave too little for the rest. "
+            f"Join some of the steps it needs, or put a step between."
         )
     # input(name) reads a declared input from the ledger and anything else from the result of a needed
     # step: one name may have one meaning only, or the step could not say which one it reads.
@@ -321,8 +326,7 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
         raise AuthoringError(
             f"step name {name!r} is invalid — use a DNS-label name: lowercase "
             f"letters, digits and hyphens, no leading/trailing hyphen, at most {MAX_NAME} characters "
-            f"(e.g. 'model-evaluation'). The name becomes the Argo template, the "
-            f"steps/<dir> folder, and the image-<step> parameter."
+            f"(e.g. 'model-evaluation'). The name is the step's folder under steps/ and part of its image name."
         )
     if name.endswith(RESERVED_STEP_SUFFIX) or name in RESERVED_STEP_NAMES or name.startswith(RESERVED_PREFIX):
         raise AuthoringError(
@@ -331,6 +335,11 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
             f"'{RESERVED_PREFIX}'. Choose another name."
         )
     _check_kind(name, kind)
+    if walltime is not None and kind in CLUSTER_ONLY_KINDS:
+        raise AuthoringError(
+            f"step {name!r}: walltime= is the run limit on an HPC class, and a {kind} step never runs on one. "
+            f"Remove walltime= from the step."
+        )
     reads, inputs, needs, produces = list(reads or []), list(inputs or []), list(needs or []), list(produces or [])
     _check_data(name, kind, inputs, needs, produces)
     if any(s.name == name for s in _current.steps):
@@ -343,10 +352,12 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
             f"step {name!r}: disk={disk!r} is not a Kubernetes quantity — use a "
             f"string like '20Gi' (digits + optional Ki/Mi/Gi/Ti/K/M/G/T suffix)."
         )
-    if walltime is not None and not (isinstance(walltime, str) and _WALLTIME_RE.match(walltime)):
+    if walltime is not None and not (
+        isinstance(walltime, str) and _WALLTIME_RE.match(walltime) and int(walltime.rstrip("mh")) != 0
+    ):
         raise AuthoringError(
             f"step {name!r}: walltime={walltime!r} must be minutes or hours as a "
-            f"string like '90m', '12h' or '720' (the run limit when this step "
+            f"string like '90m', '12h' or '720', at least one minute (the run limit when this step "
             f"runs on an HPC class; the step is ended when it elapses)."
         )
     if resumable is True:
@@ -419,7 +430,7 @@ class pipeline:
                 + ["--render-defaults", json.dumps(form.render_defaults, separators=(",", ":"))]
                 + ["--advanced", "{{workflow.parameters.config}}"]
                 + [f"--require={sec}" for sec in required]
-                + ["--output", PARAMS_PATH, "--run", "{{workflow.name}}", "--steps", self._step_table(),
+                + ["--run", "{{workflow.name}}", "--steps", self._step_table(),
                    "--context-dir", CONTEXT_DIR, "--ledger-output", LEDGER_PATH],
                 labels={STEP_LABEL: COMPOSE_STEP, STEP_KIND_LABEL: "control"},
                 outputs=[Parameter(name=LEDGER_PARAM, value_from=ValueFrom(path=LEDGER_PATH))]
@@ -455,9 +466,9 @@ class pipeline:
                         (IDLE_TIMEOUT_ANNOTATION, s.idle_timeout)) if v}
                     or None,
                     inputs=[Parameter(name=CONTEXT_PARAM)],
-                    # A step that ends well without a result hands on the sentinel, never an empty value.
-                    outputs=[Parameter(name=RESULT_PARAM,
-                                       value_from=ValueFrom(path=RESULT_PATH, default=wire(SENTINEL)))],
+                    # No default: a step that ends well without writing its result fails in the workflow engine,
+                    # loudly. A step that did not run is the sentinel through the DAG argument, not through here.
+                    outputs=[Parameter(name=RESULT_PARAM, value_from=ValueFrom(path=RESULT_PATH))],
                 )
 
             with DAG(name="main"):

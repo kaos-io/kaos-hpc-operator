@@ -15,7 +15,7 @@ from paths import ENGINE
 
 sys.path.insert(0, str(ENGINE))
 from kubecore import compose  # noqa: E402
-from kubecore.step_contract import cost, wire  # noqa: E402
+from kubecore.step_contract import MIGRATION_GUIDE_URL, cost, wire  # noqa: E402
 
 COMMITS = {"dataset-a": "a1" * 32, "dataset-b": "b2" * 32}
 
@@ -126,33 +126,21 @@ def test_an_answer_that_is_not_a_commit_id_ends_the_run_instead_of_reaching_the_
                            datasets=FakeDatasets(answer=[answer]))
 
 
-def test_offline_resolves_nothing():
-    ds = FakeDatasets(error=RuntimeError("must not be called"))
-    assert compose.pin_inputs({"raw": "dataset-a@latest"}, TWO_INPUTS, offline=True, datasets=ds) == {}
-
-
 def test_without_kaos_lib_the_compose_step_fails_instead_of_skipping(monkeypatch):
     monkeypatch.setitem(sys.modules, "kaos_lib", None)   # import kaos_lib -> ImportError
     with pytest.raises(compose.ComposeError, match="kaos-lib is not installed"):
         compose.pin_inputs({"raw": "dataset-a@latest"}, steps(("prepare", ["raw"], 0, [])))
 
 
-def test_a_lock_in_the_compose_pods_own_environment_is_never_replayed(monkeypatch):
-    """kaos-lib replays $KAOS_LIB_LOCK: with one set, a resolve returns ITS commit without asking the data
-    store. The compose step decides the commit, so it drops the variable and kaos-lib's cached copy first."""
-    calls = []
-    fake_lock = types.SimpleNamespace(reset=lambda: calls.append("reset"))
+def test_compose_connects_with_a_short_timeout(monkeypatch):
     fake_lakefs = types.SimpleNamespace(LakeFS=types.SimpleNamespace(
         connect=lambda: types.SimpleNamespace(timeout=300)))
     pkg = types.ModuleType("kaos_lib")
-    pkg.datasets, pkg.lock = types.SimpleNamespace(), fake_lock
+    pkg.datasets = types.SimpleNamespace()
     monkeypatch.setitem(sys.modules, "kaos_lib", pkg)
     monkeypatch.setitem(sys.modules, "kaos_lib.datasets", pkg.datasets)
-    monkeypatch.setitem(sys.modules, "kaos_lib.lock", fake_lock)
     monkeypatch.setitem(sys.modules, "kaos_lib.lakefs", fake_lakefs)
-    monkeypatch.setenv("KAOS_LIB_LOCK", '{"version":1,"reads":[]}')
     _, client = compose._kaos_lib()
-    assert "KAOS_LIB_LOCK" not in compose.os.environ and calls == ["reset"]
     assert client.timeout == compose.LAKEFS_TIMEOUT_S, "a dead data store ends the run in minutes, not half an hour"
 
 
@@ -202,14 +190,14 @@ def test_what_a_step_produces_names_its_repository():
     assert contexts(table)["train"]["produces"] == [
         {"name": "model", "type": "model", "repo": "outputs-demo"},
         {"name": "report", "type": "artifact", "repo": "outputs-demo"},
-        {"name": "embeddings", "type": "dataset", "repo": "dataset-embeddings"}]
+        {"name": "embeddings", "type": "dataset", "repo": "dataset-demo-embeddings"}]
 
 
 def test_a_run_promotes_a_dataset_only_when_it_asks():
     """D-06: plan.promote.<dataset> of the run request; absent means the step seals a version and latest stays."""
     table = steps(("prepare", [], 0, [{"name": "embeddings", "type": "dataset"}, {"name": "model", "type": "model"}]))
     asked = contexts(table, plan={"promote": {"embeddings": True}})["prepare"]["produces"]
-    assert asked[0] == {"name": "embeddings", "type": "dataset", "repo": "dataset-embeddings", "promote": True}
+    assert asked[0] == {"name": "embeddings", "type": "dataset", "repo": "dataset-demo-embeddings", "promote": True}
     assert "promote" not in asked[1]
     for plan in (None, {}, {"promote": {"embeddings": False}}):
         assert "promote" not in contexts(table, plan=plan)["prepare"]["produces"][0]
@@ -255,10 +243,94 @@ def test_a_config_tree_that_defines_a_reserved_key_fails_compose_naming_the_key(
     config that reached a run another way."""
     from omegaconf import OmegaConf
     monkeypatch.setattr(compose.derive_tree, "compose_tree", lambda overrides=None: OmegaConf.create({key: "mine"}))
-    with pytest.raises(compose.ComposeError) as exc:
+    with pytest.raises(compose.derive_tree.DeriveError) as exc:
         compose.compose_config([])
     assert str(exc.value) == (f"the config key '{key}' is reserved for the platform (reserved: plan, "
-                              f"pipeline-version); rename '{key}' in the app's config/ tree")
+                              f"pipeline-version); rename '{key}' in your config/ tree")
+
+
+def test_a_config_tree_with_a_platform_section_of_its_own_fails_compose_with_the_migration_message(monkeypatch):
+    from omegaconf import OmegaConf
+    monkeypatch.setattr(compose.derive_tree, "compose_tree", lambda overrides=None: OmegaConf.create({"platform": {"a": 1}}))
+    with pytest.raises(compose.derive_tree.DeriveError) as exc:
+        compose.compose_config([])
+    assert str(exc.value) == ("the config key 'platform' is reserved: the platform used to add a `platform` section to "
+                              "an app's config and no longer does. Rename 'platform' in your config/ tree. See "
+                              f"{MIGRATION_GUIDE_URL}")
+
+
+# ---------------------------------------------------------------- config never reads the environment
+
+SECRET = "LAKEFS_SECRET_KEY"
+
+
+def tree_with(monkeypatch, value, section="train"):
+    from omegaconf import OmegaConf
+    monkeypatch.setattr(compose.derive_tree, "compose_tree",
+                        lambda overrides=None: OmegaConf.create({section: {"note": value}, "experiment": {"name": "e"}}))
+
+
+@pytest.mark.parametrize("value, resolver", [("${oc.env:LAKEFS_SECRET_KEY,none}", "oc.env"),
+                                             ("prefix-${oc.env:LAKEFS_SECRET_KEY}", "oc.env"),
+                                             ("${ oc.env : LAKEFS_SECRET_KEY }", "oc.env"),
+                                             ("${now:%Y}", "now"), ("${oc.decode:'1'}", "oc.decode")])
+def test_a_resolver_in_the_config_is_refused_naming_the_key_before_anything_is_resolved(monkeypatch, value, resolver):
+    monkeypatch.setenv(SECRET, "hunter2")
+    tree_with(monkeypatch, value)
+    with pytest.raises(compose.derive_tree.DeriveError) as exc:
+        compose.compose_config([], None, ["train"])
+    assert str(exc.value) == (f"config value 'train.note' uses the resolver `${{{resolver}:...}}`. Config is not a place "
+                              "for secrets or platform values: a resolver reads the environment or the files of the "
+                              "machine that composes the run, so none is allowed. Write the value in config/, or "
+                              "choose it on the form.")
+    assert "hunter2" not in str(exc.value)
+
+
+def test_a_resolver_in_the_advanced_override_or_a_form_value_is_refused_too(monkeypatch):
+    monkeypatch.setenv(SECRET, "hunter2")
+    tree_with(monkeypatch, "plain")
+    advanced, _ = compose.split_plan("train: {note: '${oc.env:LAKEFS_SECRET_KEY}'}")
+    with pytest.raises(compose.derive_tree.DeriveError, match="config value 'train.note' uses the resolver"):
+        compose.compose_config([], advanced, ["train"])
+    tree_with(monkeypatch, "${oc.env:LAKEFS_SECRET_KEY}", section="probe")
+    with pytest.raises(compose.derive_tree.DeriveError, match="config value 'probe.note'"):
+        compose.compose_config([])
+
+
+def test_a_reference_to_another_config_value_is_not_a_resolver(monkeypatch):
+    from omegaconf import OmegaConf
+    monkeypatch.setattr(compose.derive_tree, "compose_tree", lambda overrides=None: OmegaConf.create(
+        {"train": {"lr": 0.1, "again": "${train.lr}", "relative": "${.lr}", "literal": "\\${not.a.reference}"}}))
+    out = compose.compose_config([], None, ["train"])
+    assert out["train"]["again"] == 0.1 and out["train"]["relative"] == 0.1
+
+
+def test_even_a_value_that_gets_through_cannot_see_the_environment(monkeypatch):
+    """Belt and braces: the resolver check is bypassed here, so the resolve itself must find nothing. The
+    environment is back afterwards: the run's inputs are pinned with the credentials."""
+    from omegaconf import OmegaConf
+    monkeypatch.setenv(SECRET, "hunter2")
+    monkeypatch.setattr(compose.derive_tree, "refuse_resolvers", lambda *a, **k: None)
+    tree_with(monkeypatch, "${oc.env:LAKEFS_SECRET_KEY,none}")
+    out = compose.compose_config([], None, ["train"])
+    assert out["train"]["note"] == "none" and "hunter2" not in json.dumps(out)
+    assert compose.os.environ[SECRET] == "hunter2"
+    tree_with(monkeypatch, "${oc.env:LAKEFS_SECRET_KEY}")
+    with pytest.raises(Exception, match="Environment variable 'LAKEFS_SECRET_KEY' not found"):   # noqa: B017  no default and no variable: an error, never the value
+        compose.compose_config([], None, ["train"])
+    assert compose.os.environ[SECRET] == "hunter2", "the environment is restored when the resolve fails too"
+    assert OmegaConf is not None
+
+
+def test_the_render_refuses_a_resolver_before_it_resolves_anything(tmp_path, monkeypatch):
+    from helpers import copy_app, run_render
+    repo = copy_app(tmp_path / "app")
+    with (repo / "config" / "experiment.yaml").open("a") as f:
+        f.write("  token: ${oc.env:LAKEFS_SECRET_KEY,none}\n")
+    done = run_render(repo, extra_env={SECRET: "hunter2"})
+    assert done.returncode == 1 and not (repo / "out").exists()
+    assert "config value 'experiment.token' uses the resolver `${oc.env:...}`. Config is not a place for secrets" in done.stderr
+    assert "hunter2" not in done.stderr
 
 
 # ---------------------------------------------------------------- the size cap
@@ -353,15 +425,6 @@ def test_an_input_that_cannot_be_pinned_stops_the_run_and_publishes_nothing(tmp_
     assert not (tmp_path / "ledger.json").exists()
 
 
-def test_offline_writes_contexts_with_empty_ledgers(tmp_path):
-    table = wire([{"name": "hello-world", "kind": "transform", "reads": [], "inputs": ["dataset"], "needs": [], "produces": []}])
-    done = _compose(tmp_path, "--offline", "--output", str(tmp_path / "p.yaml"), "--run", "r", "--app", "a",
-                    "--project", "p", "--steps", table, "--context-dir", str(tmp_path / "context"))
-    assert done.returncode == 0, done.stderr[-2000:]
-    assert json.loads((tmp_path / "context" / "hello-world.json").read_text())["ledger"]["reads"] == []
-    assert "OFFLINE - no input was resolved" in done.stderr
-
-
 # ---------------------------------------------------------------- a step without a built image never starts a run
 
 GOOD = "zot.example:5000/proj/app:train-0a1b2c3"
@@ -426,3 +489,58 @@ def test_the_engine_image_carries_what_kaos_lib_needs_so_the_compose_image_adds_
     pinned = {line.split("==")[0].strip().lower() for line in (ENGINE / "requirements.txt").read_text().splitlines()
               if "==" in line and not line.startswith("#")}
     assert {"requests", "pyyaml", "packaging", "pyjwt", "cryptography"} <= pinned
+
+
+# ---------------------------------------------------------------- the form's free text, checked before any step
+
+def test_the_override_is_refused_above_16_kib():
+    ok = "train: {note: " + "x" * 16000 + "}"
+    assert compose.split_plan(ok)[0] is not None
+    with pytest.raises(compose.ComposeError) as exc:
+        compose.split_plan("train: {note: " + "x" * 16400 + "}")
+    assert str(exc.value) == "the override is too large; put the values in the app's config"
+
+
+@pytest.mark.parametrize("value, why", [
+    ("dataset-a@" + "v" * 256, "the version is 256 characters, at most 255"),
+    ("dataset-" + "a" * 56 + "@v1", "the repository id 'dataset-" + "a" * 56 + "' is 64 characters, at most 63"),
+    ("other/dataset-" + "a" * 56 + "@v1", "the repository id 'dataset-" + "a" * 56 + "' is 64 characters, at most 63"),
+])
+def test_a_dataset_reference_over_the_limits_ends_the_run_naming_the_input(value, why):
+    ds = FakeDatasets(error=RuntimeError("must not be asked"))
+    with pytest.raises(compose.ComposeError) as exc:
+        compose.pin_inputs({"raw": value}, steps(("prepare", ["raw"], 0, [])), datasets=ds)
+    assert str(exc.value) == f"input 'raw' (step prepare): the reference is not valid: {why}"
+    assert compose.pin_inputs({"raw": "dataset-a@" + "v" * 255}, steps(("prepare", ["raw"], 0, [])),
+                              datasets=FakeDatasets())["raw"]["ref"] == "v" * 255
+
+
+# ---------------------------------------------------------------- a produced dataset is named per app
+
+def test_two_apps_that_declare_the_same_dataset_name_get_two_repositories():
+    table = steps(("prepare", [], 0, [{"name": "clean", "type": "dataset"}]))
+    repos = {}
+    for app in ("hera1", "hera2"):
+        reads = {}
+        text = compose.step_contexts(table, "run-1", app, "vision", RESOLVED, reads, {"promote": {"clean": True}})["prepare"]
+        repos[app] = json.loads(text)["produces"][0]
+    assert repos == {"hera1": {"name": "clean", "type": "dataset", "repo": "dataset-hera1-clean", "promote": True},
+                     "hera2": {"name": "clean", "type": "dataset", "repo": "dataset-hera2-clean", "promote": True}}
+
+
+def test_the_repository_is_named_in_one_place_and_models_keep_the_outputs_repository():
+    from kubecore import step_contract as c
+    assert c.dataset_repo("hera1", "clean") == c.produced_repo("hera1", "dataset", "clean") == "dataset-hera1-clean"
+    assert c.produced_repo("hera1", "model", "m") == c.produced_repo("hera1", "artifact", "a") == "outputs-hera1"
+
+
+def test_a_name_the_lake_cannot_hold_ends_the_run_naming_both_names_and_the_limit():
+    table = steps(("prepare", [], 0, [{"name": "n" * 40, "type": "dataset"}]))
+    ok_app = "a" * 7                                                   # 7 + 1 + 40 = 48
+    compose.step_contexts(table, "r", ok_app, "p", RESOLVED, {})
+    with pytest.raises(compose.ComposeError) as exc:
+        compose.step_contexts(table, "r", "a" * 8, "p", RESOLVED, {})  # 49
+    assert str(exc.value) == (f"step 'prepare': dataset('{'n' * 40}') in app '{'a' * 8}' is the repository "
+                              f"'dataset-{'a' * 8}-{'n' * 40}', and the lake allows 3 to 48 characters after 'dataset-': "
+                              f"'{'a' * 8}-{'n' * 40}' has 49. Shorten the dataset name ('{'n' * 40}') or the app's name "
+                              f"('{'a' * 8}').")

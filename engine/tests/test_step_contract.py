@@ -27,12 +27,19 @@ STEPS = {
 }
 
 
+# The fixtures still name the repository of the dataset the run produces `dataset-embeddings`. A produced dataset is
+# named per app, `dataset-<app>-<name>` (owner ruling 2026-11-12), so for the app `hera-demo` it is
+# `dataset-hera-demo-embeddings`. The contract lane moves the fixtures; until then the tests read them with that one
+# value mapped, and nothing else.
+PER_APP = ("dataset-embeddings", "dataset-hera-demo-embeddings")
+
+
 def fixture(name):
-    return json.loads((FIXTURES / f"{name}.json").read_text())
+    return json.loads((FIXTURES / f"{name}.json").read_text().replace(*PER_APP))
 
 
 def wire_of(name):
-    return (FIXTURES / f"{name}.wire").read_text()
+    return (FIXTURES / f"{name}.wire").read_text().replace(*PER_APP)
 
 
 def evaluate(expression, outputs):
@@ -99,7 +106,7 @@ def test_the_size_budget_is_the_contracts():
     from kubecore import step_contract as c
     assert (c.CONTEXT_CAP, c.RESULT_CAP, c.TEMPLATE_CAP) == (98304, 8192, 24576)
     assert c.base_context_cap(0) == 98304 and c.base_context_cap(1) == 90112 and c.base_context_cap(10) == 16384
-    assert c.base_context_cap(11) < c.MIN_BASE_CONTEXT_CAP == 16384
+    assert c.MAX_NEEDS == 10 and c.base_context_cap(c.MAX_NEEDS) == 16384 and c.base_context_cap(11) < 16384
     # the base is counted as it travels: with the upstream keys, every result still empty
     base = wire_of("context-one-upstream").split(',"upstream"')[0] + "}"
     assert c.base_cost(base, ["prepare"]) == c.cost(base[:-1] + ',"upstream":{"prepare":}}')
@@ -232,9 +239,10 @@ def test_every_step_runs_the_same_entry_with_one_value_and_hands_back_one_result
         env = {e["name"]: e.get("value") for e in step["container"]["env"]}
         assert env["KAOS_STEP_CONTEXT"] == "{{inputs.parameters.kaos-context}}"
         assert "KAOS_LIB_LOCK" not in env
-        assert [p["name"] for p in step["inputs"]["parameters"] if p["name"] != "gpus"] == ["kaos-context"]
+        assert [p["name"] for p in step["inputs"]["parameters"] if p["name"] not in ("gpus", "cpu", "mem")] == ["kaos-context"]
+        # no default: a step that ends well without a result fails in the workflow engine
         assert step["outputs"]["parameters"] == [{"name": "kaos-result", "valueFrom": {
-            "path": "/work/output/kaos-result.json", "default": '{"version":1,"status":"absent"}'}}]
+            "path": "/work/output/kaos-result.json"}}]
 
 
 def test_compose_writes_one_context_per_step_and_the_runs_ledger(rendered):

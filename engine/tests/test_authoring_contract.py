@@ -198,7 +198,7 @@ def test_a_step_may_need_at_most_ten_steps():
     assert render(build(10))
     assert refused(build(11)).startswith(
         "step 'last' needs 11 steps; a step may need at most 10. Each needed step's result takes room in this "
-        "step's context, and 11 would leave under 16384 bytes for the rest.")
+        "step's context, and 11 would leave too little for the rest.")
 
 
 def test_a_control_step_takes_no_data():
@@ -272,7 +272,7 @@ def test_a_step_name_is_lowercase_letters_digits_and_hyphens_at_most_40(name):
 def test_a_produced_name_follows_the_same_rule(make, name):
     message = refused(lambda a: a.step("one", kind="train", produces=[getattr(a, make)(name)]))
     assert message.startswith(f"{make}({name!r}): the name is invalid — use lowercase letters, digits and hyphens, "
-                              "at most 40 characters")
+                              + ("3 to 40 characters" if make == "dataset" else "at most 40 characters"))
 
 
 @pytest.mark.parametrize("name", ["train_data", "Raw", "a" * 41])
@@ -334,3 +334,116 @@ def test_the_same_app_fails_compose_with_the_same_message(tmp_path, monkeypatch)
 def test_a_rendered_pipeline_carries_no_platform_value():
     wft = render(lambda a: a.step("one", kind="train", reads=["experiment"]))
     assert "platform." not in yaml.safe_dump(wft).replace("platform.kubecore.io", "")
+
+
+# ---------------------------------------------------------------- walltime= and the dataset name
+
+@pytest.mark.parametrize("kind", ["ingest", "publish", "control"])
+def test_walltime_on_a_step_that_never_runs_on_hpc_is_refused(kind):
+    assert refused(lambda a: a.step("one", kind=kind, walltime="2h")) == (
+        f"step 'one': walltime= is the run limit on an HPC class, and a {kind} step never runs on one. "
+        "Remove walltime= from the step.")
+
+
+@pytest.mark.parametrize("kind", ["transform", "train", "evaluate"])
+def test_walltime_on_any_step_that_may_run_on_hpc_is_accepted_with_or_without_a_gpu(kind):
+    for gpu in (False, True):
+        wft = render(lambda a, kind=kind, gpu=gpu: a.step("one", kind=kind, gpu=gpu, walltime="2h"))
+        step = next(t for t in wft["spec"]["templates"] if t["name"] == "one")
+        assert step["metadata"]["annotations"]["platform.kubecore.io/hpc"] == "2h"
+
+
+def test_a_produced_name_may_be_written_through_a_module_attribute():
+    """produces=[au.model("m")] is the same call as model("m"): the entries are what counts."""
+    from kubecore import authoring as au
+    with au.pipeline("p") as p:
+        au.step("one", kind="train", produces=[au.model("m"), au.dataset("clean")])
+    assert [(e.name, e.type) for e in p.steps[0].produces] == [("m", "model"), ("clean", "dataset")]
+
+
+@pytest.mark.parametrize("name", ["a", "ab"])
+def test_a_dataset_name_is_three_to_forty_characters(name):
+    message = refused(lambda a: a.step("one", kind="transform", produces=[a.dataset(name)]))
+    assert message.startswith(f"dataset({name!r}): the name is invalid — use lowercase letters, digits and hyphens, "
+                              "3 to 40 characters")
+    from kubecore import authoring
+    with authoring.pipeline("p") as p:
+        authoring.step("one", kind="transform", produces=[authoring.dataset("abc"), authoring.dataset("a" * 40)])
+    assert len(p.steps[0].produces) == 2
+    assert [e.name for e in render_produced("model", "ab")] == ["ab"], "a model or artifact may have a short name"
+
+
+def render_produced(make, name):
+    from kubecore import authoring
+    with authoring.pipeline("p") as p:
+        authoring.step("one", kind="train", produces=[getattr(authoring, make)(name)])
+    return p.steps[0].produces
+
+
+# ---------------------------------------------------------------- review findings
+
+def test_a_step_may_not_name_the_same_needed_step_twice():
+    def build(a):
+        up = a.step("up", kind="transform")
+        a.step("last", kind="train", needs=[up, up])
+    assert refused(build) == "step 'last': needs= names up more than once."
+
+
+@pytest.mark.parametrize("value", ["0", "0m", "0h", "00"])
+def test_walltime_of_zero_is_refused_at_render_for_every_step(value):
+    for kind in ("train", "transform", "evaluate"):
+        message = refused(lambda a, kind=kind: a.step("one", kind=kind, walltime=value))
+        assert message == (f"step 'one': walltime={value!r} must be minutes or hours as a string like '90m', '12h' or "
+                           "'720', at least one minute (the run limit when this step runs on an HPC class; the step is "
+                           "ended when it elapses).")
+    assert render(lambda a: a.step("one", kind="train", walltime="1m"))
+
+
+@pytest.mark.parametrize("value", [90, "90s", "1d", "", "-5", None.__class__])
+def test_a_walltime_of_the_wrong_shape_is_refused_at_render(value):
+    assert "must be minutes or hours as a string" in refused(lambda a: a.step("one", kind="train", walltime=value))
+
+
+def test_no_message_a_client_reads_names_the_workflow_engine():
+    """The messages of authoring and the schema a linter reads are for the people who write apps."""
+    import json
+
+    from kubecore import authoring
+    from paths import ENGINE
+    schema = (ENGINE / "kaos_pipeline_engine" / "authoring-schema.json").read_text()
+    assert "Argo" not in schema and "Workflow" not in json.loads(schema)["doc"]
+    for build in (lambda a: a.step("Bad Name", kind="train"), lambda a: a.step("one"), lambda a: a.step("one", kind="x"),
+                  lambda a: a.step("one", kind="train", outputs=["x"]), lambda a: a.step("main", kind="train")):
+        assert "Argo" not in refused(build)
+    assert authoring.MIGRATION_GUIDE_URL
+
+
+def test_the_schema_says_kind_is_required():
+    import json
+
+    from paths import ENGINE
+    params = {p["name"]: p for p in json.loads((ENGINE / "kaos_pipeline_engine" / "authoring-schema.json").read_text())["params"]}
+    assert params["kind"]["required"] is True and params["name"]["required"] is True
+    assert not any(p["required"] for n, p in params.items() if n not in ("name", "kind"))
+
+
+def test_an_app_may_not_define_a_top_level_platform_section_of_its_own(tmp_path):
+    from kubecore.step_contract import MIGRATION_GUIDE_URL
+    repo = copy_app(tmp_path / "app")
+    with (repo / "config" / "experiment.yaml").open("a") as f:
+        f.write("platform:\n  region: x\n")
+    done = run_render(repo)
+    assert done.returncode == 1
+    assert ("the config key 'platform' is reserved: the platform used to add a `platform` section to an app's config "
+            f"and no longer does. Rename 'platform' in your config/ tree. See {MIGRATION_GUIDE_URL}") in done.stderr
+
+
+def test_the_migration_guide_has_a_real_address_in_a_release_build():
+    """One constant, step_contract.MIGRATION_GUIDE_URL. Until the guide is served it is a placeholder under
+    `.invalid`; a release build (KAOS_ENGINE_RELEASE=1) must not ship that."""
+    import os
+
+    from kubecore.step_contract import MIGRATION_GUIDE_URL
+    assert MIGRATION_GUIDE_URL.startswith("https://")
+    if os.environ.get("KAOS_ENGINE_RELEASE"):
+        assert not MIGRATION_GUIDE_URL.split("/")[2].endswith(".invalid"), MIGRATION_GUIDE_URL

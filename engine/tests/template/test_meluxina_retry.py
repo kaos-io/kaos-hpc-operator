@@ -43,8 +43,8 @@ def _twin():
 def _retried(status: str, message: str) -> bool:
     """POD_LOSS_RETRY as Argo evaluates it (Go regexp `matches` is a search
     anchored by the expression's own `.*`)."""
-    return status == "Error" or re.search(".*(%s).*" % meluxina.POD_LOSS_MESSAGES,
-                                          message) is not None
+    lost = status == "Error" or re.search(".*(%s).*" % meluxina.POD_LOSS_MESSAGES, message) is not None
+    return lost and meluxina.NO_RESULT_MESSAGE not in message
 
 
 def test_twin_retries_always_under_the_pod_loss_expression():
@@ -63,3 +63,15 @@ def test_a_lost_follower_pod_is_retried():
 def test_a_failed_step_is_not_retried():
     for message in STEP_FAILED:
         assert not _retried("Failed", message), message
+
+
+def test_a_step_that_ends_well_without_its_result_is_not_retried_but_a_lost_node_is():
+    """Argo's message for it on v4.0.6: the executor cannot open the output file. It is deterministic, so a
+    re-run only spends the GPU again."""
+    no_result = ("wait: Error (exit code 64): open /var/run/argo/outputs/parameters/work/output/kaos-result.json: "
+                 "no such file or directory")
+    assert not _retried("Error", no_result)
+    assert _retried("Error", "")
+    assert _retried("Error", "some executor error that is not about the result")
+    assert _retried("Failed", "Pod was rejected: node shutting down")
+    assert "not (lastRetry.message contains 'kaos-result.json')" in meluxina.POD_LOSS_RETRY

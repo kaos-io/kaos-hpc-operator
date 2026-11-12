@@ -63,8 +63,9 @@ WORKDIR /work
 COPY engine/kubecore /work/kubecore
 COPY engine/kaos_pipeline_engine/*.json /work/
 ENV KAOS_ENGINE_DIR=/work
-# The compose step writes /work/params.yaml and /work/output/*.json as the non-root user; the engine
-# files themselves stay root-owned and read-only.
+# The compose step writes /work/context/<step>.json and /work/kaos-ledger.json, and a step writes
+# /work/output/kaos-result.json, as the non-root user; the engine files themselves stay root-owned and
+# read-only.
 RUN mkdir -p /work/output && chown 65532:65532 /work /work/output
 
 COPY --from=engine-tests /engine-tests-passed /usr/share/kaos-engine-tests-passed

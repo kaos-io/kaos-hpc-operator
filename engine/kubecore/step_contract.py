@@ -18,6 +18,9 @@ LEDGER_PATH = "/work/kaos-ledger.json"
 SENTINEL = {"version": 1, "status": "absent"}
 RESERVED_PREFIX = "kaos-"                 # step names and produced names the platform keeps for itself
 RESERVED_CONFIG_KEYS = ("plan", "pipeline-version")
+# A top-level config key the platform used to add and no longer does: an app that defines one itself is
+# refused, as one that still names it in its defaults (kubecore/derive_tree.py refuse_platform_group).
+REMOVED_CONFIG_KEYS = ("platform",)
 
 CONTEXT_VERSION = 1
 LEDGER_VERSION = 2
@@ -27,10 +30,14 @@ LEDGER_VERSION = 2
 CONTEXT_CAP = 96 * 1024        # a whole context: the base compose writes plus one result per needed step
 RESULT_CAP = 8 * 1024          # one result (kaos-lib refuses a larger one)
 TEMPLATE_CAP = 24 * 1024       # a step's rendered definition without its context, as the workflow engine encodes it
-MIN_BASE_CONTEXT_CAP = 16 * 1024   # what must be left for the base: a step may need at most ten steps
+MAX_NEEDS = 10                 # steps one step may need: ten results leave 16 KiB for the rest of the context
 MAX_INPUTS = 16                # what one step may read by name: its inputs= plus the datasets its needs= steps produce
 MAX_NAME = 40                  # characters of a step, input or produced name
 MAX_APP_NAME = 55              # an HPC job's app field holds no more
+MIN_DATASET_NAME = 3           # dataset-<name> must be a repository id the lake accepts
+MAX_OVERRIDE = 16 * 1024       # bytes of the run's ADVANCED override: compose refuses a larger one
+MAX_REF_VERSION = 255          # characters of the version in a dataset reference
+MAX_REPO = 63                  # characters of a repository id
 
 # Where the app's migration guide to the step contract lives. Placeholder: set when the guide is published.
 MIGRATION_GUIDE_URL = "https://kaos.invalid/guides/migrate-to-the-step-contract"
@@ -39,7 +46,8 @@ KINDS = ("ingest", "transform", "train", "evaluate", "publish", "control")
 # Kinds that never run on an HPC class: they move data in or out of the platform, or steer the run.
 CLUSTER_ONLY_KINDS = ("ingest", "publish", "control")
 PRODUCED_TYPES = ("model", "artifact", "dataset")
-DATASET_PREFIX = "dataset-"    # a dataset is the repository dataset-<name>
+DATASET_PREFIX = "dataset-"    # a dataset is a repository named dataset-...
+MAX_DATASET_SUFFIX = 48        # characters the lake allows after dataset-: <app>-<name> for a produced dataset
 OUTPUTS_PREFIX = "outputs-"    # models and artifacts live in outputs-<app>
 
 
@@ -99,9 +107,26 @@ def template_bytes(template: dict) -> int:
     return len(text.encode()) + 5 * sum(text.count(c) for c in "&<>") + 3 * sum(text.count(c) for c in "\u2028\u2029")
 
 
+def dataset_repo(app: str, name: str) -> str:
+    """The repository of a dataset an app produces: named per app, so two apps of a project that declare the
+    same dataset name (every app made from a template does) never share a repository and a writer."""
+    return f"{DATASET_PREFIX}{app}-{name}"
+
+
 def produced_repo(app: str, kind: str, name: str) -> str:
-    """The repository a produced thing is written to."""
-    return DATASET_PREFIX + name if kind == "dataset" else OUTPUTS_PREFIX + app
+    """The repository a produced thing is written to. The one place a produced repository is named."""
+    return dataset_repo(app, name) if kind == "dataset" else OUTPUTS_PREFIX + app
+
+
+def dataset_name_problem(app: str, step: str, name: str):
+    """Why app + name cannot be a dataset repository, or None. The lake allows 3 to 48 characters after
+    `dataset-`; the produced name is 3 to 40 by itself, and the app's name comes before it."""
+    suffix = f"{app}-{name}"
+    if len(suffix) > MAX_DATASET_SUFFIX:
+        return (f"step '{step}': dataset('{name}') in app '{app}' is the repository '{dataset_repo(app, name)}', and "
+                f"the lake allows {MIN_DATASET_NAME} to {MAX_DATASET_SUFFIX} characters after '{DATASET_PREFIX}': "
+                f"'{suffix}' has {len(suffix)}. Shorten the dataset name ('{name}') or the app's name ('{app}').")
+    return None
 
 
 def _quoted(text: str) -> str:

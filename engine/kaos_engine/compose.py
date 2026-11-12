@@ -1,6 +1,6 @@
 """Compose an app's parameters with the PLATFORM engine: what the compose-and-validate step runs.
 
-    python -I -m kaos_engine.compose <override tokens> --output /work/params.yaml --lock-output /work/data-lock.json
+    python -I -m kaos_engine.compose <override tokens> --run R --app A --project P --steps JSON --context-dir DIR
 
 The engine's `kubecore` is put first on the path and imported from the engine directory (asserted), so
 the result never depends on what else the image or the working directory holds: kaos-lib, which the

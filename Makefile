@@ -136,8 +136,9 @@ $(ENGINE_VENV)/.stamp: engine/requirements-dev.txt engine/requirements.txt
 engine-venv: $(ENGINE_VENV)/.stamp ## Create the engine's Python venv (pinned hera/hydra/omegaconf/PyYAML).
 
 .PHONY: test-engine
+# ENGINE_KAOS_LIB=<kaos-lib checkout> also runs the compose test against the real kaos-lib 0.5 (it is skipped without).
 test-engine: engine-venv ## Run the engine tests (the step contract, the template's kubecore tests, runner, wheel, follower contract).
-	PYTHONDONTWRITEBYTECODE=1 $(ENGINE_PY) -m pytest -c engine/pytest.ini engine/tests -q
+	PYTHONDONTWRITEBYTECODE=1 $(if $(ENGINE_KAOS_LIB),PYTHONPATH=$(ENGINE_KAOS_LIB)/src) $(ENGINE_PY) -m pytest -c engine/pytest.ini engine/tests -q
 
 .PHONY: lint-engine
 lint-engine: engine-venv ## Run ruff on the engine's own Python (kubecore/ and the template tests are excluded).

@@ -33,6 +33,7 @@ derive as form dropdowns.
 """
 
 import os
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -41,7 +42,7 @@ from hydra import compose, initialize_config_dir
 from hydra.core.config_store import ConfigStore
 from omegaconf import OmegaConf
 
-from kubecore.step_contract import MIGRATION_GUIDE_URL, RESERVED_CONFIG_KEYS
+from kubecore.step_contract import MIGRATION_GUIDE_URL, REMOVED_CONFIG_KEYS, RESERVED_CONFIG_KEYS
 
 # Hera is a RENDER-TIME dependency (form derivation only). The compose step
 # runs at RUN time in a lean image without Hera, and only calls compose_tree()
@@ -298,7 +299,9 @@ def derive() -> DerivedForm:
     # free of Hera. See module docstring / the hera-note above the imports.
     from hera.workflows import Parameter
 
-    tree = OmegaConf.to_container(compose_tree(), resolve=True)
+    composed = compose_tree()
+    refuse_resolvers(OmegaConf.to_container(composed, resolve=False))   # before anything is resolved
+    tree = OmegaConf.to_container(composed, resolve=True)
     refuse_reserved_keys(tree)
     form = DerivedForm(sections=list(tree.keys()), tree=tree)
     seen = {}
@@ -349,6 +352,32 @@ def derive() -> DerivedForm:
     return form
 
 
+_RESOLVER = re.compile(r"(?<!\\)\$\{\s*([A-Za-z_][\w.\-]*)\s*:")
+
+
+def refuse_resolvers(node, path: str = "") -> None:
+    """Config never reads the environment or a file. A value written `${oc.env:NAME}` (or any other
+    `${resolver:...}`) is resolved by whoever composes the run, in a process that holds the platform's own
+    credentials, and the value would travel into the steps' contexts. No resolver is allowed, so none can
+    be used for that. `node` is the composed config, NOT yet resolved; references to other config values,
+    `${train.lr}`, are fine."""
+    if isinstance(node, dict):
+        items = ((f"{path}.{k}" if path else str(k), v) for k, v in node.items())
+    elif isinstance(node, list):
+        items = ((f"{path}[{i}]", v) for i, v in enumerate(node))
+    else:
+        found = _RESOLVER.search(node) if isinstance(node, str) else None
+        if found:
+            raise DeriveError(
+                f"config value '{path}' uses the resolver `${{{found.group(1)}:...}}`. Config is not a place for "
+                f"secrets or platform values: a resolver reads the environment or the files of the machine that "
+                f"composes the run, so none is allowed. Write the value in config/, or choose it on the form."
+            )
+        return
+    for item_path, value in items:
+        refuse_resolvers(value, item_path)
+
+
 def refuse_reserved_keys(tree: dict) -> None:
     """The platform keeps a few top-level config keys for the run itself (which data a run promotes, which
     pipeline version it runs). An app's config tree may not define them."""
@@ -357,6 +386,12 @@ def refuse_reserved_keys(tree: dict) -> None:
             raise DeriveError(
                 f"the config key '{key}' is reserved for the platform (reserved: "
                 f"{', '.join(RESERVED_CONFIG_KEYS)}); rename '{key}' in your config/ tree"
+            )
+    for key in REMOVED_CONFIG_KEYS:
+        if key in tree:
+            raise DeriveError(
+                f"the config key '{key}' is reserved: the platform used to add a `{key}` section to an app's "
+                f"config and no longer does. Rename '{key}' in your config/ tree. See {MIGRATION_GUIDE_URL}"
             )
 
 

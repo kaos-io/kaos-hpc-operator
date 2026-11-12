@@ -10,11 +10,11 @@
    "type": "string",
    "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
    "maxLength": 40,
-   "doc": "DNS-label step name: the Argo template, the steps/<dir> folder and the image-<step> parameter."
+   "doc": "DNS-label step name: the step's folder under steps/ and part of its image name."
   },
   {
    "name": "kind",
-   "required": false,
+   "required": true,
    "default": null,
    "type": "string",
    "enum": [
@@ -81,7 +81,7 @@
    "required": false,
    "default": null,
    "type": "string",
-   "doc": "An Argo `when` expression; the step is skipped when it is false."
+   "doc": "A condition on the run's form values; the step is skipped when it is false."
   },
   {
    "name": "walltime",
@@ -145,7 +145,6 @@
   "idle_timeout": "platform.kubecore.io/idle-timeout"
  },
  "constants": {
-  "compose_step": "compose-and-validate",
-  "params_path": "/work/params.yaml"
+  "compose_step": "compose-and-validate"
  }
 }
