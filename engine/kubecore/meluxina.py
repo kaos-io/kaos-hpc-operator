@@ -41,6 +41,8 @@ from kubecore.step_contract import (
     CONTEXT_ENV,
     CONTEXT_PARAM,
     RESULT_PARAM,
+    IMAGE_INPUT,
+    image_of,
     pair_results,
 )
 
@@ -316,7 +318,8 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
             "when": twin_when,
             "arguments": {"parameters": [
                 {"name": "step-name", "value": task["name"]},
-                {"name": "image", "value": container.get("image", "")},
+                {"name": "image", "value": image_of(step["name"]) if container.get("image") == IMAGE_INPUT
+                 else container.get("image", "")},
                 {"name": "step-command", "value": json.dumps(cmd, separators=(",", ":"))},
                 {"name": "step-kind", "value": ((step.get("metadata") or {}).get("labels") or {}).get(STEP_KIND_LABEL, "")},
                 # The job's limit is the run form's `<step>-walltime` (compose's output).

@@ -379,15 +379,16 @@ def compose_config(overrides: list, advanced=None, required: list = None, render
     return resolved
 
 
-def check_step_images(raw) -> None:
+def check_step_images(raw) -> dict:
     """Refuse the run when a step has no real image, before any step starts.
 
     A step added to pipeline.py appears in the released pipeline before its first image is built; until then
     its image reference has no registry and no repository, and the run would fail later with an image pull
-    error (or, on HPC, after a queue wait). `raw` is $KAOS_STEP_IMAGES; absent means nothing to check.
+    error (or, on HPC, after a queue wait). `raw` is $KAOS_STEP_IMAGES (the image record, as the workflow engine read it
+    for compose); absent means nothing to check. Returns the images, trimmed, for the output `kaos-images`.
     """
     if not raw:
-        return
+        return {}
     try:
         images = json.loads(raw)
         if not isinstance(images, dict):
@@ -404,6 +405,7 @@ def check_step_images(raw) -> None:
             f"no image has been built yet for: {listed}. The platform builds a step's image after you push; "
             "wait for the app's build to finish (or see why it failed), then run again"
         )
+    return {step: ref.strip() for step, ref in images.items()}
 
 
 _COMMIT = re.compile(r"^[0-9a-f]{64}$")
@@ -619,6 +621,8 @@ def main(argv=None) -> None:
                         help="Minutes before its limit that a resumable step is told to save (repeatable).")
     parser.add_argument("--settings-output", default="",
                         help="Where to write the numbers the form gave each step: {step: {walltime, checkpoint-every}}.")
+    parser.add_argument("--images-output", default="",
+                        help="Where to write the images the run resolved, {step: image}, from $KAOS_STEP_IMAGES.")
     parser.add_argument("--ledger-output", default="", help="Where to write the run's ledger: every pinned input.")
     parser.add_argument("overrides", nargs="*", help="Hydra override tokens (key=value).")
     args = parser.parse_args(argv)
@@ -628,9 +632,9 @@ def main(argv=None) -> None:
         if missing:
             parser.error(f"--steps needs {', '.join(missing)}")
 
-    contexts, reads, settings = {}, {}, {}
+    contexts, reads, settings, images = {}, {}, {}, {}
     try:
-        check_step_images(os.environ.get(STEP_IMAGES_ENV))
+        images = check_step_images(os.environ.get(STEP_IMAGES_ENV))
         advanced = check_advanced(args.advanced)
         resolved = compose_config(args.overrides, advanced, args.require, json.loads(args.render_defaults))
         if args.steps:
@@ -668,6 +672,10 @@ def main(argv=None) -> None:
         Path(args.settings_output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.settings_output).write_text(wire(settings))
         print(f"wrote {args.settings_output}")
+    if args.images_output:
+        Path(args.images_output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.images_output).write_text(wire(images))
+        print(f"wrote {args.images_output}")
     if args.ledger_output:
         Path(args.ledger_output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.ledger_output).write_text(wire(ledger(list(reads.values()))))

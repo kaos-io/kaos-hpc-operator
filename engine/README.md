@@ -187,7 +187,7 @@ holds a reference that is not in this list:
 | In | Reference | What bounds its value |
 |---|---|---|
 | every step | `inputs.parameters.kaos-context` | the context caps |
-| every step | `workflow.parameters.image-<step>` | the app's image record, written by CI |
+| every step | `inputs.parameters.image` | the app's image record, written by CI, read once by compose (`workflow.parameters` holds no image) |
 | every step | `workflow.parameters.<step>-class` | a form field with an `enum`: the pool's classes, plus the HPC classes for a kind that may run there. A step pinned to one class has no such field |
 | a step that is not pinned to one class | `inputs.parameters.cpu`, `inputs.parameters.mem` | computed by the engine from the class (a lookup table of the pool's classes written at render): a number and a quantity like `7` and `27Gi` |
 | GPU steps | `inputs.parameters.gpus` | `0` or `1`, set by the engine |

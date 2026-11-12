@@ -89,8 +89,8 @@ and, for `control`, `step 'x': a control step steers the run and handles no data
 classes, the developer's steps; no account, provider or platform step), the `experiment-*` fields, the other settings
 in the order of `config/`, the dataset fields (the config values `inputs=` names), then for each step, in pipeline order,
 `<step>-class`, `<step>-walltime` and `<step>-checkpoint-every`, then the `promote-<dataset>` choices (read by the final task `kaos-promote`), `config`
-("Extra settings for this run, as YAML. They replace the values above.") and last the `image-<step>` fields, each
-described "Set by the platform. Do not change." (the delivery pipeline reads them to check each step has its folder).
+("Extra settings for this run, as YAML. They replace the values above."). There is no field for an image: see
+"Where a step's image comes from" below.
 A setting's description is the comment written next to it in `config/*.yaml`: the `# ...` at the end of its line, else
 the comment lines directly above it with no blank line between; with no comment the description is empty. The
 platform's own compose step has no class field (it runs on the default class, fixed in the template) and the platform
@@ -283,6 +283,29 @@ are not touched: their run-unique folder is saved by their step. The code is `en
 
 Fixtures: `context-no-upstream`, `context-one-upstream`, `context-skipped-upstream`,
 `context-escapes`.
+
+**Where a step's image comes from.** The image a step runs is never a parameter of the workflow, so it is not on the run
+form and a submit cannot set it (an argument named `image-<step>` or `image` in a submit is ignored: nothing reads it).
+The platform's record of what CI built, the ConfigMap `<app>-pipeline-images` (labelled
+`workflows.argoproj.io/configmap-type: Parameter`, which the workflow engine needs to read it), is read by the templates:
+
+- Compose's template has an input `image` and one input `image-<step>` for each step, each with
+  `valueFrom.configMapKeyRef` into the record (key: the step's name, or its `platform.kubecore.io/source`). The engine reads
+  them when compose starts, so one reading serves the whole run. A key that the record lacks ends compose's task with
+  `unable to retrieve inputs.parameters.image from ConfigMap: ... does not have the key ...` (an `optional` flag does not
+  change that on the workflow engine v4.0.6).
+- Compose gets the step images as `KAOS_STEP_IMAGES` and refuses the run for a step that was never built (a record
+  of `:<step>-latest`: `kubecore/compose.py` `check_step_images`). It writes the images as its output `kaos-images`
+  (`/work/kaos-images.json`, `--images-output`).
+- Every step's task gives the step its `image` input from that output
+  (`step_contract.image_of`: `{{=fromJSON(tasks["compose-and-validate"].outputs.parameters["kaos-images"])["<step>"]}}`),
+  and the step's container image is `{{inputs.parameters.image}}`. The HPC variant's task gets the same expression, so
+  the same string runs on the cluster and on HPC.
+- The final task `kaos-promote` has its own input `image` from the record (key `compose-and-validate`); a step with a
+  `platform.kubecore.io/image` annotation keeps that verbatim image and reads no record.
+
+Checked on the lab (workflow engine v4.0.6): the images come from the record, a submit that carries `image-ingest=evil/a:1`,
+`image=evil/b:1` and `image-compose-and-validate=evil/c:1` runs the record's images, and the HPC variant gets the step's string.
 
 ## 4. The result
 

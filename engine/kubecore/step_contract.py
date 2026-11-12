@@ -16,6 +16,9 @@ CONTEXT_OUTPUT_PREFIX = "kaos-context-"   # compose's output per step: kaos-cont
 CONTEXT_DIR = "/work/context"             # where compose writes them: <dir>/<step>.json
 RESULT_PARAM = "kaos-result"              # a step's one output
 RESULT_PATH = "/work/output/kaos-result.json"
+IMAGES_PARAM = "kaos-images"              # compose's output: {step: the image the run resolved for it}
+IMAGES_PATH = "/work/kaos-images.json"
+IMAGE_INPUT = "{{inputs.parameters.image}}"   # a step template's container image: the DAG task gives the input (image_of)
 LEDGER_PARAM = "kaos-ledger"              # compose's output: the run's ledger as the run starts (pinned inputs)
 LEDGER_PATH = "/work/kaos-ledger.json"
 SENTINEL = {"version": 1, "status": "absent"}
@@ -242,6 +245,13 @@ def value_test(task: str, key: str, op: str, text: str) -> str:
     test = '(type(%s) == "string" ? %s == %s : toJSON(%s) == %s)' % (
         value, value, _single_quoted(text), value, _single_quoted(canonical_when_text(text)))
     return test if op == "==" else "!" + test
+
+
+def image_of(step: str, compose_task: str = "compose-and-validate") -> str:
+    """The DAG task argument that gives a step (or its HPC variant) the image the run resolved for it: compose read the
+    image record once, checked it, and wrote it as the output `kaos-images`. The same string on the cluster and on HPC.
+    A step's image is never a workflow parameter, so no submit can set it."""
+    return "{{=fromJSON(%s)[%s]}}" % (_task_output(compose_task, IMAGES_PARAM), _quoted(step))
 
 
 def context_expression(compose_task: str, step: str, needs: list) -> str:

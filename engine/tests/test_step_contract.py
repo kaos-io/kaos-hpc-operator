@@ -224,7 +224,7 @@ def test_every_step_runs_the_same_entry_with_one_value_and_hands_back_one_result
         assert env["KAOS_STEP_CONTEXT"] == "{{inputs.parameters.kaos-context}}"
         assert "KAOS_LIB_LOCK" not in env
         sizing = ("gpus", "cpu", "mem", "disk", "deadline")
-        assert [p["name"] for p in step["inputs"]["parameters"] if p["name"] not in sizing] == ["kaos-context"]
+        assert [p["name"] for p in step["inputs"]["parameters"] if p["name"] not in sizing] == ["kaos-context", "image"]
         # no default: a step that ends well without a result fails in the workflow engine
         assert step["outputs"]["parameters"] == [{"name": "kaos-result", "valueFrom": {
             "path": "/work/output/kaos-result.json"}}]
@@ -236,7 +236,7 @@ def test_compose_writes_one_context_per_step_and_the_runs_ledger(rendered):
     assert outputs == {"kaos-ledger": "/work/kaos-ledger.json",
                        "kaos-context-dataset-loading": "/work/context/dataset-loading.json",
                        "kaos-context-hello-world": "/work/context/hello-world.json",
-                       "kaos-run-settings": "/work/kaos-run-settings.json"}
+                       "kaos-run-settings": "/work/kaos-run-settings.json", "kaos-images": "/work/kaos-images.json"}
     args = compose["container"]["args"]
     assert args[args.index("--run") + 1] == "{{workflow.name}}"
     assert args[args.index("--app") + 1] == "PLACEHOLDER-app" and args[args.index("--project") + 1]
