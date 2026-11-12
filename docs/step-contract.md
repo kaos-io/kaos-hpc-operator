@@ -106,7 +106,7 @@ this limit. A step that declares `checkpoint_every=` (not `False`) also has `<st
 the 'x' step's checkpoint is saved: minutes or hours, for example 10m or 1h."), default the value in code. Both are
 text: minutes (`90`, `90m`) or hours (`12h`), at least one minute; compose refuses any other value before a step
 starts, naming the field: `<step>-walltime is '1d'. Write minutes or hours, for example 90, 90m or 12h: at least
-one minute, no other unit.` Compose writes the numbers as its output `kaos-run-settings` (`{"<step>": {"walltime":
+one minute, at most 30 days, no other unit.` Compose writes the numbers as its output `kaos-run-settings` (`{"<step>": {"walltime":
 minutes, "checkpoint-every": minutes}}`), which the deadline, the HPC job's limit and the checkpoint copies read.
 A step with a checkpoint interval has the field `checkpoint_every` (minutes, a number) in its context, after
 `produces`; a step without one has no such field.

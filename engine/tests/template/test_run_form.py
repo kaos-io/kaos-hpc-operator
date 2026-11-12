@@ -100,3 +100,9 @@ def test_pipeline_info_lists_the_developers_steps_only_and_names_no_account_or_p
     for word in ("p201342", "account", "MeluXina", "MELUXINA", "leave it unchanged", "informational", "KubePool"):
         assert word not in info
     assert "HPC (Slurm)" in info
+
+
+def test_template_braces_in_a_comment_are_shown_and_never_read_as_a_template():
+    from kubecore import derive_tree
+    found = derive_tree._file_comments("a: 1  # use {{inputs.parameters.x}} or {{= 1 + 1 }}\n")
+    assert found["a"] == "use { {inputs.parameters.x} } or { {= 1 + 1 } }" and "{{" not in found["a"] and "}}" not in found["a"]

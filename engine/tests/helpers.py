@@ -42,7 +42,7 @@ def evaluate(expression: str, settings: dict):
 
     body = re.fullmatch(r"\{\{=(.*)\}\}", expression, re.S).group(1)
     body = re.sub(r'fromJSON\(tasks\["compose-and-validate"\]\.outputs\.parameters\["kaos-run-settings"\]\)',
-                  "json.loads(%r)" % json.dumps(settings), body)
+                  f"json.loads({json.dumps(settings)!r})", body)
     return eval(body, {"json": json, "int": int})  # noqa: S307 - the engine's own output, in a test
 
 

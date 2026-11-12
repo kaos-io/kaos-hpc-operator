@@ -36,12 +36,17 @@ def class_field(step: str) -> str:
     return f"{step}-class"
 
 
+LONGEST_MINUTES = 30 * 24 * 60   # 30 days: no step runs longer, and a larger number is a typing mistake
+
+
 def minutes(value) -> int:
-    """'90' / '90m' -> 90, '12h' -> 720; 0 when the text is not minutes or hours, or is zero."""
+    """'90' / '90m' -> 90, '12h' -> 720; 0 when the text is not minutes or hours, is zero, or is longer than
+    30 days (a value that large would not fit what the run is given as its limit)."""
     match = _TIME.match(str(value).strip())
-    if not match:
+    if not match or len(match.group(1)) > 7:
         return 0
-    return int(match.group(1)) * (60 if match.group(2) == "h" else 1)
+    total = int(match.group(1)) * (60 if match.group(2) == "h" else 1)
+    return total if total <= LONGEST_MINUTES else 0
 
 
 def time_problem(field: str, value) -> str:
@@ -49,7 +54,7 @@ def time_problem(field: str, value) -> str:
     if minutes(value):
         return ""
     return (f"{field} is {str(value)!r}. Write minutes or hours, for example 90, 90m or 12h: at least one "
-            f"minute, no other unit.")
+            f"minute, at most 30 days, no other unit.")
 
 
 def promote_problem(field: str, value) -> str:

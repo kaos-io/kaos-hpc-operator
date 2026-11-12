@@ -322,7 +322,7 @@ def run_classes(steps: list, chosen: list, offers: str) -> None:
         raise ComposeError(f"cannot read the classes the form offers (--class-offers: {exc})") from None
     for step, value in _pairs(chosen).items():
         if step not in known or step not in table:
-            raise ComposeError(f"class-{step}: the pipeline has no step '{step}' that takes a class")
+            raise ComposeError(f"{step}-class: the pipeline has no step '{step}' that takes a class")
         problem = class_problem(step, value, table[step])
         if problem:
             raise ComposeError(problem)

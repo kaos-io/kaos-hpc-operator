@@ -93,3 +93,11 @@ def test_an_offered_class_passes():
     table = __import__("json").loads(args[args.index("--steps") + 1])
     for chosen in ("cpu-standard", "meluxina-cpu"):
         compose.run_classes(table, [f"one={chosen}"], args[args.index("--class-offers") + 1])
+
+
+def test_a_class_for_a_step_the_pipeline_does_not_have_names_the_form_field():
+    wft = _enhanced(kind="evaluate")
+    args = _compose(wft)
+    table = __import__("json").loads(args[args.index("--steps") + 1])
+    with pytest.raises(compose.ComposeError, match=r"^ghost-class: the pipeline has no step 'ghost'"):
+        compose.run_classes(table, ["ghost=cpu-standard"], args[args.index("--class-offers") + 1])

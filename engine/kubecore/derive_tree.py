@@ -319,6 +319,8 @@ def _file_comments(text: str, prefix: str = "") -> dict:
             name = key.group(2) or key.group(3) or key.group(4)
             stack.append((indent, name))
             text_here = _trailing_comment(line[key.end():]) or " ".join(c for c in above if c)
+            # A description is shown, never evaluated: keep template braces from being read as a template.
+            text_here = text_here.replace("{{", "{ {").replace("}}", "} }")
             if text_here:
                 found[".".join(([prefix] if prefix else []) + [n for _, n in stack])] = text_here
         above = []

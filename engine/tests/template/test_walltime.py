@@ -156,7 +156,7 @@ def test_compose_refuses_a_walltime_or_checkpoint_value_that_is_not_minutes_or_h
     with pytest.raises(compose.ComposeError) as walltime:
         compose.run_settings([{"name": "one"}], [f"one={value}"], [])
     assert str(walltime.value) == (f"one-walltime is {value!r}. Write minutes or hours, for example 90, 90m or "
-                                   f"12h: at least one minute, no other unit.")
+                                   f"12h: at least one minute, at most 30 days, no other unit.")
     with pytest.raises(compose.ComposeError) as every:
         compose.run_settings([{"name": "one"}], [], [f"one={value}"])
     assert str(every.value).startswith(f"one-checkpoint-every is {value!r}.")
@@ -259,3 +259,18 @@ def test_a_walltime_on_the_form_not_longer_than_the_save_lead_of_a_resumable_ste
         compose.run_settings([{"name": "one"}], ["one=15m"], [], ["one=20"])
     assert str(exc.value) == ("one-walltime is 15 minutes, which is not longer than the 20 minutes before its limit "
                               "that the step is told to save (resumable= in pipeline.py). Give the step more time.")
+
+
+@pytest.mark.parametrize("value", ["720h", "43200", "30000m"])
+def test_a_limit_of_up_to_thirty_days_is_accepted(value):
+    from kubecore import run_settings
+    assert 0 < run_settings.minutes(value) <= 43200 and run_settings.time_problem("one-walltime", value) == ""
+
+
+@pytest.mark.parametrize("value", ["721h", "43201", "99999999999", "99999999999999999999999", "9999999h"])
+def test_a_limit_longer_than_thirty_days_is_refused_in_compose_with_the_sentence(value):
+    from kubecore import compose, run_settings
+    assert run_settings.minutes(value) == 0
+    assert "at most 30 days" in run_settings.time_problem("one-walltime", value)
+    with pytest.raises(compose.ComposeError, match="one-walltime"):
+        compose.run_settings([{"name": "one"}], [f"one={value}"], [])
