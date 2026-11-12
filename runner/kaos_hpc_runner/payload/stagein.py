@@ -26,6 +26,11 @@ open(os.environ['DATASET_DIRFILE'], 'w').write(str(dest))
 #  3. This program changes the marker FIRST and looks for <folder>.kaos-clean AFTER. Whichever of the two came
 #     second sees the other: the cleanup sees a new or missing marker and leaves the folder, or this program sees
 #     the cleanup, waits the moment it takes, and starts over on what is there then.
+#  4. One window is left in 3: the cleanup read the marker's age, this program renewed the marker, the cleanup
+#     moved the folder and let go, and only then does this program look for the lock and find none. So a hit is
+#     believed only if the marker is STILL in the folder after that look; the cleanup's move takes it away, and a
+#     folder another stage-in has begun to fill again has none until that copy is whole. Otherwise: start over,
+#     at most HIT_RETRIES times, then fill the folder like a miss (that is always safe).
 MARK, OLD_MARK = dest / '.kaos-complete', dest / '.complete'
 CLEAN = pathlib.Path(str(dest) + '.kaos-clean')
 def cleaning():
@@ -39,6 +44,7 @@ def cleaning():
             return waited
         waited = True
         time.sleep(1)
+HIT_RETRIES, lost = 5, 0
 while True:
     try:
         os.utime(str(MARK), None)           # last use, for the cleanup; also what tells a cleanup to leave it
@@ -51,6 +57,11 @@ while True:
             pass
     if cleaning():
         continue                            # a cleanup was at this folder: look again at what is there now
+    if hit and not MARK.is_file():          # the cleanup moved the folder after the renewal (rule 4)
+        lost += 1
+        if lost <= HIT_RETRIES:
+            continue
+        hit = False
     if hit:
         try:
             os.utime(str(OLD_MARK), None)   # a job script from before .kaos-complete cleans by this one
@@ -203,10 +214,19 @@ for d, dirs, names in os.walk(str(dest)):
     if rel == '.':
         dirs[:] = [x for x in dirs if not x.startswith('.kaos-')]
         names = [x for x in names if not x.startswith('.kaos-')]
-    # Not counted: half-downloaded files of a writer from before .kaos-parts (name.part-<job>-<pid>), and
-    # .complete, which a job script from before .kaos-complete writes into the folder when it ends.
-    extra += [x for x in (os.path.normpath(os.path.join(rel, n)) for n in names)
-              if x not in listed and '.part-' not in os.path.basename(x) and x != '.complete']
+    # Half-downloaded files of a writer from before .kaos-parts (name.part-<job>-<pid>) are never dataset files (a
+    # dataset name of that shape is refused above) unless the commit lists them: one a killed writer left is removed
+    # here, before the copy is marked. Not counted either: .complete, which a job script from before .kaos-complete
+    # writes into the folder when it ends.
+    for name in names:
+        x = os.path.normpath(os.path.join(rel, name))
+        if '.part-' in name and x not in listed:
+            try:
+                os.unlink(os.path.join(d, name))
+            except OSError:
+                extra.append(x)             # it stays and is counted: the copy is then not marked
+        elif x not in listed and x != '.complete':
+            extra.append(x)
 if wrong or extra:
     sys.exit('stage-in: the copy of %s@%s on the site is not the commit: %d of %d files are missing or have another '
              'size (first: %r), %d files are not in the commit (first: %r). The copy was not marked complete. '

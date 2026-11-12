@@ -253,6 +253,20 @@ def test_half_downloaded_files_do_not_stay_and_are_not_taken_for_the_dataset(tmp
     assert not [f for f in dest.rglob("*") if ".part-" in f.name]
 
 
+def test_a_part_file_a_killed_older_writer_left_is_removed_before_the_copy_is_marked(tmp_path, lakefs):
+    """A writer from before .kaos-parts wrote name.part-<job>-<pid> beside the file; killed, it left a truncated
+    one inside the copy. It is never a file of the dataset: it goes, then the copy is verified and marked."""
+    fake = lakefs(NOT_YOLO)
+    dest, _ = _stage_in(tmp_path, fake)
+    os.remove(str(dest / ".kaos-complete"))
+    for rel in ("scenes/0001/points.ply.part-77-3", "README.md.part-5-9"):
+        (dest / rel).write_bytes(b"trunc")
+    _, out = _stage_in(tmp_path, fake)
+    assert (dest / ".kaos-complete").is_file() and "downloaded 0 of" in out
+    assert not [f for f in dest.rglob("*") if ".part-" in f.name]
+    assert _tree(dest) == NOT_YOLO
+
+
 # ------------------------------------------------ the cleanup of unused copies and a stage-in at the same folder
 
 def _cleanup_lines():
@@ -367,6 +381,42 @@ def test_a_cache_hit_renews_both_markers(tmp_path, lakefs):
     _, out = _stage_in(tmp_path, fake)
     assert "cache hit" in out
     assert all(time.time() - (dest / m).stat().st_mtime < 60 for m in (".complete", ".kaos-complete"))
+
+
+_CLEANUP_MOVES_THE_FOLDER = """
+import os
+_real, _done = os.utime, []
+def _utime(p, t=None):
+    _real(p, t)
+    if str(p).endswith('.kaos-complete') and not _done:
+        _done.append(1)
+        d = os.path.dirname(str(p))
+        os.rename(d, d + '.kaos-trash-777')     # the cleanup's move, right after the marker was renewed
+        if %r:
+            os.makedirs(os.path.join(d, '.kaos-parts'))   # another stage-in has begun filling the folder
+os.utime = _utime
+"""
+
+
+@pytest.mark.parametrize("refilled", [False, True])
+def test_a_hit_on_a_folder_the_cleanup_moved_after_the_renewal_is_not_a_hit(tmp_path, lakefs, refilled):
+    """The window of rule 3 that is left: the cleanup read the marker's age, the stage-in renewed the marker,
+    the cleanup moved the folder and let go, and the stage-in then found no lock. The marker is checked again
+    after that look: gone, so the stage-in starts over and ends with a whole copy, never a `cache hit` on a
+    folder that is gone (FileNotFoundError) or on one another stage-in has begun to fill."""
+    fake = lakefs(NOT_YOLO)
+    dest, _ = _stage_in(tmp_path, fake)
+    old = time.time() - 20 * 86400
+    os.utime(str(dest / ".kaos-complete"), (old, old))
+    env = {"LAKEFS_ENDPOINT": fake.url, "LAKEFS_BEARER_TOKEN": "w", "DATASET_REPO": "ds", "DATASET_COMMIT": COMMIT,
+           "DATASET_CACHE": str(tmp_path / "data-cache"), "DATASET_DIRFILE": str(tmp_path / "dirfile"),
+           "SLURM_JOB_ID": "9"}
+    p = subprocess.run([sys.executable, "-"], input=_CLEANUP_MOVES_THE_FOLDER % refilled + payloads.STAGEIN,
+                       env=env, capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    assert "cache hit" not in p.stdout
+    assert "FileNotFoundError" not in p.stderr
+    assert _tree(dest) == NOT_YOLO and (dest / ".kaos-complete").is_file()
 
 
 def test_the_platforms_own_folder_is_downloaded(tmp_path, lakefs):
