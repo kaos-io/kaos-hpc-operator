@@ -72,11 +72,16 @@ if [ -z "${LAKE_IMAGE:-}" ]; then
 fi
 echo "lake image: $LAKE_IMAGE ($(short "$(docker image inspect -f '{{.Id}}' "$LAKE_IMAGE")"))"
 # kaos-lake multi-user mode with one declared app user (kaos.app_users, PRD kaos#1217 F-06):
-# user kaos-app-lab, read on dataset-*, write on its outputs repository outputs-lab.
+# user kaos-app-lab, read on dataset-*, write on its outputs repository outputs-lab and on the datasets it
+# produces ($PRODUCED_REPOS, PRD kaos#1911 D-04). The lake creates a declared dataset itself (it never adopts one
+# made by hand), which needs kaos.repositories: new repositories go under local://lab/.
 mkdir -p "$STATE/apps"
-printf '{"user":"kaos-app-lab","access_key_id":"%s","secret_access_key":"%s","outputs_repository":"%s"}\n' \
-  "$LAKE_APP_KEY" "$LAKE_APP_SECRET" "$OUT_REPO" > "$STATE/apps/lab.json"
-lake_args=(-e LAKEFS_AUTH_UI_CONFIG_RBAC=internal -e LAKEFS_KAOS_APP_USERS_PATH=/apps -e LAKEFS_KAOS_APP_USERS_INTERVAL=5s -v "$STATE/apps":/apps:ro)
+# shellcheck disable=SC2086
+produced=$(printf '%s\n' $PRODUCED_REPOS | jq -Rnc '[inputs | select(length > 0)]')
+printf '{"user":"kaos-app-lab","access_key_id":"%s","secret_access_key":"%s","outputs_repository":"%s","datasets":%s}\n' \
+  "$LAKE_APP_KEY" "$LAKE_APP_SECRET" "$OUT_REPO" "$produced" > "$STATE/apps/lab.json"
+lake_args=(-e LAKEFS_AUTH_UI_CONFIG_RBAC=internal -e LAKEFS_KAOS_APP_USERS_PATH=/apps -e LAKEFS_KAOS_APP_USERS_INTERVAL=5s -v "$STATE/apps":/apps:ro
+  -e LAKEFS_KAOS_REPOSITORIES_STORAGE_NAMESPACE_PREFIX=local://lab -e LAKEFS_KAOS_REPOSITORIES_INTERVAL=5s)
 if [ "$LAKE_IMAGE" = "$LAKE_UPSTREAM" ]; then lake_args=(); fi   # upstream has no declared users: the app uses the admin key
 want_id=$(docker image inspect -f '{{.Id}}' "$LAKE_IMAGE")
 running=$(docker inspect -f '{{.Image}} {{.State.Running}}' "$LAKE_CONTAINER" 2>/dev/null || true)
@@ -117,6 +122,15 @@ done
 echo "waiting for the declared app user"
 for _ in $(seq 60); do app "$LAKE_URL/api/v1/repositories/$OUT_REPO" >/dev/null 2>&1 && break; sleep 2; done
 app "$LAKE_URL/api/v1/repositories/$OUT_REPO" >/dev/null || { echo "app user cannot reach $OUT_REPO" >&2; docker logs "$LAKE_CONTAINER" | tail -20; exit 1; }
+if [ "$LAKE_IMAGE" != "$LAKE_UPSTREAM" ]; then
+  # a declared dataset appears about half a minute after it is declared, by design: people's sessions get the
+  # rule that keeps them from writing it first
+  for r in $PRODUCED_REPOS; do
+    echo "waiting for the lake to create the produced dataset $r"
+    for _ in $(seq 60); do adm "$LAKE_URL/api/v1/repositories/$r" >/dev/null 2>&1 && break; sleep 2; done
+    adm "$LAKE_URL/api/v1/repositories/$r" >/dev/null || { echo "the lake did not create $r" >&2; docker logs "$LAKE_CONTAINER" | tail -20; exit 1; }
+  done
+fi
 seeded=$(adm "$LAKE_URL/api/v1/repositories/$DATA_REPO/refs/main/objects/ls" | jq '.results|length')
 if [ "$seeded" = 0 ]; then
   for f in readme.txt samples/a.csv samples/b.csv; do

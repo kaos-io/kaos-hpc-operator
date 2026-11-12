@@ -26,6 +26,9 @@ LAKE_ADMIN_KEY=AKIALABADMINAAAAAAAA
 LAKE_ADMIN_SECRET=labadminsecretlabadminsecretlabadminsecr
 OUT_REPO=outputs-lab
 DATA_REPO=dataset-lab
+# Datasets the lab app produces (produces=[dataset("clean")] writes dataset-clean): declared for the app user, so
+# the lake creates each one, labels it and lets only that user write it. Space-separated repository names.
+PRODUCED_REPOS=${PRODUCED_REPOS:-dataset-clean}
 LAKE_APP_KEY=AKIALABAPPAAAAAAAAAA
 LAKE_APP_SECRET=labappsecretlabappsecretlabappsecretlabap
 k() { kubectl --context "$CTX" "$@"; }
