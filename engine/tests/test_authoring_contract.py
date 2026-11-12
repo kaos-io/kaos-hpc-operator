@@ -34,6 +34,19 @@ def test_a_step_without_a_kind_is_an_app_from_before_the_contract():
                        "evaluate, publish, control. " + OLD_APP_NOTICE)
 
 
+def test_a_pipeline_where_every_step_lacks_a_kind_is_an_app_from_before_the_contract():
+    message = refused(lambda a: (a.step("one"), a.step("two"), a.step("three")))
+    assert message == ("step 'one' has no kind=, which every step declares: one of ingest, transform, train, "
+                       "evaluate, publish, control. " + OLD_APP_NOTICE)
+
+
+def test_one_step_without_a_kind_among_steps_that_have_one_is_not_an_old_app():
+    message = refused(lambda a: (a.step("one", kind="transform"), a.step("two"), a.step("three", kind="train")))
+    assert message == ("step 'two' has no kind=, which every step declares: one of ingest, transform, train, "
+                       "evaluate, publish, control.")
+    assert OLD_APP_MARKER not in message
+
+
 def test_an_unknown_kind_fails_the_render_naming_the_kinds():
     message = refused(lambda a: a.step("train", kind="training"))
     assert message == ("step 'train': kind='training' is not a step kind. Use one of ingest, transform, train, "

@@ -70,11 +70,12 @@ produced dataset. The step runs on the cluster until jobs there hold the app's o
 A step that produces a dataset and is pinned to an HPC class is refused. A step that produces only a model or
 an artifact is not affected.
 
-**Apps made before the current pipelines.** An app that still uses a keyword the contract removed (a step
-with no `kind=`, `outputs=`, `hpc_time_limit=`, `disk=`), lists the `platform` config group or defines a
+**Apps made before the current pipelines.** An app that still uses a keyword the contract removed (a pipeline
+in which no step has a `kind=`, `outputs=`, `hpc_time_limit=`, `disk=`), lists the `platform` config group or defines a
 top-level `platform` section, or carries a `kubecore/` folder of its own, is not moved to this contract. The
 render refuses it with a message that ends: "This app was made before the current pipelines. Create it again
-from the template."
+from the template." A step without `kind=` in a pipeline where other steps have one forgot it: its message ends at
+the list of kinds, without that sentence.
 
 **Names.** A step name, an input name and a `produces` name match `[a-z0-9]([a-z0-9-]*[a-z0-9])?` and are at
 most 40 characters; a dataset name is also at least 3. The lake allows 3 to 48 characters after `dataset-`, so

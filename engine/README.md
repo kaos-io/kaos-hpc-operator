@@ -67,7 +67,8 @@ train   = step("train", kind="train", needs=[prepare])    # in the step: step.in
 step("evaluate", kind="evaluate", inputs=["clean"])       # in the step: step.input("clean")
 ```
 
-Refused at render, each with a message that names the step and what to write: a missing or unknown `kind=`;
+Refused at render, each with a message that names the step and what to write: a missing or unknown `kind=` (a missing
+`kind=` in a pipeline where no step has one also says the app is from before the contract);
 `outputs=`, `hpc_time_limit=` and `disk=` (removed); a step that produces a dataset and is pinned to an HPC class; a step or produced name that
 starts with `kaos-`; a config tree that defines `plan` or `pipeline-version`, or a leaf whose form field would
 get one of those names; a step (or the HPC follower) whose rendered definition is over 24 KiB, counted as the
@@ -87,7 +88,9 @@ section to an app's config. This app was made before the current pipelines. Crea
 that identify an app from before the contract each say what is wrong in one sentence and end with
 `step_contract.OLD_APP_NOTICE`, "This app was made before the current pipelines. Create it again from the
 template." Its second sentence is `step_contract.OLD_APP_MARKER`, published as `old_app_marker` in the authoring
-schema. They are: a step with no `kind=`; `outputs=`, `hpc_time_limit=` or `disk=`; the `platform` group in
+schema. They are: no step of the pipeline with a `kind=` (when at least one step has a `kind=`, a step without it is a
+mistake in a new pipeline and gets the plain message, which ends at the list of kinds; the refusal is raised when the
+pipeline is assembled, not at the `step(...)` call); `outputs=`, `hpc_time_limit=` or `disk=`; the `platform` group in
 `config/config.yaml`; a top-level `platform` config key (render and compose); a `kubecore/` folder in the app.
 Every other refusal (an unknown `kind`, a name that is too long or reserved, a wrong `walltime`, ...) is a mistake in
 a new pipeline and keeps its plain message without the sentence.

@@ -213,11 +213,9 @@ class Step:
 
 
 def _check_kind(name, kind):
-    if kind is None:
-        raise AuthoringError(
-            f"step {name!r} has no kind=, which every step declares: one of {', '.join(KINDS)}. {OLD_APP_NOTICE}"
-        )
-    if kind not in KINDS:
+    # A step with no kind= is reported when the pipeline is assembled (pipeline._check_kinds): whether the app is
+    # one from before the contract depends on the other steps.
+    if kind is not None and kind not in KINDS:
         raise AuthoringError(
             f"step {name!r}: kind={kind!r} is not a step kind. Use one of {', '.join(KINDS)}."
         )
@@ -383,8 +381,19 @@ class pipeline:
         global _current
         _current = None
         if exc_type is None:
+            self._check_kinds()
             self._build()
         return False
+
+    def _check_kinds(self) -> None:
+        """A step with no kind=. An app from before the contract has no kind on any step, so only then is it told
+        to create the app again; in a pipeline where other steps have a kind, the step simply forgot it."""
+        kindless = [s.name for s in self.steps if s.kind is None]
+        if kindless:
+            notice = "" if len(kindless) < len(self.steps) else f" {OLD_APP_NOTICE}"
+            raise AuthoringError(
+                f"step {kindless[0]!r} has no kind=, which every step declares: one of {', '.join(KINDS)}.{notice}"
+            )
 
     def _step_table(self) -> str:
         """What compose needs to write each step's context: its kind, the config sections it
