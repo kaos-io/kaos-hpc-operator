@@ -69,7 +69,18 @@ Refused at render, each with a message that names the step and what to write: a 
 `authoring.MIGRATION_GUIDE_URL`, a placeholder until the guide has an address); a step or produced name that
 starts with `kaos-`; a config tree that defines `plan` or `pipeline-version`, or a leaf whose form field would
 get one of those names; a step (or the HPC follower) whose rendered definition is over 24 KiB, counted as the
-workflow engine encodes it (`&`, `<` and `>` cost six bytes each); an app name over 55 characters.
+workflow engine encodes it (`&`, `<` and `>` cost six bytes each); an app name over 55 characters; a
+`config/config.yaml` that still lists the removed `platform` group in its defaults.
+
+The `platform` config group is gone. The platform used to add a `platform` section (endpoints, the outputs
+repository) to every app's config; no step can read it now, so the group, its search path and the enhancer's
+overrides for it are deleted. An app that still names it fails the render, and compose, with:
+
+```
+config/config.yaml still lists `- platform: live` in its defaults. The platform no longer adds a `platform`
+section to an app's config: delete that line. A step gets the run, the app and where its results go from
+kaos_lib.step. See <MIGRATION_GUIDE_URL>
+```
 
 **What a step gets and hands back.** Every step container runs `python -m app.entry` with no arguments. Its one
 input parameter is `kaos-context`, which the container reads as `KAOS_STEP_CONTEXT`; its one output parameter is
@@ -85,7 +96,7 @@ with the sentinel: a skipped or omitted step has an empty output. Section 10 of 
   `latest`, the head of the dataset's `main` now), and refuses an empty value, a value that names no dataset, a
   version that does not exist and a store that does not answer, naming the input and the steps that declare it;
 - writes each step's base context in wire form (`/work/context/<step>.json`): `params` holds the config
-  sections the step names in `reads=` (never `platform`: the context holds no endpoint), `ledger` holds the step's own inputs,
+  sections the step names in `reads=`, `ledger` holds the step's own inputs,
   `experiment` is config `experiment.name` or else the app's name, `produces` names each repository;
 - writes the run's ledger at version 2, every pinned input, as the output `kaos-ledger`;
 - reads the run's own key in the ADVANCED override: `plan.promote.<dataset>: true` (the name in `produces=`;
@@ -96,6 +107,28 @@ with the sentinel: a skipped or omitted step has an empty output. Section 10 of 
 
 The enhancer gives compose the run's identity (`--app`, `--project`); authoring gives it the run's name and the
 step table (`--run`, `--steps`).
+
+**What a definition refers to besides its context, and the limit that leaves.** A step's definition must stay
+under what the workflow engine can hand a pod (131057 bytes). The context is bounded by the caps above and the
+rendered definition by the 24 KiB budget; what remains are the references the workflow engine fills in when
+the run starts. `tests/template/test_step_contract_enhance.py` fails when a rendered step or follower definition
+holds a reference that is not in this list:
+
+| In | Reference | What bounds its value |
+|---|---|---|
+| every step | `inputs.parameters.kaos-context` | the context caps |
+| every step | `workflow.parameters.image-<step>` | the app's image record, written by CI |
+| every step | `workflow.parameters.<step>-class` | a form field with an `enum`: the pool's classes, plus the HPC classes for a kind that may run there. A step pinned to one class has no such field |
+| every step | `workflow.parameters.<step>-cpu`, `-mem`, `-disk` | free-text form fields. Their defaults are checked against the class at render; a submitted value is checked only by Kubernetes, which refuses a pod whose quantity it cannot read. Nothing bounds their length |
+| GPU steps | `inputs.parameters.gpus` | `0` or `1`, set by the engine |
+| steps with checkpoint copies, the follower | `workflow.name`, `workflow.uid` | the workflow engine |
+| the follower | `inputs.parameters.step-name`, `image`, `step-command`, `step-kind`, `time-limit`, `deadline-seconds`, `hpc-class`, `resumable-lead`, `resumable`, `idle-timeout` | written by the engine at render, or one of the form fields above |
+
+The compose step is the one definition that carries the run's free text: every form field is one of its
+arguments, and so is the ADVANCED override (`workflow.parameters.config`). Its rendered definition is about
+5 KiB, so an override of roughly 60 KiB or more (less when it holds many quotes) makes the compose step itself
+too large to start. That is the first step, before any GPU; the run ends with the workflow engine's error, not
+with a message of ours. Nothing in the engine can check it: the value is only known when the run is submitted.
 
 **The step table, for CI and the form.** The compose step's argument after `--steps` is one JSON array, written
 at render, with one object per step in pipeline order. It is the place to read what a pipeline declares without
