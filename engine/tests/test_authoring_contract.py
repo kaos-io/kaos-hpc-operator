@@ -524,8 +524,8 @@ def test_walltime_of_zero_is_refused_at_render_for_every_step(value):
     for kind in ("train", "transform", "evaluate", "ingest"):
         message = refused(lambda a, kind=kind: a.step("one", kind=kind, walltime=value, **valid(a, kind)))
         assert message == (f"step 'one': walltime={value!r} must be minutes or hours as a string like '90m', '12h' or "
-                           "'720', at least one minute (the step's time limit, wherever it runs; the step is "
-                           "ended when it elapses).")
+                           "'720', at least one minute (the default time limit of the step, wherever it runs; the person "
+                           "who starts the run sets the limit on the run form, `<step>-walltime`).")
     assert render(lambda a: a.step("one", kind="evaluate", walltime="1m"))
 
 

@@ -119,7 +119,7 @@ func TestShowPlacementPrintsOnlyOnChange(t *testing.T) {
 func TestShowPlacementPrintsTheWarningOnce(t *testing.T) {
 	var out bytes.Buffer
 	f := &follower{o: Options{Out: &out}}
-	w := "Warning: this step was stopped at its 4 h limit in an earlier run and will be again unless you raise its limit (`walltime`) or make it resumable."
+	w := "Warning: this step was stopped at its 4 h limit in an earlier run and will be again unless you raise its limit on the run form (`<step>-walltime`) or make it resumable."
 	job := jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseAdmitted,
 		Placement: &hpcv1alpha1.Placement{TimeLimitMinutes: 240, Source: hpcv1alpha1.PlacementDeclared, Warning: w}})
 	f.showPlacement(job)

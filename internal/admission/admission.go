@@ -130,7 +130,7 @@ func refuseTooLong(job *hpcv1alpha1.HPCArgoWorkflowJob, laneMax int32) (Decision
 		return refuse(hpcv1alpha1.ReasonTooLongNotResumable,
 			"this step asks for %s but the longest run this site allows is %s, and it is not resumable, so it would be "+
 				"cut at %s. Make it resumable (write framework checkpoints into KAOS_CHECKPOINT_DIR, resumable=True) "+
-				"so it continues automatically in runs of up to %s, or shorten it (walltime of %d minutes or less)",
+				"so it continues automatically in runs of up to %s, or set its time limit on the run form (`<step>-walltime`) to %d minutes or less",
 			Words(declared), Words(laneMax), Words(laneMax), Words(laneMax), laneMax), true
 	}
 	runs := int64(res.MaxContinuations) + 1
@@ -138,7 +138,7 @@ func refuseTooLong(job *hpcv1alpha1.HPCArgoWorkflowJob, laneMax int32) (Decision
 	if int64(declared) > total {
 		return refuse(hpcv1alpha1.ReasonTooLongBeyondContinuations,
 			"this step asks for %s; as a resumable step it runs in runs of up to %s and at most %d continuations "+
-				"(%d runs, %d min in all). Shorten it to %d minutes or less, or raise maxContinuations",
+				"(%d runs, %d min in all). Shorten its time limit on the run form (`<step>-walltime`) to %d minutes or less, or raise maxContinuations",
 			Words(declared), Words(laneMax), res.MaxContinuations, runs, total, total), true
 	}
 	return Decision{}, false

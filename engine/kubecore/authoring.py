@@ -102,10 +102,10 @@ _REMOVED_KEYWORDS = {
 }
 
 
-# step(resumable=True) gets the stop signal this long before its HPC wall time.
+# step(resumable=True) gets the stop signal this long before its time limit.
 DEFAULT_RESUMABLE_LEAD = "10m"
 HPC_RESUMABLE_ANNOTATION = "platform.kubecore.io/hpc-resumable"
-# step(walltime=...): the step's time limit (read by kubecore/enhance.py and kubecore/meluxina.py).
+# step(walltime=...): the default of the step's time limit; the run form sets it (read by kubecore/enhance.py and kubecore/meluxina.py).
 WALLTIME_ANNOTATION = "platform.kubecore.io/hpc"
 RESUMABLE_OFF = "off"   # the annotation value of resumable=False
 CHECKPOINT_EVERY_ANNOTATION = "platform.kubecore.io/checkpoint-every"
@@ -460,8 +460,8 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
     ):
         raise AuthoringError(
             f"step {name!r}: walltime={walltime!r} must be minutes or hours as a "
-            f"string like '90m', '12h' or '720', at least one minute (the step's time limit, wherever it "
-            f"runs; the step is ended when it elapses)."
+            f"string like '90m', '12h' or '720', at least one minute (the default time limit of the step, wherever it "
+            f"runs; the person who starts the run sets the limit on the run form, `<step>-walltime`)."
         )
     if walltime is not None and not minutes(walltime):     # the form would refuse its default: compose's sentence
         raise AuthoringError(f"step {name!r}: {time_problem(walltime_field(name), walltime)}")
@@ -474,7 +474,7 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
     elif not (isinstance(resumable, str) and _WALLTIME_RE.match(resumable) and int(resumable.rstrip("mh")) != 0):
         raise AuthoringError(
             f"step {name!r}: resumable={resumable!r} must be True or a lead time like '20m' or '1h': how long "
-            f"before its HPC wall time the step is told to save its checkpoint (kaos_lib.checkpoint)."
+            f"before its time limit the step is told to save its checkpoint (kaos_lib.checkpoint)."
         )
     # Any step may declare these, GPU or not: every step can be placed on an HPC class, and a step on a spot
     # machine is interrupted too. A resumable step gets its checkpoint copies wherever it runs (resilience.py).

@@ -1,7 +1,7 @@
 """What the run form says about a step besides the app's config (docs/step-contract.md, "The run form").
 
-The form has, for a step that declares them in pipeline.py, `<step>-walltime` and `<step>-checkpoint-every`
-(the value in code is the default), for each dataset a step produces `promote-<name>`, and for every step the
+The form has `<step>-walltime` for every step and `<step>-checkpoint-every` for a step that declares
+`checkpoint_every=` (the value in code is the default; the person who starts the run chooses), for each dataset a step produces `promote-<name>`, and for every step the
 class it runs on, `<step>-class`. The enhancer adds the fields and hands every value to compose as an
 argument; compose refuses a wrong one before any step starts and writes the numbers the steps need as one
 output, `kaos-run-settings`, which the DAG reads. Nothing here needs more than the standard library: compose

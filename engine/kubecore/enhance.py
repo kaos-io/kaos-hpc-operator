@@ -44,10 +44,10 @@ release-gate rule):
                                       the ConfigMap indirection
   platform.kubecore.io/shm            /dev/shm emptyDir sizeLimit (e.g. "4Gi")
   platform.kubecore.io/workspace      per-run RWO PVC at /workspace (e.g. "50Gi")
-  platform.kubecore.io/hpc            the step's time limit, on the cluster and on an
-                                      HPC class (authoring: walltime=)
-  platform.kubecore.io/checkpoint-every  minutes between checkpoint copies of
-                                      the step's KAOS_CHECKPOINT_DIR; "off"
+  platform.kubecore.io/hpc            the default of the step's time limit (authoring:
+                                      walltime=; the run form's <step>-walltime sets it)
+  platform.kubecore.io/checkpoint-every  default minutes between checkpoint copies of
+                                      the step's KAOS_CHECKPOINT_DIR (the run form's <step>-checkpoint-every sets it); "off"
                                       removes the persistence helper (see
                                       kubecore/resilience.py)
   platform.kubecore.io/idle-timeout   minutes a GPU step may show no GPU use
@@ -745,9 +745,10 @@ def enhance_walltime(spec: dict, step: dict, annots: dict) -> None:
 
 
 def enhance_run_form(spec: dict, steps: list, offers: dict) -> None:
-    """The run form's own fields: `<step>-walltime` for every step and `<step>-checkpoint-every` for a step that declares
-    checkpoint_every= or resumable= (not checkpoint_every=False), whose default is the value in code (the engine's
-    default for resumable= alone). Compose gets each value (checks it,
+    """The run form's own fields: `<step>-walltime` for every step (default: walltime= in code, else 4h),
+    `<step>-checkpoint-every` for a step that declares checkpoint_every= or resumable= (not checkpoint_every=False;
+    default: the value in code, else the engine's for resumable= alone), and
+    `promote-<dataset>` for every dataset a step produces. Compose gets each value (checks it,
     and writes the numbers as its output `kaos-run-settings`)."""
     compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
     if compose is None:

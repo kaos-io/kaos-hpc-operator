@@ -73,7 +73,7 @@
    "required": false,
    "default": null,
    "type": "string",
-   "doc": "A condition in plain words, a run-form field compared with a value: 'mode != off', joined with and / or; the step is skipped when it is false."
+   "doc": "A condition in plain words: a run-form field or a value of a needed step compared with a text: 'mode != off', 'evaluate.passed == true', joined with and / or; the step is skipped when it is false."
   },
   {
    "name": "walltime",
@@ -81,7 +81,7 @@
    "default": null,
    "type": "string",
    "pattern": "^[0-9]+[mh]?$",
-   "doc": "The step's time limit, on the cluster and on an HPC class: '90m', '12h' or '720' (minutes)."
+   "doc": "The default time limit of the step, wherever it runs: '90m', '12h' or '720' (minutes). The person who starts the run sets the limit on the run form (<step>-walltime); 4h when not given."
   },
   {
    "name": "resumable",
@@ -92,7 +92,7 @@
     "string"
    ],
    "pattern": "^[0-9]+[mh]?$",
-   "doc": "True or a lead time ('20m', '1h'): how long before the HPC wall time the step is told to save its checkpoint; False opts out.",
+   "doc": "True or a lead time ('20m', '1h'): how long before its time limit the step is told to save its checkpoint; False opts out.",
    "true_means": "10m"
   },
   {
@@ -105,7 +105,7 @@
     "string"
    ],
    "pattern": "^([0-9]+)([mh]?)$",
-   "doc": "How often the platform copies the step's checkpoint folder: minutes ('20m', '1h', 20); False = no copies; unset = the platform default."
+   "doc": "The default for how often the platform copies the step's checkpoint folder: minutes ('20m', '1h', 20); False = no copies; unset = the platform default (a resumable step has the field too). The person who starts the run can change it on the run form (<step>-checkpoint-every)."
   },
   {
    "name": "idle_timeout",

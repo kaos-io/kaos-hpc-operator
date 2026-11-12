@@ -42,17 +42,22 @@ def _described(authoring) -> dict[str, dict]:
                      "doc": "What the step writes: model('name'), artifact('name') or dataset('name')."},
         "gpu": {"type": "boolean", "doc": "The step needs one GPU."},
         "when": {"type": "string",
-                 "doc": "A condition in plain words, a run-form field compared with a value: 'mode != off', "
-                        "joined with and / or; the step is skipped when it is false."},
+                 "doc": "A condition in plain words: a run-form field or a value of a needed step compared with a "
+                        "text: 'mode != off', 'evaluate.passed == true', joined with and / or; the step is "
+                        "skipped when it is false."},
         "walltime": {"type": "string", "pattern": authoring._WALLTIME_RE.pattern,
-                     "doc": "The step's time limit, on the cluster and on an HPC class: '90m', '12h' or '720' (minutes)."},
+                     "doc": "The default time limit of the step, wherever it runs: '90m', '12h' or '720' (minutes). "
+                            "The person who starts the run sets the limit on the run form (<step>-walltime); "
+                            "4h when not given."},
         "resumable": {"type": ["boolean", "string"], "pattern": authoring._WALLTIME_RE.pattern,
-                      "doc": "True or a lead time ('20m', '1h'): how long before the HPC wall time "
+                      "doc": "True or a lead time ('20m', '1h'): how long before its time limit "
                              "the step is told to save its checkpoint; False opts out.",
                       "true_means": authoring.DEFAULT_RESUMABLE_LEAD},
         "checkpoint_every": {"type": ["boolean", "integer", "string"], "pattern": authoring._CHECKPOINT_EVERY_RE.pattern,
-                             "doc": "How often the platform copies the step's checkpoint folder: minutes ('20m', '1h', 20); "
-                                    "False = no copies; unset = the platform default."},
+                             "doc": "The default for how often the platform copies the step's checkpoint folder: "
+                                    "minutes ('20m', '1h', 20); False = no copies; unset = the platform default "
+                                    "(a resumable step has the field too). The person who starts the run "
+                                    "can change it on the run form (<step>-checkpoint-every)."},
         "idle_timeout": {"type": ["boolean", "integer", "string"], "pattern": authoring._CHECKPOINT_EVERY_RE.pattern,
                          "doc": "How long a step may show no GPU use and no new log line before it is ended as Idle: "
                                 "minutes ('40m', '1h', 40); 0 or False = never; unset = the platform rule."},
