@@ -28,6 +28,7 @@ REUSED_DIR = "/work/reused"               # where compose writes them: <dir>/<st
 RECORD_DIR = "kaos-runs"                  # in outputs-<app>: kaos-runs/<run>/<step>.json and plan.json (kaos-lib's record.py)
 REUSE_FIELD = "reuse-from-run"            # the run form's fields for starting from a step with an earlier run's results
 START_FIELD = "start-from-step"
+RAW_FORM_ANNOTATION = "ui.kubecore.io/raw-form"   # author data the render may leave on the raw template; the trusted enhance step reads and removes it
 PROMOTE_STEP = "kaos-promote"             # the run's final task (kubecore/promote.py); a name no step can take
 PROMOTE_PARAM = "kaos-promote-plan"       # its one input: what each dataset-producing step wrote, and the form's promote-<name>
 RESERVED_PREFIX = "kaos-"                 # step names and produced names the platform keeps for itself

@@ -111,6 +111,7 @@ from kubecore.run_settings import (
 )
 from kubecore.resilience import enhance_resilience, every_field_default, every_minutes, shared_templates, write_helper_configmap
 from kubecore.step_contract import (
+    RAW_FORM_ANNOTATION,
     CLUSTER_ONLY_KINDS,
     CONTEXT_PARAM,
     DATASET_PRODUCER_LABEL,
@@ -285,6 +286,33 @@ def pipeline_wft_name(ctx: dict) -> str:
     return f"{app}-pipeline"
 
 
+RESERVED_METADATA_PREFIXES = ("ui.kubecore.io/", "platform.kubecore.io/")
+
+
+def strip_render_metadata(wft: dict) -> "str | None":
+    """Delete every ui.kubecore.io/* and platform.kubecore.io/* key from metadata.labels, metadata.annotations,
+    spec.workflowMetadata.labels and spec.workflowMetadata.annotations of the RAW template. Returns the text of
+    ui.kubecore.io/raw-form (author data, unvalidated) or None.
+
+    Why: the render is untrusted. These keys are the platform's (project/app scoping, the run form, the stamp),
+    so the trusted step takes them all away and writes its own (engine issue 80)."""
+    raw_form = None
+    spec = wft.get("spec")
+    holders = [wft.get("metadata"), spec.get("workflowMetadata") if isinstance(spec, dict) else None]
+    for holder in holders:
+        if not isinstance(holder, dict):
+            continue
+        for field in ("labels", "annotations"):
+            mapping = holder.get(field)
+            if not isinstance(mapping, dict):
+                continue
+            if holder is wft.get("metadata") and field == "annotations":
+                raw_form = mapping.get(RAW_FORM_ANNOTATION)
+            for key in [k for k in mapping if isinstance(k, str) and k.startswith(RESERVED_METADATA_PREFIXES)]:
+                del mapping[key]
+    return raw_form
+
+
 def enhance_metadata(wft: dict, ctx: dict) -> None:
     meta = wft["metadata"]
 
@@ -299,16 +327,16 @@ def enhance_metadata(wft: dict, ctx: dict) -> None:
     authoritative = pipeline_wft_name(ctx)
     if meta.get("name") != authoritative:
         meta["name"] = authoritative
-    meta.setdefault("namespace", ctx["namespace"])
+    meta["namespace"] = ctx["namespace"]  # ArgoCD applies the manifest's namespace: the render does not choose it
 
     labels = meta.setdefault("labels", {})
-    labels.setdefault("platform.kubecore.io/project", ctx["project"])
-    labels.setdefault("platform.kubecore.io/app", ctx["app"])
-    labels.setdefault("platform.kubecore.io/managed-by", "kubecore-ci")
+    labels["platform.kubecore.io/project"] = ctx["project"]
+    labels["platform.kubecore.io/app"] = ctx["app"]
+    labels["platform.kubecore.io/managed-by"] = "kubecore-ci"
 
     annotations = meta.setdefault("annotations", {})
-    annotations.setdefault("platform.kubecore.io/generated-by", "ml-ci-build/hera-render")
-    annotations.setdefault("platform.kubecore.io/cost-tracking", "enabled")
+    annotations["platform.kubecore.io/generated-by"] = "ml-ci-build/hera-render"
+    annotations["platform.kubecore.io/cost-tracking"] = "enabled"
 
 
 RUN_RETENTION_DAYS = 35
@@ -1501,6 +1529,7 @@ def enhance_connections(step: dict, ctx: dict) -> None:
 
 def enhance(wft: dict, ctx: dict) -> dict:
     refuse_client_identity(wft)  # before the platform adds its own account and patches
+    strip_render_metadata(wft)  # the render's ui.* and platform.* keys never survive (the seal reads the raw form separately)
     enhance_metadata(wft, ctx)
     spec = wft["spec"]
     enhance_spec_top_level(spec, ctx)
