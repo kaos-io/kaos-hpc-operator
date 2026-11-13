@@ -44,10 +44,10 @@ release-gate rule):
                                       the ConfigMap indirection
   platform.kubecore.io/shm            /dev/shm emptyDir sizeLimit (e.g. "4Gi")
   platform.kubecore.io/workspace      per-run RWO PVC at /workspace (e.g. "50Gi")
-  platform.kubecore.io/hpc            the step's time limit, on the cluster and on an
-                                      HPC class (authoring: walltime=)
-  platform.kubecore.io/checkpoint-every  minutes between checkpoint copies of
-                                      the step's KAOS_CHECKPOINT_DIR; "off"
+  platform.kubecore.io/hpc            the default of the step's time limit (authoring:
+                                      walltime=; the run form's <step>-walltime sets it)
+  platform.kubecore.io/checkpoint-every  default minutes between checkpoint copies of
+                                      the step's KAOS_CHECKPOINT_DIR (the run form's <step>-checkpoint-every sets it); "off"
                                       removes the persistence helper (see
                                       kubecore/resilience.py)
   platform.kubecore.io/idle-timeout   minutes a GPU step may show no GPU use
@@ -71,6 +71,7 @@ developer's repo pins.
 """
 
 import argparse
+import copy
 import json
 from pathlib import Path
 
@@ -102,15 +103,22 @@ from kubecore.run_settings import (
     setting,
     walltime_field,
 )
-from kubecore.resilience import enhance_resilience, every_minutes, shared_templates, write_helper_configmap
+from kubecore.resilience import enhance_resilience, every_field_default, every_minutes, shared_templates, write_helper_configmap
 from kubecore.step_contract import (
     CLUSTER_ONLY_KINDS,
     CONTEXT_PARAM,
     DATASET_PRODUCER_LABEL,
     DATASET_PRODUCERS_STAY_ON_CLUSTER,
+    IMAGE_INPUT,
+    IMAGES_PARAM,
+    IMAGES_PATH,
     MAX_APP_NAME,
+    PROMOTE_PARAM,
+    PROMOTE_STEP,
     TEMPLATE_CAP,
     dataset_name_problem,
+    image_of,
+    result_of,
     template_bytes,
 )
 
@@ -168,8 +176,8 @@ class EnhanceError(Exception):
 
 
 # PRD-HPC-1461 D-79 F-37: template names only the platform may produce (the follower twin, and its
-# pre-AC-12 name that a Workflow submitted before the rename may still call).
-RESERVED_TEMPLATE_NAMES = (HPC_TWIN_TEMPLATE, "meluxina-run")
+# pre-AC-12 name that a Workflow submitted before the rename may still call; the run's final task).
+RESERVED_TEMPLATE_NAMES = (HPC_TWIN_TEMPLATE, "meluxina-run", PROMOTE_STEP)
 
 
 def refuse_client_identity(wft: dict) -> None:
@@ -193,7 +201,7 @@ def refuse_client_identity(wft: dict) -> None:
         name = tpl.get("name", "?")
         if name in RESERVED_TEMPLATE_NAMES:
             raise EnhanceError(
-                f"step or template '{name}' uses a name the platform reserves for its HPC follower "
+                f"step or template '{name}' uses a name the platform reserves for its own templates "
                 f"({', '.join(RESERVED_TEMPLATE_NAMES)}). Rename it.")
         if "serviceAccountName" in tpl or "serviceAccountName" in (tpl.get("executor") or {}):
             raise EnhanceError(
@@ -303,42 +311,6 @@ def step_templates(spec: dict) -> list:
 
 
 # ----------------------------------------------------------------- arguments
-
-
-# The description of a field the developer does not choose: the platform stamps the step's image (the CI chart reads
-# this field to check every step has a folder).
-PLATFORM_OWNED = "Set by the platform. Do not change."
-
-
-def enhance_arguments(spec: dict, ctx: dict, steps: list) -> None:
-    args = spec.setdefault("arguments", {})
-    parameters = args.setdefault("parameters", [])
-    existing = _param_names(parameters)
-    cm = images_configmap(ctx)
-
-    def add(param: dict) -> None:
-        if param["name"] not in existing:
-            parameters.append(param)
-            existing.add(param["name"])
-
-    for step in steps:
-        annots = platform_annotations(step)
-        if "image" in annots:
-            continue  # verbatim utility image: no ConfigMap indirection, no parameter
-        step_name = step["name"]
-        configmap_key = annots.get("source", step_name)
-        add(
-            {
-                "name": f"image-{step_name}",
-                "description": PLATFORM_OWNED,
-                "valueFrom": {
-                    "configMapKeyRef": {
-                        "name": cm,
-                        "key": configmap_key,
-                    }
-                },
-            }
-        )
 
 
 # ------------------------------------------------------------------- compute
@@ -623,7 +595,8 @@ def class_offer(step: dict, ctx: dict, annots: dict) -> dict:
     CPU-only (see the gpus routing in enhance_gpu_routing). A step that does not declare gpu=True is offered the
     cluster's cpu classes only: a gpu class would put it on a machine it cannot use. A pool with no cpu class at
     all keeps offering what exists. The HPC classes are offered to a step that can run on HPC (meluxina.py
-    runs_on_hpc: not an ingest, publish or control step, not a step that produces a dataset)."""
+    runs_on_hpc: not an ingest, publish or control step, not a step that produces a dataset), and an HPC class with
+    `gpus` above 0 only to a step that declares gpu=True (a GPU step may pick a CPU HPC class)."""
     default = tier_default(ctx, step)["name"]
     catalog = ctx["computeClasses"]["all"]
     offered = catalog
@@ -632,9 +605,14 @@ def class_offer(step: dict, ctx: dict, annots: dict) -> dict:
     options = [c["name"] for c in offered]
     if default not in options:
         options.insert(0, default)
-    hpc_all = [c["name"] for c in hpc_classes(ctx)]
+    hpc = hpc_classes(ctx)
+    hpc_all = [c["name"] for c in hpc]
+    # A GPU partition (`gpus` above 0) is offered to a step that declares gpu=True only, as the cluster's GPU classes
+    # are (D-25): a CPU step on it would take a GPU slot of a shared node for nothing. A GPU step may still pick a CPU
+    # HPC class.
+    gpu_partitions = {c["name"] for c in hpc if (c.get("gpus") or 0) > 0}
     if runs_on_hpc(step):
-        options += [n for n in hpc_all if n not in options]
+        options += [n for n in hpc_all if n not in options and (is_gpu_step(step) or n not in gpu_partitions)]
     choose = f"Choose one of: {', '.join(options)}."
     labels = (step.get("metadata") or {}).get("labels") or {}
     refused = {}
@@ -644,6 +622,10 @@ def class_offer(step: dict, ctx: dict, annots: dict) -> dict:
                                     "Add gpu=True to the step in pipeline.py to run it on a GPU machine."]
     for name in hpc_all:
         if name not in options:
+            if name in gpu_partitions and runs_on_hpc(step):
+                refused[name] = ["it is a GPU machine and the step does not declare gpu=True",
+                                 "Add gpu=True to the step in pipeline.py to run it on a GPU machine."]
+                continue
             if labels.get(STEP_KIND_LABEL) in CLUSTER_ONLY_KINDS:
                 reason = f"a {labels.get(STEP_KIND_LABEL)} step never runs on HPC (Slurm)"
             else:
@@ -682,17 +664,6 @@ def enhance_class_param(spec: dict, step: dict, ctx: dict, annots: dict, offer: 
         ),
     }
     parameters.append(param)
-
-
-def enhance_image(step: dict, ctx: dict, annots: dict) -> None:
-    # Always overwritten: image is a supply-chain concern, not a developer
-    # choice (see module docstring). The `image` annotation is the sanctioned
-    # escape hatch (verbatim utility image).
-    if "image" in annots:
-        step["container"]["image"] = annots["image"]
-        return
-    step_name = step["name"]
-    step["container"]["image"] = f"{{{{workflow.parameters.image-{step_name}}}}}"
 
 
 def enhance_env(step: dict, ctx: dict, annots: dict) -> None:
@@ -774,8 +745,10 @@ def enhance_walltime(spec: dict, step: dict, annots: dict) -> None:
 
 
 def enhance_run_form(spec: dict, steps: list, offers: dict) -> None:
-    """The run form's own fields for the steps that declare walltime= and checkpoint_every=: `<step>-walltime`
-    and `<step>-checkpoint-every`, whose default is the value in code. Compose gets each value (checks it,
+    """The run form's own fields: `<step>-walltime` for every step (default: walltime= in code, else 4h),
+    `<step>-checkpoint-every` for a step that declares checkpoint_every= or resumable= (not checkpoint_every=False;
+    default: the value in code, else the engine's for resumable= alone), and
+    `promote-<dataset>` for every dataset a step produces. Compose gets each value (checks it,
     and writes the numbers as its output `kaos-run-settings`)."""
     compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
     if compose is None:
@@ -807,8 +780,8 @@ def enhance_run_form(spec: dict, steps: list, offers: dict) -> None:
         lead = step_resumable_lead(step)
         if lead:
             args.extend(["--resumable-lead", f"{step_name}={lead}"])
-        every = every_minutes(annots)
-        if every.isdigit():
+        every = every_field_default(annots)
+        if every:
             field(checkpoint_field(step_name), f"{every}m",
                   f"How often the '{step_name}' step's checkpoint is saved: minutes or hours, "
                   f"for example 10m or 1h.", "--checkpoint-every", step_name)
@@ -1159,29 +1132,116 @@ def refuse_large_templates(spec: dict) -> None:
 
 
 STEP_IMAGES_ENV = "KAOS_STEP_IMAGES"
+IMAGE_RECORD_PARAM = "image"        # the compose-like template's own image: an input read from the image record
 
 
-def enhance_image_guard(steps: list) -> None:
-    """Hand the compose step the image every other step will run, as the run resolved it.
+def _record_input(name: str, cm: str, key: str) -> dict:
+    """A template input that the workflow engine reads from the image record when the task starts. It is an input of
+    the template, not an argument of the workflow: nobody can set it when a run is submitted."""
+    return {"name": name, "valueFrom": {"configMapKeyRef": {"name": cm, "key": key}}}
 
-    A step's image is a workflow parameter read from the app's image record when a run starts. A step that
-    was just added has no built image yet and its record is a reference without registry or repository;
-    the compose step (kubecore/compose.py check_step_images) refuses such a run before any step starts.
-    Steps with a verbatim `image` annotation have no parameter and are not listed.
-    """
-    compose = next((s for s in steps if s["name"] == "compose-and-validate"), None)
-    if compose is None:
-        return
+
+def enhance_images(spec: dict, ctx: dict, steps: list) -> None:
+    """Where every image comes from. The image of a step is never a workflow parameter (no field on the run form, no
+    parameter a submit can set): the app's image record, the ConfigMap `<app>-pipeline-images` that CI writes after a
+    build, is read in two places.
+
+    - Compose's own template and the final task's have an input `image` read from the record (key `compose-and-validate`).
+    - Compose's template also has one input `image-<step>` for each step, read from the record when compose starts. They
+      go to compose as KAOS_STEP_IMAGES (compose refuses a step that was never built: kubecore/compose.py
+      check_step_images) and compose writes them as its output `kaos-images`.
+    - Every step (and its HPC variant) is given its image by its DAG task, from that output (step_contract.image_of): one
+      reading of the record for the whole run, the same string on the cluster and on HPC.
+
+    A step with a `platform.kubecore.io/image` annotation keeps that verbatim image and reads no record."""
+    cm = images_configmap(ctx)
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
     images = {}
     for step in steps:
-        image = (step.get("container") or {}).get("image") or ""
-        if step is not compose and image == f"{{{{workflow.parameters.image-{step['name']}}}}}":
-            images[step["name"]] = image
-    if not images:
+        annots = platform_annotations(step)
+        if "image" in annots:
+            step["container"]["image"] = annots["image"]      # the sanctioned escape hatch: a verbatim utility image
+        elif step is compose:
+            step["container"]["image"] = IMAGE_INPUT
+            step.setdefault("inputs", {}).setdefault("parameters", []).append(
+                _record_input(IMAGE_RECORD_PARAM, cm, annots.get("source", COMPOSE_STEP)))
+        else:
+            step["container"]["image"] = IMAGE_INPUT
+            step.setdefault("inputs", {}).setdefault("parameters", []).append({"name": "image"})
+            add_task_argument(spec, step["name"], "image", image_of(step["name"]))
+            images[step["name"]] = annots.get("source", step["name"])
+    if compose is None or not images:
         return
+    inputs = compose["inputs"]["parameters"]
+    inputs += [_record_input(f"image-{name}", cm, key) for name, key in sorted(images.items())]
     env = compose["container"].setdefault("env", [])
     if not any(e.get("name") == STEP_IMAGES_ENV for e in env):
-        env.append({"name": STEP_IMAGES_ENV, "value": json.dumps(images, separators=(",", ":"), sort_keys=True)})
+        env.append({"name": STEP_IMAGES_ENV, "value": json.dumps(
+            {name: "{{inputs.parameters.image-%s}}" % name for name in sorted(images)}, separators=(",", ":"))})
+    args = compose["container"].setdefault("args", [])
+    args += ["--images-output", IMAGES_PATH]
+    compose.setdefault("outputs", {}).setdefault("parameters", []).append(
+        {"name": IMAGES_PARAM, "valueFrom": {"path": IMAGES_PATH}})
+
+
+PROMOTE_COMMAND = ["python", "-I", "-m", "kaos_engine.promote"]
+PROMOTE_SIZE = {"cpu": "100m", "mem": "256Mi", "disk": "1Gi"}   # what the final task asks of a node: a few commits and merges
+
+
+def add_promote_task(spec: dict, steps: list) -> None:
+    """The run's final task `kaos-promote` (kubecore/promote.py): it moves `latest` of every dataset the run form
+    asked to promote, all or none, once every step has succeeded or been skipped. Steps only seal their versions.
+
+    It is the compose template again, as the passes before this one made it (the same image, the same lake
+    credential and service account, the same fixed limit, the cluster), with another command: so it holds exactly
+    the identity a step has, and nothing a step does not. It is added here, never by pipeline.py, and the name is one
+    a pipeline cannot use (refuse_client_identity). A pipeline with no dataset producer has no such task."""
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
+    if compose is None:
+        return
+    args = compose["container"].get("args", [])
+    table = json.loads(args[args.index("--steps") + 1]) if "--steps" in args else []
+    producers = [(s["name"], e["name"]) for s in table for e in s["produces"] if e["type"] == "dataset"]
+    if not producers:
+        return
+    tpl = copy.deepcopy(compose)
+    tpl["name"] = PROMOTE_STEP
+    # Beside the class's and its own `image` (read from the image record): not compose's one input for each step.
+    tpl["inputs"]["parameters"] = [p for p in tpl["inputs"]["parameters"] if not p["name"].startswith("image-")]
+    tpl["inputs"]["parameters"].append({"name": PROMOTE_PARAM})
+    tpl.pop("outputs", None)
+    container = tpl["container"]
+    container["command"], container["args"] = list(PROMOTE_COMMAND), []
+    container["env"] = [e for e in container.get("env", []) if e["name"] != STEP_IMAGES_ENV] + [
+        {"name": "KAOS_RUN", "value": "{{workflow.name}}"},
+        {"name": "KAOS_PROMOTE_PLAN", "value": "{{inputs.parameters.%s}}" % PROMOTE_PARAM}]
+    labels = tpl.setdefault("metadata", {}).setdefault("labels", {})
+    labels["platform.kubecore.io/step"] = PROMOTE_STEP
+    spec["templates"].insert(spec["templates"].index(compose) + 1, tpl)
+    # What each producer wrote (its result's writes; the sentinel when it did not run) and the form's choice, as JSON.
+    # Every `}` is followed by `,` or `]`: two closing braces would end the expression.
+    plan = ",".join(
+        '{"step":%s,"name":%s,"promote":workflow.parameters[%s],"writes":fromJSON(%s)?.writes ?? []}'
+        % (json.dumps(step), json.dumps(name), json.dumps(promote_field(name)), result_of(step))
+        for step, name in producers)
+    dag = next(t for t in spec["templates"] if t.get("name") == spec.get("entrypoint") and "dag" in t)["dag"]
+    compose_task = next(t for t in dag["tasks"] if t["name"] == COMPOSE_STEP)
+    # The compose step's class, but with the small fixed size of this task (it reads a few commits and merges): the compose
+    # step's own size (7 CPU, 27 GiB on the standard class) would ask the pool for a node at the end of every run.
+    given = [dict(p, value=PROMOTE_SIZE[p["name"]]) if p["name"] in PROMOTE_SIZE else p
+             for p in copy.deepcopy((compose_task.get("arguments") or {}).get("parameters") or [])]
+    for p in tpl["inputs"]["parameters"]:
+        if p["name"] in PROMOTE_SIZE:
+            p["default"] = PROMOTE_SIZE[p["name"]]
+    # No pod at all when no dataset is ticked on the form (the default): the task is Skipped. The compose step's log says
+    # which datasets stay where they are (kubecore/compose.py).
+    ticked = " || ".join("workflow.parameters[%s] == 'true'" % json.dumps(promote_field(name))
+                         for name in dict.fromkeys(name for _, name in producers))
+    ends = " && ".join("(%s.Succeeded || %s.Skipped)" % (n, n) for n in dict.fromkeys(s["name"] for s in table))
+    dag["tasks"].append({
+        "name": PROMOTE_STEP, "template": PROMOTE_STEP, "depends": "%s && %s" % (COMPOSE_STEP, ends),
+        "when": "{{=%s}}" % ticked,
+        "arguments": {"parameters": given + [{"name": PROMOTE_PARAM, "value": "{{=toJSON([%s])}}" % plan}]}})
 
 
 def enhance_pipeline_info(spec: dict, ctx: dict, steps: list) -> None:
@@ -1269,8 +1329,6 @@ def order_form(spec: dict, steps: list) -> None:
             place(name, 5)
         elif name == "config":
             place(name, 6)
-        elif name.startswith("image-"):
-            place(name, 7)
     for i, step in enumerate(own):
         for suffix in ("class", "walltime", "checkpoint-every"):
             place(f"{step}-{suffix}", 4, i * 3 + ("class", "walltime", "checkpoint-every").index(suffix))
@@ -1332,7 +1390,6 @@ def enhance(wft: dict, ctx: dict) -> dict:
     spec = wft["spec"]
     enhance_spec_top_level(spec, ctx)
     steps = step_templates(spec)
-    enhance_arguments(spec, ctx, steps)
     gpu_step_names: set = set()
     offers: dict = {}    # step -> what its {step}-class choice offers (None: pinned to one class)
     shared = shared_templates(spec)  # before enhance_hpc adds twin tasks
@@ -1343,7 +1400,6 @@ def enhance(wft: dict, ctx: dict) -> dict:
         gpu = is_gpu_step(step)
         if gpu:
             gpu_step_names.add(step["name"])
-        enhance_image(step, ctx, annots)
         enhance_env(step, ctx, annots)
         # Before enhance_gpu_routing strips the typed request, which class_offer reads.
         offer = class_offer(step, ctx, annots) if "compute-class" not in annots else None
@@ -1363,13 +1419,14 @@ def enhance(wft: dict, ctx: dict) -> dict:
         enhance_volumes(step, annots, ctx)
         enhance_resilience(spec, step, ctx, annots, gpu, inject_disabled(annots, "lakefs"), shared)
         enhance_connections(step, ctx)
-    enhance_image_guard(steps)
+    enhance_images(spec, ctx, steps)
     enhance_workspace_pvc(spec, steps)
     enhance_compose_identity(steps, ctx)
     enhance_run_form(spec, steps, offers)
     enhance_compose_class(spec, steps, ctx)
     enhance_pipeline_info(spec, ctx, steps)
     order_form(spec, steps)
+    add_promote_task(spec, steps)   # before enhance_hpc: its depends are rewritten for the steps that have a twin
     # PRD-1016: the MeluXina leg — must run LAST (twin tasks copy each routed
     # step's FINAL container image/command, and the depends rewrite needs the
     # final DAG). See kubecore/meluxina.py.

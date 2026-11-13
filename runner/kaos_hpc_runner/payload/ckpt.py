@@ -32,6 +32,7 @@ MIN_EVERY_S, MAX_EVERY_S, DEFAULT_EVERY_S = 300, 3600, 900
 SPACE_LIMIT, FILES_LIMIT = 0.8, 0.8
 SEQ_RE = re.compile(r'^(\d{6})\.json$')
 LEASE_RE = re.compile(r'kaos-ckpt-lease=(\S+)')
+FIXED_EVERY = bool(os.environ.get('KAOS_CKPT_EVERY_S'))    # set by the runner from the run form's <step>-checkpoint-every
 state = {'comment_ok': True, 'sig': None, 'digest': None, 'skipped': '', 'every': float(os.environ.get('KAOS_CKPT_EVERY_S') or DEFAULT_EVERY_S)}
 
 
@@ -409,11 +410,46 @@ def expire():
 
 
 # ------------------------------------------------------------------------------------------- watch
+DUTY = 10          # a periodic copy may take at most a tenth of the time between copies (10 x its duration apart)
+
+
+def spacing(target, took):
+    """Seconds after the previous copy ENDED before the next periodic copy may start, and the reason when that is more than
+    the target asked for ('' when it is not). The target is the run form's `<step>-checkpoint-every` (or the adaptive default):
+    never sooner than MIN_EVERY_S, and never so soon that copying takes more than a tenth of the run time."""
+    wanted = max(target, MIN_EVERY_S)
+    apart = max(wanted, DUTY * took)
+    if apart <= target:
+        return apart, ''
+    if apart == wanted:
+        return apart, 'copies are at least %d minutes apart on HPC (Slurm)' % (MIN_EVERY_S // 60)
+    return apart, 'a copy takes %d s and copying is kept under a tenth of the run time' % round(took)
+
+
+def time_for_a_copy(elapsed, limit_s, lead_s, took):
+    """Whether a periodic copy may start: the time left before the limit must be more than the lead the final copy needs
+    plus the time this copy takes, so that it is over before the wall-time signal. Without a limit or a lead: yes."""
+    if not limit_s or not lead_s:
+        return True
+    return limit_s - elapsed > lead_s + took
+
+
+def decide(since_last, elapsed, target, took, limit_s, lead_s):
+    """What the watcher does on a tick: 'wait' (too soon after the last copy), 'late' (the time left is the final copy's)
+    or 'copy' (a periodic copy may start)."""
+    if since_last < spacing(target, took)[0]:
+        return 'wait'
+    return 'copy' if time_for_a_copy(elapsed, limit_s, lead_s, took) else 'late'
+
+
 def watch():
     flags = {'now': False, 'stop': False}
     signal.signal(signal.SIGUSR2, lambda *a: flags.update(now=True))
     signal.signal(signal.SIGTERM, lambda *a: flags.update(stop=True))
-    last = time.time()
+    started_at = last = time.time()
+    limit_s = float(os.environ.get('KAOS_TIME_LIMIT_S') or 0)
+    lead_s = float(os.environ.get('KAOS_RESUMABLE_LEAD_MIN') or 0) * 60
+    took, told, quiet = 0.0, '', False
     while not flags['stop']:
         time.sleep(1)
         if flags['now']:
@@ -424,15 +460,29 @@ def watch():
             except Exception as e:
                 say('copy failed: %s' % e)
             last = time.time()
-        elif time.time() - last >= state['every']:
-            started = time.time()
-            try:
-                persist(False)
-            except Exception as e:
-                say('periodic copy failed: %s' % e)
-            took = time.time() - started
-            state['every'] = min(max(10 * took, MIN_EVERY_S), MAX_EVERY_S)   # saving stays near 10% of the run time
-            last = time.time()
+            continue
+        now = time.time()
+        what = decide(now - last, now - started_at, state['every'], took, limit_s, lead_s)
+        if what == 'wait':
+            continue
+        if what == 'late':
+            if not quiet:
+                say('no more periodic copies: the time left is needed for the final copy before the limit')
+                quiet = True
+            continue
+        started = time.time()
+        try:
+            persist(False)
+        except Exception as e:
+            say('periodic copy failed: %s' % e)
+        took = time.time() - started
+        last = time.time()
+        if not FIXED_EVERY:         # no interval chosen on the run form: saving stays near 10% of the run time
+            state['every'] = min(max(DUTY * took, MIN_EVERY_S), MAX_EVERY_S)
+        apart, why = spacing(state['every'], took)
+        if why and why != told:     # one plain line when copies are less often than asked, and why
+            say('copying every %d minutes, not every %d: %s' % (round(apart / 60), round(state['every'] / 60), why))
+            told = why
     return 0
 
 

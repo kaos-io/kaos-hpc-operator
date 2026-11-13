@@ -101,3 +101,41 @@ def test_a_class_for_a_step_the_pipeline_does_not_have_names_the_form_field():
     table = __import__("json").loads(args[args.index("--steps") + 1])
     with pytest.raises(compose.ComposeError, match=r"^ghost-class: the pipeline has no step 'ghost'"):
         compose.run_classes(table, ["ghost=cpu-standard"], args[args.index("--class-offers") + 1])
+
+
+# --------------------------------------------------- D-25: GPU classes only for gpu=True, on HPC as on the cluster
+
+def _hpc_gpu_names():
+    return [c["name"] for c in BASE["hpc"]["classes"] if (c.get("gpus") or 0) > 0]
+
+
+def _hpc_cpu_names():
+    return [c["name"] for c in BASE["hpc"]["classes"] if not (c.get("gpus") or 0) > 0]
+
+
+def test_the_fixture_has_an_hpc_gpu_class_and_an_hpc_cpu_class():
+    assert _hpc_gpu_names() and _hpc_cpu_names()
+
+
+def test_a_step_without_gpu_is_not_offered_an_hpc_gpu_class_and_the_form_and_the_check_agree():
+    wft = _enhanced(kind="evaluate")
+    offered = _offers(wft)["one"]["offered"]
+    form = next(p for p in wft["spec"]["arguments"]["parameters"] if p["name"] == "one-class")
+    assert form["enum"] == offered
+    assert not set(_hpc_gpu_names()) & set(offered), "no HPC GPU class on the form"
+    assert set(_hpc_cpu_names()) <= set(offered), "the HPC CPU classes stay"
+    for name in _hpc_gpu_names():
+        assert _refusal(wft, name) == (
+            f"step 'one' cannot run on class '{name}': it is a GPU machine and the step does not declare gpu=True. "
+            "Add gpu=True to the step in pipeline.py to run it on a GPU machine.")
+
+
+def test_a_gpu_step_is_offered_every_hpc_class_gpu_and_cpu():
+    offered = _offers(_enhanced(kind="train", gpu=True, produces=[authoring.model("m")]))["one"]["offered"]
+    assert set(_hpc_gpu_names()) <= set(offered) and set(_hpc_cpu_names()) <= set(offered)
+
+
+def test_a_step_that_never_runs_on_hpc_keeps_its_own_reason_for_an_hpc_gpu_class():
+    wft = _enhanced(kind="publish")
+    name = _hpc_gpu_names()[0]
+    assert "never runs on HPC (Slurm)" in _refusal(wft, name)

@@ -19,6 +19,17 @@ from . import image as imagemod
 from . import jobscript, payloads, result, settings, staging, wallet
 from .logs import LogStreamer
 from .reporter import Reporter, checkpoint_uri
+
+
+def checkpoint_every_seconds(context):
+    """Seconds between the checkpoint copies the run form chose for this step (`checkpoint_every`, minutes, in the step
+    context), or 0 when the context holds none: the copier then adapts its own interval. The same value the step's
+    kaos-lib reads (runtime.checkpoint_every_minutes), and the one the cluster's copier is given."""
+    try:
+        value = json.loads(context or '{}').get('checkpoint_every')
+    except (ValueError, AttributeError):
+        return 0
+    return value * 60 if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 from .sharing import inputs_in_script
 from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_site_down, lane_refusal,
                     share_state, site_time, submit_limit_refusal)
@@ -268,6 +279,10 @@ class Runner:
         env.append('REDACT_B64=' + payloads.b64(payloads.REDACT))     # the job's failure tail is redacted with it
         env += ['CKPT_B64=' + payloads.b64(payloads.CKPT), 'KAOS_CKPT_BUDGET_PCT=%d' % cfg.ckpt_budget_pct,
                 'KAOS_PROJID=' + ''.join(c for c in ident['account'] if c.isdigit())]
+        env.append('KAOS_TIME_LIMIT_S=%d' % (cfg.time_limit * 60))   # the copier keeps the last minutes for the final copy
+        every = checkpoint_every_seconds(cfg.context)    # the run form's <step>-checkpoint-every, from the step context
+        if every:
+            env.append('KAOS_CKPT_EVERY_S=%d' % every)
         if cfg.env.get('KAOS_LIB_SUPPORT'):      # the one variable a job's spec.env may hand to the step
             env.append('KAOS_LIB_SUPPORT=' + cfg.env['KAOS_LIB_SUPPORT'])
         w = self.wallet      # minted by prepare_handback, before anything was staged or cancelled

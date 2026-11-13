@@ -52,12 +52,12 @@ def evaluate(expression, outputs):
     return eval(body, {"__builtins__": {}}, {"sprig": sprig, "tasks": {t: Task(p) for t, p in outputs.items()}})
 
 
-def base_of(context, step, promote=None):
+def base_of(context, step):
     """The base context compose writes for `step`, from the fixture's own run, params and pinned reads."""
     from kubecore import compose
     reads = {r["name"]: r for r in fixture("ledger-two-reads")["reads"]}
     return compose.base_context(STEPS[step], context["run"], context["app"], context["project"],
-                                context["experiment"], context["params"], reads, promote)
+                                context["experiment"], context["params"], reads)
 
 
 # ---------------------------------------------------------------- the wire form
@@ -116,15 +116,6 @@ def test_a_step_with_no_upstream_gets_exactly_the_fixture():
     base = wire(base_of(want, "prepare"))
     got = evaluate(context_expression(COMPOSE, "prepare", []), {COMPOSE: {"kaos-context-prepare": base}})
     assert got == wire_of("context-no-upstream")
-
-
-def test_a_run_that_asks_to_promote_marks_the_produced_dataset():
-    from kubecore.step_contract import context_expression, wire
-    want = fixture("context-promote")
-    base = wire(base_of(want, "prepare", promote={"embeddings": True}))
-    got = evaluate(context_expression(COMPOSE, "prepare", []), {COMPOSE: {"kaos-context-prepare": base}})
-    assert got == wire_of("context-promote")
-    assert "promote" not in wire(base_of(want, "prepare", promote={"embeddings": False})), "absent means false"
 
 
 def test_a_step_gets_the_result_of_the_step_it_needs_byte_for_byte():
@@ -233,7 +224,7 @@ def test_every_step_runs_the_same_entry_with_one_value_and_hands_back_one_result
         assert env["KAOS_STEP_CONTEXT"] == "{{inputs.parameters.kaos-context}}"
         assert "KAOS_LIB_LOCK" not in env
         sizing = ("gpus", "cpu", "mem", "disk", "deadline")
-        assert [p["name"] for p in step["inputs"]["parameters"] if p["name"] not in sizing] == ["kaos-context"]
+        assert [p["name"] for p in step["inputs"]["parameters"] if p["name"] not in sizing] == ["kaos-context", "image"]
         # no default: a step that ends well without a result fails in the workflow engine
         assert step["outputs"]["parameters"] == [{"name": "kaos-result", "valueFrom": {
             "path": "/work/output/kaos-result.json"}}]
@@ -245,7 +236,7 @@ def test_compose_writes_one_context_per_step_and_the_runs_ledger(rendered):
     assert outputs == {"kaos-ledger": "/work/kaos-ledger.json",
                        "kaos-context-dataset-loading": "/work/context/dataset-loading.json",
                        "kaos-context-hello-world": "/work/context/hello-world.json",
-                       "kaos-run-settings": "/work/kaos-run-settings.json"}
+                       "kaos-run-settings": "/work/kaos-run-settings.json", "kaos-images": "/work/kaos-images.json"}
     args = compose["container"]["args"]
     assert args[args.index("--run") + 1] == "{{workflow.name}}"
     assert args[args.index("--app") + 1] == "PLACEHOLDER-app" and args[args.index("--project") + 1]

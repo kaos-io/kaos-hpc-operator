@@ -138,7 +138,7 @@ def test_every_task_an_expression_reads_is_in_the_depends_of_the_task_that_reads
     tasks = _tasks(_enhanced(_pipeline))
     assert {"prepare-hpc", "train-hpc", "alone-hpc"} <= set(tasks) and "load-hpc" not in tasks
     for name, task in tasks.items():
-        if name == "compose-and-validate":
+        if name in ("compose-and-validate", "kaos-promote"):     # the final task reads the steps' results (test_promote)
             continue
         context = next(p["value"] for p in task["arguments"]["parameters"] if p["name"] == "kaos-context")
         read = set(re.findall(r'tasks\["([^"]+)"\]', context))
@@ -154,7 +154,7 @@ def test_every_task_an_expression_reads_is_in_the_depends_of_the_task_that_reads
 # name); none is sized by a step's data. A reference that is not listed here fails the test: decide whether its
 # value is bounded before adding it.
 KNOWN_REFERENCES = {
-    "inputs.parameters.kaos-context",
+    "inputs.parameters.kaos-context", "inputs.parameters.kaos-promote-plan",
     "workflow.name", "workflow.uid",
     "inputs.parameters.gpus", "inputs.parameters.cpu", "inputs.parameters.mem", "inputs.parameters.disk",
     "inputs.parameters.step-name", "inputs.parameters.image",
@@ -195,7 +195,7 @@ def test_a_definition_refers_to_nothing_sized_at_run_time_but_its_context():
     assert found - form <= KNOWN_REFERENCES, found - form - KNOWN_REFERENCES
     for reference in form:
         name = reference[len("workflow.parameters."):]
-        assert name.startswith("image-") or name.endswith("-class"), reference   # nothing else is a form field of a step
+        assert name.endswith("-class"), reference   # nothing else is a form field of a step
 
 
 # ---------------------------------------------------------------- a step gets the node of its class
@@ -228,7 +228,7 @@ def test_a_cpu_step_gets_what_a_node_of_its_class_offers_and_the_numbers_follow_
     assert resources["requests"]["cpu"] == resources["limits"]["cpu"] == "7"
     assert resources["requests"]["memory"] == resources["limits"]["memory"] == "27Gi", "the default class, cpu-standard"
     assert {p["name"]: p.get("default") for p in template["inputs"]["parameters"]} == {
-        "kaos-context": None, "deadline": "14400", "cpu": "7", "mem": "27Gi", "disk": "10Gi"}
+        "kaos-context": None, "image": None, "deadline": "14400", "cpu": "7", "mem": "27Gi", "disk": "10Gi"}
     patch = yaml.safe_load(template["podSpecPatch"])["containers"][0]
     assert patch == {"name": "main", "resources": {
         "requests": {"cpu": "{{inputs.parameters.cpu}}", "memory": "{{inputs.parameters.mem}}",
@@ -246,7 +246,7 @@ def test_a_gpu_step_gets_its_gpu_and_the_node_numbers_in_one_patch():
     template = _template(wft, "one")
     assert template["container"]["resources"]["requests"]["memory"] == "25Gi", "the default of a gpu step is gpu-t4"
     assert {p["name"]: p.get("default") for p in template["inputs"]["parameters"]} == {
-        "kaos-context": None, "deadline": "14400", "cpu": "7", "mem": "25Gi", "disk": "10Gi",
+        "kaos-context": None, "image": None, "deadline": "14400", "cpu": "7", "mem": "25Gi", "disk": "10Gi",
         "gpus": "1"}
     patch = yaml.safe_load(template["podSpecPatch"])["containers"]
     assert len(patch) == 1 and patch[0]["resources"]["requests"] == {
@@ -267,7 +267,7 @@ def test_a_step_pinned_to_one_class_has_plain_resources_and_no_runtime_numbers()
     assert template["container"]["resources"]["requests"] == {
         "cpu": "7", "memory": "25Gi", "ephemeral-storage": "10Gi", "nvidia.com/gpu": "1"}
     assert "podSpecPatch" not in template
-    assert [p["name"] for p in template["inputs"]["parameters"]] == ["kaos-context", "deadline"]
+    assert [p["name"] for p in template["inputs"]["parameters"]] == ["kaos-context", "deadline", "image"]
     assert not any(p["name"] in ("cpu", "mem") for p in _task(wft, "pinned")["arguments"]["parameters"])
     assert "pinned-class" not in [p["name"] for p in wft["spec"]["arguments"]["parameters"]]
 

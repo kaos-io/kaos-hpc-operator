@@ -16,12 +16,12 @@ not in these fixtures, because an input is read through `ledger`, not through `p
 | File | What it is |
 |---|---|
 | `context-no-upstream.json` | The context of `prepare`: one input, one produced dataset, no upstream. |
-| `context-promote.json` | The context of `prepare` in a run that asked to promote: the same as `context-no-upstream.json`, with `promote: true` on the produced dataset. |
 | `context-one-upstream.json` | The context of `train`: one upstream (`prepare`, whose result is `result-ok.json`). |
 | `context-skipped-upstream.json` | The context of `evaluate`: `train` ran (`result-model.json`), `export` was skipped and is the sentinel. |
 | `context-escapes.json` | A context whose strings hold `{{...}}`, `&`, `<`, `>`, a quote, a backslash and non-ASCII characters, and whose numbers a float would change. Its `.wire` file shows every escape. |
 | `result-ok.json` | The result of `prepare`: one read, one write (a dataset). |
 | `result-model.json` | The result of `train`: two reads (one of a dataset produced in the run), one write (a model). |
+| `result-skipped.json` | The result of a step that ended itself as skipped with `step.skip("reason")`: no values, no reads, no writes. |
 | `result-absent.json` | The sentinel: what stands in for a result that is missing. |
 | `ledger-two-reads.json` | A ledger with two reads, as compose writes it when the run starts. |
 | `ledger-run-union.json` | The ledger of the whole run: the union of compose's reads and every step's result. |

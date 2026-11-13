@@ -151,6 +151,19 @@ def every_minutes(annots: dict) -> str:
     return raw
 
 
+def every_field_default(annots: dict) -> str:
+    """The default of the run form's `<step>-checkpoint-every`, in minutes as text, or '' when the step has no such field. The
+    form has the field for a step that declares `checkpoint_every=` (its value is the default) and for a step that declares
+    `resumable=` (the default is the engine's, DEFAULT_EVERY_MINUTES); `checkpoint_every=False` removes it."""
+    every = every_minutes(annots)
+    if every == "off":
+        return ""
+    if every.isdigit():
+        return every
+    declared = annots.get("hpc-resumable")
+    return str(DEFAULT_EVERY_MINUTES) if declared not in (None, "", RESUMABLE_OFF) else ""
+
+
 def shared_templates(spec: dict) -> set:
     """Templates run by more than one DAG task or by a fan-out: one checkpoint key would be shared."""
     uses, fanned = {}, set()
@@ -187,7 +200,7 @@ def _add_named(items: list, entry: dict) -> None:
         items.append(entry)
 
 
-def helper_env(step: dict, ctx: dict, every: str) -> list:
+def helper_env(step: dict, ctx: dict, every_field: str) -> list:
     keys, secret = ctx["lakefs"]["adminSecretKeys"], ctx["lakefs"]["adminSecret"]
     ref = lambda key: {"secretKeyRef": {"name": secret, "key": keys[key]}}  # noqa: E731
     return [
@@ -199,20 +212,20 @@ def helper_env(step: dict, ctx: dict, every: str) -> list:
         {"name": "CKPT_BRANCH", "value": CHECKPOINT_BRANCH},
         {"name": "CKPT_ROOT", "value": CHECKPOINT_ROOT},
         {"name": "CKPT_KEY", "value": "{{workflow.name}}/%s" % step["name"]},
-        # A step that declares checkpoint_every= is copied at the run form's `<step>-checkpoint-every`.
+        # A step with the run form's `<step>-checkpoint-every` is copied at that interval; any other step at the default.
         {"name": "CKPT_EVERY_MIN",
-         "value": CHECKPOINT_PARAM_REF if every.isdigit() else str(DEFAULT_EVERY_MINUTES)},
+         "value": CHECKPOINT_PARAM_REF if every_field else str(DEFAULT_EVERY_MINUTES)},
         {"name": "CKPT_STAGE", "value": STAGE_MOUNT},
         {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
     ]
 
 
-def helper_container(name: str, mode: str, step: dict, ctx: dict, every: str) -> dict:
+def helper_container(name: str, mode: str, step: dict, ctx: dict, every_field: str) -> dict:
     """One helper container (init or sidecar): small requests, locked down, never the step's GPU."""
     return {
         "name": name, "image": helper_image(ctx),
         "command": ["python3", "%s/%s" % (HELPER_MOUNT, HELPER_FILE), mode],
-        "env": helper_env(step, ctx, every),
+        "env": helper_env(step, ctx, every_field),
         "resources": {"requests": {"cpu": "10m", "memory": "64Mi"}, "limits": {"memory": "512Mi"}},
         "securityContext": {"runAsUser": 65532, "runAsGroup": 65532, "allowPrivilegeEscalation": False,
                             "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}},
@@ -249,10 +262,11 @@ def enhance_resilience(spec: dict, step: dict, ctx: dict, annots: dict, gpu: boo
     helper = wants_helper(step, gpu, every, ctx, inject_off, shared)
     if not inject_folder(step, helper, ctx) or not helper:
         return
-    if every.isdigit():
-        add_input(step, CHECKPOINT_PARAM, every)
+    every_field = every_field_default(annots)
+    if every_field:
+        add_input(step, CHECKPOINT_PARAM, every_field)
         add_task_argument(spec, step["name"], CHECKPOINT_PARAM, "{{=%s}}" % setting(step["name"], "checkpoint-every"))
     step.setdefault("initContainers", [])
     step.setdefault("sidecars", [])
-    _add_named(step["initContainers"], helper_container(INIT_NAME, "restore", step, ctx, every))
-    _add_named(step["sidecars"], helper_container(SIDECAR_NAME, "watch", step, ctx, every))
+    _add_named(step["initContainers"], helper_container(INIT_NAME, "restore", step, ctx, every_field))
+    _add_named(step["sidecars"], helper_container(SIDECAR_NAME, "watch", step, ctx, every_field))

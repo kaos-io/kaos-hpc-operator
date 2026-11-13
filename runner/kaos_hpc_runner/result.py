@@ -82,6 +82,8 @@ def cost(wire_text):
 
 
 RESULT_FIELDS = ('version', 'status', 'values', 'reads', 'writes')        # docs/step-contract.md, section 4
+SKIPPED_FIELDS = ('version', 'status', 'reason')   # section 4, a skipped result: kaos_lib.step.skip(reason)
+SKIP_REASON_MAX = 300
 READ_FIELDS = ('name', 'repo', 'owner', 'ref', 'commit', 'line')           # section 5, a read
 WRITE_FIELDS = ('name', 'type', 'repo', 'commit', 'line', 'path')          # section 5, a write
 
@@ -149,7 +151,8 @@ def _bad_write(e):
 
 def check(raw):
     """The result file's bytes as the text for status.result (wire form), or InvalidResult saying what is wrong.
-    A result is a JSON object (docs/step-contract.md, section 4) with the integer version 1, status "ok", an
+    A result is a JSON object (docs/step-contract.md, section 4) with the integer version 1, status "skipped" and a
+    reason, or status "ok", an
     object `values` (no key starting with kaos-), the lists `reads` and `writes` of ledger entries (section 5),
     only finite numbers and no key twice in one object; and it costs at most 8 KiB."""
     try:
@@ -161,8 +164,17 @@ def check(raw):
         raise InvalidResult('the step\'s result file holds %s, not a JSON object' % type(value).__name__)
     if type(value.get('version')) is not int or value.get('version') != 1:
         raise InvalidResult('the step\'s result has version %r; this platform reads the integer 1' % (value.get('version'),))
+    if value.get('status') == 'skipped':
+        # A step that ended itself with step.skip(reason): nothing but the reason (section 4).
+        unknown = [k for k in value if k not in SKIPPED_FIELDS]
+        reason = value.get('reason')
+        if unknown or not isinstance(reason, str) or not 0 < len(reason) <= SKIP_REASON_MAX:
+            raise InvalidResult('the step\'s skipped result has only version, status and a reason of 1 to %d characters%s'
+                                % (SKIP_REASON_MAX, '; it has the unknown field `%s`' % unknown[0] if unknown else ''))
+        return wire(_ordered(value, SKIPPED_FIELDS))
     if value.get('status') != 'ok':
-        raise InvalidResult('the step\'s result has status %r; a step hands back status "ok"' % (value.get('status'),))
+        raise InvalidResult('the step\'s result has status %r; a step hands back status "ok" or "skipped"'
+                            % (value.get('status'),))
     for field, kind, word in (('values', dict, 'an object'), ('reads', list, 'a list'), ('writes', list, 'a list')):
         if not isinstance(value.get(field), kind):
             raise InvalidResult('the step\'s result has no `%s` that is %s' % (field, word))

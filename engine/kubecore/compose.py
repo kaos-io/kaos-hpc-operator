@@ -51,7 +51,8 @@ config is resolved with an empty environment besides, because this pod holds the
 
 The run's own keys: `plan` and `pipeline-version` are the platform's; the ADVANCED override may carry
 neither. Whether a run promotes a dataset it produces is the run form's `promote-<dataset>` field
-(--promote); the step that produces it finds `promote` on that entry of its context.
+(--promote): compose checks the value; the run's final task moves `latest` (kubecore/promote.py). A step
+never promotes: it seals its version and hands the commit on in its result.
 """
 
 import argparse
@@ -378,15 +379,16 @@ def compose_config(overrides: list, advanced=None, required: list = None, render
     return resolved
 
 
-def check_step_images(raw) -> None:
+def check_step_images(raw) -> dict:
     """Refuse the run when a step has no real image, before any step starts.
 
     A step added to pipeline.py appears in the released pipeline before its first image is built; until then
     its image reference has no registry and no repository, and the run would fail later with an image pull
-    error (or, on HPC, after a queue wait). `raw` is $KAOS_STEP_IMAGES; absent means nothing to check.
+    error (or, on HPC, after a queue wait). `raw` is $KAOS_STEP_IMAGES (the image record, as the workflow engine read it
+    for compose); absent means nothing to check. Returns the images, trimmed, for the output `kaos-images`.
     """
     if not raw:
-        return
+        return {}
     try:
         images = json.loads(raw)
         if not isinstance(images, dict):
@@ -403,6 +405,7 @@ def check_step_images(raw) -> None:
             f"no image has been built yet for: {listed}. The platform builds a step's image after you push; "
             "wait for the app's build to finish (or see why it failed), then run again"
         )
+    return {step: ref.strip() for step, ref in images.items()}
 
 
 _COMMIT = re.compile(r"^[0-9a-f]{64}$")
@@ -520,16 +523,13 @@ def run_settings(steps: list, walltimes: list, checkpoints: list, leads: list = 
 
 
 def base_context(step: dict, run: str, app: str, project: str, experiment: str, params: dict, reads: dict,
-                 promote: dict = None, checkpoint_every: int = 0) -> dict:
+                 checkpoint_every: int = 0) -> dict:
     """A step's context without `upstream` (the DAG task argument adds it), in the contract's field order.
     `params` is the step's own (step_params)."""
     produces = []
     for entry in step["produces"]:
-        produced = {"name": entry["name"], "type": entry["type"],
-                    "repo": produced_repo(app, entry["type"], entry["name"])}
-        if entry["type"] == "dataset" and (promote or {}).get(entry["name"]):
-            produced["promote"] = True
-        produces.append(produced)
+        produces.append({"name": entry["name"], "type": entry["type"],
+                         "repo": produced_repo(app, entry["type"], entry["name"])})
     context = {
         "version": CONTEXT_VERSION, "run": run, "app": app, "project": project, "step": step["name"],
         "kind": step["kind"], "experiment": experiment, "params": params,
@@ -542,7 +542,7 @@ def base_context(step: dict, run: str, app: str, project: str, experiment: str, 
 
 
 def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict, reads: dict,
-                  promote: dict = None, settings: dict = None) -> dict:
+                  settings: dict = None) -> dict:
     """{step: its base context in wire form}, each within its cap.
 
     `params` holds the config sections the step names in reads=. The cap is checked on the real text,
@@ -555,13 +555,12 @@ def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict,
             problem = entry["type"] == "dataset" and dataset_name_problem(app, step["name"], entry["name"])
             if problem:
                 raise ComposeError(problem)
-    promote = dict(promote or {})
     experiment = experiment_of(resolved, app)
     out = {}
     for step in steps:
         try:
             params = step_params(step, resolved)
-            text = wire(base_context(step, run, app, project, experiment, params, reads, promote,
+            text = wire(base_context(step, run, app, project, experiment, params, reads,
                                       (settings or {}).get(step["name"], {}).get("checkpoint-every", 0)))
         except (TypeError, ValueError) as exc:   # a value JSON cannot hold (inf, nan)
             raise ComposeError(f"the resolved config cannot be handed to the steps: {exc}") from None
@@ -622,6 +621,8 @@ def main(argv=None) -> None:
                         help="Minutes before its limit that a resumable step is told to save (repeatable).")
     parser.add_argument("--settings-output", default="",
                         help="Where to write the numbers the form gave each step: {step: {walltime, checkpoint-every}}.")
+    parser.add_argument("--images-output", default="",
+                        help="Where to write the images the run resolved, {step: image}, from $KAOS_STEP_IMAGES.")
     parser.add_argument("--ledger-output", default="", help="Where to write the run's ledger: every pinned input.")
     parser.add_argument("overrides", nargs="*", help="Hydra override tokens (key=value).")
     args = parser.parse_args(argv)
@@ -631,18 +632,22 @@ def main(argv=None) -> None:
         if missing:
             parser.error(f"--steps needs {', '.join(missing)}")
 
-    contexts, reads, settings = {}, {}, {}
+    contexts, reads, settings, images = {}, {}, {}, {}
     try:
-        check_step_images(os.environ.get(STEP_IMAGES_ENV))
+        images = check_step_images(os.environ.get(STEP_IMAGES_ENV))
         advanced = check_advanced(args.advanced)
         resolved = compose_config(args.overrides, advanced, args.require, json.loads(args.render_defaults))
         if args.steps:
             steps = _steps(args.steps)
             settings = run_settings(steps, args.walltime, args.checkpoint_every, args.resumable_lead)
-            promote = run_promote(steps, args.promote)
+            flags = run_promote(steps, args.promote)   # refuses a value that is not true or false; the final task reads it
+            for name in sorted({e["name"] for step in steps for e in step["produces"] if e["type"] == "dataset"}):
+                what = ("true: latest moves at the end of the run, if every step went well" if flags.get(name)
+                        else "false: its version stays sealed and latest does not move")
+                print(f"dataset {name}: {promote_field(name)} is {what}")
             run_classes(steps, args.classes, args.class_offers)
             reads = pin_inputs(resolved, steps)
-            contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, promote, settings)
+            contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, settings)
     except Exception as exc:  # any composition failure = hard error, pre-GPU
         message = str(exc)
         if exc.__cause__ is not None:  # e.g. enum ValidationError inside Hydra's wrapper
@@ -667,6 +672,10 @@ def main(argv=None) -> None:
         Path(args.settings_output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.settings_output).write_text(wire(settings))
         print(f"wrote {args.settings_output}")
+    if args.images_output:
+        Path(args.images_output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.images_output).write_text(wire(images))
+        print(f"wrote {args.images_output}")
     if args.ledger_output:
         Path(args.ledger_output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.ledger_output).write_text(wire(ledger(list(reads.values()))))

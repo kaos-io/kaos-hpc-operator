@@ -325,8 +325,10 @@ def test_the_hpc_variant_keeps_the_steps_own_condition():
         "workflow.parameters['experiment-name'] != 'off'")
 
 
-def _example():
-    return 'for example when="mode != off"'
+ALLOWED = ('A condition compares one name with a text, with == or != and nothing else, for example '
+           'when="mode != off" (a field of the run form) or when="evaluate.passed == true" (a value that the step '
+           '"evaluate", which this step needs, handed on with step.result(passed=...)). '
+           'Join comparisons with and / or; no parentheses, no < or >.')
 
 
 @pytest.mark.parametrize("written", [
@@ -336,10 +338,9 @@ def _example():
     "exp$ment == a", "experiment name == a", "experiment-name == a AND dataset == b", "experiment-name == a and",
     "experiment-name == 'open",
 ])
-def test_a_when_that_is_not_a_comparison_is_refused_with_an_example(written):
+def test_a_when_that_is_not_a_comparison_is_refused_with_what_is_allowed(written):
     assert refused(lambda a: a.step("export", kind="evaluate", when=written)) == (
-        f"step 'export': when={written!r} is not a run-form field compared with a value, "
-        f'for example when="mode != off". Join comparisons with and / or; no parentheses.')
+        f"step 'export': when={written!r} is not a condition the platform can read. {ALLOWED}")
 
 
 @pytest.mark.parametrize("written", [
@@ -348,12 +349,11 @@ def test_a_when_that_is_not_a_comparison_is_refused_with_an_example(written):
 ])
 def test_the_workflow_systems_own_syntax_in_when_is_refused(written):
     assert refused(lambda a: a.step("export", kind="evaluate", when=written)) == (
-        "step 'export': when= is written with the name of a run-form field, for example when=\"mode != off\". "
-        "Write the field's name instead of {{workflow.parameters.<field>}}.")
+        f"step 'export': when= is written with plain names, not with {{{{...}}}}. {ALLOWED}")
 
 
 def test_a_when_that_is_not_text_is_refused():
-    assert "is not a run-form field compared with a value" in refused(
+    assert "is not a condition the platform can read" in refused(
         lambda a: a.step("export", kind="evaluate", when=True))
 
 
@@ -524,8 +524,8 @@ def test_walltime_of_zero_is_refused_at_render_for_every_step(value):
     for kind in ("train", "transform", "evaluate", "ingest"):
         message = refused(lambda a, kind=kind: a.step("one", kind=kind, walltime=value, **valid(a, kind)))
         assert message == (f"step 'one': walltime={value!r} must be minutes or hours as a string like '90m', '12h' or "
-                           "'720', at least one minute (the step's time limit, wherever it runs; the step is "
-                           "ended when it elapses).")
+                           "'720', at least one minute (the default time limit of the step, wherever it runs; the person "
+                           "who starts the run sets the limit on the run form, `<step>-walltime`).")
     assert render(lambda a: a.step("one", kind="evaluate", walltime="1m"))
 
 

@@ -120,7 +120,7 @@ func percentile(samples []time.Duration, p float64) time.Duration {
 }
 
 // Max is the longest limit the class and the site allow (the lowest known of the two), or 0 when
-// neither reports one. Unlike lowest it ignores the spec: it is what a user could raise walltime to.
+// neither reports one. Unlike lowest it ignores the spec: it is what a user could raise the run form's time limit to.
 func (c Caps) Max() int32 {
 	var m int32
 	for _, v := range []int32{c.Class, c.Site} {
@@ -151,9 +151,9 @@ func StopMessage(limit, max int32, resumable bool) string {
 	case max > 0 && limit >= max:
 		return head + ". Its limit is already the longest this site allows (" + FormatMinutes(max) + "); " + resume
 	case max > 0:
-		return head + ". Set a longer limit for it (`walltime`, up to " + FormatMinutes(max) + " on this site) or " + resume
+		return head + ". Set a longer limit for it on the run form (`<step>-walltime`, up to " + FormatMinutes(max) + " on this site) or " + resume
 	}
-	return head + ". Set a longer limit for it (`walltime`) or " + resume
+	return head + ". Set a longer limit for it on the run form (`<step>-walltime`) or " + resume
 }
 
 // WarnMessage warns, before a step starts, that an earlier run of it was stopped at this same limit.
@@ -162,5 +162,5 @@ func WarnMessage(limit int32, resumable bool) string {
 	if resumable {
 		return head + " before it saved a checkpoint; save more often or ask to be signalled earlier."
 	}
-	return head + " and will be again unless you raise its limit (`walltime`) or make it resumable."
+	return head + " and will be again unless you raise its limit on the run form (`<step>-walltime`) or make it resumable."
 }
