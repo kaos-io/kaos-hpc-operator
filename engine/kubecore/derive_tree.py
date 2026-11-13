@@ -193,6 +193,10 @@ class DerivedForm:
     sections: list = field(default_factory=list)  # top-level config sections
     render_defaults: dict = field(default_factory=dict)  # {override_key: rendered default}
     tree: dict = field(default_factory=dict)  # the composed config tree
+    # What the run form's seal needs to type and show the leaves (PRD kaos#1533 F-21 H4). Author data.
+    types: dict = field(default_factory=dict)            # {param: "string"|"integer"|"number"|"boolean"|"enum"}
+    option_defaults: dict = field(default_factory=dict)  # {group param: {option: {leaf param: value str}}}, every group
+    leaf_options: dict = field(default_factory=dict)     # {leaf param: {"group": group param, "options": [...]}}
 
 
 def refuse_platform_group() -> None:
@@ -269,6 +273,19 @@ def _value_str(value) -> str:
     return str(value)
 
 
+def _leaf_type(value) -> str:
+    """The form type of a config leaf's value (bool before int: a bool is an int in Python)."""
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, Enum):
+        return "enum"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    return "string"
+
+
 def _walk_scalars(node: dict, path: str = "") -> list:
     """(dotted_path, value) for every scalar leaf; complex nodes (lists)
     are not flattened, plain dicts are recursed. Enum values (from
@@ -340,6 +357,41 @@ def _comments() -> dict:
     return found
 
 
+def _option_defaults(groups: dict) -> tuple[dict, dict]:
+    """Compose each group option once (`_compose([f"{group}={opt}"])`) and keep, per option, the leaves that
+    differ from the default option's tree ({leaf param: value str}); the default option's entry is empty. Also
+    {leaf param: {"group", "options"}} for the leaves of the default tree that exist under only some options.
+    `groups` is {group path: default option}. An option that fails to compose raises DeriveError (it fails the
+    render): the form would offer a choice that cannot run."""
+    defaults = {dotted: _value_str(v) for dotted, v in _walk_scalars(
+        OmegaConf.to_container(_compose([]), resolve=True))}
+    deltas, leaf_options = {}, {}
+    for group, default in sorted(groups.items()):
+        name = _mapped(group)
+        present = {}
+        deltas[name] = {}
+        for option in _group_options(group):
+            try:
+                leaves = dict(_walk_scalars(OmegaConf.to_container(_compose([f"{group}={option}"]), resolve=True)))
+            except DeriveError:
+                raise
+            except Exception as exc:
+                raise DeriveError(
+                    f"config group {group}/ option '{option}' does not compose: {type(exc).__name__}. Fix "
+                    f"config/{group}/{option}.yaml, or delete it."
+                ) from exc
+            present[option] = leaves
+            deltas[name][option] = {} if option == default else {
+                _mapped(dotted): _value_str(v) for dotted, v in leaves.items() if defaults.get(dotted) != _value_str(v)
+                or dotted not in defaults
+            }
+        for dotted in defaults:
+            where = [o for o, leaves in present.items() if dotted in leaves]
+            if default in where and len(where) < len(present):
+                leaf_options.setdefault(_mapped(dotted), {"group": name, "options": where})
+    return deltas, leaf_options
+
+
 def derive() -> DerivedForm:
     # Hera imported HERE (render time only) — keeps the run-time compose image
     # free of Hera. See module docstring / the hera-note above the imports.
@@ -387,6 +439,7 @@ def derive() -> DerivedForm:
         name = _mapped(dotted)
         claim(name, f"config leaf {dotted}")
         default = _value_str(value)
+        form.types[name] = _leaf_type(value)
         enum = [str(m.value) for m in type(value)] if isinstance(value, Enum) else None
         form.parameters.append(
             Parameter(name=name, value=default, enum=enum, description=comments.get(dotted, ""))
@@ -394,6 +447,7 @@ def derive() -> DerivedForm:
         form.tokens.append(f"{dotted}={{{{workflow.parameters.{name}}}}}")
         form.render_defaults[dotted] = default
 
+    form.option_defaults, form.leaf_options = _option_defaults(_group_choices())
     form.parameters.append(Parameter(**ADVANCED_PARAM_KWARGS))
     return form
 

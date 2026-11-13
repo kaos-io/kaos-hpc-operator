@@ -58,6 +58,7 @@ from kubecore.step_contract import (
     MAX_INPUTS,
     MAX_NAME,
     MAX_NEEDS,
+    RAW_FORM_ANNOTATION,
     DATASET_PRODUCER_LABEL,
     DATASET_PRODUCERS_STAY_ON_CLUSTER,
     OLD_APP_NOTICE,
@@ -97,6 +98,9 @@ IMAGE = "platform-managed"  # sentinel; the platform always rewrites images
 # and hyphens, no leading/trailing hyphen). Validating here turns a silent bad
 # render (or a cryptic Hera NodeNameConflict) into a clear authoring error.
 _STEP_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")   # also an input's name and a produced name
+
+
+MAX_RAW_FORM = 128 * 1024   # bytes of the raw-form annotation; the seal reads at most this much
 
 
 class AuthoringError(Exception):
@@ -710,8 +714,18 @@ class pipeline:
         derive_tree.validate_inputs({s.name: s.inputs for s in self.steps}, form.tree)
         required = sorted({sec for s in self.steps for sec in s.reads})
 
+        raw_form = json.dumps(
+            {"version": 1, "types": form.types, "optionDefaults": form.option_defaults,
+             "leafOptions": form.leaf_options}, sort_keys=True, separators=(",", ":"))
+        if len(raw_form.encode()) > MAX_RAW_FORM:
+            raise AuthoringError(
+                f"the run form's description is {len(raw_form.encode())} bytes; at most {MAX_RAW_FORM} are allowed. "
+                f"Fewer config values or fewer options in the config groups make it smaller."
+            )
+
         with WorkflowTemplate(
-            name=self.name, entrypoint="main", arguments=form.parameters
+            name=self.name, entrypoint="main", arguments=form.parameters,
+            annotations={RAW_FORM_ANNOTATION: raw_form},   # author data: the seal validates it (kaos#1533 F-21 H5)
         ) as wt:
             compose = Container(
                 name=COMPOSE_STEP, image=IMAGE,

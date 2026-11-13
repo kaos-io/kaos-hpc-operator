@@ -139,7 +139,9 @@ def test_form_data_raw_is_the_stripped_raw_form_text():
     _enhanced(raw, data)
     assert data["raw"] == '{"version": 1}'
     none: dict = {}
-    _enhanced(_raw(), none)
+    bare = _raw()
+    bare["metadata"].get("annotations", {}).pop(RAW_FORM_ANNOTATION, None)   # the render now emits one (H5)
+    _enhanced(bare, none)
     assert none["raw"] is None
 
 
