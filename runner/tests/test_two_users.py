@@ -2,8 +2,8 @@
 
 Needs real distinct uids, so it runs only where they can be had: as root inside a container (the validate container
 normally is), or on a workstation with podman or docker and the python:3.12-slim image. Anywhere else it is skipped with
-the reason, and the same-uid fake-site tests (test_per_project_root.py) are what runs. The staging tool is added to the
-run when STAGER names it (the kubecore-operator checkout)."""
+the reason, and the same-uid fake-site tests (test_per_project_root.py) are what runs. The staging tool (STAGER, the
+kubecore-operator checkout) is required: it is what connects each project first."""
 import os
 import shutil
 import subprocess
@@ -20,6 +20,8 @@ def _in_container():
 
 
 def _command():
+    if not os.environ.get("STAGER"):
+        pytest.skip("the run needs the staging tool (STAGER=<kubecore-operator>/images/meluxina-tokenmint/stager/stager.py): each project is connected by its `prepare` verb first")
     if _in_container():
         return ["python3", str(SCRIPT)]
     ctr = os.environ.get("CONTAINER") or shutil.which("podman") or shutil.which("docker")

@@ -47,8 +47,8 @@ def _site(tmp_path):
     return scratch, bindir
 
 
-def _run_job(tmp_path, project, scratch, bindir, *, extra_lines=(), env=None):
-    root = scratch / "kaos" / project
+def _run_job(tmp_path, project, scratch, bindir, *, extra_lines=(), env=None, root=None):
+    root = root or scratch / "kaos" / project
     lines = _lines(root)
     script = "\n".join(['fail(){ echo "FAIL $1"; exit "$1"; }', *_root_helper(lines), "SCR=" + str(root), *_chunk(lines),
                         *extra_lines, 'echo DONE'])
@@ -78,115 +78,107 @@ def _perm(path):
     return _mode(path) & 0o777
 
 
-def test_the_first_job_makes_the_shared_folder_and_its_own_root_and_a_second_project_makes_its_own(tmp_path):
-    scratch, bindir = _site(tmp_path)
-    root_a, a = _run_job(tmp_path, "alpha", scratch, bindir)
-    assert a.returncode == 0 and "DONE" in a.stdout, a.stdout
-    shared = scratch / "kaos"
-    assert _mode(shared) == 0o3770, oct(_mode(shared))
-    assert os.stat(shared).st_gid == os.stat(scratch).st_gid, "the group of the site project's scratch"
-    assert _perm(root_a) == 0o700
-    root_b, b = _run_job(tmp_path, "beta", scratch, bindir)
-    assert b.returncode == 0 and "DONE" in b.stdout, b.stdout
-    assert _perm(root_b) == 0o700 and _mode(shared) == 0o3770, "the second project changes nothing of the shared folder"
-    # Nothing but the shared folder sits directly under the site project's scratch.
-    assert sorted(p.name for p in scratch.iterdir()) == ["kaos"]
-    assert sorted(p.name for p in shared.iterdir()) == ["alpha", "beta"]
+def _chmod_log(bindir, log):
+    """A `chmod` on the PATH that records every call, then does it."""
+    (bindir / "chmod").write_text('#!/bin/sh\necho "$@" >> "%s"\nexec /usr/bin/chmod "$@"\n' % log)
+    (bindir / "chmod").chmod(0o755)
 
 
-def test_each_project_gets_its_own_work_cache_and_checkpoint_trees_and_none_is_shared(tmp_path):
+def _prepare(scratch, project, mode=0o700):
+    """What the project's connection does as the project's user (the stager's `prepare` verb): the shared folder and the root."""
+    (scratch / "kaos").mkdir(exist_ok=True)
+    (scratch / "kaos").chmod(0o3770)
+    (scratch / "kaos" / project).mkdir(exist_ok=True)
+    (scratch / "kaos" / project).chmod(mode)
+    return scratch / "kaos" / project
+
+
+def test_a_job_before_the_connection_prepared_its_folder_fails_233_and_creates_nothing(tmp_path):
     scratch, bindir = _site(tmp_path)
-    for project in ("alpha", "beta"):
-        root, r = _run_job(tmp_path, project, scratch, bindir)
-        assert r.returncode == 0, r.stdout
-        names = sorted(p.name for p in root.iterdir())
-        assert names == ["data-cache", "kaos-apptainer-cache", "kaos-tmp", "kaos-work", "sif-cache"], names
-        for n in names:
-            assert _perm(root / n) == 0o700, n
+    before = sorted(p.name for p in scratch.iterdir())
+    log = tmp_path / "chmod.log"
+    _chmod_log(bindir, log)
+    root, r = _run_job(tmp_path, "alpha", scratch, bindir)
+    assert r.returncode == 233 and "FAIL 233" in r.stdout, r.stdout
+    assert "has not prepared its folder %s (it does not exist); nothing was changed" % root in r.stdout, r.stdout
+    assert sorted(p.name for p in scratch.iterdir()) == before and not (scratch / "kaos").exists(), "no shared folder, no root"
+    assert not log.exists() or log.read_text() == ""
+    assert r.stdout.count("The project's connection") == 1
+
+
+def test_a_job_on_a_prepared_root_runs_and_makes_only_its_subfolders(tmp_path):
+    scratch, bindir = _site(tmp_path)
+    root = _prepare(scratch, "alpha")
+    root, r = _run_job(tmp_path, "alpha", scratch, bindir)
+    assert r.returncode == 0 and "DONE" in r.stdout, r.stdout
+    assert sorted(p.name for p in root.iterdir()) == ["data-cache", "kaos-apptainer-cache", "kaos-tmp", "kaos-work", "sif-cache"]
     for n in ("kaos-work", "kaos-tmp", "kaos-priv", "kaos-ckpt", "kaos-claims", "sif-cache", "data-cache", "kaos-apptainer-cache"):
         assert not (scratch / n).exists(), n + " must not be directly under the shared scratch"
+    assert _perm(root) == 0o700 and all(_perm(root / p.name) == 0o700 for p in root.iterdir())
 
 
-def test_a_host_job_keeps_its_private_script_folder_in_its_own_root_for_each_project(tmp_path):
+def test_the_job_of_one_project_before_another_is_connected_cannot_affect_it(tmp_path):
     scratch, bindir = _site(tmp_path)
-    (tmp_path / "slots.py").write_text("print('slot manager ran')\n")
-    host = ['KAOS_SLOTS_B64=$(printf %s "print(1)" | base64 -w0)']
-    for project in ("alpha", "beta"):
-        root = scratch / "kaos" / project
-        lines = _lines(root)
-        head = lines[:lines.index('kaos_root "$SCR" || fail 233')]
-        # the host branch of the real script, from the root setup to its `fi`
-        a = lines.index('kaos_root "$SCR" || fail 233')
-        b = lines.index("fi", a)
-        script = "\n".join(['fail(){ echo "FAIL $1"; exit "$1"; }', *_root_helper(lines), "SCR=" + str(root),
-                            "KAOS_PRIV=", "trap 'echo PRIV=$KAOS_PRIV' EXIT", *host, *lines[a:b + 1], "echo UNREACHED"])
-        e = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], SLURM_JOB_ID="9", KAOS_ROOT_RETRY_SLEEP="0.1",
-                 USER=os.environ.get("USER") or "u")
-        r = subprocess.run(["bash", "-c", "umask 077\n" + script], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           universal_newlines=True, cwd=str(tmp_path), timeout=60)
-        assert "UNREACHED" not in r.stdout and "PRIV=%s/kaos-priv/host-9" % root in r.stdout, r.stdout
-        assert head, "sanity"
-        assert _perm(root / "kaos-priv") == 0o700
-    assert not (scratch / "kaos-priv").exists()
+    _prepare(scratch, "beta")                        # B is connected, A is not yet
+    root_b, b = _run_job(tmp_path, "beta", scratch, bindir)
+    assert b.returncode == 0, b.stdout
+    root_a, a = _run_job(tmp_path, "alpha", scratch, bindir)
+    assert a.returncode == 233 and not root_a.exists(), "A's folder is not made by anybody's job"
+    root_a = _prepare(scratch, "alpha")              # A is connected afterwards
+    root_a, a = _run_job(tmp_path, "alpha", scratch, bindir)
+    assert a.returncode == 0, a.stdout
+    assert sorted(p.name for p in (scratch / "kaos").iterdir()) == ["alpha", "beta"] and _mode(scratch / "kaos") == 0o3770
 
 
-def test_a_shared_folder_with_the_wrong_mode_stops_the_job_with_one_plain_sentence_and_changes_nothing(tmp_path):
+@pytest.mark.parametrize("mode", [0o755, 0o750, 0o770, 0o707])
+def test_a_root_that_is_not_private_is_refused_and_never_chmoded_by_the_job(tmp_path, mode):
     scratch, bindir = _site(tmp_path)
-    shared = scratch / "kaos"
-    shared.mkdir()
-    shared.chmod(0o755)          # made by the first user's umask: the second user cannot write in it
+    root = _prepare(scratch, "alpha", mode)
+    log = tmp_path / "chmod.log"
+    _chmod_log(bindir, log)
+    root, r = _run_job(tmp_path, "alpha", scratch, bindir)
+    assert r.returncode == 233 and "it has mode %o and must be private (0700)" % mode in r.stdout, r.stdout
+    assert _mode(root) == mode and (not log.exists() or log.read_text() == "")
+
+
+def test_the_bare_scratch_of_an_older_operator_changes_nothing_and_names_no_parent(tmp_path):
+    scratch, bindir = _site(tmp_path)
+    log = tmp_path / "chmod.log"
+    _chmod_log(bindir, log)
+    before = (os.stat(scratch).st_mode, os.stat(scratch.parent).st_mode, sorted(p.name for p in scratch.parent.iterdir()))
+    for bare in (scratch, scratch / "kaos", Path("/scratch"), Path("relative")):
+        root, r = _run_job(tmp_path, "x", scratch, bindir, root=bare)
+        assert r.returncode == 233, (bare, r.stdout)
+        assert "has not published a per-project folder for this job yet (operator older than this runner); nothing was changed" in r.stdout
+        assert str(scratch.parent) not in r.stdout.replace("FAIL", "") and "chgrp" not in r.stdout and "chmod" not in r.stdout
+    assert not log.exists() or log.read_text() == "", "no chmod at all"
+    assert before == (os.stat(scratch).st_mode, os.stat(scratch.parent).st_mode, sorted(p.name for p in scratch.parent.iterdir()))
+    assert not (scratch / "kaos").exists()
+
+
+def test_a_shared_folder_or_a_project_root_that_is_a_symbolic_link_is_refused_and_nothing_is_chmoded(tmp_path):
+    scratch, bindir = _site(tmp_path)
+    log = tmp_path / "chmod.log"
+    _chmod_log(bindir, log)
+    target = tmp_path / "elsewhere"
+    (target / "beta").mkdir(parents=True)
+    target.chmod(0o755)
+    os.symlink(target, scratch / "kaos")
     root, r = _run_job(tmp_path, "beta", scratch, bindir)
-    assert r.returncode == 233, r.stdout
-    assert _mode(shared) == 0o755, "never a silent chmod of a folder the site owner or another user made"
-    assert not root.exists()
-    sentence = next(ln for ln in r.stdout.splitlines() if ln.startswith("The shared folder"))
-    group = subprocess.run(["stat", "-c", "%G", str(scratch)], stdout=subprocess.PIPE, universal_newlines=True).stdout.strip()
-    assert "%s has mode 755" % shared in sentence, sentence
-    assert "chgrp %s %s && chmod 3770 %s" % (group, shared, shared) in sentence, sentence
-    assert sentence.count(". ") == 1 and "FAIL 233" in r.stdout
-
-
-@pytest.mark.parametrize("mode", [0o2770, 0o1770, 0o3750, 0o3707])
-def test_a_shared_folder_missing_sticky_setgid_or_a_group_bit_is_refused(tmp_path, mode):
-    scratch, bindir = _site(tmp_path)
+    assert r.returncode == 233 and "the shared folder %s is a symbolic link" % (scratch / "kaos") in r.stdout, r.stdout
+    os.unlink(scratch / "kaos")
     (scratch / "kaos").mkdir()
-    (scratch / "kaos").chmod(mode)
-    root, r = _run_job(tmp_path, "beta", scratch, bindir)
-    assert r.returncode == 233 and "has mode %o" % mode in r.stdout, r.stdout
-    assert _mode(scratch / "kaos") == mode
-
-
-def test_a_folder_another_user_is_still_making_is_given_a_moment(tmp_path):
-    scratch, bindir = _site(tmp_path)
-    shared = scratch / "kaos"
-    shared.mkdir()
-    shared.chmod(0o700)          # created, not yet chmod-ed by its creator
-    fixer = subprocess.Popen(["sh", "-c", "sleep 0.15; chmod 3770 '%s'" % shared])
-    root, r = _run_job(tmp_path, "beta", scratch, bindir, env={"KAOS_ROOT_RETRY_SLEEP": "0.2"})
-    fixer.wait()
-    assert r.returncode == 0 and "DONE" in r.stdout, r.stdout
-    assert root.is_dir()
-
-
-def test_a_project_root_that_cannot_be_made_private_names_the_folder(tmp_path):
-    scratch, bindir = _site(tmp_path)
-    root = scratch / "kaos" / "beta"
-    root.mkdir(parents=True)
     (scratch / "kaos").chmod(0o3770)
-    # what EPERM on a folder of another user looks like
-    (bindir / "chmod").write_text('#!/bin/sh\ncase "$*" in *"%s") echo "chmod: changing permissions: Operation not permitted" >&2; exit 1;; esac\n'
-                                  'exec /usr/bin/chmod "$@"\n' % root)
-    (bindir / "chmod").chmod(0o755)
+    os.symlink(target, scratch / "kaos" / "beta")
     root, r = _run_job(tmp_path, "beta", scratch, bindir)
-    assert r.returncode == 233, r.stdout
-    assert "The project folder %s must be private to the project user and cannot be made so" % root in r.stdout, r.stdout
+    assert r.returncode == 233 and "it is a symbolic link" in r.stdout, r.stdout
+    assert _mode(target) == 0o755 and (not log.exists() or log.read_text() == "")
 
 
 def test_a_cache_folder_that_cannot_be_made_private_fails_loudly_naming_it_not_silently(tmp_path):
     scratch, bindir = _site(tmp_path)
-    (scratch / "kaos").mkdir()
-    (scratch / "kaos").chmod(0o3770)
-    victim = scratch / "kaos" / "beta" / "sif-cache"
+    root = _prepare(scratch, "beta")
+    victim = root / "sif-cache"
     (bindir / "chmod").write_text('#!/bin/sh\ncase "$*" in *"%s") exit 1;; esac\nexec /usr/bin/chmod "$@"\n' % victim)
     (bindir / "chmod").chmod(0o755)
     root, r = _run_job(tmp_path, "beta", scratch, bindir)

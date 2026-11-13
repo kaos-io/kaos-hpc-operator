@@ -54,6 +54,8 @@ def one(context, mode, work, lakefs):
     for d in (scratch.parent, bindir):
         d.mkdir(parents=True)
     scratch.parent.chmod(0o3770)
+    scratch.mkdir()
+    scratch.chmod(0o700)    # the project's root, as the connection's set-up leaves it
     out = work / mode / 'step-saw.json'
     step = work / mode / 'step.py'
     step.write_text(STEP)

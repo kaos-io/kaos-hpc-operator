@@ -6,8 +6,10 @@ the caller is root: it makes the users and the site's folders, then runs each pr
 
 What runs for each project, as that project's user: the real generated job script from the root setup to the SIF path and
 the work folder and checkpoint root; the host's private script folder; the real slot manager (claims) against the fake
-Slurm of the runner tests; the real checkpoint copier; and, when STAGER names the staging tool (kubecore-operator
-images/meluxina-tokenmint/stager/stager.py), image staging, `usage`, and `clean` (the known-jobs selection).
+Slurm of the runner tests; the real checkpoint copier; and the staging tool (STAGER, required: kubecore-operator
+images/meluxina-tokenmint/stager/stager.py): each project is first CONNECTED, as its own user, by the stager's `prepare` verb (what the
+platform's token mint runs at every connection refresh), then runs its jobs; a job and every other verb only verify. Image staging,
+`usage`, and `clean` (the known-jobs selection) run as each user.
 
 Not covered here: Lustre quota per user and per project (a fake `lfs` answers), the site's real group and ACL setup,
 lakeFS download of datasets (the staged-dataset layout is the same root; covered by the stager's own tests), and the
@@ -160,6 +162,9 @@ def main():
     if os.geteuid() != 0:
         say("needs root (a container): %s" % sys.argv)
         return 2
+    if not STAGER:
+        say("STAGER must name kubecore-operator's images/meluxina-tokenmint/stager/stager.py")
+        return 2
     subprocess.check_call(["groupadd", "-g", str(GID_SITE), "site"])
     for name, uid in USERS.items():
         subprocess.check_call(["groupadd", "-g", str(uid), name])
@@ -176,11 +181,40 @@ def main():
     check(r.returncode != 0, "old layout: beta cannot use alpha's kaos-priv (the defect this change removes)")
     shutil.rmtree(SCRATCH + "/kaos-priv")
 
-    say("== the jobs: alpha's job script first makes the shared folder; beta's staging tool (if given) or job finds it")
+    def root_of(project):
+        return "%s/kaos/%s" % (SCRATCH, project)
+
+    def connect(project):
+        r = run_as(project, [sys.executable, str(HERE), "root", "prepare", root_of(project)])
+        return r.stdout
+
+    def verify(project, kind="bash"):
+        r = run_as(project, [sys.executable, str(HERE), "root", kind, root_of(project)])
+        rc = [l for l in r.stdout.splitlines() if l.startswith("rc=")]
+        return (rc[-1] if rc else "rc=?"), r.stdout
+
+    say("== a job, or a stager verb, before its project is connected fails in one sentence and creates nothing")
     for project in ("alpha", "beta"):
-        r = run_as(project, [sys.executable, str(HERE), "job", project], env={"STAGER": STAGER, "PYTHONPATH": ""})
-        say(r.stdout.rstrip())
-        check(r.returncode == 0, "%s: its whole job side ran as uid %d" % (project, USERS[project]))
+        for kind in ("bash", "stager"):
+            rc, out = verify(project, kind)
+            check(rc != "rc=0" and "has not prepared its folder" in out and not os.path.exists(SCRATCH + "/kaos"),
+                  "%s: %s before connection: refused, nothing made (no kaos/ at all)" % (project, kind))
+    say("== connection: beta first (it makes the shared folder), then its job; alpha's job before alpha is connected cannot be affected")
+    out = connect("beta")
+    check('"event": "prepared"' in out and os.stat(SCRATCH + "/kaos").st_uid == USERS["beta"], "beta is connected: the set-up made kaos/ and its folder as beta")
+    r = run_as("beta", [sys.executable, str(HERE), "job", "beta"], env={"STAGER": STAGER, "PYTHONPATH": ""})
+    say(r.stdout.rstrip())
+    check(r.returncode == 0, "beta: its whole job side ran as uid %d" % USERS["beta"])
+    rc, out = verify("alpha")
+    check(rc != "rc=0" and not os.path.exists(root_of("alpha")), "alpha's job before alpha is connected: refused, and nobody's job or connection made alpha's folder")
+    out = connect("alpha")
+    check('"event": "prepared"' in out and os.stat(root_of("alpha")).st_uid == USERS["alpha"], "alpha is connected: its folder is made by alpha")
+    before = (stat.S_IMODE(os.stat(SCRATCH + "/kaos").st_mode), os.stat(root_of("alpha")).st_ino)
+    out2 = connect("alpha")
+    check('"event": "prepared"' in out2 and before == (stat.S_IMODE(os.stat(SCRATCH + "/kaos").st_mode), os.stat(root_of("alpha")).st_ino), "a second refresh of the connection is idempotent")
+    r = run_as("alpha", [sys.executable, str(HERE), "job", "alpha"], env={"STAGER": STAGER, "PYTHONPATH": ""})
+    say(r.stdout.rstrip())
+    check(r.returncode == 0, "alpha: its whole job side ran as uid %d" % USERS["alpha"])
 
     say("== modes")
     shared = SCRATCH + "/kaos"
@@ -189,10 +223,10 @@ def main():
     check(sorted(os.listdir(shared)) == ["alpha", "beta"], "the shared folder holds one root per project and nothing else")
     check(sorted(os.listdir(SCRATCH)) == ["kaos"], "nothing else sits directly under the site scratch")
     # Known limit, said here and in docs/job-environment.md: the owner of a sticky folder may rename or remove what is in it.
-    # The project user whose job made the shared folder first owns it, so THAT user could move another project's root away.
+    # The project user whose connection made the shared folder first owns it, so THAT user could move another project's root away.
     # Closing it is the site owner's one-time setup (the folder owned by the site owner, not by a project user).
-    check(os.stat(shared).st_uid == USERS["alpha"], "the shared folder is owned by the user whose job made it first (alpha)")
-    ok, _ = can("alpha", "import os,sys; os.rename(sys.argv[1], sys.argv[1]+'-moved'); os.rename(sys.argv[1]+'-moved', sys.argv[1])", shared + "/beta")
+    check(os.stat(shared).st_uid == USERS["beta"], "the shared folder is owned by the user whose connection made it first (beta)")
+    ok, _ = can("beta", "import os,sys; os.rename(sys.argv[1], sys.argv[1]+'-moved'); os.rename(sys.argv[1]+'-moved', sys.argv[1])", shared + "/alpha")
     check(ok, "KNOWN LIMIT: while a project user owns the shared folder, that user can rename another project's root (sticky only protects from the other users)")
     os.chown(shared, 0, GID_SITE)
     say("-- the site owner takes the shared folder over once (chown root:site, mode 3770 kept): the rest is checked in that setup")
@@ -257,12 +291,142 @@ def main():
                    env={"PATH": fake + ":" + os.environ["PATH"]})
         ev = [json.loads(l) for l in r.stdout.splitlines() if l.startswith("{")]
         check(r.returncode == 0 and ev[-1]["event"] == "usage", "alpha: usage measures its own root")
+    scenarios()
     say("ALL OK")
     return 0
+
+
+def root_only(kind, root):
+    """Run only the root setup of a project, as the calling user: the job script's kaos_root (bash) or the staging tool (usage)."""
+    from kaos_hpc_runner import jobscript
+    work = Path(tempfile.mkdtemp(prefix="root-", dir="/home/" + os.environ["USER"]))
+    bindir = work / "bin"
+    fake_bin(bindir)
+    env = dict(os.environ, PATH="%s:%s" % (bindir, os.environ["PATH"]), KAOS_ROOT_RETRY_SLEEP="0.1", COMMENT_FILE=str(work / "c"))
+    if kind in ("prepare", "stager"):
+        scratch = root.rsplit("/kaos/", 1)[0] if "/kaos/" in root else os.path.dirname(root)
+        verb = "prepare" if kind == "prepare" else "usage"
+        r = subprocess.run([sys.executable, STAGER, "--root", root, "--account", ACCOUNT, "--scratch", scratch, verb], env=env,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        print("rc=%d\n%s" % (r.returncode, r.stdout))
+        return
+    if kind in ("clean-old", "usage"):
+        scratch = root.rsplit("/kaos/", 1)[0]
+        args = ["clean", "--what", "old-layout", "--older-than-days", "14"] if kind == "clean-old" else ["usage"]
+        r = subprocess.run([sys.executable, STAGER, "--root", root, "--account", ACCOUNT, "--scratch", scratch] + args, env=env,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        print("rc=%d\n%s" % (r.returncode, r.stdout))
+        return
+    script = "umask 077\n" + "\n".join(jobscript.ROOT_HELPER) + '\nkaos_root "$1"; echo "rc=$?"'
+    r = subprocess.run(["bash", "-c", script, "x", root], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+    print(r.stdout)
+
+
+def scenarios():
+    """An existing site, upgraded: what the project's connection (the stager's `prepare`) does with the folders the OLD tools left and
+    with folders another user plants, and that a job (bash) and every other verb (stager) only verify afterwards. Each scenario is a
+    fresh site scratch; every case runs as a real uid."""
+    n = [0]
+
+    def site():
+        n[0] += 1
+        d = "/project/scratch/up%d" % n[0]
+        os.makedirs(d)
+        os.chown(d, 0, GID_SITE)
+        os.chmod(d, 0o2770)
+        return d
+
+    def go(user, kind, root):
+        r = run_as(user, [sys.executable, str(HERE), "root", kind, root])
+        rc = [l for l in r.stdout.splitlines() if l.startswith("rc=")]
+        return rc[-1] if rc else "rc=?", r.stdout
+
+    def mk(path, uid, mode, gid=None):
+        os.makedirs(path, exist_ok=True)
+        os.chown(path, uid, GID_SITE if gid is None else gid)
+        os.chmod(path, mode)
+
+    say("== upgrade scenarios")
+    for mode in (0o755, 0o700):
+        d = site()
+        mk(d + "/kaos", USERS["alpha"], mode)                  # what the old stager's makedirs left, alpha's
+        rc, out = go("alpha", "prepare", d + "/kaos/alpha")
+        check(rc == "rc=0" and stat.S_IMODE(os.stat(d + "/kaos").st_mode) == 0o3770 and "repaired the shared folder" in out
+              and os.stat(d + "/kaos").st_gid == GID_SITE, "alpha's connection repairs its own kaos/ left at mode %o (one line)" % mode)
+        rc, out = go("alpha", "bash", d + "/kaos/alpha")
+        check(rc == "rc=0", "alpha's job then finds its folder")
+        rc, out = go("beta", "prepare", d + "/kaos/beta")
+        check(rc == "rc=0" and "repaired" not in out, "beta's connection then works in the repaired folder, nothing more is changed")
+    d = site()
+    mk(d + "/kaos", USERS["alpha"], 0o755)
+    rc, out = go("beta", "prepare", d + "/kaos/beta")
+    check(rc != "rc=0" and "owned by alpha" in out and "alpha (or the site owner) must run once: chgrp site %s/kaos && chmod 3770 %s/kaos" % (d, d) in out
+          and stat.S_IMODE(os.stat(d + "/kaos").st_mode) == 0o755 and not os.path.exists(d + "/kaos/beta"),
+          "beta's connection finds alpha's kaos/ at 755: refused naming alpha, nothing changed")
+    for kind in ("bash", "stager"):
+        rc, out = go("beta", kind, d + "/kaos/beta")
+        check(rc != "rc=0" and "has not prepared its folder" in out and not os.path.exists(d + "/kaos/beta"), "beta's %s verify then refuses and creates nothing" % kind)
+    d = site()
+    mk(d + "/kaos", 0, 0o3770)
+    before = os.stat(d + "/kaos")
+    rc, out = go("alpha", "prepare", d + "/kaos/alpha")
+    after = os.stat(d + "/kaos")
+    check(rc == "rc=0" and "repaired" not in out and (before.st_mode, before.st_uid, before.st_gid) == (after.st_mode, after.st_uid, after.st_gid),
+          "a correct kaos/ (root:site 3770) is left untouched by the connection")
+    # beta plants alpha's project folder before alpha is connected: as a link to a folder alpha owns, and as a directory beta owns
+    d = site()
+    mk(d + "/kaos", 0, 0o3770)
+    mk(d + "/alpha-real", USERS["alpha"], 0o755, USERS["alpha"])
+    r = run_as("beta", ["ln", "-s", d + "/alpha-real", d + "/kaos/alpha"])
+    check(r.returncode == 0, "beta plants kaos/alpha as a symbolic link to a folder alpha owns")
+    for kind in ("prepare", "bash", "stager"):
+        rc, out = go("alpha", kind, d + "/kaos/alpha")
+        check(rc != "rc=0" and "symbolic link" in out and stat.S_IMODE(os.stat(d + "/alpha-real").st_mode) == 0o755,
+              "alpha's %s refuses the link in one sentence and chmod-ed nothing (its own folder is still 755)" % kind)
+    os.unlink(d + "/kaos/alpha")
+    r = run_as("beta", ["bash", "-c", "mkdir %s/kaos/alpha && chmod 755 %s/kaos/alpha" % (d, d)])
+    check(r.returncode == 0, "beta plants kaos/alpha as a directory beta owns")
+    for kind in ("prepare", "bash", "stager"):
+        rc, out = go("alpha", kind, d + "/kaos/alpha")
+        check(rc != "rc=0" and "owned by beta" in out and stat.S_IMODE(os.stat(d + "/kaos/alpha").st_mode) & 0o777 == 0o755,
+              "alpha's %s refuses a project folder beta owns, nothing chmod-ed" % kind)
+    # the bare scratch of an older operator
+    d = site()
+    for kind in ("prepare", "bash", "stager"):
+        rc, out = go("alpha", kind, d)
+        check(rc != "rc=0" and "has not published a per-project folder" in out and stat.S_IMODE(os.stat(d).st_mode) == 0o2770 and not os.path.exists(d + "/kaos"),
+              "the bare scratch changes nothing (%s)" % kind)
+
+    if True:
+        say("== old-layout cleanup: only the caller's own entries")
+        d = site()
+        mk(d + "/kaos", 0, 0o3770)
+        os.chown(d + "/kaos", 0, GID_SITE)
+        old = __import__("time").time() - 40 * 86400
+        for name, who in (("kaos-work", "alpha"), ("sif-cache", "beta")):
+            os.makedirs("%s/%s/x" % (d, name))
+            open("%s/%s/x/f" % (d, name), "w").write("data")
+            for q in ("%s/%s/x/f" % (d, name), "%s/%s/x" % (d, name), "%s/%s" % (d, name)):
+                os.chown(q, USERS[who], USERS[who])
+                os.utime(q, (old, old))
+        for who in ("alpha", "beta"):
+            check(go(who, "prepare", d + "/kaos/" + who)[0] == "rc=0", "%s connected" % who)
+        rc, out = go("alpha", "usage", d + "/kaos/alpha")
+        ev = json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
+        check([e["name"] for e in ev["old_layout"]] == ["kaos-work"], "alpha's usage lists only its own old folder (kaos-work), not beta's sif-cache")
+        rc, out = go("beta", "clean-old", d + "/kaos/beta")
+        ev = json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
+        check(rc == "rc=0" and not os.path.exists(d + "/sif-cache") and os.path.exists(d + "/kaos-work/x/f")
+              and ev["categories"]["old-layout"]["kept"].get("not_ours") == 1,
+              "beta's clean old-layout removed its own sif-cache and left alpha's kaos-work (not_ours)")
+        rc, out = go("alpha", "clean-old", d + "/kaos/alpha")
+        check(rc == "rc=0" and not os.path.exists(d + "/kaos-work"), "alpha's clean old-layout removed alpha's own kaos-work")
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "job":
         job_side(sys.argv[2])
+    elif len(sys.argv) > 1 and sys.argv[1] == "root":
+        root_only(sys.argv[2], sys.argv[3])
     else:
         sys.exit(main())

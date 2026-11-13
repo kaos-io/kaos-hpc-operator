@@ -281,6 +281,7 @@ class Site:
         (self.site_scratch / "kaos").mkdir()
         (self.site_scratch / "kaos").chmod(0o3770)
         self.scratch.mkdir()
+        self.scratch.chmod(0o700)          # as the connection's set-up leaves the project's root
         (bindir / "apptainer").write_text(APPTAINER)
         for tool in ("squeue", "scontrol"):
             (bindir / tool).write_text("#!/bin/bash\nexit 0\n")
