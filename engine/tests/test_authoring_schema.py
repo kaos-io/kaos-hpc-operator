@@ -21,7 +21,8 @@ def test_should_list_every_step_option_in_signature_order_with_its_default():
            if p.kind is not inspect.Parameter.VAR_KEYWORD}
     assert [p["name"] for p in SCHEMA["params"]] == list(sig)
     assert list(sig) == ["name", "kind", "reads", "inputs", "needs", "produces", "gpu", "when", "walltime",
-                         "resumable", "checkpoint_every", "idle_timeout"], "the keywords of the step contract"
+                         "resumable", "checkpoint_every", "idle_timeout", "matrix", "matrix_allow_failed"], \
+        "the keywords of the step contract"
     for entry in SCHEMA["params"]:
         param = sig[entry["name"]]
         assert entry["required"] == (param.default is inspect.Parameter.empty or entry["name"] == "kind")

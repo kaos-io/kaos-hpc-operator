@@ -41,7 +41,7 @@ runner's hand-back and its checks. Where a section says "the engine refuses" or 
 
 ```python
 step(name, *, kind, reads=, inputs=, needs=, produces=, gpu=, when=, walltime=,
-     resumable=, checkpoint_every=, idle_timeout=)
+     resumable=, checkpoint_every=, idle_timeout=, matrix=, matrix_allow_failed=)
 ```
 
 Everything after `name` is keyword-only.
@@ -57,6 +57,8 @@ Everything after `name` is keyword-only.
 | `gpu=` | Unchanged. |
 | `when=` | A condition in plain words: a name, `==` or `!=`, and a value. The name is a field of the run form, `when="quantization-mode != off"` (a setting's path with dashes, as the run form shows it), or a value a step in `needs=` handed on, `when="evaluate.passed == true"`: `<step>.<value>`, where `<value>` is a keyword of that step's `step.result(...)` (letters, digits and `_`; a step that is not in this step's `needs=` is refused, naming the fix). The value is a bare word or number (`off`, `3`) or a quoted string (`"two words"`). Comparisons join with `and` / `or` (`and` binds tighter; no parentheses, no other operators). The engine writes it as one condition on the step's task and on its HPC variant, comparing the field's value as text: `quantization-mode != off` becomes `{{=workflow.parameters['quantization-mode'] != 'off'}}` (`and` becomes `&&`, `or` becomes a double bar, in the order written). A step's value is read from the needed step's result (`kaos-result`) through the expression of section 10 item 3. **What is compared, exactly:** a value that is a string is compared with the text as text; a value that is a number or a boolean is compared by its JSON text, as the workflow system's `toJSON` writes it (`1000000` is `1000000`, `1e6` written in `when=` is read as `1000000`, `1.0` is `1`, `1e-5` is `0.00001`, `true` is `true`), never through `string()` (which writes `1e+06` for 1000000, `1.2345678e+07` for 12345678 and `1e-05` for 0.00001). Written in `when=`, a number is read the way JSON writes numbers, so `1e6`, `1000000` and `1000000.0` all match the value 1000000. `evaluate.rows != 1000000` therefore skips the step when `rows` is 1000000. A text that cannot be matched reliably is refused when the pipeline is rendered, naming the fix: a number written another way than JSON writes it (`.5`, `+1`, `01`, `5.`), a `True`/`NULL` that is not lowercase, an integer above 9007199254740992 (a result's number is a double), a number too large to hold, and any control character (a line break, a tab; also refused in `when=` as a whole). A `null` or missing value stops the run (below). When the needed step ran on an HPC class the result is read from its HPC variant (the pair, section 10); the text is the same on both. A value that is not there (the step was skipped or did not run, or never set it) fails the task: `int("<sentence>")` of a sentence is the one failure the expression language lets us word, and the workflow system shows `failed to evaluate expression: invalid operation: int(step 'evaluate' gave no value 'passed' (it was skipped, did not run, or never set it): a when= on a step's value needs the value)` as the task's error, so a missing value is never a quiet `false` (checked on the lab, Argo Workflows v4.0.6: 29 comparisons over 999999, 1000000, 12345678, 3000000000, 0.5, 1.0, 1e-5, true, false, an empty string and a string that looks like a number, on the cluster and on the HPC variant). The step is skipped when the condition is false. |
 | `walltime=` | The step's time limit, on any kind: `'90m'`, `'12h'` or `'720'` (minutes). It is the default of the step's run-form field `<step>-walltime` (below). |
+| `matrix=` | `{"lr": [0.01, 0.001], "batch": [16, 32]}`: the step runs once for each combination of the values (section 12). The run form's `<step>-matrix` holds the combinations (every one by default) and `<step>-parallel` how many run at once. At most 32 combinations; the step may not produce a dataset or be `ingest`, `publish` or `control`; it may not need another matrix step. |
+| `matrix_allow_failed=` | `True` on a step with `matrix=`: the step after it runs when some items failed and sees which (section 12). By default one failed item fails the step. |
 | `resumable=`, `idle_timeout=` | Unchanged. |
 | `checkpoint_every=` | How often the step's checkpoint is saved: `'20m'`, `'1h'` or `20` (minutes); `False` for no copies. It is the default of the run-form field `<step>-checkpoint-every`. |
 
@@ -302,7 +304,7 @@ Models and artifacts
 are not touched: their run-unique folder is saved by their step. The code is `engine/kubecore/promote.py`.
 
 Fixtures: `context-no-upstream`, `context-one-upstream`, `context-skipped-upstream`,
-`context-escapes`.
+`context-escapes`, `context-matrix-item`, `context-matrix-upstream`.
 
 **Where a step's image comes from.** The image a step runs is never a parameter of the workflow, so it is not on the run
 form and a submit cannot set it (an argument named `image-<step>` or `image` in a submit is ignored: nothing reads it).
@@ -361,7 +363,7 @@ number is finite, no object holds a key twice, and a field the contract does not
 fails any of this fails the job and the message names what is wrong. A skipped result (`status` `skipped`) is checked as
 its own shape: `version`, `status` and a `reason` of 1 to 300 characters, and no other field.
 
-Fixtures: `result-ok` (one read, one write), `result-model`, `result-absent`, `result-skipped`.
+Fixtures: `result-ok` (one read, one write), `result-model`, `result-absent`, `result-skipped`, `result-matrix`.
 
 ## 5. The ledger
 
@@ -701,3 +703,106 @@ What each check found, and what it could not prove, is in
   the definition changes, and the controller refuses a job without `spec.context`.
 - An older follower creates its job with strict field validation, so after the change its job is refused
   with `unknown field "spec.dataset"`; it never becomes a job without data.
+
+## 12. A matrix step
+
+```python
+train = step("train", kind="train", needs=[prepare], gpu=True,
+             matrix={"lr": [0.01, 0.001], "batch": [16, 32]},
+             produces=[model("detector")])
+best = step("pick-best", kind="evaluate", needs=[train], produces=[artifact("winner")])
+```
+
+One step, one folder, one image. The run starts the step once for each combination of the values, an **item**, and the
+step after it gets all the results.
+
+**The run form.** `<step>-matrix` holds the combinations as a JSON list of objects, one name per axis: the default is
+every combination of the values in `matrix=`, in the order written, the first name changing slowest
+(`[{"lr":0.01,"batch":16},{"lr":0.01,"batch":32},...]`). `<step>-parallel` is a whole number from 1 to 32 or `all`: how
+many items run at the same time (more than there are items means all). **The default is 4**, the 1-GPU steps one node
+holds, so that on an HPC class the items share one node; a larger number asks for more nodes. Both follow the step's
+`<step>-class` and `<step>-walltime`. Compose checks them before any step starts and refuses, naming the field: not
+JSON; not a list or an empty list; more than 32 combinations ("holds 33 combinations; a step runs at most 32. Remove
+1."); a combination that is not an object, has a name the step did not declare, or lacks one; a value that is not a
+number, a boolean or a text of 1 to 64 letters, digits, spaces and `. _ + / : = @ , ( ) [ ] # % ^ ~ * -`; a whole number
+beyond 2 to the power 53 (write it as text); `<step>-parallel` that is neither `all` nor a number from 1 to 32. Compose
+writes the checked combinations into `kaos-run-settings`: `{"<step>": {"matrix": [{"index", "of", "text"}, ...],
+"parallel": n}}`, where `text` is the item's `matrix` field in wire form.
+
+**What the engine refuses when it renders**, each naming the step and the fix: `matrix=` that is not a dict of
+non-empty lists; a name that is not `[a-z][a-z0-9_]*` or is also a section in `reads=`; a value that is not a number, a
+boolean or short text, or a whole number beyond 2 to the power 53; more than 32 combinations; the kinds `ingest`,
+`publish`, `control`; a dataset in `produces=`; more than 4 things read and written together (`inputs=` plus
+`produces=`), because up to 32 items hand their ledgers back in one shared result; `resumable=` or `checkpoint_every=`;
+a matrix step that needs a matrix step; a step that needs two matrix steps, or that needs more than 4 steps in all when
+one of them is a matrix step; `matrix_allow_failed=` without `matrix=`; a `when=` that reads `<matrix step>.<value>` (a
+`when=` on a matrix step itself is fine: every item is skipped).
+
+**The item's context.** Each item is an ordinary run of the step: the same context (section 3), with one more field
+after `upstream`: `matrix`, `{"index": 1, "of": 4, "values": {"lr": 0.001, "batch": 16}}`: `index` counts from 0 in the
+order of the combinations; `values` are in the order of `matrix=`, each with the number and the text it was written
+with (`1.0` stays `1.0`, `1e-05` stays `1e-05`): compose writes the field as text and the workflow system hands the
+text over unchanged. `params` is unchanged; kaos-lib puts `values` into the step's `params` as top-level names, so
+`step.params["lr"]` is the item's value and a setting and an axis cannot share a name. The step reads, writes and ends
+as any step does.
+
+**Where each item writes.** Compose gives every item the same `produces`; kaos-lib makes the paths and branches of an
+item's outputs its own by the index: a model or an artifact `<name>` is written under
+`<name>/<experiment>/<run>/<index>/` of `outputs-<app>`, on the branch `run-<run>-<step>-<name>-<index>`, and merged
+into `main` as one commit per item, whose metadata also has `kaos.matrix.index` and `kaos.matrix.<name>=<value>` for
+every axis. So a model has one name and one version for each item, tagged with the item's values. An item reads
+`input(name)` of a matrix step's output with the item's index (`step.input(name, item=2)`).
+
+**The entry in `upstream`.** A step that needs a matrix step finds in `upstream.<step>` not a result but one entry
+for all items (fixture `result-matrix`): `{"version":1,"status":"matrix","items":[...]}`, one entry per item in index
+order: `{"index", "values" (the item's matrix values), "status"}` and, by status, `"result"` (`ok`: the item's
+result, section 4, with its `values`, `reads` and `writes`) or `"reason"` (`skipped`: the item ended itself with
+`step.skip(reason)`); a `failed` item (it handed back no result) has neither. kaos-lib's `step.upstream("train")` is
+then a list with one entry per item.
+
+**What the next step gets of an item's result.** The workflow system gives the results of a step's items back as
+parsed values, so a number in an item's `values` arrives in its usual JSON form (`1.0` as `1`, `1e-05` as `1e-05`, a
+whole number beyond 2 to the power 53 changed) and the names of an object in alphabetical order. kaos-lib refuses such a
+whole number in an item's result (`step.result()` of a step with `matrix=`): hand it on as text. The item's own `matrix`
+values in the entry are exact: they come from compose's text.
+
+**A matrix step is like any step: one failed item fails it.** The task that joins the items fails when an item
+failed, naming each by index and values; nothing after it runs, the run is Failed and `kaos-promote` does not run. A
+skipped item (it ended itself with `step.skip()`) is not a failure. A step that says `matrix_allow_failed=True` has
+declared that failed items are acceptable: the join then fails only when no item is `ok`; the step after it runs and sees
+every failed item (`status` `failed`, no result), the join's log says how many failed and which, and the run may end
+Succeeded and promote, because the author said so. A matrix step that was skipped as a whole (its `when=` was false)
+is the sentinel for the steps that need it, as any skipped step is.
+
+**Size.** The `values` of all items share 16 KiB (`MATRIX_VALUES_CAP`): kaos-lib refuses an item's result when its
+`values` cost more than 16 KiB divided by `of` (never more than 8 KiB): 512 bytes at 32 items, 4 KiB at 4. The ledger
+(`reads`, `writes`) does not count against that share, only against the whole result (8 KiB). The whole entry of the
+matrix step in `upstream` may cost 56 KiB (`MATRIX_ENTRY_CAP`): 32 items that read two inputs and write a model cost about
+1.5 KiB each, 49 KiB (`engine/tests/test_matrix.py`). A step that needs a matrix step keeps 56 KiB of its context
+budget for it, in place of 8 KiB, which is why it may need at most 4 steps in all. The workflow system keeps each item's
+result once in the output of every round above it (`fan_output_bytes`: about 210 KiB of results for 32 items of 1.5 KiB at
+`<step>-parallel` 4, about 775 KiB at 1), besides each item's own context and output. Measured on the lab (Argo
+Workflows v4.0.6, 32 items that read two inputs and write a model, results of 1.5 KiB): the run's status was 779 KB at
+`<step>-parallel` 4 and 1.5 MB at 1; the workflow system compresses it (94 KB at 1) and both runs handed back all 32
+results (`hack/local-lab`, evidence in the PRD).
+
+**Checkpoints.** A matrix step is never continued from a checkpoint: its runs would share one checkpoint folder.
+`resumable=` and `checkpoint_every=` are refused on it, and the render opts the step out of continuation on HPC. The
+step's `walltime=` (the form's `<step>-walltime`) is each item's limit.
+
+**How the engine runs it** (the HPC leg is the same, section 8). The step's task `<step>` calls a template
+`kaos-matrix-<step>` that runs the step's container for `items` in rounds of `par`: the first `par` items in parallel,
+then the template calls itself for the rest, so the limit needs no engine setting. Each item gets the context of the
+task (section 10, left open) with `,"matrix":<the item's text>` and the closing brace added. An item that fails does
+not end the template (`continueOn: failed`): its output has a default (the sentinel), so the template always ends with
+the list of the `kaos-result` and `kaos-item` of the items that handed an output back (an empty list, its default, when
+none did; the gather task also marks every item of the plan that is not in the list as failed). A task
+`kaos-gather-<step>` (kubecore/gather.py, the compose template's identity) puts them in index order, marks each item
+`ok`, `skipped` or `failed`, applies the rule above, and writes the entry as its `kaos-result`; the steps that need the
+matrix step read that output (section 10, item 3, with the gather task in place of the step) and wait for that task.
+`kaos-promote` waits for it too. On HPC an item is a second step beside it in the same round, `run-hpc`, with the
+complementary condition on the class. The job of an item is named after the step and the index (`NODE_KEY`
+`<step>-hpc-<index>`), so the items are separate jobs of one run, each with its own result. What the controller does with a
+fan-out larger than the project's budget is in `internal/admission/admission.go` and `test/scale` (`TestScaleMatrixBudget`).
+
+Fixtures: `context-matrix-item`, `context-matrix-upstream`, `result-matrix`.

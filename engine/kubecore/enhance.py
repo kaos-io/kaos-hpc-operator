@@ -97,8 +97,14 @@ from kubecore.run_settings import (
     WALLTIME_EXAMPLE,
     add_input,
     add_task_argument,
+    calls,
     checkpoint_field,
     class_field,
+    DEFAULT_PARALLEL,
+    combinations,
+    matrix_field,
+    matrix_setting,
+    parallel_field,
     promote_field,
     setting,
     walltime_field,
@@ -115,9 +121,11 @@ from kubecore.step_contract import (
     MAX_APP_NAME,
     PROMOTE_PARAM,
     PROMOTE_STEP,
+    RESULT_PARAM,
     TEMPLATE_CAP,
     dataset_name_problem,
     image_of,
+    gather_task,
     result_of,
     template_bytes,
 )
@@ -537,14 +545,11 @@ def enhance_class_sizing(spec: dict, step: dict, ctx: dict, annots: dict) -> Non
     values = {"cpu": f'{{{{=({cpu_map}[{klass}]) ?? "{default_cpu}"}}}}',
               "mem": f'{{{{=({mem_map}[{klass}]) ?? "{default_mem}Gi"}}}}',
               "disk": f'{{{{=({disk_map}[{klass}]) ?? "{default_disk}"}}}}'}
-    for template in spec["templates"]:
-        for task in (template.get("dag", {}) or {}).get("tasks", []):
-            if task.get("template") != step_name:
-                continue
-            params = task.setdefault("arguments", {}).setdefault("parameters", [])
-            for name, expression in values.items():
-                if not any(p.get("name") == name for p in params):
-                    params.append({"name": name, "value": expression})
+    for task, _ in calls(spec, step_name):
+        params = task.setdefault("arguments", {}).setdefault("parameters", [])
+        for name, expression in values.items():
+            if not any(p.get("name") == name for p in params):
+                params.append({"name": name, "value": expression})
 
 
 def enhance_gpu_routing(spec: dict, step: dict, ctx: dict, annots: dict) -> None:
@@ -609,14 +614,11 @@ def enhance_gpu_routing(spec: dict, step: dict, ctx: dict, annots: dict) -> None
     expr = (
         f"{{{{=workflow.parameters['{step_name}-class'] in [{expr_list}] ? '1' : '0'}}}}"
     )
-    for template in spec["templates"]:
-        for task in (template.get("dag", {}) or {}).get("tasks", []):
-            if task.get("template") != step_name:
-                continue
-            args = task.setdefault("arguments", {})
-            params = args.setdefault("parameters", [])
-            if not any(p.get("name") == "gpus" for p in params):
-                params.append({"name": "gpus", "value": expr})
+    for task, _ in calls(spec, step_name):
+        args = task.setdefault("arguments", {})
+        params = args.setdefault("parameters", [])
+        if not any(p.get("name") == "gpus" for p in params):
+            params.append({"name": "gpus", "value": expr})
 
 
 def class_offer(step: dict, ctx: dict, annots: dict) -> dict:
@@ -827,6 +829,17 @@ def enhance_run_form(spec: dict, steps: list, offers: dict) -> None:
     if chosen:
         args.extend(["--class-offers", json.dumps(chosen, separators=(",", ":"))])
     for entry in table:
+        if entry.get("matrix"):
+            axes, name = list(entry["matrix"]), entry["name"]
+            default = combinations(entry["matrix"])
+            field(matrix_field(name), json.dumps(default, separators=(",", ":")),
+                  f"The combinations the '{name}' step runs, one run each, as a JSON list of objects with the names "
+                  f"{', '.join(axes)}. Default: every combination of the values in pipeline.py ({len(default)}). At "
+                  f"most 32; a value is a number, true or false, or a short text.", "--matrix", name)
+            field(parallel_field(name), str(DEFAULT_PARALLEL),
+                  f"How many of the '{name}' step's runs go at the same time: a whole number from 1 to 32, or all. "
+                  f"Default {DEFAULT_PARALLEL}: the GPU steps one machine holds, so that on an HPC (Slurm) class the "
+                  f"runs share one machine. A larger number asks for more machines.", "--parallel", name)
         for produced in entry["produces"]:
             if produced["type"] == "dataset":
                 field(promote_field(produced["name"]), "false",
@@ -1153,7 +1166,8 @@ def refuse_large_templates(spec: dict) -> None:
     """
     by_name = {t["name"]: t for t in spec["templates"]}
     for template in spec["templates"]:
-        for task in (template.get("dag") or {}).get("tasks", []):
+        tasks = (template.get("dag") or {}).get("tasks", []) + [e for g in template.get("steps") or [] for e in g]
+        for task in tasks:
             called = by_name.get(task.get("template")) or {}
             if not any(p.get("name") == CONTEXT_PARAM for p in (called.get("inputs") or {}).get("parameters") or []):
                 continue
@@ -1223,6 +1237,49 @@ PROMOTE_COMMAND = ["python", "-I", "-m", "kaos_engine.promote"]
 PROMOTE_SIZE = {"cpu": "100m", "mem": "256Mi", "disk": "1Gi"}   # what the final task asks of a node: a few commits and merges
 
 
+GATHER_RESULT_PATH = "/tmp/outputs/kaos-result.json"
+GATHER_COMMAND = ["python", "-I", "-m", "kaos_engine.gather"]
+
+
+def add_gather_tasks(spec: dict, steps: list) -> None:
+    """For each matrix step, the task `kaos-gather-<step>` (kubecore/gather.py) after it: it joins what the step's
+    items handed back into the one entry the steps that need the matrix step read, and fails the run when no item
+    succeeded. Like `kaos-promote` it is the compose template again (same image, service account, credential and
+    fixed class), added here and never by pipeline.py, under a name a step cannot take."""
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
+    if compose is None:
+        return
+    args = compose["container"].get("args", [])
+    table = json.loads(args[args.index("--steps") + 1]) if "--steps" in args else []
+    dag = next(t for t in spec["templates"] if t.get("name") == spec.get("entrypoint") and "dag" in t)["dag"]
+    compose_task = next(t for t in dag["tasks"] if t["name"] == COMPOSE_STEP)
+    given = copy.deepcopy((compose_task.get("arguments") or {}).get("parameters") or [])
+    inputs = ("results", "items", "plan", "status")
+    for entry in (e for e in table if e.get("matrix")):
+        step = entry["name"]
+        tpl = copy.deepcopy(compose)
+        tpl["name"] = gather_task(step)
+        tpl.setdefault("inputs", {}).setdefault("parameters", []).extend({"name": n} for n in inputs)
+        tpl["outputs"] = {"parameters": [{"name": RESULT_PARAM, "valueFrom": {"path": GATHER_RESULT_PATH}}]}
+        container = tpl["container"]
+        container["command"], container["args"] = list(GATHER_COMMAND), []
+        container["env"] = [e for e in container.get("env", []) if e["name"] != STEP_IMAGES_ENV] + [
+            {"name": "KAOS_GATHER_STEP", "value": step},
+            {"name": "KAOS_GATHER_ALLOW_FAILED", "value": "true" if entry.get("allow_failed") else "false"}] + [
+            {"name": "KAOS_GATHER_" + n.upper(), "value": "{{inputs.parameters.%s}}" % n} for n in inputs]
+        tpl.setdefault("metadata", {}).setdefault("labels", {})["platform.kubecore.io/step"] = gather_task(step)
+        spec["templates"].insert(spec["templates"].index(compose) + 1, tpl)
+        document = 'tasks["%s"].outputs.parameters[%s]' % (step, "%s")
+        dag["tasks"].append({
+            "name": gather_task(step), "template": gather_task(step),
+            "depends": "%s && (%s.Succeeded || %s.Skipped || %s.Omitted)" % (COMPOSE_STEP, step, step, step),
+            "arguments": {"parameters": given + [
+                {"name": "results", "value": '{{=sprig.default("[]", %s)}}' % (document % '"kaos-result"')},
+                {"name": "items", "value": '{{=sprig.default("[]", %s)}}' % (document % '"kaos-item"')},
+                {"name": "plan", "value": "{{=%s}}" % matrix_setting(step, "matrix")},
+                {"name": "status", "value": "{{tasks.%s.status}}" % step}]}})
+
+
 def add_promote_task(spec: dict, steps: list) -> None:
     """The run's final task `kaos-promote` (kubecore/promote.py): it moves `latest` of every dataset the run form
     asked to promote, all or none, once every step has succeeded or been skipped. Steps only seal their versions.
@@ -1273,6 +1330,7 @@ def add_promote_task(spec: dict, steps: list) -> None:
     ticked = " || ".join("workflow.parameters[%s] == 'true'" % json.dumps(promote_field(name))
                          for name in dict.fromkeys(name for _, name in producers))
     ends = " && ".join("(%s.Succeeded || %s.Skipped)" % (n, n) for n in dict.fromkeys(s["name"] for s in table))
+    ends += "".join(" && %s.Succeeded" % gather_task(s["name"]) for s in table if s.get("matrix"))
     dag["tasks"].append({
         "name": PROMOTE_STEP, "template": PROMOTE_STEP, "depends": "%s && %s" % (COMPOSE_STEP, ends),
         "when": "{{=%s}}" % ticked,
@@ -1364,9 +1422,10 @@ def order_form(spec: dict, steps: list) -> None:
             place(name, 5)
         elif name == "config":
             place(name, 6)
+    suffixes = ("class", "walltime", "checkpoint-every", "matrix", "parallel")
     for i, step in enumerate(own):
-        for suffix in ("class", "walltime", "checkpoint-every"):
-            place(f"{step}-{suffix}", 4, i * 3 + ("class", "walltime", "checkpoint-every").index(suffix))
+        for suffix in suffixes:
+            place(f"{step}-{suffix}", 4, i * len(suffixes) + suffixes.index(suffix))
     parameters.sort(key=lambda p: rank.get(p["name"], (2, 0)))     # sort is stable: config order within a group
 
 
@@ -1461,6 +1520,7 @@ def enhance(wft: dict, ctx: dict) -> dict:
     enhance_compose_class(spec, steps, ctx)
     enhance_pipeline_info(spec, ctx, steps)
     order_form(spec, steps)
+    add_gather_tasks(spec, steps)
     add_promote_task(spec, steps)   # before enhance_hpc: its depends are rewritten for the steps that have a twin
     # PRD-1016: the MeluXina leg — must run LAST (twin tasks copy each routed
     # step's FINAL container image/command, and the depends rewrite needs the

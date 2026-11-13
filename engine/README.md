@@ -16,6 +16,7 @@ It is released by the same build as the controller, at the same version (D-58/D-
 | `kubecore/` | the engine. **This is its source** (PRD-HPC-1461 D-80, 2026-11-10): apps carry no copy and there is no upstream to stay equal to. Edit it here |
 | `kaos_engine/render.py` | the runner, `python -I -m kaos_engine.render` |
 | `kubecore/step_contract.py` | the step contract as the engine writes it: names, caps, the wire form, the expression that assembles a step's context (see "The step contract" below) |
+| `kaos_engine/gather.py`, `kubecore/gather.py` | the task `kaos-gather-<step>` after a step with `matrix=`, `python -I -m kaos_engine.gather`: puts the items' results in index order, marks each `ok`, `skipped` or `failed`, fails the run when none is `ok` (`docs/step-contract.md`, section 12). `enhance.add_gather_tasks` adds it, as a copy of the compose template |
 | `kaos_engine/promote.py`, `kubecore/promote.py` | the run's final task `kaos-promote`, `python -I -m kaos_engine.promote`: checks every dataset the form asked to promote, then moves `latest` of all of them, or of none (`docs/step-contract.md`, section 3). `enhance.add_promote_task` adds it, as a copy of the compose template |
 | `kaos_engine/compose.py` | what the compose-and-validate step runs, `python -I -m kaos_engine.compose`: the engine's compose with the engine first on the path. Pins every declared input and writes each step's context and the run's ledger |
 | `kaos_engine/version.py` | build tag -> PEP 440 |

@@ -97,7 +97,7 @@ def test_any_other_unknown_keyword_lists_the_keywords_that_exist():
         render(lambda a: a.step("one", kind="evaluate", gpus=1))
     assert str(exc.value) == ("step() got an unexpected keyword argument 'gpus'. The keywords are: name, kind, reads, "
                               "inputs, needs, produces, gpu, when, walltime, resumable, checkpoint_every, "
-                              "idle_timeout.")
+                              "idle_timeout, matrix, matrix_allow_failed.")
 
 
 def test_an_app_on_the_old_contract_fails_the_render_and_writes_nothing(tmp_path):

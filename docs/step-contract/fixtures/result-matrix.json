@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "status": "matrix",
+  "items": [
+    {
+      "index": 0,
+      "values": {
+        "lr": 0.01,
+        "batch": 16
+      },
+      "status": "ok",
+      "result": {
+        "version": 1,
+        "status": "ok",
+        "values": {
+          "accuracy": 0.93,
+          "best_epoch": 2
+        },
+        "reads": [
+          {
+            "name": "labels",
+            "repo": "dataset-labels",
+            "owner": null,
+            "ref": "v3",
+            "commit": "2222222222222222222222222222222222222222222222222222222222222222"
+          },
+          {
+            "name": "embeddings",
+            "repo": "dataset-hera-demo-embeddings",
+            "owner": null,
+            "ref": "3333333333333333333333333333333333333333333333333333333333333333",
+            "commit": "3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        ],
+        "writes": [
+          {
+            "name": "model",
+            "type": "model",
+            "repo": "outputs-hera-demo",
+            "commit": "4444444444444444444444444444444444444444444444444444444444444444"
+          }
+        ]
+      }
+    },
+    {
+      "index": 1,
+      "values": {
+        "lr": 0.01,
+        "batch": 32
+      },
+      "status": "failed"
+    },
+    {
+      "index": 2,
+      "values": {
+        "lr": 0.001,
+        "batch": 16
+      },
+      "status": "skipped",
+      "reason": "the loss did not move in the first epoch"
+    },
+    {
+      "index": 3,
+      "values": {
+        "lr": 0.001,
+        "batch": 32
+      },
+      "status": "ok",
+      "result": {
+        "version": 1,
+        "status": "ok",
+        "values": {
+          "accuracy": 0.93,
+          "best_epoch": 2
+        },
+        "reads": [
+          {
+            "name": "labels",
+            "repo": "dataset-labels",
+            "owner": null,
+            "ref": "v3",
+            "commit": "2222222222222222222222222222222222222222222222222222222222222222"
+          },
+          {
+            "name": "embeddings",
+            "repo": "dataset-hera-demo-embeddings",
+            "owner": null,
+            "ref": "3333333333333333333333333333333333333333333333333333333333333333",
+            "commit": "3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        ],
+        "writes": [
+          {
+            "name": "model",
+            "type": "model",
+            "repo": "outputs-hera-demo",
+            "commit": "4444444444444444444444444444444444444444444444444444444444444444"
+          }
+        ]
+      }
+    }
+  ]
+}

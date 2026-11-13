@@ -61,6 +61,13 @@ def _described(authoring) -> dict[str, dict]:
         "idle_timeout": {"type": ["boolean", "integer", "string"], "pattern": authoring._CHECKPOINT_EVERY_RE.pattern,
                          "doc": "How long a step may show no GPU use and no new log line before it is ended as Idle: "
                                 "minutes ('40m', '1h', 40); 0 or False = never; unset = the platform rule."},
+        "matrix": {"type": "object", "maxItems": authoring.MATRIX_MAX_ITEMS,
+                   "doc": "Values to try: {'lr': [0.01, 0.001], 'batch': [16, 32]}. The step runs once for each "
+                          "combination (at most 32); read a value as step.params['lr']. The run form can change "
+                          "the combinations and how many run at once. The step may not produce a dataset."},
+        "matrix_allow_failed": {"type": "boolean",
+                                "doc": "With matrix=: True lets the step after it run when some runs failed (it then sees "
+                                       "which); by default one failed run fails the step and the whole run."},
     }
 
 

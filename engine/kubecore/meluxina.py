@@ -33,16 +33,19 @@ import re
 
 from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
-from kubecore.run_settings import setting
+from kubecore.run_settings import in_fan_template, setting
 from kubecore.step_contract import (
     CLUSTER_ONLY_KINDS,
     DATASET_PRODUCER_LABEL,
     DATASET_PRODUCERS_STAY_ON_CLUSTER,
     CONTEXT_ENV,
     CONTEXT_PARAM,
+    FAN_TEMPLATE_PREFIX,
+    ITEMS_PARAM,
     RESULT_PARAM,
     IMAGE_INPUT,
     image_of,
+    fan_outputs,
     pair_results,
 )
 
@@ -112,7 +115,7 @@ def controller_serves(ctx: dict) -> bool:
     return (ctx.get("hpc") or {}).get("controller") == "serve"
 
 
-def follower_template(ctx: dict, tpl: dict) -> dict:
+def follower_template(ctx: dict, tpl: dict, fanned: bool = False) -> dict:
     """The `hpc-follower` template as the follower (PRD-HPC-1461 D-59): it creates the step's
     HPCArgoWorkflowJob, prints its progress and writes the step's result from its status. It holds no
     Slurm, staging or MLflow credential and no Secret volume: the controller's runner Job carries them,
@@ -130,7 +133,10 @@ def follower_template(ctx: dict, tpl: dict) -> dict:
         # The twin's DAG task name: unique per task in the entrypoint DAG, and the same on every Argo
         # retry of the twin (a retry is a new pod of the same task; only Argo's node name gets a
         # "(n)" suffix, which is not in this parameter). The job name derives from it and WF_UID.
-        {"name": "NODE_KEY", "value": "{{inputs.parameters.step-name}}-%s" % HPC_TWIN_SUFFIX},
+        # With a matrix step in the pipeline (`fanned`), an item has the index of its combination after it: one job
+        # for each item.
+        {"name": "NODE_KEY", "value": "{{inputs.parameters.step-name}}-%s%s" % (
+            HPC_TWIN_SUFFIX, "{{inputs.parameters.node-suffix}}" if fanned else "")},
         {"name": "IMAGE_REF", "value": "{{inputs.parameters.image}}"},
         {"name": "STEP_COMMAND", "value": "{{inputs.parameters.step-command}}"},
         {"name": "SLURM_TIME_LIMIT", "value": "{{inputs.parameters.time-limit}}"},
@@ -247,6 +253,62 @@ def _when_expr(when: str) -> str:
     return w[3:-2].strip() if w else ""
 
 
+def enhance_matrix_hpc(spec: dict, steps: list, by_tpl: dict, prefix: str) -> list:
+    """The HPC variant of each matrix step's items. A matrix step is one task that calls the template
+    `kaos-matrix-<step>`, which runs the step once for each item; its HPC variant is a second step beside the
+    item's in the same round, `run-hpc`, with the complementary condition on the class. One of the two runs for
+    each item, and the template's output joins whichever did. The job of an item is named after the step and the
+    item's index, so the items are separate jobs of one run, which the controller places on one node when the
+    class has room (docs/step-contract.md, section 12). Returns the names of the matrix steps given a variant."""
+    routed = []
+    for tpl in spec["templates"]:
+        if not tpl.get("name", "").startswith(FAN_TEMPLATE_PREFIX) or not tpl.get("steps"):
+            continue
+        run = tpl["steps"][0][0]
+        step = by_tpl.get(run["template"])
+        annots = ((step or {}).get("metadata") or {}).get("annotations") or {}
+        if step is None or not runs_on_hpc(step) or "platform.kubecore.io/compute-class" in annots:
+            continue
+        name = step["name"]
+        gate = "hasPrefix(workflow.parameters['%s-class'], '%s')" % (name, prefix)
+        own = _when_expr(run.get("when", ""))
+        run["when"] = "{{=%s!%s}}" % ("(%s) && " % own if own else "", gate)
+        container = step.get("container") or {}
+        command = list(container.get("command") or []) + list(container.get("args") or [])
+        given = {p["name"]: p["value"] for p in run["arguments"]["parameters"]}
+        minutes = step_time_limit(step)
+        limit = in_fan_template(setting(name, "walltime"))
+        lead = step_resumable_lead(step)
+        if lead >= minutes:
+            raise ValueError("step %s: resumable lead %d min is not shorter than its wall time %d min" % (name, lead, minutes))
+        jobs = 1 if step_resumable_opt_out(step) else 1 + HPC_MAX_CONTINUATIONS
+        twin = {
+            "name": "run-" + HPC_TWIN_SUFFIX, "template": HPC_TWIN_TEMPLATE, "withParam": run["withParam"],
+            "when": "{{=%s%s}}" % ("(%s) && " % own if own else "", gate),
+            "arguments": {"parameters": [
+                {"name": "step-name", "value": name},
+                {"name": "image", "value": in_fan_template(image_of(name)) if container.get("image") == IMAGE_INPUT
+                 else container.get("image", "")},
+                {"name": "step-command", "value": json.dumps(command, separators=(",", ":"))},
+                {"name": "step-kind", "value": ((step.get("metadata") or {}).get("labels") or {}).get(STEP_KIND_LABEL, "")},
+                {"name": "time-limit", "value": "{{=%s}}" % limit},
+                {"name": "deadline-seconds", "value": "{{=%d * (%s + %d) * 60}}" % (jobs, limit, QUEUE_ALLOWANCE_MINUTES)},
+                {"name": "resumable-lead", "value": str(lead)},
+                {"name": "resumable", "value": "0" if step_resumable_opt_out(step) else "auto"},
+                {"name": "idle-timeout", "value": step_idle_timeout(step)},
+                {"name": "hpc-class", "value": "{{workflow.parameters.%s-class}}" % name},
+                {"name": "node-suffix", "value": "-{{=item.index}}"},
+                {"name": ITEMS_PARAM, "value": given[ITEMS_PARAM]},
+                {"name": CONTEXT_PARAM, "value": given[CONTEXT_PARAM]},
+            ]},
+        }
+        tpl["steps"][0].append(twin)
+        for out in tpl["outputs"]["parameters"]:
+            out["valueFrom"]["expression"] = fan_outputs(out["name"], ["run", twin["name"], "rest"])
+        routed.append(name)
+    return routed
+
+
 def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None:
     """Per-step HPC placement. Every step's
     {step}-class dropdown carries the HPC classes (enhance_class_param);
@@ -341,8 +403,11 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
         tasks.insert(tasks.index(task) + 1, twin)
         routed.append(task["name"])
 
-    if not routed:
+    matrix_routed = enhance_matrix_hpc(spec, steps, by_tpl, prefix)
+    if not routed and not matrix_routed:
         return
+    if not routed:
+        routed = []
 
     # A step that needs a routed step reads its result from the pair: exactly one of the two tasks ran,
     # the other was skipped and has no result. Twins included: a twin whose upstream also ran on HPC
@@ -397,6 +462,7 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
             {"name": "hpc-class"},
             {"name": "resumable-lead", "value": "0"}, {"name": "resumable", "value": "auto"},
             {"name": "idle-timeout", "value": ""},
+            *([{"name": "node-suffix", "value": ""}, {"name": ITEMS_PARAM, "value": ""}] if matrix_routed else []),
             {"name": CONTEXT_PARAM}]},
         # Per-step: Slurm time limit + queue/prep allowance (see
         # QUEUE_ALLOWANCE_MINUTES). Argo resolves the parameter here.
@@ -414,8 +480,10 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
         # slurm-job-id, and the step's one result (the same output its pod would have).
         "outputs": {"parameters": [{"name": "slurm-job-id",
                                     "valueFrom": {"path": "/tmp/slurm-job-id"}},
-                                   {"name": RESULT_PARAM, "valueFrom": {"path": FOLLOWER_RESULT_PATH}}]},
+                                   {"name": RESULT_PARAM, "valueFrom": {"path": FOLLOWER_RESULT_PATH}},
+                                   *([{"name": ITEMS_PARAM, "value": "{{inputs.parameters.%s}}" % ITEMS_PARAM}]
+                                     if matrix_routed else [])]},
     }
     # F-35: the controller's follower, or a refusal; never an in-pod submitter.
-    tpl = follower_template(ctx, tpl) if controller_serves(ctx) else refusal_template(tpl)
+    tpl = follower_template(ctx, tpl, bool(matrix_routed)) if controller_serves(ctx) else refusal_template(tpl)
     spec["templates"].append(tpl)
