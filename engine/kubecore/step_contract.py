@@ -201,13 +201,13 @@ def result_of(task: str, twin: str = "") -> str:
 
 def result_value(task: str, key: str) -> str:
     """The expression for the value `key` of the result of the needed step `task`, for a `when=` that compares it. A
-    value that is not there (the step was skipped or did not run, or never set it, or set it to null) is NOT an empty
-    text: the expression fails, and the workflow engine shows the sentence below as the task's error, so the run stops
-    with the step and the key named instead of the condition quietly being false. (`int()` of a sentence is the one
-    failure the expression language lets us word.) `?.` keeps an absent result from failing earlier with a message
-    that names neither."""
-    sentence = ("step '%s' gave no value '%s' (it was skipped, did not run, or never set it): "
-                "a when= on a step's value needs the value" % (task, key))
+    needed step that RAN and finished well but gave no such value (a typo in the key, or a value never set, or null) is NOT
+    an empty text: the expression fails, and the workflow engine shows the sentence below as the task's error, so the run
+    stops with the step and the key named instead of the condition quietly being false. (`int()` of a sentence is the one
+    failure the expression language lets us word.) `?.` keeps a result with no values from failing earlier with a message
+    that names neither. A step that was skipped has no result at all and never reaches this: see `value_test`."""
+    sentence = ("step '%s' ran but gave no value '%s' (a typo in the name, or the value was never set with "
+                "step.result(%s=...)): a when= on a step's value needs the value" % (task, key, key))
     return "(fromJSON(%s)?.values?.[%s] ?? int(%s))" % (result_of(task), _quoted(key), _quoted(sentence))
 
 
@@ -267,11 +267,21 @@ def _single_quoted(text: str) -> str:
 def value_test(task: str, key: str, op: str, text: str) -> str:
     """The comparison of a step's value with the text of a `when=`, exact for every JSON value: a string is compared as
     text; a number or a boolean by its JSON text (`toJSON`), because the workflow engine's `string()` of a number writes
-    `1e+06` for 1000000 and drops the point of `1.0`."""
+    `1e+06` for 1000000 and drops the point of `1.0`.
+
+    A needed step that was SKIPPED (by its own `when=`: the absent sentinel, or by `step.skip()`: status `skipped`) has no
+    value: the condition is then FALSE for `==` and for `!=` alike (nothing can be said about a value that does not exist),
+    so the step that asked is skipped and the run goes on. A result with another status is malformed and fails the task. A
+    step that ran well (`ok`) goes through `result_value`: if it did not set the key the task fails, naming step and key."""
     value = result_value(task, key)
     test = '(type(%s) == "string" ? %s == %s : toJSON(%s) == %s)' % (
         value, value, _single_quoted(text), value, _single_quoted(canonical_when_text(text)))
-    return test if op == "==" else "!" + test
+    if op != "==":
+        test = "!" + test
+    bad = ("step '%s' left a result that is not a result (its status is not ok, skipped or absent): "
+           "a when= on a step's value needs a result" % task)
+    status = "fromJSON(%s)?.status" % result_of(task)
+    return '(%s in ["absent", "skipped"] ? false : (%s == "ok" ? %s : int(%s)))' % (status, status, test, _quoted(bad))
 
 
 def image_of(step: str, compose_task: str = "compose-and-validate") -> str:

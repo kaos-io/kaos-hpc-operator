@@ -121,6 +121,9 @@ with the sentinel: a skipped or omitted step has an empty output. Section 10 of 
 - pins every input any step declares to one commit, once per name (`<dataset>@<version>`; no version means
   `latest`, the head of the dataset's `main` now), and refuses an empty value, a value that names no dataset, a
   version that does not exist and a store that does not answer, naming the input and the steps that declare it;
+- waits until the data store has given the app the right to write every dataset a step produces (the repository label
+  `kaos.grant=<app>@<time>`, polled every 3 s for up to 3 minutes), so that no step's first write is refused: a store that sets
+  no such label anywhere is taken for an older one and the run starts after the wait, with a line saying so;
 - writes each step's base context in wire form (`/work/context/<step>.json`): `params` holds the config
   sections the step names in `reads=`, `ledger` holds the step's own inputs,
   `experiment` is config `experiment.name` or else the app's name, `produces` names each repository;

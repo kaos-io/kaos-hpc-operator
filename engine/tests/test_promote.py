@@ -317,16 +317,16 @@ def test_no_pod_starts_for_the_final_task_when_no_dataset_is_ticked():
                                              "workflow.parameters[\"promote-feats\"] == 'true'}}")
 
 
-def test_the_compose_log_says_which_datasets_stay_where_they_are(tmp_path):
-    from test_compose_inputs import _compose
-    out = tmp_path / "params.yaml"
+def test_the_compose_log_says_which_datasets_stay_where_they_are(tmp_path, monkeypatch, capsys):
+    from kubecore import compose
+    monkeypatch.setattr(compose, "wait_for_grants", lambda *a, **k: None)     # no data store here (test_compose_grant)
     steps = json.dumps([{"name": "prepare", "kind": "ingest", "reads": [], "inputs": [], "needs": [],
                          "produces": [{"name": "clean", "type": "dataset"}, {"name": "feats", "type": "dataset"}]}])
-    done = _compose(tmp_path, "--output", str(out), "--steps", steps, "--run", "r", "--app", "a", "--project", "p",
-                    "--context-dir", str(tmp_path / "ctx"), "--promote", "clean=true", "--promote", "feats=false")
-    assert done.returncode == 0, done.stderr
-    assert "dataset clean: promote-clean is true: latest moves at the end of the run" in done.stdout
-    assert "dataset feats: promote-feats is false: its version stays sealed and latest does not move" in done.stdout
+    compose.main(["--output", str(tmp_path / "params.yaml"), "--steps", steps, "--run", "r", "--app", "a", "--project", "p",
+                  "--context-dir", str(tmp_path / "ctx"), "--promote", "clean=true", "--promote", "feats=false"])
+    out = capsys.readouterr().out
+    assert "dataset clean: promote-clean is true: latest moves at the end of the run" in out
+    assert "dataset feats: promote-feats is false: its version stays sealed and latest does not move" in out
 
 
 def test_the_final_task_imports_no_render_library():

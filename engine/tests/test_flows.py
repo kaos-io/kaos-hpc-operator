@@ -44,7 +44,16 @@ def test_a_when_on_a_needed_steps_value_reads_its_result():
 def test_a_missing_value_fails_the_condition_with_a_sentence_naming_step_and_key():
     expression = result_value("evaluate", "passed")
     assert "?? int(" in expression and "string(" not in expression, "an absent value must not quietly compare as empty text"
-    assert "step 'evaluate' gave no value 'passed'" in expression
+    assert "step 'evaluate' ran but gave no value 'passed' (a typo in the name, or the value was never set with " in expression
+    assert "skipped" not in expression, "a skipped step never reaches the sentence"
+
+
+def test_a_skipped_needed_step_makes_the_condition_false_for_equals_and_not_equals():
+    for op in ("==", "!="):
+        test = value_test("evaluate", "passed", op, "true")
+        assert test.startswith('(fromJSON(') and '?.status in ["absent", "skipped"] ? false : ' in test, op
+        assert result_of("evaluate") in test.split("? false :")[0], "the status is read from the same result as the value"
+        assert '== "ok" ? ' in test and "is not a result" in test, "any other status is a malformed result: an error"
 
 
 def test_the_sentinel_stands_in_for_a_step_that_did_not_run():
@@ -59,7 +68,7 @@ def test_step_and_form_terms_join_with_and_and_or():
     when = tasks_of(render(build))["publish"]["when"]
     assert when.count("&&") == 1 and when.count("||") == 1
     assert "workflow.parameters['experiment-name'] != 'off'" in when
-    assert when.count('tasks["evaluate"].outputs.parameters["kaos-result"]') == 6, "three readings for each of the two terms"
+    assert when.count('tasks["evaluate"].outputs.parameters["kaos-result"]') == 10, "five readings for each term"
 
 
 def test_a_value_of_a_step_that_is_not_needed_is_refused_with_the_fix():
@@ -243,10 +252,10 @@ def test_json_numbers_are_written_as_go_writes_them():
 
 def test_the_comparison_reads_a_string_as_text_and_anything_else_as_json_text():
     test = value_test("evaluate", "rows", "==", "1e6")
-    assert test.startswith('(type(') and '== "string" ? ' in test and "toJSON(" in test
+    assert '== "ok" ? (type(' in test and '== "string" ? ' in test and "toJSON(" in test
     assert "string(" not in test.replace("type(", "")
     assert "== '1e6'" in test and "== '1000000'" in test, "the text as written for a string, as JSON writes it otherwise"
-    assert value_test("evaluate", "rows", "!=", "1e6") == "!" + test
+    assert '== "ok" ? !(type(' in value_test("evaluate", "rows", "!=", "1e6") and '? !(type(' not in test
 
 
 def test_a_when_with_a_line_break_is_refused_at_render():
