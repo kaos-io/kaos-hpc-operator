@@ -47,7 +47,7 @@ def test_a_kind_that_never_runs_on_hpc_is_offered_no_hpc_class_and_gets_no_hpc_v
     assert ("run the step as a job on HPC (Slurm)" in choice["description"]) is on_hpc
     assert ("one-hpc" in _tasks(wft)) is on_hpc
     if not on_hpc:
-        assert "when" not in _tasks(wft)["one"], "it always runs on the cluster"
+        assert "hasPrefix" not in _tasks(wft)["one"]["when"], "it always runs on the cluster"
 
 
 def test_the_compose_step_has_no_class_field_and_no_hpc_variant():
@@ -79,7 +79,8 @@ def test_a_step_reads_the_result_of_a_step_that_may_run_on_hpc_from_the_pair():
         assert result_of("load") in context and "load-hpc" not in context, name
         assert "prepare-hpc" in tasks[name]["depends"], "a task sees the outputs of the tasks it depends on only"
     assert result_of("prepare", "prepare-hpc") == (
-        'sprig.default(sprig.default("{\\"version\\":1,\\"status\\":\\"absent\\"}", '
+        'sprig.default(sprig.default(sprig.default("{\\"version\\":1,\\"status\\":\\"absent\\"}", '
+        'tasks["compose-and-validate"].outputs.parameters["kaos-reused-prepare"]), '
         'tasks["prepare-hpc"].outputs.parameters["kaos-result"]), tasks["prepare"].outputs.parameters["kaos-result"])')
 
 
@@ -379,7 +380,7 @@ def test_a_step_that_produces_a_dataset_is_offered_no_hpc_class_and_gets_no_hpc_
     assert not [c for c in choice["enum"] if c.startswith("meluxina-")]
     assert "HPC (Slurm)" not in choice["description"]
     assert "prep-hpc" not in _tasks(wft)
-    assert "when" not in _tasks(wft)["prep"], "it always runs on the cluster"
+    assert "hasPrefix" not in _tasks(wft)["prep"]["when"], "it always runs on the cluster"
 
 
 def test_a_step_that_produces_a_model_or_an_artifact_is_unaffected():

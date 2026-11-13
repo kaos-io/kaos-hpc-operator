@@ -158,7 +158,7 @@ def contexts(table, resolved=RESOLVED):
 
 def test_a_step_context_holds_its_own_inputs_and_the_sections_it_reads():
     got = contexts(TWO_INPUTS)
-    assert list(got["train"]) == ["version", "run", "app", "project", "step", "kind", "experiment", "params",
+    assert list(got["train"]) == ["version", "run", "app", "project", "step", "kind", "experiment", "instance", "params",
                                   "ledger", "produces"], "the contract's fields, in order, without upstream"
     assert [r["name"] for r in got["prepare"]["ledger"]["reads"]] == ["raw"]
     assert [r["name"] for r in got["train"]["ledger"]["reads"]] == ["raw", "labels"]

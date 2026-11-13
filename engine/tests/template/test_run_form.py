@@ -87,7 +87,7 @@ def test_the_form_is_in_the_order_a_developer_reads_it():
         "load-class", "load-walltime",
         "train-class", "train-walltime", "train-checkpoint-every",
         "report-class", "report-walltime",
-        "promote-loaded", "config"]
+        "reuse-from-run", "start-from-step", "promote-loaded", "config"]
 
 
 def test_pipeline_info_lists_the_developers_steps_only_and_names_no_account_or_provider():

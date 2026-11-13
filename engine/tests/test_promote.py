@@ -256,7 +256,7 @@ def test_every_task_the_final_task_reads_is_in_its_depends():
     plan = next(p["value"] for p in task["arguments"]["parameters"] if p["name"] == "kaos-promote-plan")
     read = set(re.findall(r'tasks\["([^"]+)"\]', plan))
     named = set(re.findall(r"[a-z0-9][a-z0-9-]*(?=\.[A-Z]|\b)", task["depends"]))
-    assert read == {"ingest", "features"} and read <= named, (read, named)
+    assert read == {"compose-and-validate", "ingest", "features"} and read <= named, (read, named)
 
 
 def test_the_final_task_runs_the_engines_promote_with_the_identity_of_the_compose_step():

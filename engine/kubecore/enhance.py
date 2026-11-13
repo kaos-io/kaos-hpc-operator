@@ -122,6 +122,8 @@ from kubecore.step_contract import (
     PROMOTE_PARAM,
     PROMOTE_STEP,
     RESULT_PARAM,
+    REUSE_FIELD,
+    START_FIELD,
     TEMPLATE_CAP,
     dataset_name_problem,
     image_of,
@@ -781,11 +783,12 @@ def enhance_walltime(spec: dict, step: dict, annots: dict) -> None:
     add_task_argument(spec, step["name"], "deadline", "{{=%s * 60}}" % setting(step["name"], "walltime"))
 
 
-def enhance_run_form(spec: dict, steps: list, offers: dict) -> None:
+def enhance_run_form(spec: dict, steps: list, offers: dict, ctx: dict) -> None:
     """The run form's own fields: `<step>-walltime` for every step (default: walltime= in code, else 4h),
     `<step>-checkpoint-every` for a step that declares checkpoint_every= or resumable= (not checkpoint_every=False;
-    default: the value in code, else the engine's for resumable= alone), and
-    `promote-<dataset>` for every dataset a step produces. Compose gets each value (checks it,
+    default: the value in code, else the engine's for resumable= alone),
+    `promote-<dataset>` for every dataset a step produces, and `reuse-from-run` and `start-from-step`, which start a
+    run from a step with the results of an earlier run. Compose gets each value (checks it,
     and writes the numbers as its output `kaos-run-settings`)."""
     compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
     if compose is None:
@@ -828,6 +831,22 @@ def enhance_run_form(spec: dict, steps: list, offers: dict) -> None:
         args.extend(["--class", "%s={{workflow.parameters.%s}}" % (name, class_field(name))])
     if chosen:
         args.extend(["--class-offers", json.dumps(chosen, separators=(",", ":"))])
+    # A step on an HPC class is never reused, and one that reads a reused model or artifact is not run there yet: compose
+    # is told which classes are HPC.
+    hpc = [c["name"] for c in hpc_classes(ctx)]
+    if hpc:
+        args.extend(["--hpc-classes", ",".join(hpc)])
+    for name, value, description in (
+            (REUSE_FIELD, "", "Optional. The name of an earlier run of this app. Steps before the step below are not run again; "
+                              "their results and outputs are taken from that run. Leave empty for a normal run."),
+            (START_FIELD, "", "Optional. The step to run first; it and every step after it run again. Needs the earlier run "
+                              "above. Steps: %s." % ", ".join(e["name"] for e in table))):
+        if name in existing:
+            raise EnhanceError(f"the run form already has a field '{name}'; rename the setting that would give the form "
+                               f"a second one")
+        parameters.append({"name": name, "value": value, "description": description})
+        existing.add(name)
+        args.append("--%s={{workflow.parameters.%s}}" % (name, name))
     for entry in table:
         if entry.get("matrix"):
             axes, name = list(entry["matrix"]), entry["name"]
@@ -1397,8 +1416,8 @@ def enhance_compose_class(spec: dict, steps: list, ctx: dict) -> None:
 
 def order_form(spec: dict, steps: list) -> None:
     """The form in the order a developer reads it: the text, the experiment fields, the settings in config
-    order, the dataset fields, then each step's class, time limit and checkpoint interval, the promote ticks,
-    the extra YAML, and last what the platform owns."""
+    order, the dataset fields, then each step's class, time limit and checkpoint interval, the two fields that
+    start a run from a step, the promote ticks, the extra YAML, and last what the platform owns."""
     parameters = spec["arguments"]["parameters"]
     compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
     table = json.loads(compose["container"]["args"][compose["container"]["args"].index("--steps") + 1]) \
@@ -1418,6 +1437,8 @@ def order_form(spec: dict, steps: list) -> None:
             place(name, 1)
         elif name in inputs:
             place(name, 3)
+        elif name in (REUSE_FIELD, START_FIELD):
+            place(name, 5, (REUSE_FIELD, START_FIELD).index(name) - 2)    # before the promote ticks
         elif name.startswith("promote-"):
             place(name, 5)
         elif name == "config":
@@ -1516,7 +1537,7 @@ def enhance(wft: dict, ctx: dict) -> dict:
     enhance_images(spec, ctx, steps)
     enhance_workspace_pvc(spec, steps)
     enhance_compose_identity(steps, ctx)
-    enhance_run_form(spec, steps, offers)
+    enhance_run_form(spec, steps, offers, ctx)
     enhance_compose_class(spec, steps, ctx)
     enhance_pipeline_info(spec, ctx, steps)
     order_form(spec, steps)

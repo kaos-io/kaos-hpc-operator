@@ -6,6 +6,7 @@
   "step": "prepare",
   "kind": "transform",
   "experiment": "baseline",
+  "instance": "0b7f6c1e-1111-2222-3333-444455556666",
   "params": {"prepare": {"size": 224}},
   "ledger": {
     "version": 2,
