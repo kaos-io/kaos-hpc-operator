@@ -7,6 +7,7 @@ import copy
 import json
 import runpy
 
+import pytest
 import yaml
 
 from kubecore import enhance
@@ -184,3 +185,30 @@ def test_main_writes_form_data_only_with_the_flag(tmp_path, monkeypatch):
     assert text == json.dumps(json.loads(text), sort_keys=True, separators=(",", ":"))    # compact
     assert json.loads(text)["version"] == 1
     assert (tmp_path / "a.yaml").read_text() == (tmp_path / "b.yaml").read_text()
+
+
+# ---------------------------------------------------------------- the step table must match the templates (review I-1)
+
+def _table_arg(wft):
+    compose = next(s for s in _steps_of(wft) if s["name"] == enhance.COMPOSE_STEP)
+    args = compose["container"]["args"]
+    return args, args.index("--steps") + 1
+
+
+def test_a_step_missing_from_the_table_with_a_render_declared_class_is_refused():
+    wft = _raw()
+    args, i = _table_arg(wft)
+    table = json.loads(args[i])
+    victim = table[-1]["name"]
+    args[i] = json.dumps(table[:-1])
+    wft["spec"]["arguments"]["parameters"].append({"name": f"{victim}-class", "value": "evil", "enum": ["evil", "x"]})
+    with pytest.raises(enhance.EnhanceError, match=victim):
+        _enhanced(wft, {})
+
+
+def test_an_extra_table_step_without_a_template_is_refused():
+    wft = _raw()
+    args, i = _table_arg(wft)
+    args[i] = json.dumps(json.loads(args[i]) + [{"name": "ghost", "kind": "train", "inputs": [], "produces": []}])
+    with pytest.raises(enhance.EnhanceError, match="ghost"):
+        _enhanced(wft)

@@ -1384,6 +1384,25 @@ def add_promote_task(spec: dict, steps: list) -> None:
         "arguments": {"parameters": given + [{"name": PROMOTE_PARAM, "value": "{{=toJSON([%s])}}" % plan}]}})
 
 
+def refuse_step_table_mismatch(steps: list) -> None:
+    """The compose `--steps` table is author data and names the steps the run form gives fields to; the step
+    templates are what runs. They must be the same set, or a render could hide a step from the table while
+    declaring its `<step>-class` itself, and the form would rank that field as a plain setting."""
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
+    args = compose["container"].get("args", []) if compose else []
+    table = json.loads(args[args.index("--steps") + 1]) if "--steps" in args else []
+    named = {e["name"] for e in table}
+    templates = {s["name"] for s in steps if s["name"] != COMPOSE_STEP}
+    if named != templates:
+        missing, extra = sorted(templates - named), sorted(named - templates)
+        raise EnhanceError(
+            "the steps table the render gave compose does not match the step templates"
+            + (f"; steps missing from the table: {', '.join(missing)}" if missing else "")
+            + (f"; table steps with no template: {', '.join(extra)}" if extra else "")
+            + ". Render the pipeline again with the platform's authoring module."
+        )
+
+
 def enhance_pipeline_info(spec: dict, ctx: dict, steps: list) -> None:
     """The text at the top of the run form: how to run, the machine classes, the developer's steps. It is a
     field because the form shows nothing else; it speaks about the developer's pipeline, not the platform."""
@@ -1559,6 +1578,7 @@ def enhance(wft: dict, ctx: dict, form_data: "dict | None" = None) -> dict:
     spec = wft["spec"]
     enhance_spec_top_level(spec, ctx)
     steps = step_templates(spec)
+    refuse_step_table_mismatch(steps)   # before any engine pass reads the table or a render-declared field
     gpu_step_names: set = set()
     offers: dict = {}    # step -> what its {step}-class choice offers (None: pinned to one class)
     pinned: dict = {}    # step -> the class it is pinned to

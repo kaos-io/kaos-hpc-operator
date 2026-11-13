@@ -21,7 +21,24 @@ CTX_PATH = ROOT / "kubecore/local-dev/pipeline-context.yaml"
 
 # ---------------------------------------------------------------- render wiring
 
+STEPS_TABLE = '[{"name":"model-training","kind":"train","inputs":[],"produces":[]}]'   # compose --steps of _raw()
+
+
 def _raw():
+    """A hand-made render with one step and the compose step as authoring renders it (the enhancer refuses a
+    `--steps` table that is not the set of step templates)."""
+    raw = _bare()
+    raw["spec"]["templates"].append({
+        "name": "compose-and-validate", "container": {"image": "i", "args": ["--steps", STEPS_TABLE]},
+        "metadata": {"labels": {"platform.kubecore.io/step-kind": "control"}},
+        "outputs": {"parameters": [{"name": "kaos-ledger"}, {"name": "kaos-context-model-training"}]}})
+    tasks = raw["spec"]["templates"][0]["dag"]["tasks"]
+    tasks.append({"name": "compose-and-validate", "template": "compose-and-validate"})
+    tasks[0]["depends"] = "compose-and-validate"
+    return raw
+
+
+def _bare():
     return {
         "apiVersion": "argoproj.io/v1alpha1", "kind": "WorkflowTemplate", "metadata": {"name": "x"},
         "spec": {"entrypoint": "p", "arguments": {"parameters": [{"name": "dataset", "value": "dataset-default@latest"}]},
@@ -54,16 +71,7 @@ def test_the_runner_derives_the_outputs_repository_from_the_app_not_from_variabl
 
 
 def _with_compose() -> dict:
-    """_raw() plus the platform's compose step as authoring renders it (its outputs)."""
-    raw = _raw()
-    raw["spec"]["templates"].append({
-        "name": "compose-and-validate", "container": {"image": "i", "args": []},
-        "metadata": {"labels": {"platform.kubecore.io/step-kind": "control"}},
-        "outputs": {"parameters": [{"name": "kaos-ledger"}, {"name": "kaos-context-model-training"}]}})
-    tasks = raw["spec"]["templates"][0]["dag"]["tasks"]
-    tasks.insert(0, {"name": "compose-and-validate", "template": "compose-and-validate"})
-    tasks[1]["depends"] = "compose-and-validate"
-    return raw
+    return _raw()
 
 
 def test_the_follower_gets_the_steps_context_from_the_compose_step_never_a_run_parameter():
@@ -92,6 +100,8 @@ def test_a_task_that_already_has_the_hpc_variants_name_stops_the_render():
     ctx = yaml.safe_load(CTX_PATH.read_text())
     raw = _with_compose()
     raw["spec"]["templates"].append({"name": "x", "container": {"image": "i", "command": ["c"]}})
+    compose = next(t for t in raw["spec"]["templates"] if t["name"] == "compose-and-validate")
+    compose["container"]["args"] = ["--steps", STEPS_TABLE[:-1] + ',{"name":"x","kind":"train","inputs":[],"produces":[]}]']
     raw["spec"]["templates"][0]["dag"]["tasks"].append({"name": "model-training-hpc", "template": "x"})
     with pytest.raises(ValueError, match="already exists"):
         enhance(raw, ctx)
