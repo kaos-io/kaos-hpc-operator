@@ -253,6 +253,16 @@ step's own task, and the follower receives it as `KAOS_STEP_CONTEXT`. The follow
 `slurm-job-id` and `kaos-result` (`/tmp/outputs/kaos-result.json`, no default: the follower always writes it).
 A step that needs a step with an HPC variant reads the result from the pair: exactly one of the two tasks ran.
 
+## The run form's raw data
+
+`derive_tree.derive()` also hands the run form its raw data: the type of each field, what each config group option
+changes (`optionDefaults`, an entry for every group), the leaves only some options of a group have (`leafOptions`,
+each with its group), and `config/_form.yaml` (label, tier, minimum, maximum and group of a field; groups of
+their own). Every option of a group is composed ALONE, with the other groups at their defaults, and an option that
+does not compose fails the build with an error naming `config/<group>/<option>.yaml`. So an option that uses a key
+only a non-default option of ANOTHER group defines fails the build, although it would work in that combination at
+run time: write the key in the option itself or in the root config.
+
 ## GPU driver prelude
 
 `kubecore/enhance.py` (`enhance_gpu_driver`) wraps the container command of every `gpu=True` step that runs on a KAOS GPU

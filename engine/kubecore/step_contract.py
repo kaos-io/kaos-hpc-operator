@@ -180,6 +180,7 @@ RUN_FORM_ANNOTATION = "ui.kubecore.io/run-form"     # the finished form, written
 RAW_FORM_ANNOTATION = "ui.kubecore.io/raw-form"     # the render's raw form, taken and stripped by enhance
 RUN_FORM_CAP = 128 * 1024      # bytes of the finished form: OSR's maxRunFormBytes
 RUN_FORM_WARN = 96 * 1024      # CI warns above this
+HIDDEN_FORM_GROUPS = ("info", "platform")   # run form groups the form never shows (derive_tree, run_form)
 RAW_FORM_CAP = 128 * 1024      # bytes of the raw form
 FORM_OVERRIDES_CAP = 64 * 1024  # bytes of config/_form.yaml
 

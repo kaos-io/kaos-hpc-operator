@@ -24,6 +24,22 @@ TREE = {
 }
 
 
+ARGO_PARAMETERS = [
+    ("model", "small", ["big", "huge", "small"], "One of: big, huge, small."),
+    ("optim", "sgd", ["adam", "sgd"], "One of: adam, sgd."),
+    ("name", "run", None, ""),
+    ("train-epochs", "3", None, ""),
+    ("train-lr", "0.1", None, ""),
+    ("train-amp", "false", None, ""),
+    ("train-note", "", None, ""),
+    ("model-width", "8", None, ""),
+    ("model-depth", "2", None, ""),
+    ("model-dropout", "0.1", None, ""),
+    ("optim-momentum", "0.9", None, ""),
+    ("config", "", None, "Extra settings for this run, as YAML. They replace the values above."),
+]
+
+
 def _tree(tmp_path, monkeypatch, files=None):
     for rel, text in {**TREE, **(files or {})}.items():
         path = tmp_path / rel
@@ -95,9 +111,9 @@ def test_nested_group_names_are_mapped(tmp_path, monkeypatch):
 
 
 def test_the_argo_parameters_are_unchanged_by_the_raw_data(tmp_path, monkeypatch):
+    """Global Constraint 5: the list, in order, with every value, enum and description (a literal)."""
     form = _form(tmp_path, monkeypatch)
-    names = [p.name for p in form.parameters]
-    assert names[:2] == ["model", "optim"] and names[-1] == "config"
+    assert [(p.name, p.value, p.enum, p.description) for p in form.parameters] == ARGO_PARAMETERS
     assert form.tokens[0] == "model={{workflow.parameters.model}}"
 
 
@@ -215,3 +231,37 @@ def test_no_comment_is_read_from_the_form_file(tmp_path, monkeypatch):
     assert "train.epochs" not in derive_tree._comments()
     form = derive_tree.derive()
     assert {p.name: p.description for p in form.parameters}["train-epochs"] == ""
+
+
+def test_a_fifo_form_file_is_refused_without_hanging(tmp_path, monkeypatch):
+    _tree(tmp_path, monkeypatch)
+    os.mkfifo(tmp_path / "_form.yaml")
+    with pytest.raises(DeriveError, match="regular file"):
+        derive_tree.read_form_overrides()
+
+
+def test_a_key_written_twice_is_refused(tmp_path, monkeypatch):
+    _write_form(tmp_path, monkeypatch, "fields:\n  train-epochs: {label: A, label: B}\n")
+    with pytest.raises(DeriveError, match="written twice"):
+        derive_tree.read_form_overrides()
+    _write_form(tmp_path, monkeypatch, "fields:\n  train-epochs: {label: A}\n  train-epochs: {label: B}\n")
+    with pytest.raises(DeriveError, match="written twice"):
+        derive_tree.read_form_overrides()
+
+
+def test_a_field_name_that_is_not_text_is_refused(tmp_path, monkeypatch):
+    _write_form(tmp_path, monkeypatch, "fields:\n  1: {label: A}\n")
+    with pytest.raises(DeriveError, match="must be text"):
+        derive_tree.read_form_overrides()
+
+
+@pytest.mark.parametrize("text", ["width: [\n", "width: 1\n  bad: [\n"])
+def test_a_malformed_option_file_names_the_file(tmp_path, monkeypatch, text):
+    with pytest.raises(DeriveError, match=r"(?s)option `bad` of the config group model/.*config/model/bad.yaml"):
+        _form(tmp_path, monkeypatch, {"model/bad.yaml": text})
+
+
+def test_the_hidden_group_lists_agree():
+    from kubecore.step_contract import HIDDEN_FORM_GROUPS
+    assert set(HIDDEN_FORM_GROUPS) == run_form.HIDDEN_FIXED_GROUP_IDS
+    assert {g for g, tier in run_form.GROUPS if tier == "hidden"} == set(HIDDEN_FORM_GROUPS)

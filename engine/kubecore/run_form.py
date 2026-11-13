@@ -22,7 +22,8 @@ from kubecore.meluxina import HPC_TWIN_TEMPLATE, STEP_KIND_LABEL, hpc_classes
 from kubecore.run_settings import LONGEST_MINUTES, checkpoint_field, class_field, promote_field, walltime_field
 
 from kubecore.step_contract import (
-    COMMIT_RE, ENGINE_VERSION_ANNOTATION, ENGINE_VERSION_RE, PARAMS_DIGEST_KEY, PIPELINE_VERSION_KEY,
+    COMMIT_RE, ENGINE_VERSION_ANNOTATION, ENGINE_VERSION_RE, HIDDEN_FORM_GROUPS, PARAMS_DIGEST_KEY,
+    PIPELINE_VERSION_KEY,
     RAW_FORM_ANNOTATION, RAW_FORM_CAP, RUN_FORM_ANNOTATION, RUN_FORM_CAP, RUN_FORM_WARN, SOURCE_COMMIT_KEY, STAMP_BY,
     wire,
 )
@@ -346,7 +347,7 @@ GROUPS = (
     ("platform", "hidden"),
 )
 _STEP_SUFFIXES = ("class", "walltime", "checkpoint-every")
-HIDDEN_FIXED_GROUP_IDS = frozenset(g for g, tier in GROUPS if tier == "hidden")
+HIDDEN_FIXED_GROUP_IDS = frozenset(HIDDEN_FORM_GROUPS)
 
 
 def form_rank(params: list, step_table: list, overrides: Optional[dict] = None) -> dict:

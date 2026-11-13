@@ -44,7 +44,7 @@ from hydra import compose, initialize_config_dir
 from hydra.core.config_store import ConfigStore
 from omegaconf import OmegaConf
 
-from kubecore.step_contract import OLD_APP_NOTICE, REMOVED_CONFIG_KEYS, RESERVED_CONFIG_KEYS
+from kubecore.step_contract import HIDDEN_FORM_GROUPS, OLD_APP_NOTICE, REMOVED_CONFIG_KEYS, RESERVED_CONFIG_KEYS
 
 # Hera is a RENDER-TIME dependency (form derivation only). The compose step
 # runs at RUN time in a lean image without Hera, and only calls compose_tree()
@@ -353,7 +353,6 @@ FORM_FILE = "_form.yaml"
 FORM_FILE_CAP = 64 * 1024
 FORM_FIELD_KEYS = ("label", "tier", "minimum", "maximum", "group")   # D13: no `pattern` in v1
 FORM_GROUP_KEYS = ("id", "label", "tier", "order")
-FORM_HIDDEN_GROUPS = ("info", "platform")   # fixed groups the form never shows
 
 
 class _NoAliasLoader(yaml.SafeLoader):
@@ -365,6 +364,16 @@ class _NoAliasLoader(yaml.SafeLoader):
             raise yaml.YAMLError("anchors and aliases (&name, *name) are not allowed")
         return super().compose_node(parent, index)
 
+    def construct_mapping(self, node, deep=False):
+        seen = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=True)
+            if isinstance(key, (str, int, float, bool, type(None))):
+                if key in seen:
+                    raise yaml.YAMLError(f"the key {key!r} is written twice (line {key_node.start_mark.line + 1})")
+                seen.add(key)
+        return super().construct_mapping(node, deep)
+
 
 def read_form_overrides() -> dict:
     """config/_form.yaml, the developer's changes to the run form: {"fields": {name: {label, tier, minimum,
@@ -374,7 +383,7 @@ def read_form_overrides() -> dict:
     path = CONFIG_DIR / FORM_FILE
     here = f"config/{FORM_FILE}"
     try:
-        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except FileNotFoundError:
         return {}
     except OSError as exc:
@@ -409,6 +418,9 @@ def read_form_overrides() -> dict:
         if not isinstance(fields, dict):
             raise DeriveError(f"{here}: fields must be a mapping of field name to its changes")
         for name, spec in fields.items():
+            if not isinstance(name, str):
+                raise DeriveError(f"{here}: the field name {name!r} must be text: write the field's name, "
+                                  f"for example train-epochs")
             if not isinstance(spec, dict):
                 raise DeriveError(f"{here}: fields.{name} must be a mapping")
             if "pattern" in spec:
@@ -421,7 +433,7 @@ def read_form_overrides() -> dict:
                 raise DeriveError(
                     f"{here}: fields.{name} has unknown keys {bad}: allowed are {', '.join(FORM_FIELD_KEYS)}"
                 )
-            if spec.get("group") in FORM_HIDDEN_GROUPS:
+            if spec.get("group") in HIDDEN_FORM_GROUPS:
                 raise DeriveError(
                     f"{here}: fields.{name}.group is `{spec['group']}`, a group the run form never shows: pick "
                     f"another group"
@@ -455,22 +467,22 @@ def _leaf_type(value) -> str:
     return "string"
 
 
-def _option_data(group: str, default: str, options: list, defaults: dict) -> tuple:
+def _option_data(group: str, default: str, options: list, defaults: dict, default_tree: dict) -> tuple:
     """For one group: ({option: {leaf: value}} for the leaves that are form fields and differ from the default
     option, {leaf: [options that have it]}). `defaults` is {leaf name: default value text}, the form fields.
     The default option has no entry, but counts as an option that has its leaves."""
+    from hydra.errors import HydraException
     from omegaconf.errors import OmegaConfBaseException
 
     name = _mapped(group)
     changed, having = {}, {}
     for option in options:
         if option == default:
-            leaves = {_mapped(d): _value_str(v) for d, v in _walk_scalars(OmegaConf.to_container(
-                compose_tree(), resolve=True))}
+            leaves = {_mapped(d): _value_str(v) for d, v in _walk_scalars(default_tree)}
         else:
             try:
                 tree = OmegaConf.to_container(_compose([f"{group}={option}"]), resolve=True)
-            except (OmegaConfBaseException, ValueError) as exc:
+            except (OmegaConfBaseException, HydraException, yaml.YAMLError, OSError, ValueError) as exc:
                 raise DeriveError(
                     f"the option `{option}` of the config group {group}/ does not compose ({exc}): fix "
                     f"config/{group}/{option}.yaml"
@@ -548,7 +560,7 @@ def derive() -> DerivedForm:
     # the raw data the run form needs: what each group option changes, and which leaves only some options have
     defaults = {_mapped(dotted): _value_str(value) for dotted, value in _walk_scalars(tree)}
     for group, default in choices:
-        name, changed, partial = _option_data(group, default, _group_options(group), defaults)
+        name, changed, partial = _option_data(group, default, _group_options(group), defaults, tree)
         form.option_defaults[name] = changed
         for leaf, opts in partial.items():
             form.leaf_options[leaf] = {"group": name, "options": opts}
