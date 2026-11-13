@@ -52,6 +52,11 @@ def evaluate(expression, outputs):
     return eval(body, {"__builtins__": {}}, {"sprig": sprig, "tasks": {t: Task(p) for t, p in outputs.items()}})
 
 
+def not_reused(*steps):
+    """Compose's outputs for steps this run runs: `kaos-reused-<step>` is declared and empty (the run starts from no step)."""
+    return {f"kaos-reused-{step}": "" for step in steps}
+
+
 def base_of(context, step):
     """The base context compose writes for `step`, from the fixture's own run, params and pinned reads."""
     from kubecore import compose
@@ -123,7 +128,8 @@ def test_a_step_gets_the_result_of_the_step_it_needs_byte_for_byte():
     want = fixture("context-one-upstream")
     base = wire(base_of(want, "train"))
     got = evaluate(context_expression(COMPOSE, "train", ["prepare"]),
-                   {COMPOSE: {"kaos-context-train": base}, "prepare": {"kaos-result": wire_of("result-ok")}})
+                   {COMPOSE: {"kaos-context-train": base, **not_reused("prepare")},
+                    "prepare": {"kaos-result": wire_of("result-ok")}})
     assert got == wire_of("context-one-upstream")
     assert json.loads(got) == want
 
@@ -134,10 +140,23 @@ def test_a_skipped_upstream_arrives_as_the_sentinel():
     want = fixture("context-skipped-upstream")
     base = wire(base_of(want, "evaluate"))
     got = evaluate(context_expression(COMPOSE, "evaluate", ["train", "export"]),
-                   {COMPOSE: {"kaos-context-evaluate": base}, "train": {"kaos-result": wire_of("result-model")},
-                    "export": {"kaos-result": ""}})
+                   {COMPOSE: {"kaos-context-evaluate": base, **not_reused("train", "export")},
+                    "train": {"kaos-result": wire_of("result-model")}, "export": {"kaos-result": ""}})
     assert got == wire_of("context-skipped-upstream")
     assert json.loads(got)["upstream"]["export"] == fixture("result-absent")
+
+
+def test_a_step_that_is_not_run_again_arrives_as_the_earlier_runs_result_with_its_path():
+    """`train` did not run in this run: compose took its result from the earlier run (`kaos-reused-train`), `export` was skipped."""
+    from kubecore.step_contract import context_expression, wire
+    want = fixture("context-reused-upstream")
+    base = wire(base_of(want, "evaluate"))
+    got = evaluate(context_expression(COMPOSE, "evaluate", ["train", "export"]),
+                   {COMPOSE: {"kaos-context-evaluate": base, "kaos-reused-train": wire_of("result-reused"),
+                              **not_reused("export")},
+                    "train": {"kaos-result": ""}, "export": {"kaos-result": ""}})
+    assert got == wire_of("context-reused-upstream")
+    assert json.loads(got)["upstream"]["train"]["writes"][0]["path"] == "model/baseline/hera-demo-x7k2p/"
 
 
 def test_braces_quotes_and_numbers_cross_unchanged():
@@ -155,7 +174,7 @@ def test_braces_quotes_and_numbers_cross_unchanged():
 def test_a_step_that_ran_on_hpc_is_read_from_its_twin_and_a_pair_that_did_not_run_is_the_sentinel():
     from kubecore.step_contract import context_expression, pair_results, wire
     want = fixture("context-one-upstream")
-    base = {COMPOSE: {"kaos-context-train": wire(base_of(want, "train"))}}
+    base = {COMPOSE: {"kaos-context-train": wire(base_of(want, "train")), **not_reused("prepare")}}
     expression = pair_results(context_expression(COMPOSE, "train", ["prepare"]), "prepare", "prepare-hpc")
     ran = {"kaos-result": wire_of("result-ok")}
     skipped = {"kaos-result": ""}
@@ -236,6 +255,8 @@ def test_compose_writes_one_context_per_step_and_the_runs_ledger(rendered):
     assert outputs == {"kaos-ledger": "/work/kaos-ledger.json",
                        "kaos-context-dataset-loading": "/work/context/dataset-loading.json",
                        "kaos-context-hello-world": "/work/context/hello-world.json",
+                       "kaos-reused-dataset-loading": "/work/reused/dataset-loading.json",
+                       "kaos-reused-hello-world": "/work/reused/hello-world.json",
                        "kaos-run-settings": "/work/kaos-run-settings.json", "kaos-images": "/work/kaos-images.json"}
     args = compose["container"]["args"]
     assert args[args.index("--run") + 1] == "{{workflow.name}}"

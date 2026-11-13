@@ -68,6 +68,9 @@ from kubecore.step_contract import (
     MATRIX_ENTRY_CAP,
     IMAGES_PARAM,
     ITEMS_PARAM,
+    REUSED_DIR,
+    REUSED_OUTPUT_PREFIX,
+    START_FIELD,
     MATRIX_MAX_ITEMS,
     MATRIX_MAX_LEDGER,
     MATRIX_MIN_BASE,
@@ -297,6 +300,29 @@ def _classify_when(name, parsed, needs, steps):
         else:
             compares.append(("field", left, None, op, text))
     return compares, parsed[1]
+
+
+def _when_fields(parsed) -> list:
+    """The run form fields a step's `when=` names, in order and once each."""
+    return list(dict.fromkeys(left for kind, left, _, _, _ in (parsed[0] if parsed else []) if kind == "field"))
+
+
+def _ancestors(step) -> list:
+    """The names of every step `step` needs, directly or through the steps they need."""
+    found = {}
+    for need in step.needs:
+        found[need.name] = None
+        found.update(dict.fromkeys(_ancestors(need)))
+    return list(found)
+
+
+def _start_gate(step) -> str:
+    """The condition that keeps a step out of a run that starts from another step (the run form's `start-from-step`): the
+    step runs when no start was asked for, when it is the start, or when the start is a step it needs, directly or
+    through others (it is downstream of the start). Every other step, before the start or on a branch that does not meet
+    it, is taken from the earlier run (kubecore/rerun.py)."""
+    runs = ["", step.name] + _ancestors(step)
+    return "workflow.parameters['%s'] in [%s]" % (START_FIELD, ", ".join("'%s'" % name for name in runs))
 
 
 def _when_condition(compares, joiners):
@@ -660,6 +686,7 @@ class pipeline:
         return wire([
             {"name": s.name, "kind": s.kind, "reads": s.reads, "inputs": s.inputs, "needs": [n.name for n in s.needs],
              "produces": [{"name": e.name, "type": e.type} for e in s.produces],
+             **({"when_fields": _when_fields(s.parsed_when)} if _when_fields(s.parsed_when) else {}),
              **({"matrix": s.matrix} if s.matrix else {}),
              **({"allow_failed": True} if s.matrix_allow_failed else {})}
             for s in self.steps
@@ -696,11 +723,17 @@ class pipeline:
                 + ["--advanced", "{{workflow.parameters.config}}"]
                 + [f"--require={sec}" for sec in required]
                 + ["--run", "{{workflow.name}}", "--steps", self._step_table(),
-                   "--context-dir", CONTEXT_DIR, "--ledger-output", LEDGER_PATH],
+                   "--context-dir", CONTEXT_DIR, "--ledger-output", LEDGER_PATH, "--reused-dir", REUSED_DIR]
+                # what the run form says to the `when=` of each step: compose keeps it in the run's plan (docs/step-contract.md, 13)
+                + [arg for field in dict.fromkeys(f for s in self.steps for f in _when_fields(s.parsed_when))
+                   for arg in ("--when-field", "%s={{=workflow.parameters['%s']}}" % (field, field))],
                 labels={STEP_LABEL: COMPOSE_STEP, STEP_KIND_LABEL: "control"},
                 outputs=[Parameter(name=LEDGER_PARAM, value_from=ValueFrom(path=LEDGER_PATH))]
                 + [Parameter(name=CONTEXT_OUTPUT_PREFIX + s.name,
-                             value_from=ValueFrom(path=f"{CONTEXT_DIR}/{s.name}.json")) for s in self.steps],
+                             value_from=ValueFrom(path=f"{CONTEXT_DIR}/{s.name}.json")) for s in self.steps]
+                # the result of a step that this run does not run again: taken from the earlier run, else empty
+                + [Parameter(name=REUSED_OUTPUT_PREFIX + s.name,
+                             value_from=ValueFrom(path=f"{REUSED_DIR}/{s.name}.json")) for s in self.steps],
             )
             containers = {}
             for s in self.steps:
@@ -748,7 +781,9 @@ class pipeline:
                         ]
                     )
                     context = context_expression(COMPOSE_STEP, s.name, [n.name for n in s.needs], fanned, open_end=bool(s.matrix))
-                    when = _when_condition(*s.parsed_when) if s.parsed_when else None
+                    own = _when_condition(*s.parsed_when)[3:-2] if s.parsed_when else None
+                    gate = _start_gate(s)
+                    when = "{{=%s}}" % (gate if own is None else "%s && (%s)" % (gate, own))
                     if s.matrix:     # one task that runs the step once for each combination (_fan_template)
                         Task(name=s.name, template=fan_template(s.name), depends=depends, when=when, arguments={
                             "items": "{{=%s}}" % matrix_setting(s.name, "matrix"),

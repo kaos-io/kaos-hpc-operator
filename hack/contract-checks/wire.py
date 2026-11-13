@@ -250,6 +250,33 @@ def shape_of_context(v):
     return next((b for b in bad if b), "")
 
 
+PLAN_FIELDS = ["version", "run", "app", "project", "experiment", "steps", "pins"]
+PLAN_STEP_FIELDS = ["name", "kind", "needs", "inputs", "produces", "class", "params", "when"]
+
+
+def shape_of_plan(v):
+    """The plan compose keeps for a run (kaos-runs/<run>/plan.json): the steps, each step's settings, the commit of each input.
+    A run that took results from an earlier one also has `reused_from` (after `pins`); a step with matrix= has `matrix`
+    (after `produces`)."""
+    if not isinstance(v, dict) or list(v) not in (PLAN_FIELDS, PLAN_FIELDS + ["reused_from"]) or v["version"] != 1:
+        return "fields must be %s (and optionally reused_from), in that order" % ", ".join(PLAN_FIELDS)
+    if "reused_from" in v and (not isinstance(v["reused_from"], dict) or list(v["reused_from"]) != ["run", "start"]):
+        return "reused_from is {run, start}"
+    for i, e in enumerate(v["steps"]):
+        fields = PLAN_STEP_FIELDS[:5] + (["matrix"] if "matrix" in e else []) + PLAN_STEP_FIELDS[5:]
+        if not isinstance(e, dict) or list(e) != fields:
+            return "step %d: fields must be %s, in that order" % (i, ", ".join(fields))
+        if not _name(e["name"]) or e["kind"] not in KINDS or not isinstance(e["params"], dict) or not isinstance(e["when"], dict):
+            return "step %d: name, kind, params or when is not valid" % i
+        if not all(_name(n) for n in e["needs"] + e["inputs"]) or not all(
+                isinstance(p, dict) and list(p) == ["name", "type"] and _name(p["name"]) and p["type"] in TYPES
+                for p in e["produces"]):
+            return "step %d: needs, inputs or produces is not valid" % i
+    bad = [shape_of_read(r) for r in v["pins"].values()] + ["a pin is under another name" for k, r in v["pins"].items()
+                                                              if isinstance(r, dict) and r.get("name") != k]
+    return next((b for b in bad if b), "")
+
+
 def check_fixtures():
     problems = []
 
@@ -280,6 +307,8 @@ def check_fixtures():
             want(not shape_of_result(value), "%s: %s" % (name, shape_of_result(value)))
         if name.startswith("ledger-"):
             want(not shape_of_ledger(value), "%s: %s" % (name, shape_of_ledger(value)))
+        if name.startswith("run-plan"):
+            want(not shape_of_plan(value), "%s: %s" % (name, shape_of_plan(value)))
     sample = (FIXTURES / "context-escapes.wire").read_text()
     want(all(chr(92) + "u%04x" % ord(c) in sample for c in ESCAPED), "context-escapes.wire does not show every escape")
     want(shape_of_read({"name": "raw", "repo": "raw", "owner": None, "ref": "v1", "commit": "c" * 64}) != ""
@@ -296,6 +325,19 @@ def check_fixtures():
     want(shape_of_matrix_result({"version": 1, "status": "matrix", "items": [{"index": 0, "values": {"a": 1}, "status": "failed"}]}) != "",
          "the shape checks accept a matrix result with no ok item")
     want(_load("result-skipped.json")["status"] == "skipped", "result-skipped.json is not a skipped result")
+    want(_load("context-reused-upstream.json")["upstream"] == {"train": _load("result-reused.json"), "export": ABSENT},
+         "context-reused-upstream.json: upstream is not result-reused.json plus the sentinel")
+    reused = dict(_load("result-model.json"), writes=[dict(w, path="model/baseline/hera-demo-x7k2p/")
+                                                        for w in _load("result-model.json")["writes"]])
+    want(_load("result-reused.json") == reused, "result-reused.json is not result-model.json with the path of the run that wrote it")
+    want(all(p["path"].endswith("/hera-demo-x7k2p/") for p in _load("result-reused.json")["writes"]),
+         "result-reused.json: a path is <name>/<experiment>/<run>/ of the run that wrote it")
+    want(_load("run-plan.json")["run"] == _load("context-no-upstream.json")["run"], "run-plan.json is not the plan of the fixtures' run")
+    want(_load("run-plan.json")["pins"] == {r["name"]: r for r in _load("ledger-two-reads.json")["reads"]},
+         "run-plan.json: pins are not the reads of ledger-two-reads.json")
+    want(shape_of_plan({"version": 1}) != "" and shape_of_write({"name": "m", "type": "model", "repo": "outputs-a",
+                                                                   "commit": "c" * 64, "path": 3}) != "",
+         "the shape checks accept a wrong plan or a path that is not text")
     want(len(_load("ledger-two-reads.json")["reads"]) == 2, "ledger-two-reads.json does not hold two reads")
     want(_load("hpc-job.json") == _hpc_job(), "hpc-job.json is not derived from the other fixtures (run write-fixtures)")
     for p in problems:

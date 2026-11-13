@@ -8,8 +8,8 @@ import textwrap
 import pytest
 import yaml
 
-from helpers import copy_app, run_render, valid
-from kubecore.step_contract import OLD_APP_MARKER, OLD_APP_NOTICE
+from helpers import copy_app, gated, own_condition, run_render, valid
+from kubecore.step_contract import OLD_APP_MARKER, OLD_APP_NOTICE, result_of
 
 
 def render(build):
@@ -278,8 +278,7 @@ def test_a_step_that_needs_a_conditional_step_waits_for_it_to_end_either_way():
                                             "(export.Succeeded || export.Skipped)")
     argument = tasks["evaluate"]["arguments"]["parameters"][0]
     assert argument["name"] == "kaos-context"
-    assert ('sprig.default("{\\"version\\":1,\\"status\\":\\"absent\\"}", '
-            'tasks["export"].outputs.parameters["kaos-result"])') in argument["value"]
+    assert result_of("export") in argument["value"]
 
 
 def _when_of(when, **more):
@@ -306,24 +305,24 @@ def _when_of(when, **more):
      "&& workflow.parameters['experiment-name'] == 'c'}}"),
 ])
 def test_when_is_a_run_form_field_compared_with_a_value(written, rendered):
-    assert _when_of(written)["when"] == rendered
+    assert own_condition(_when_of(written)["when"], "export") == rendered
 
 
-def test_a_step_without_when_has_no_condition():
-    assert "when" not in _when_of(None)
+def test_a_step_without_when_has_only_the_condition_of_the_start_step():
+    assert _when_of(None)["when"] == gated("export")
 
 
 def test_and_binds_tighter_than_or_in_the_rendered_condition():
     """The workflow engine's expression language has the same precedence, so the order is kept as written."""
     import re
-    c = _when_of("dataset == a or dataset == b and experiment-name == c")["when"]
+    c = own_condition(_when_of("dataset == a or dataset == b and experiment-name == c")["when"], "export")
     assert re.search(r"'a' \|\| .* == 'b' && ", c)
 
 
 def test_the_hpc_variant_keeps_the_steps_own_condition():
     from kubecore import meluxina
     assert meluxina._when_expr(_when_of("experiment-name != off")["when"]) == (
-        "workflow.parameters['experiment-name'] != 'off'")
+        "workflow.parameters['start-from-step'] in ['', 'export'] && (workflow.parameters['experiment-name'] != 'off')")
 
 
 ALLOWED = ('A condition compares one name with a text, with == or != and nothing else, for example '

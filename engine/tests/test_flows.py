@@ -9,7 +9,7 @@ import pytest
 import yaml
 from test_authoring_contract import refused, render
 
-from helpers import copy_app, run_render
+from helpers import copy_app, gated, own_condition, run_render
 from kubecore import enhance
 from kubecore.step_contract import (
     canonical_when_text,
@@ -37,7 +37,7 @@ def verdict_pipeline(a, when="evaluate.passed == true"):
 
 def test_a_when_on_a_needed_steps_value_reads_its_result():
     publish = tasks_of(render(verdict_pipeline))["publish"]
-    assert publish["when"] == "{{=" + value_test("evaluate", "passed", "==", "true") + "}}"
+    assert publish["when"] == gated("publish", value_test("evaluate", "passed", "==", "true"), "evaluate")
     assert 'tasks["evaluate"].outputs.parameters["kaos-result"]' in publish["when"]
 
 
@@ -65,7 +65,7 @@ def test_step_and_form_terms_join_with_and_and_or():
         evaluate = a.step("evaluate", kind="evaluate")
         a.step("publish", kind="publish", needs=[evaluate],
                when="evaluate.passed == true and experiment-name != off or evaluate.score != 0")
-    when = tasks_of(render(build))["publish"]["when"]
+    when = own_condition(tasks_of(render(build))["publish"]["when"], "publish", "evaluate")
     assert when.count("&&") == 1 and when.count("||") == 1
     assert "workflow.parameters['experiment-name'] != 'off'" in when
     assert when.count('tasks["evaluate"].outputs.parameters["kaos-result"]') == 10, "five readings for each term"

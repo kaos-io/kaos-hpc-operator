@@ -22,6 +22,12 @@ IMAGE_INPUT = "{{inputs.parameters.image}}"   # a step template's container imag
 LEDGER_PARAM = "kaos-ledger"              # compose's output: the run's ledger as the run starts (pinned inputs)
 LEDGER_PATH = "/work/kaos-ledger.json"
 SENTINEL = {"version": 1, "status": "absent"}
+COMPOSE_TASK = "compose-and-validate"     # the run's first task; the name a step cannot take
+REUSED_OUTPUT_PREFIX = "kaos-reused-"     # compose's output per step: kaos-reused-<step>, the result taken from an earlier run
+REUSED_DIR = "/work/reused"               # where compose writes them: <dir>/<step>.json (empty for a step that runs)
+RECORD_DIR = "kaos-runs"                  # in outputs-<app>: kaos-runs/<run>/<step>.json and plan.json (kaos-lib's record.py)
+REUSE_FIELD = "reuse-from-run"            # the run form's fields for starting from a step with an earlier run's results
+START_FIELD = "start-from-step"
 PROMOTE_STEP = "kaos-promote"             # the run's final task (kubecore/promote.py); a name no step can take
 PROMOTE_PARAM = "kaos-promote-plan"       # its one input: what each dataset-producing step wrote, and the form's promote-<name>
 RESERVED_PREFIX = "kaos-"                 # step names and produced names the platform keeps for itself
@@ -189,14 +195,22 @@ def _task_output(task: str, parameter: str) -> str:
     return "tasks[%s].outputs.parameters[%s]" % (_quoted(task), _quoted(parameter))
 
 
+def reused_output(task: str) -> str:
+    """The expression for the result compose took from an earlier run for the step `task`: empty when the step runs."""
+    return _task_output(COMPOSE_TASK, REUSED_OUTPUT_PREFIX + task)
+
+
 def result_of(task: str, twin: str = "") -> str:
     """The expression for one upstream step's result. A step that was skipped, omitted or wrote nothing
     yields an empty value, never its declared default, so every result goes through `sprig.default` with
-    the sentinel. `twin` is the step's HPC task: exactly one of the two ran, so the pair is asked in turn."""
-    value = "sprig.default(%s, %s)" % (_quoted(wire(SENTINEL)), _task_output(twin or task, RESULT_PARAM))
+    the sentinel. A step whose result was taken from an earlier run (the run form's `reuse-from-run`) did not run: its
+    result is compose's output `kaos-reused-<step>`, which comes before the sentinel and after the step's own result, so a
+    step that runs always gives its own. `twin` is the step's HPC task: exactly one of the two ran, so the pair is asked in
+    turn."""
+    value = "sprig.default(%s, %s)" % (_quoted(wire(SENTINEL)), reused_output(task))
     if twin:
-        value = "sprig.default(%s, %s)" % (value, _task_output(task, RESULT_PARAM))
-    return value
+        value = "sprig.default(%s, %s)" % (value, _task_output(twin, RESULT_PARAM))
+    return "sprig.default(%s, %s)" % (value, _task_output(task, RESULT_PARAM))
 
 
 def result_value(task: str, key: str) -> str:

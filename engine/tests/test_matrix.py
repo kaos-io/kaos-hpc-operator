@@ -8,7 +8,7 @@ import pytest
 import yaml
 from test_authoring_contract import refused, render
 
-from helpers import valid
+from helpers import gated, valid
 from kubecore import compose, enhance
 from kubecore.run_settings import matrix_items, parallel_count
 from kubecore.step_contract import (
@@ -116,7 +116,7 @@ def test_a_when_cannot_read_a_value_of_a_matrix_step_but_a_picker_may_have_a_whe
     assert "runs once for each combination" in refused(build)
     tasks = tasks_of(render(lambda a: sweep(a, when="mode != off") if False else (
         a.step("train", kind="train", matrix={"x": [1]}, when="experiment-name != off", produces=[a.model("m")]))))
-    assert tasks["train"]["when"] == "{{=workflow.parameters['experiment-name'] != 'off'}}"
+    assert tasks["train"]["when"] == gated("train", "workflow.parameters['experiment-name'] != 'off'")
 
 
 # --------------------------------------------------------------------------------------------------- the render

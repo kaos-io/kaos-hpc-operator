@@ -49,6 +49,11 @@ the run here.
 Config never reads the environment: a value that uses a resolver (`${oc.env:NAME}`) is refused, and the
 config is resolved with an empty environment besides, because this pod holds the platform's credentials.
 
+Starting from a step: the run form's `reuse-from-run` and `start-from-step` name an earlier run and a step. The steps
+before the step are not run again: compose takes their results from the earlier run's record, pins the inputs they read to
+the commits that run read, and refuses, before any step starts, whatever it cannot do (kubecore/rerun.py). Every run, this
+kind or not, leaves its plan as `kaos-runs/<run>/plan.json` of the app's outputs repository, best effort.
+
 The run's own keys: `plan` and `pipeline-version` are the platform's; the ADVANCED override may carry
 neither. Whether a run promotes a dataset it produces is the run form's `promote-<dataset>` field
 (--promote): compose checks the value; the run's final task moves `latest` (kubecore/promote.py). A step
@@ -69,7 +74,7 @@ import yaml
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from omegaconf.nodes import BooleanNode, EnumNode, FloatNode, IntegerNode, StringNode
 
-from kubecore import derive_tree
+from kubecore import derive_tree, rerun
 from kubecore.run_settings import (
     checkpoint_field,
     DEFAULT_PARALLEL,
@@ -528,7 +533,21 @@ def _any_grant_label_safe(client):
         return None
 
 
-def pin_inputs(resolved: dict, steps: list, datasets=None, client=None) -> dict:
+def _held_read(name: str, wanted: str, ref, held: dict, resolve) -> dict:
+    """The read of an input that a step this run does not run again read in the earlier run: that read, as it was, unless the
+    form now names another dataset or a version that is another commit. `ref` is the form's value, parsed; `resolve()` is its
+    commit. The version `latest`, or none, is whatever it is now and follows the earlier run."""
+    read, users = held["read"], held["steps"]
+    same = (ref.repo, ref.owner or None) == (read["repo"], read.get("owner") or None)
+    if not same or (ref.version not in (LATEST, read["ref"]) and resolve() != read["commit"]):
+        raise ComposeError(
+            f"input '{name}': step {', '.join(users)} is not run again and read {read['repo']}@{read['ref']} (commit "
+            f"{read['commit'][:12]}) in run '{held['run']}', but the form now names {wanted!r}. Set it back, or leave the "
+            f"version out, or start from step '{users[0]}'.")
+    return read
+
+
+def pin_inputs(resolved: dict, steps: list, datasets=None, client=None, fixed: dict = None) -> dict:
     """{input name: its ledger read} for every input a step declares, each resolved once to a commit.
 
     An input is the name of a top-level config value that holds a dataset reference,
@@ -537,6 +556,9 @@ def pin_inputs(resolved: dict, steps: list, datasets=None, client=None) -> dict:
     be pinned ends the run here, naming the input: an empty value, a value that is no reference, a dataset
     or version that does not exist, a store that does not answer. `datasets`/`client` default to kaos-lib's
     (tests pass their own).
+
+    `fixed` is {input: {"read", "steps", "run"}} for an input a step that this run does not run again read in the earlier
+    run: it keeps that commit, and the form may not name another (_held_read).
     """
     names = [name for step in steps for name in step["inputs"]]
     names = list(dict.fromkeys(names))
@@ -567,15 +589,45 @@ def pin_inputs(resolved: dict, steps: list, datasets=None, client=None) -> dict:
                 raise ValueError(f"{ref.repo} is not a dataset: a dataset is a repository named {DATASET_PREFIX}<name> "
                                  f"(for example {DATASET_PREFIX}default@{LATEST})")
             ref, source = datasets.source(ref, client)   # an owner that is the run's own project is dropped
-            commit = datasets.resolve(ref, source)
+            held = (fixed or {}).get(name)
+            commit = None if held else datasets.resolve(ref, source)
         except Exception as exc:   # no such dataset or version, lakeFS unreachable, no credentials: all end the run
             raise ComposeError(f"input '{name}' (step {users}): cannot use {wanted!r}: {exc}") from None
+        if held:
+            try:
+                reads[name] = _held_read(name, wanted, ref, held, lambda: datasets.resolve(ref, source))
+            except ComposeError:
+                raise
+            except Exception as exc:
+                raise ComposeError(f"input '{name}' (step {users}): cannot use {wanted!r}: {exc}") from None
+            continue
         if not isinstance(commit, str) or not _COMMIT.match(commit):
             raise ComposeError(f"input '{name}' (step {users}): cannot use {wanted!r}: the data store answered "
                                f"with {commit!r} where a commit id was expected")
         reads[name] = {"name": name, "repo": ref.repo, "owner": ref.owner or None, "ref": ref.version,
                        "commit": commit}
     return reads
+
+
+def _record():
+    """kaos-lib's record module: where a run's results and plan are kept (kaos-runs/<run>/ of outputs-<app>)."""
+    try:
+        from kaos_lib import record
+    except ImportError as exc:
+        raise ComposeError(f"cannot read or keep the records of a run: this kaos-lib has no record module ({exc}). The "
+                           f"platform's compose image installs the kaos-lib that has it.") from None
+    return record
+
+
+def keep_plan(plan: dict, app: str, run: str) -> None:
+    """Keep the run's plan as kaos-runs/<run>/plan.json, so that a later run can start from one of its steps. Best effort: a
+    plan that cannot be kept is a warning, and the run goes on (a later run then cannot start from this one)."""
+    try:
+        _record().write(_kaos_lib()[1], app, run, rerun.PLAN, wire(plan))
+        print(f"kept the plan of this run as kaos-runs/{run}/plan.json")
+    except Exception as exc:   # noqa: BLE001
+        print(f"WARNING: the plan of this run could not be kept ({exc}). A later run cannot start from a step of this run.",
+              file=sys.stderr)
 
 
 def ledger(reads: list) -> dict:
@@ -732,6 +784,15 @@ def main(argv=None) -> None:
     parser.add_argument("--images-output", default="",
                         help="Where to write the images the run resolved, {step: image}, from $KAOS_STEP_IMAGES.")
     parser.add_argument("--ledger-output", default="", help="Where to write the run's ledger: every pinned input.")
+    parser.add_argument("--reuse-from-run", default="",
+                        help="The run form's reuse-from-run: an earlier run whose results the steps before --start-from-step take.")
+    parser.add_argument("--start-from-step", default="",
+                        help="The run form's start-from-step: the step this run runs first; with it and every step after it.")
+    parser.add_argument("--hpc-classes", default="", help="The names of the HPC (Slurm) classes, separated by commas.")
+    parser.add_argument("--when-field", action="append", default=[], metavar="FIELD=VALUE",
+                        help="The value of a run form field that a step's when= names (repeatable).")
+    parser.add_argument("--reused-dir", default="",
+                        help="Where to write the result of each step this run does not run: <dir>/<step>.json, empty for a step that runs.")
     parser.add_argument("overrides", nargs="*", help="Hydra override tokens (key=value).")
     args = parser.parse_args(argv)
     if args.steps:
@@ -740,13 +801,16 @@ def main(argv=None) -> None:
         if missing:
             parser.error(f"--steps needs {', '.join(missing)}")
 
-    contexts, reads, settings, images = {}, {}, {}, {}
+    contexts, reads, settings, images, steps, reuse = {}, {}, {}, {}, [], None
     try:
         images = check_step_images(os.environ.get(STEP_IMAGES_ENV))
         advanced = check_advanced(args.advanced)
         resolved = compose_config(args.overrides, advanced, args.require, json.loads(args.render_defaults))
         if args.steps:
             steps = _steps(args.steps)
+            reuse_run, start = args.reuse_from_run.strip(), args.start_from_step.strip()
+            if reuse_run or start:
+                rerun.check_fields(steps, reuse_run, start)
             settings = run_settings(steps, args.walltime, args.checkpoint_every, args.resumable_lead)
             for step, entry in run_matrix(steps, args.matrix, args.parallel).items():
                 settings.setdefault(step, {}).update(entry)
@@ -756,8 +820,15 @@ def main(argv=None) -> None:
                         else "false: its version stays sealed and latest does not move")
                 print(f"dataset {name}: {promote_field(name)} is {what}")
             run_classes(steps, args.classes, args.class_offers)
+            if reuse_run:
+                reuse = rerun.prepare(
+                    steps, reuse_run, start, args.app, {s["name"]: step_params(s, resolved) for s in steps},
+                    _pairs(args.when_field), _pairs(args.classes), {c for c in args.hpc_classes.split(",") if c}, flags,
+                    _record(), _kaos_lib()[1])
+                for line in reuse.notes:
+                    print(line)
             wait_for_grants(steps, args.app)
-            reads = pin_inputs(resolved, steps)
+            reads = pin_inputs(resolved, steps, fixed={k: dict(v, run=reuse_run) for k, v in reuse.pins.items()} if reuse else None)
             contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, settings)
     except Exception as exc:  # any composition failure = hard error, pre-GPU
         message = str(exc)
@@ -773,7 +844,8 @@ def main(argv=None) -> None:
         out.write_text(text)
         print(f"wrote {out} ({len(text.encode())} bytes)")
     for name, read in reads.items():
-        print(f"input {name}: {read['repo']}@{read['ref']} is commit {read['commit']}")
+        print(f"input {name}: {read['repo']}@{read['ref']} is commit {read['commit']}"
+              + (f" (as read in run {reuse.run})" if reuse and name in reuse.pins else ""))
     for step, body in contexts.items():
         target = Path(args.context_dir) / f"{step}.json"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -791,6 +863,17 @@ def main(argv=None) -> None:
         Path(args.ledger_output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.ledger_output).write_text(wire(ledger(list(reads.values()))))
         print(f"wrote {args.ledger_output}")
+    if args.reused_dir:
+        for step in steps:     # the result a step that is not run again gets from the earlier run; empty for a step that runs
+            target = Path(args.reused_dir) / f"{step['name']}.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(wire(reuse.entries[step["name"]]) if reuse and step["name"] in reuse.entries else "")
+        print(f"wrote {args.reused_dir}: {', '.join(reuse.reused) if reuse and reuse.reused else 'no step'} reused")
+    if steps:
+        keep_plan(rerun.plan_of(
+            args.run, args.app, args.project, experiment_of(resolved, args.app), steps,
+            {s["name"]: step_params(s, resolved) for s in steps}, _pairs(args.when_field), _pairs(args.classes), reads, reuse),
+            args.app, args.run)
 
 
 if __name__ == "__main__":

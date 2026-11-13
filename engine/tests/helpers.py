@@ -46,6 +46,25 @@ def evaluate(expression: str, settings: dict):
     return eval(body, {"json": json, "int": int})  # noqa: S307 - the engine's own output, in a test
 
 
+def start_gate(step: str, *needs_of: str) -> str:
+    """The condition every task has on the run form's `start-from-step`: the step runs when the form names no step, the step
+    itself, or a step it needs (directly or not). `needs_of` is every step it needs, in the order the engine writes them."""
+    names = ", ".join(f"'{n}'" for n in ("", step, *needs_of))
+    return f"workflow.parameters['start-from-step'] in [{names}]"
+
+
+def gated(step: str, own: str = "", *needs_of: str) -> str:
+    """The whole `when` of a task: the gate of `start_gate`, and the step's own condition (without the braces) after it."""
+    return "{{=" + start_gate(step, *needs_of) + (f" && ({own})" if own else "") + "}}"
+
+
+def own_condition(when: str, step: str, *needs_of: str) -> str:
+    """The step's own condition as the engine writes it, `{{=...}}`, taken out of the whole `when` of its task."""
+    head, tail = "{{=" + start_gate(step, *needs_of) + " && (", ")}}"
+    assert when.startswith(head) and when.endswith(tail), when
+    return "{{=" + when[len(head):-len(tail)] + "}}"
+
+
 def valid(authoring, kind: str) -> dict:
     """The keywords that make a step of `kind` valid on its own: what its kind requires it to produce
     (docs/step-contract.md, "Step kinds")."""

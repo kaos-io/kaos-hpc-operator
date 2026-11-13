@@ -19,6 +19,8 @@ one beside it: every app moves once.
 - [9. Reserved names](#9-reserved-names)
 - [10. How the engine assembles the context](#10-how-the-engine-assembles-the-context)
 - [11. Checks](#11-checks)
+- [12. A matrix step](#12-a-matrix-step)
+- [13. Starting a run from a step](#13-starting-a-run-from-a-step)
 
 ## 0. What exists today
 
@@ -53,7 +55,7 @@ Everything after `name` is keyword-only.
 | `needs=` | The steps this step runs after, at most ten. Each one's result reaches this step in `upstream`. |
 | `produces=` | What the step writes: `model("name")`, `artifact("name")`, `dataset("name")`. A dataset an app produces is the repository `dataset-<app>-<name>`: `dataset("clean")` in the app `hera1` is `dataset-hera1-clean`. The name is per app because every app made from a template declares the same names and a dataset has exactly one producer; two apps of a project never share one. |
 | `gpu=` | Unchanged. |
-| `when=` | A condition in plain words: a name, `==` or `!=`, and a value. The name is a field of the run form, `when="quantization-mode != off"` (a setting's path with dashes, as the run form shows it), or a value a step in `needs=` handed on, `when="evaluate.passed == true"`: `<step>.<value>`, where `<value>` is a keyword of that step's `step.result(...)` (letters, digits and `_`; a step that is not in this step's `needs=` is refused, naming the fix). The value is a bare word or number (`off`, `3`) or a quoted string (`"two words"`). Comparisons join with `and` / `or` (`and` binds tighter; no parentheses, no other operators). The engine writes it as one condition on the step's task and on its HPC variant, comparing the field's value as text: `quantization-mode != off` becomes `{{=workflow.parameters['quantization-mode'] != 'off'}}` (`and` becomes `&&`, `or` becomes a double bar, in the order written). A step's value is read from the needed step's result (`kaos-result`) through the expression of section 10 item 3. **What is compared, exactly:** a value that is a string is compared with the text as text; a value that is a number or a boolean is compared by its JSON text, as the workflow system's `toJSON` writes it (`1000000` is `1000000`, `1e6` written in `when=` is read as `1000000`, `1.0` is `1`, `1e-5` is `0.00001`, `true` is `true`), never through `string()` (which writes `1e+06` for 1000000, `1.2345678e+07` for 12345678 and `1e-05` for 0.00001). Written in `when=`, a number is read the way JSON writes numbers, so `1e6`, `1000000` and `1000000.0` all match the value 1000000. `evaluate.rows != 1000000` therefore skips the step when `rows` is 1000000. A text that cannot be matched reliably is refused when the pipeline is rendered, naming the fix: a number written another way than JSON writes it (`.5`, `+1`, `01`, `5.`), a `True`/`NULL` that is not lowercase, an integer above 9007199254740992 (a result's number is a double), a number too large to hold, and any control character (a line break, a tab; also refused in `when=` as a whole). **A needed step that was skipped has no value, and the condition is false** for `==` and for `!=` alike (nothing can be said about a value that does not exist): the step that asked is skipped too, and the run goes on. That holds for a step skipped by its own `when=` (the absent sentinel), for one that ended itself with `step.skip()` (result `status: skipped`), on the cluster and on the HPC variant (the pair). A needed step that **ran and finished well but did not set the key** (a typo in the name, a value never set, or `null`) fails the task, naming step and key: `int("<sentence>")` of a sentence is the one failure the expression language lets us word, and the workflow system shows `failed to evaluate expression: invalid operation: int(step 'evaluate' ran but gave no value 'passed' (a typo in the name, or the value was never set with step.result(passed=...)): a when= on a step's value needs the value)` as the task's error. A result whose status is none of `ok`, `skipped` and `absent` is malformed and fails the task too. A needed step that failed never reaches the condition (its `depends`). The expression is `(<status> in ["absent", "skipped"] ? false : (<status> == "ok" ? <comparison> : int("<malformed sentence>")))` (checked on the lab, Argo Workflows v4.0.6: 29 comparisons over 999999, 1000000, 12345678, 3000000000, 0.5, 1.0, 1e-5, true, false, an empty string and a string that looks like a number; and the cases: gate passes, gate hands on false, gate skipped by `step.skip()` and by its own `when=` with `==` and `!=`, key missing, malformed result; the cluster shape and the HPC pair). `kaos-promote` is unaffected (its `depends` accept Skipped; a skipped step's dataset is simply not promoted), and a step that needs a matrix step cannot name its value (section 1). The step is skipped when the condition is false. |
+| `when=` | A condition in plain words: a name, `==` or `!=`, and a value. The name is a field of the run form, `when="quantization-mode != off"` (a setting's path with dashes, as the run form shows it), or a value a step in `needs=` handed on, `when="evaluate.passed == true"`: `<step>.<value>`, where `<value>` is a keyword of that step's `step.result(...)` (letters, digits and `_`; a step that is not in this step's `needs=` is refused, naming the fix). The value is a bare word or number (`off`, `3`) or a quoted string (`"two words"`). Comparisons join with `and` / `or` (`and` binds tighter; no parentheses, no other operators). The engine writes it as one condition on the step's task and on its HPC variant (after the term every task has for starting a run from a step, section 13), comparing the field's value as text: `quantization-mode != off` becomes `{{=workflow.parameters['quantization-mode'] != 'off'}}` (`and` becomes `&&`, `or` becomes a double bar, in the order written). A step's value is read from the needed step's result (`kaos-result`) through the expression of section 10 item 3. **What is compared, exactly:** a value that is a string is compared with the text as text; a value that is a number or a boolean is compared by its JSON text, as the workflow system's `toJSON` writes it (`1000000` is `1000000`, `1e6` written in `when=` is read as `1000000`, `1.0` is `1`, `1e-5` is `0.00001`, `true` is `true`), never through `string()` (which writes `1e+06` for 1000000, `1.2345678e+07` for 12345678 and `1e-05` for 0.00001). Written in `when=`, a number is read the way JSON writes numbers, so `1e6`, `1000000` and `1000000.0` all match the value 1000000. `evaluate.rows != 1000000` therefore skips the step when `rows` is 1000000. A text that cannot be matched reliably is refused when the pipeline is rendered, naming the fix: a number written another way than JSON writes it (`.5`, `+1`, `01`, `5.`), a `True`/`NULL` that is not lowercase, an integer above 9007199254740992 (a result's number is a double), a number too large to hold, and any control character (a line break, a tab; also refused in `when=` as a whole). **A needed step that was skipped has no value, and the condition is false** for `==` and for `!=` alike (nothing can be said about a value that does not exist): the step that asked is skipped too, and the run goes on. That holds for a step skipped by its own `when=` (the absent sentinel), for one that ended itself with `step.skip()` (result `status: skipped`), on the cluster and on the HPC variant (the pair). A needed step that **ran and finished well but did not set the key** (a typo in the name, a value never set, or `null`) fails the task, naming step and key: `int("<sentence>")` of a sentence is the one failure the expression language lets us word, and the workflow system shows `failed to evaluate expression: invalid operation: int(step 'evaluate' ran but gave no value 'passed' (a typo in the name, or the value was never set with step.result(passed=...)): a when= on a step's value needs the value)` as the task's error. A result whose status is none of `ok`, `skipped` and `absent` is malformed and fails the task too. A needed step that failed never reaches the condition (its `depends`). The expression is `(<status> in ["absent", "skipped"] ? false : (<status> == "ok" ? <comparison> : int("<malformed sentence>")))` (checked on the lab, Argo Workflows v4.0.6: 29 comparisons over 999999, 1000000, 12345678, 3000000000, 0.5, 1.0, 1e-5, true, false, an empty string and a string that looks like a number; and the cases: gate passes, gate hands on false, gate skipped by `step.skip()` and by its own `when=` with `==` and `!=`, key missing, malformed result; the cluster shape and the HPC pair). `kaos-promote` is unaffected (its `depends` accept Skipped; a skipped step's dataset is simply not promoted), and a step that needs a matrix step cannot name its value (section 1). The step is skipped when the condition is false. |
 | `walltime=` | The step's time limit, on any kind: `'90m'`, `'12h'` or `'720'` (minutes). It is the default of the step's run-form field `<step>-walltime` (below). |
 | `matrix=` | `{"lr": [0.01, 0.001], "batch": [16, 32]}`: the step runs once for each combination of the values (section 12). The run form's `<step>-matrix` holds the combinations (every one by default) and `<step>-parallel` how many run at once. At most 32 combinations; the step may not produce a dataset or be `ingest`, `publish` or `control`; it may not need another matrix step. |
 | `matrix_allow_failed=` | `True` on a step with `matrix=`: the step after it runs when some items failed and sees which (section 12). By default one failed item fails the step. |
@@ -394,7 +396,7 @@ A write, with its fields in this order:
 | `repo` | string | The repository written to: `dataset-<app>-<name>` for a dataset, `outputs-<app>` for a model or an artifact. |
 | `commit` | string | The commit that holds it: 64 hex characters. |
 | `line` | string, optional | Reserved, as above. |
-| `path` | string, optional | Reserved for Use (after the wave): where the model or artifact lives when it comes from an earlier run. Absent means `<name>/<experiment>/<run>/` of this run. |
+| `path` | string, optional | Where the model or artifact lives when it comes from an earlier run: `<name>/<experiment>/<run>/` of that run, with a final `/`. Only the platform writes it, in the result it hands on for a step this run does not run again (section 13); a step never does. Absent means `<name>/<experiment>/<run>/` of the run that reads it. Datasets need none: they are read by commit. kaos-lib reads a model or an artifact from `path` when it is there; a kaos-lib that does not know the field looks under this run's folder and fails the step, naming the missing files. |
 
 **The run's ledger.** Compose writes one output, `kaos-ledger`: a ledger with no writes and one read for
 each declared input name, in the pipeline's order of steps and then the order of declaration. Two input
@@ -578,13 +580,15 @@ days with "runs with HPC steps are kept at least 32 days, so the month's HPC spe
 | Config keys | `plan` and `pipeline-version`. `plan.use.<artifact>` and `plan.target` are reserved for Use and Target; until those ship compose refuses every `plan` key (`plan.promote` with a message that names the run-form field `promote-<dataset>`, any other with a message that it is not available yet). |
 | Step names, input names, `produces` names, `values` keys | everything that starts with `kaos-` |
 | Step names | also `compose-and-validate`, `main`, `hpc-follower` and names ending in `-hpc`, as before |
-| Output names of a step | `kaos-result`; of compose, `kaos-ledger` and `kaos-context-<step>` |
+| Output names of a step | `kaos-result`; of compose, `kaos-ledger`, `kaos-context-<step>` and `kaos-reused-<step>` |
 | Branches of a dataset or outputs repository | `run-*` |
 | Tags | `k-*` and `keep-*` |
 | Folder at the root of a dataset | `.kaos/` |
 | Authoring | `of=` in `dataset(...)` |
 | Dataset references | the form `<dataset>.<variant>@<ref>` |
-| Ledger entries | `line`; on a write, `path` |
+| Ledger entries | `line`; on a write, `path` (written by the platform only, section 13) |
+| Run form | `reuse-from-run` and `start-from-step` (section 13) |
+| Files in `outputs-<app>` | `kaos-runs/` (section 13) |
 
 ## 10. How the engine assembles the context
 
@@ -629,16 +633,21 @@ The checks ran on v4.0.6. An earlier version of checks 3(a), 3(b) and 3(c) was a
      value: >-
        {{=sprig.trimSuffix("}", tasks["compose-and-validate"].outputs.parameters["kaos-context-train"])
        + ",\"upstream\":{\"prepare-data\":"
-       + sprig.default("{\"version\":1,\"status\":\"absent\"}", tasks["prepare-data"].outputs.parameters["kaos-result"])
+       + sprig.default(sprig.default("{\"version\":1,\"status\":\"absent\"}", tasks["compose-and-validate"].outputs.parameters["kaos-reused-prepare-data"]), tasks["prepare-data"].outputs.parameters["kaos-result"])
        + "}" + "}"}}
    ```
+
+   The inner `sprig.default(<sentinel>, ...["kaos-reused-prepare-data"])` is the result a run that starts from a step took
+   from an earlier run for a step it does not run again (section 13); it is empty in every other run.
 
    A step that can run on an HPC class is two tasks, `<step>` and `<step>-hpc`, of which exactly one
    runs. Its result is the one that is there, so each such step in `needs=` takes the pair form:
 
    ```
    sprig.default(
-     sprig.default("{\"version\":1,\"status\":\"absent\"}", tasks["prepare-data-hpc"].outputs.parameters["kaos-result"]),
+     sprig.default(
+       sprig.default("{\"version\":1,\"status\":\"absent\"}", tasks["compose-and-validate"].outputs.parameters["kaos-reused-prepare-data"]),
+       tasks["prepare-data-hpc"].outputs.parameters["kaos-result"]),
      tasks["prepare-data"].outputs.parameters["kaos-result"])
    ```
 
@@ -809,3 +818,90 @@ complementary condition on the class. The job of an item is named after the step
 fan-out larger than the project's budget is in `internal/admission/admission.go` and `test/scale` (`TestScaleMatrixBudget`).
 
 Fixtures: `context-matrix-item`, `context-matrix-upstream`, `result-matrix`.
+
+## 13. Starting a run from a step
+
+A run may start from a step and take the results of an earlier run for the steps before it: the steps that are not
+run again are not started, and their results and outputs are the earlier run's. It is a run like any other for what it
+runs: its own name, its own ledger, its own `latest` rules.
+
+**The record.** Every step that ends well writes, as its last act, the exact result it hands on (section 4, wire form)
+as `kaos-runs/<run>/<step>.json` on `main` of the app's `outputs-<app>`, through kaos-lib (`kaos_lib.record`): on its own
+branch `run-<run>-<step>-record`, merged into `main` as one commit, the way a model is saved. A step that ends itself with
+`step.skip()` writes its skipped result. Writing is best effort: when it fails the step warns in its log and still
+succeeds (a later run then cannot start after that step from this run). A step with `matrix=` writes none; a step that
+failed or was never reached has none, and a step skipped by its `when=` ran no code and has none. Compose writes the
+run's plan, `kaos-runs/<run>/plan.json` (fixture `run-plan`), when the checks pass, before any step starts, also best
+effort: `{version, run, app, project, experiment, steps, pins}`, and `reused_from: {run, start}` when the run took results
+from another. For each step the plan holds `name`, `kind`, `needs`, `inputs`, `produces` (names and types), `matrix` (when
+it has one), the class the run form gave it (`class`), its settings (`params`, the config sections it reads) and `when`,
+the values of the run form fields its `when=` names (the render writes them into the step table as `when_fields`);
+`pins` holds the read of every input, as the ledger does. `kaos-runs/` is in the repository of the outputs, beside the
+folders of the models.
+
+**The run form.** Two text fields, empty by default, which mean a normal run:
+
+| Field | Meaning |
+|---|---|
+| `reuse-from-run` | "Optional. The name of an earlier run of this app. Steps before the step below are not run again; their results and outputs are taken from that run. Leave empty for a normal run." |
+| `start-from-step` | "Optional. The step to run first; it and every step after it run again. Needs the earlier run above. Steps: <the steps>." |
+
+Both reach compose as `--reuse-from-run=` and `--start-from-step=`, as `--promote` does, and a render also passes
+`--hpc-classes` (the names of the HPC classes) and one `--when-field <field>=<value>` for each form field a `when=` names.
+
+**Which tasks run.** Let X be `start-from-step`. A step is run again when X is empty, or is the step, or is a step it needs
+(directly or through others): the step is X or after X. Every other step is not run again, whether it is before X or on a
+branch that never meets it. The render gives every task one more term in its `when`, first, so that a step that is not run
+again never evaluates its own condition: `{{=workflow.parameters['start-from-step'] in ['', '<step>', '<each step it
+needs, directly or not>'] && (<the step's own when>)}}` (without the parenthesis when it has none). The HPC variant of a step
+has the same term, as it has the step's own `when`. A task whose `when` is false is Skipped and its `depends` are met by
+a bare name (`depends: <step>` accepts Skipped; checked on Argo Workflows v4.0.6), so the steps after it start: no change to
+`depends`. (The tolerant form of section 10, `(<step>.Succeeded || <step>.Skipped || <step>.Omitted)`, is for a step that
+may be skipped: it is not used here, because a failed step makes the next task Omitted and every task that tolerates Omitted
+would then run.)
+
+**The result of a step that is not run again.** Compose declares one more output for each step, `kaos-reused-<step>`
+(`/work/reused/<step>.json`): the step's result as the earlier run handed it on, in wire form, with `path` added to every
+model or artifact write, and empty for a step that runs. The expression of section 10, item 3 reads a step's result as
+
+```
+sprig.default(sprig.default("{\"version\":1,\"status\":\"absent\"}", tasks["compose-and-validate"].outputs.parameters["kaos-reused-<step>"]), tasks["<step>"].outputs.parameters["kaos-result"])
+```
+
+and the pair of a step with an HPC variant as `sprig.default(sprig.default(sprig.default(<sentinel>, <reused>),
+tasks["<step>-hpc"]...["kaos-result"]), tasks["<step>"]...["kaos-result"])`: a step that ran gives its own result, a step
+that is not run again the earlier run's, and a step that did not run the sentinel. Everything that reads a result goes
+through that expression and works unchanged: the context of a step, a `when=` on a value (also one that reads a value of a
+step not run again, both ways), the final task's plan, the pair of a twin. A result may cost 8 KiB (section 7); compose
+refuses a result that costs more with the paths added.
+
+**The inputs.** An input a step that is not run again read is pinned to the commit the earlier run recorded in `pins`, never
+resolved again: `latest` in the run form is not looked at again for it, and a form value that names another dataset, or a
+version that is another commit, is refused. An input read only by steps that run again is resolved as always.
+
+**The checks.** Compose does all of them before any step starts, and each refusal is one plain sentence after
+`compose-and-validate FAILED:` that says what to change:
+
+| Refused | Sentence (the start is X, the run R) |
+|---|---|
+| one field empty | `reuse-from-run and start-from-step go together: <field> is empty.` |
+| X is not a step | `start-from-step: this pipeline has no step 'X'. Its steps are: a, b, c.` |
+| a step that is not run again has `matrix=` | `step 'S' runs once for each combination of its matrix= and this run does not run it again (it starts from 'X'): a step with matrix= cannot be reused yet. Start from step 'S'.` |
+| no plan of R for this app | `reuse-from-run: no saved record of run 'R' for this app. It may belong to another app, be misspelled, or be older than what the platform keeps.` |
+| R took results from another run | `reuse-from-run: run 'R' took the results of some of its steps from run 'R0', so it has no record of them. Reuse run 'R0' instead, or choose a run that ran every step it has.` |
+| a step that is not run again has no `ok` or `skipped` record in R | `run 'R' has no result for step 'S' (it failed, did not finish or was not run). A step before 'X' is not run again without one. Start from step 'S', or choose a run that finished it.` |
+| the step is not in R's plan | `step 'S' is not in run 'R': the pipeline has changed since. A step before 'X' is not run again. Start from step 'S'.` |
+| its kind, needs, inputs or produces differ | `step 'S' is not the step run 'R' ran: its <kind> was <old> and is <new>. A step before 'X' is not run again. Start from step 'S'.` |
+| its settings or the form values its `when=` names differ | `step 'S' reads different settings than in run 'R': <key: old -> new, ...>. A step before 'X' is not run again, so its settings cannot change. Set them back, or start from step 'S'.` |
+| it ran on an HPC class in R | `step 'S' ran on the HPC (Slurm) class 'C' in run 'R': the result of a step that ran there cannot be reused yet. Start from step 'S'.` |
+| a step that runs again on an HPC class reads a model or an artifact of a step not run again | `step 'T' is set to run on the HPC (Slurm) class 'C' and reads 'M' of step 'S', which this run takes from run 'R': an HPC step cannot read it yet. Choose a machine class of the cluster for 'T', or start from step 'S'.` |
+| an input's form value differs from what R read | `input 'I': step S is not run again and read <repo>@<ref> (commit <12>) in run 'R', but the form now names '<value>'. Set it back, or leave the version out, or start from step 'S'.` |
+| an output a step that runs again needs is gone (a dataset commit not readable, no object under a model's or artifact's path) | `output 'O' of step 'S' (run 'R') is no longer there: <why>. Run that step again: start from step 'S'.` |
+| `promote-<d>` is true and a step not run again made `<d>` | `promote-<d> is true, but the dataset <d> was made by step S of run R, which this run does not run again. Promote it from run R, or start from step S.` |
+
+On success compose logs one line for each step not run again (`step S: reused from run R`), each pin taken from R, and that
+the images are not compared: **a step that is not run again is whatever ran in R**, its code and its image included.
+Not in this version: a step with `matrix=` that is not run again, a result from an HPC step, an HPC step that reads
+a reused model or artifact, a run that reused another (so the earlier run to name is the one that ran the steps), a
+step skipped by its `when=` in R that is not run again (it has no record: start from it).
+
