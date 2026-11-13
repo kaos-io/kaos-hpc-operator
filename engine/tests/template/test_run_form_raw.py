@@ -30,7 +30,7 @@ GOOD = {
               "experiment-name": "string"},
     "optionDefaults": {"model": {"b": {"train.lr": "0.2"}}},
     "leafOptions": {"train.lr": ["a"]},
-    "when": {"train": "train.amp"},
+    "when": {"train": "train.amp == true"},
     "overrides": {"fields": {"train.epochs": {"label": "Epochs", "tier": "advanced", "minimum": 1, "maximum": 9,
                                               "group": "tuning"}},
                   "groups": [{"id": "tuning", "label": "Tuning", "tier": "basic", "order": 1}]},
@@ -129,7 +129,7 @@ def test_a_good_raw_form_passes():
     _validate(_raw())
     seen = []
     _validate(_raw(), parse_when=seen.append)
-    assert seen == ["train.amp"]
+    assert seen == ["train.amp == true"]
 
 
 def _with(path, value):
@@ -204,6 +204,17 @@ def test_a_when_text_that_does_not_parse_is_refused():
         raise ValueError("bad text")
     with pytest.raises(RunFormError, match="does not parse: bad text"):
         _validate(_raw(), parse_when=parse)
+
+
+@pytest.mark.parametrize("text", ["train.amp", "mode ==", "a == b or", "(a == b)", "a = b", "{{workflow.parameters.x}} == 1",
+                                  "a == b; c == d", ""])
+def test_the_default_parser_refuses_an_invalid_when(text):
+    with pytest.raises(RunFormError, match=r"when\['train'\] does not parse"):
+        _validate(_with(["when", "train"], text))
+
+
+def test_the_default_parser_accepts_the_grammar():
+    _validate(_with(["when", "train"], "train.amp == true and model != 'b' or model == \"a\""))
 
 
 def test_the_allowed_override_keys_are_the_v1_set():

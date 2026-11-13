@@ -7,6 +7,7 @@ import re
 from typing import Callable, Optional
 
 from kubecore import step_contract
+from kubecore import form_grammar
 from kubecore.enhance import platform_annotations, tier_default
 from kubecore.meluxina import HPC_TWIN_TEMPLATE, STEP_KIND_LABEL, hpc_classes
 from kubecore.run_settings import checkpoint_field, class_field, promote_field, walltime_field
@@ -160,8 +161,9 @@ def _check_type(name: str, kind: str, param: dict) -> None:
 
 def validate_raw(raw: dict, params: list, step_names, parse_when: Optional[Callable[[str], object]] = None) -> None:
     """Refuse a raw form that does not fit the template. `params` are the Argo parameters, `step_names` the
-    pipeline's own steps. `parse_when` re-parses each `when` text.
-    TODO(T2a): pass form_grammar's parser from enhance(); until then (None) the re-parse is skipped."""
+    pipeline's own steps. `parse_when` re-parses each `when` text; the default is form_grammar's parser."""
+    if parse_when is None:
+        parse_when = form_grammar.parse_when
     if not isinstance(raw, dict):
         raise RunFormError("the raw form must be an object")
     extra = set(raw) - RAW_KEYS
@@ -221,11 +223,10 @@ def validate_raw(raw: dict, params: list, step_names, parse_when: Optional[Calla
             raise RunFormError("when names %r, which is not a step of this pipeline" % step)
         if not isinstance(text, str):
             raise RunFormError("when[%r] must be text" % step)
-        if parse_when is not None:
-            try:
-                parse_when(text)
-            except Exception as exc:
-                raise RunFormError("when[%r] does not parse: %s" % (step, exc)) from None
+        try:
+            parse_when(text)
+        except Exception as exc:
+            raise RunFormError("when[%r] does not parse: %s" % (step, exc)) from None
 
     _validate_overrides(raw["overrides"], types, param)
 
@@ -298,6 +299,74 @@ def _validate_overrides(overrides, types: dict, param) -> None:
             # TODO(T8): enforce that `gid` is a declared override group or a fixed group (check_form).
             if not isinstance(gid, str) or not GROUP_ID_RE.match(gid):
                 raise RunFormError("%s: group %r must match %s" % (where, gid, GROUP_ID_RE.pattern))
+
+
+# ------------------------------------------------------------------------------ order
+
+# The run form's fixed groups, in the order a developer reads them: (id, tier). `settings` is where the config
+# leaves sit, and where the groups of _form.yaml sort (by their `order`, after the plain settings).
+GROUPS = (
+    ("info", "hidden"),
+    ("experiment", "basic"),
+    ("settings", "basic"),
+    ("datasets", "basic"),
+    ("steps", "basic"),
+    ("promote", "advanced"),
+    ("advanced", "advanced"),
+    ("platform", "hidden"),
+)
+_STEP_SUFFIXES = ("class", "walltime", "checkpoint-every")
+
+
+def form_rank(params: list, step_table: list, overrides: Optional[dict] = None) -> dict:
+    """{parameter name: (group id, index)} for each of `params`, the Argo parameters. The group id is one of
+    GROUPS, or the id of a _form.yaml group (in `overrides["groups"]`) a field was moved to with `group`. The
+    index orders a step's own fields (class, time limit, checkpoint interval, step by step); everywhere else
+    it is 0, and a caller sorts stably so the Argo order holds inside a group. Sort with `rank_key`.
+    `step_table` is the compose step's `--steps` table."""
+    inputs = {name for entry in step_table for name in entry["inputs"]}
+    own = [entry["name"] for entry in step_table]
+    step_fields = {"%s-%s" % (step, suffix): (i * 3 + k) for i, step in enumerate(own)
+                   for k, suffix in enumerate(_STEP_SUFFIXES)}
+    moved = ((overrides or {}).get("fields")) or {}
+    rank = {}
+    for p in params:
+        name = p["name"]
+        if name in step_fields:
+            rank[name] = ("steps", step_fields[name])
+        elif name == "pipeline-info":
+            rank[name] = ("info", 0)
+        elif name.startswith("experiment-"):
+            rank[name] = ("experiment", 0)
+        elif name in inputs:
+            rank[name] = ("datasets", 0)
+        elif name.startswith("promote-"):
+            rank[name] = ("promote", 0)
+        elif name == "config":
+            rank[name] = ("advanced", 0)
+        elif name.startswith("image-"):
+            rank[name] = ("platform", 0)
+        else:
+            rank[name] = ("settings", 0)
+        group = (moved.get(name) or {}).get("group")
+        if group:
+            rank[name] = (group, 0)
+    return rank
+
+
+def rank_key(entry: tuple, overrides: Optional[dict] = None) -> tuple:
+    """The sort key of a `form_rank` entry. A fixed group sorts by its place in GROUPS. A _form.yaml group sorts
+    inside `settings`, after the plain settings, by its `order` (then its declaration). A group that is neither
+    sorts last, so a stale id never reorders the rest."""
+    group, index = entry
+    fixed = [g for g, _ in GROUPS]
+    if group in fixed:
+        return (fixed.index(group), 0, 0, index)
+    declared = [g.get("id") for g in ((overrides or {}).get("groups") or [])]
+    if group in declared:
+        order = (overrides["groups"][declared.index(group)] or {}).get("order")
+        return (fixed.index("settings"), 1, order if isinstance(order, int) else 0, declared.index(group), index)
+    return (len(fixed), 0, 0, index)
 
 
 # ------------------------------------------------------------------------------ machines and steps
@@ -397,7 +466,10 @@ def steps(steps: list, offers: dict, ctx: dict, params: list) -> list:
             continue
         offer = offers.get(name)
         if offer is None:
-            pinned = platform_annotations(step)["compute-class"]
+            pinned = platform_annotations(step).get("compute-class")
+            if not pinned:
+                raise RunFormError("step %r is not pinned to a compute class and has no class offer: pin it with "
+                                   "the compute-class annotation, or pass its class_offer in offers" % name)
             entry = {"classField": None, "default": pinned, "offered": [pinned], "refused": {}}
         else:
             # enhance_class_param sets the `<step>-class` value to tier_default; once the step is enhanced its typed

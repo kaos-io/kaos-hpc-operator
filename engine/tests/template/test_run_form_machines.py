@@ -185,3 +185,13 @@ def test_run_form_imports_no_render_library():
 @pytest.mark.parametrize("name", ["machine", "step"])
 def test_the_definitions_exist(name):
     assert name in SCHEMA["$defs"]
+
+
+def test_an_unpinned_step_missing_from_offers_is_refused_naming_the_step():
+    ctx = _ctx()
+    _, offers, steps, params = _steps(ctx)
+    name = next(iter(offers))
+    with pytest.raises(run_form.RunFormError, match="step %r is not pinned" % name):
+        run_form.steps(steps, {k: v for k, v in offers.items() if k != name}, ctx, params)
+    with pytest.raises(run_form.RunFormError, match="step %r is not pinned" % name):
+        run_form.steps(steps, {**offers, name: None}, ctx, params)
