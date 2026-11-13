@@ -61,6 +61,7 @@ import json
 import os
 import re
 import sys
+import time
 from enum import Enum
 from pathlib import Path
 
@@ -98,6 +99,7 @@ from kubecore.step_contract import (
     base_cost,
     cost,
     dataset_name_problem,
+    dataset_repo,
     produced_repo,
     wire,
 )
@@ -453,6 +455,79 @@ def _kaos_lib():
     return datasets, client
 
 
+GRANT_KEY = "kaos.grant"      # the data store's label on a produced dataset's repository: "<app>@<time>" once the app can write it
+GRANT_WAIT_S = 180            # the data store says a grant takes one to two minutes
+GRANT_POLL_S = 3
+
+
+def _grant_of(metadata) -> str:
+    return str((metadata or {}).get(GRANT_KEY) or "")
+
+
+def _any_grant_label(client) -> bool:
+    """Whether any dataset repository of the project carries a `kaos.grant` label: the evidence that the data store marks
+    writable datasets at all. The store exposes no version or capability, so this is how an older store is told."""
+    for repository in client.repositories():
+        name = repository.get("id") or repository.get("name") or ""
+        if name.startswith(DATASET_PREFIX) and GRANT_KEY in (client.metadata(name) or {}):
+            return True
+    return False
+
+
+def wait_for_grants(steps: list, app: str, client=None, clock=time.monotonic, sleep=time.sleep, say=print) -> None:
+    """Before any step starts, wait until the data store has given this app the right to write every dataset its steps
+    produce. The store creates the repository first and marks it `kaos.grant=<app>@<time>` only once the app can really
+    write it, up to a minute or two later; a step that wrote sooner was refused. A run that produces no dataset makes no
+    call at all. Polls every few seconds for up to GRANT_WAIT_S.
+
+    A store that does not set the label (an older one) is told by the evidence: when the time is up and no dataset
+    repository of the project carries any `kaos.grant` label, the run starts, and the log says so. In any other case the
+    run stops, naming the dataset and what to do."""
+    wanted = {e["name"]: dataset_repo(app, e["name"]) for step in steps for e in step["produces"] if e["type"] == "dataset"}
+    if not wanted:
+        return
+    client = client or _kaos_lib()[1]
+    pending, told, deadline, problem = dict(wanted), set(), clock() + GRANT_WAIT_S, {}
+    while True:
+        for name, repo in list(pending.items()):
+            try:
+                label = _grant_of(client.metadata(repo))
+                problem.pop(name, None)
+            except Exception as exc:   # noqa: BLE001 - the repository may not be visible yet; the last reason is told
+                label, problem[name] = "", f"{type(exc).__name__}: {exc}"
+            if label.startswith(app + "@"):
+                del pending[name]
+            elif label:
+                problem[name] = f"it is marked for another app ({label.split('@')[0]})"
+        if not pending:
+            return
+        for name in sorted(pending):
+            if name not in told:
+                say(f"waiting for dataset {name} to become writable (it was declared a moment ago)")
+                told.add(name)
+        if clock() >= deadline:
+            break
+        sleep(GRANT_POLL_S)
+    if not any(name in problem for name in pending) and _any_grant_label_safe(client) is False:
+        say(f"the data store marks no dataset of this project as writable (no repository carries {GRANT_KEY}), so it is "
+            f"an older store: starting without waiting for {', '.join(sorted(pending))}")
+        return
+    names = ", ".join(sorted(pending))
+    why = "; ".join(f"{name}: {problem[name]}" for name in sorted(pending) if name in problem)
+    raise ComposeError(
+        f"the dataset {names} is not writable yet: the data store has not given app '{app}' the right to write it after "
+        f"{GRANT_WAIT_S // 60} minutes{' (' + why + ')' if why else ''}. Run again in a minute. If it keeps happening, tell the "
+        f"platform team the name of the dataset.")
+
+
+def _any_grant_label_safe(client):
+    """_any_grant_label, or None when the store cannot be read (then the run is not started on a guess)."""
+    try:
+        return _any_grant_label(client)
+    except Exception:   # noqa: BLE001
+        return None
+
+
 def pin_inputs(resolved: dict, steps: list, datasets=None, client=None) -> dict:
     """{input name: its ledger read} for every input a step declares, each resolved once to a commit.
 
@@ -681,6 +756,7 @@ def main(argv=None) -> None:
                         else "false: its version stays sealed and latest does not move")
                 print(f"dataset {name}: {promote_field(name)} is {what}")
             run_classes(steps, args.classes, args.class_offers)
+            wait_for_grants(steps, args.app)
             reads = pin_inputs(resolved, steps)
             contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, settings)
     except Exception as exc:  # any composition failure = hard error, pre-GPU
