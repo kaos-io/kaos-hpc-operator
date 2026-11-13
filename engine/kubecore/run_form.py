@@ -6,6 +6,11 @@ import json
 import re
 from typing import Callable, Optional
 
+from kubecore import step_contract
+from kubecore.enhance import platform_annotations, tier_default
+from kubecore.meluxina import HPC_TWIN_TEMPLATE, STEP_KIND_LABEL, hpc_classes
+from kubecore.run_settings import checkpoint_field, class_field, promote_field, walltime_field
+
 from kubecore.step_contract import (
     ENGINE_VERSION_ANNOTATION, PARAMS_DIGEST_KEY, PIPELINE_VERSION_KEY, RAW_FORM_ANNOTATION, RAW_FORM_CAP,
     SOURCE_COMMIT_KEY,
@@ -293,3 +298,123 @@ def _validate_overrides(overrides, types: dict, param) -> None:
             # TODO(T8): enforce that `gid` is a declared override group or a fixed group (check_form).
             if not isinstance(gid, str) or not GROUP_ID_RE.match(gid):
                 raise RunFormError("%s: group %r must match %s" % (where, gid, GROUP_ID_RE.pattern))
+
+
+# ------------------------------------------------------------------------------ machines and steps
+
+MAX_DESCRIPTION = 512     # the schema's limit on a machine's description (bytes: safe for a count in either unit)
+COMPOSE_STEP = "compose-and-validate"
+# Steps that are not the developer's: the compose step, and (once open PR 79 lands) its promote step. The name
+# is read from the constant if there is one; main has none today, so only the compose step is excluded.
+EXCLUDED_STEPS = frozenset(
+    {COMPOSE_STEP} | ({getattr(step_contract, "PROMOTE_STEP")} if hasattr(step_contract, "PROMOTE_STEP") else set()))
+
+
+def truncate_text(text, limit=MAX_DESCRIPTION):
+    """Platform text over `limit` UTF-8 bytes, cut on a character boundary with a trailing ellipsis (D11)."""
+    text = text if isinstance(text, str) else ("" if text is None else str(text))
+    if len(text.encode("utf-8")) <= limit:
+        return text
+    ellipsis = "\u2026"
+    room = limit - len(ellipsis.encode("utf-8"))
+    return text.encode("utf-8")[:room].decode("utf-8", "ignore") + ellipsis
+
+
+def _number(value):
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def machines(ctx: dict) -> list:
+    """The machines the run form offers: the pool's `computeClasses.all` plus the tier defaults not in it
+    (de-duplicated by name, a missing `allocatable` taken from the tier default), then the HPC classes when
+    the project has HPC. Only the fields of the schema's machine definition are copied; the pool's
+    tolerations, node counts, disk sizes and the HPC account, paths and controller never leave the platform."""
+    classes = ctx["computeClasses"]
+    defaults = {c["name"]: c for c in (classes.get("cpu"), classes.get("gpu")) if c}
+    catalog = list(classes.get("all") or [])
+    seen = {c["name"] for c in catalog}
+    catalog += [c for name, c in defaults.items() if name not in seen]
+    out, names = [], set()
+    for cls in catalog:
+        if cls["name"] in names:
+            continue
+        names.add(cls["name"])
+        alloc = cls.get("allocatable") or (defaults.get(cls["name"]) or {}).get("allocatable") or {}
+        accel = cls.get("guestAccelerator")
+        out.append({
+            "name": cls["name"],
+            "tier": cls.get("tier") or "cpu",
+            "machineType": cls.get("machineType"),
+            "accelerator": ({"type": accel.get("type"), "count": accel["count"]}
+                            if accel and accel.get("count") else None),
+            "allocatable": {"cpu": _number(alloc.get("cpu")), "memoryGiB": _number(alloc.get("memoryGiB")),
+                            "ephemeralStorageGiB": _number(alloc.get("ephemeralStorageGiB"))},
+            "description": truncate_text(cls.get("description")),
+            "kind": "cluster",
+        })
+    provider = (ctx.get("hpc") or {}).get("provider", "meluxina")
+    for cls in hpc_classes(ctx):
+        if cls["name"] in names:
+            continue
+        names.add(cls["name"])
+        gpus = cls.get("gpus") or 0
+        hpc = {"provider": provider, "partition": cls.get("partition", ""), "qos": cls.get("qos", ""),
+               "gpus": gpus}
+        if isinstance(cls.get("maxTimeLimitMinutes"), int) and cls["maxTimeLimitMinutes"] >= 1:
+            hpc["maxTimeLimitMinutes"] = cls["maxTimeLimitMinutes"]
+        hpc["sharesNode"] = True
+        out.append({
+            "name": cls["name"],
+            "tier": cls.get("tier") or "cpu",
+            "machineType": None,
+            "accelerator": {"type": None, "count": gpus} if gpus > 0 else None,
+            "allocatable": {"cpu": _number(cls.get("cpus")), "memoryGiB": _number(cls.get("memoryGiB")),
+                            "ephemeralStorageGiB": None},
+            "description": truncate_text(cls.get("description")),
+            "kind": "hpc",
+            "hpc": hpc,
+        })
+    return out
+
+
+def steps(steps: list, offers: dict, ctx: dict, params: list) -> list:
+    """The run form's steps: for each step of the developer's pipeline, the class choice it offers (the
+    output of enhance.class_offer, verbatim), its default, its kind and the names of its run-setting fields.
+    `steps` are the workflow's step templates, `offers` is {step: class_offer or None (pinned)}, `params` the
+    workflow's Argo parameters (a field is named only when the form has it)."""
+    have = {p["name"] for p in params}
+    values = {p["name"]: p.get("value") for p in params}
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
+    args = ((compose or {}).get("container") or {}).get("args") or []
+    table = json.loads(args[args.index("--steps") + 1]) if "--steps" in args else []
+    datasets = {e["name"]: [p["name"] for p in e.get("produces", []) if p.get("type") == "dataset"] for e in table}
+    out = []
+    for step in steps:
+        name = step["name"]
+        # the compose step, the HPC twin (a template the platform adds) and any template that is not a step
+        # of the developer's pipeline (the compose step's table lists those) are not steps of the form
+        if name in EXCLUDED_STEPS or name == HPC_TWIN_TEMPLATE or (table and name not in datasets):
+            continue
+        offer = offers.get(name)
+        if offer is None:
+            pinned = platform_annotations(step)["compute-class"]
+            entry = {"classField": None, "default": pinned, "offered": [pinned], "refused": {}}
+        else:
+            # enhance_class_param sets the `<step>-class` value to tier_default; once the step is enhanced its typed
+            # GPU request is gone (enhance_gpu_routing), so tier_default would read a GPU step as CPU. The
+            # parameter is the authority; tier_default is only for a caller that has no such parameter.
+            default = values.get(class_field(name)) or tier_default(ctx, step)["name"]
+            entry = {"classField": class_field(name), "default": default,
+                     "offered": list(offer["offered"]),
+                     "refused": {k: [v[0], v[1]] for k, v in offer["refused"].items()}}
+        entry = {"name": name, "kind": ((step.get("metadata") or {}).get("labels") or {}).get(STEP_KIND_LABEL),
+                 **entry}
+        if walltime_field(name) in have:
+            entry["walltimeField"] = walltime_field(name)
+        if checkpoint_field(name) in have:
+            entry["checkpointField"] = checkpoint_field(name)
+        promote = [promote_field(d) for d in datasets.get(name, []) if promote_field(d) in have]
+        if promote:
+            entry["promoteFields"] = promote
+        out.append(entry)
+    return out
