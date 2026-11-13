@@ -426,8 +426,8 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
     # is now a twin pair where exactly one twin runs and the other is Skipped.
     # Twins included: a twin whose upstream also ran on HPC must depend on
     # the upstream PAIR, not on the (Skipped) in-cluster task.
-    # Status-qualified references (step.Succeeded || step.Skipped
-    # || step.Omitted) must name the twin too: Argo exposes tasks.X to
+    # Status-qualified references (step.Succeeded || step.Skipped)
+    # must name the twin too: Argo exposes tasks.X to
     # a task's expressions ONLY for X in its depends, so a consumer whose
     # args pick tasks['X-hpc'] hangs forever with "tasks.X-hpc is
     # missing" (observed at run time, argo v4.0.6). Pair semantics:

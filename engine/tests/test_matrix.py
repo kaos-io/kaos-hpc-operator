@@ -254,7 +254,7 @@ def test_the_gather_task_joins_the_items_and_the_run_fails_with_it():
     wft = enhanced()
     tasks = tasks_of(wft)
     gather = tasks[gather_task("train")]
-    assert gather["depends"] == "compose-and-validate && (train.Succeeded || train.Skipped || train.Omitted)"
+    assert gather["depends"] == "compose-and-validate && (train.Succeeded || train.Skipped)"
     tpl = template(wft, gather_task("train"))
     assert tpl["container"]["command"] == ["python", "-I", "-m", "kaos_engine.gather"]
     env = {e["name"]: e["value"] for e in tpl["container"]["env"] if "value" in e}

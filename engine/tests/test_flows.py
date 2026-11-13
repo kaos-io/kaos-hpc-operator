@@ -324,3 +324,37 @@ def test_checkpoint_every_false_keeps_the_copies_off_even_for_a_resumable_step()
     assert "train-checkpoint-every" not in form
     train = next(t for t in wft["spec"]["templates"] if t["name"] == "train")
     assert "initContainers" not in train, "no copies"
+
+
+# ------------------------------------------- a step never runs after a failure hidden behind a skipped step
+
+def chain(a):
+    load = a.step("load", kind="transform", produces=[a.artifact("l")])
+    left = a.step("left", kind="transform", needs=[load], produces=[a.artifact("m")])
+    opt = a.step("opt", kind="evaluate", needs=[left], when="experiment-name != off")
+    a.step("after", kind="evaluate", needs=[opt])
+
+
+def test_a_step_after_a_conditional_step_accepts_it_ran_or_was_skipped_and_never_omitted():
+    tasks = tasks_of(render(chain))
+    assert tasks["after"]["depends"] == "compose-and-validate && (opt.Succeeded || opt.Skipped)"
+    assert tasks["opt"]["depends"] == "compose-and-validate && left"
+
+
+def test_the_pair_form_of_a_conditional_step_has_no_omitted_term_either():
+    tasks = tasks_of(hpc_render(chain))
+    assert tasks["after"]["depends"].startswith("compose-and-validate && ")
+    assert "Omitted" not in tasks["after"]["depends"] and "Omitted" not in tasks["after-hpc"]["depends"]
+    assert "((opt.Succeeded || opt-hpc.Succeeded) || (opt.Skipped && opt-hpc.Skipped))" in tasks["after"]["depends"]
+
+
+def test_no_depends_of_a_rendered_pipeline_names_omitted_matrix_and_promote_included():
+    def build(a):
+        feed = a.step("feed", kind="ingest", produces=[a.dataset("fed")])
+        train = a.step("train", kind="train", needs=[feed], matrix={"x": [1, 2]}, produces=[a.model("m")],
+                       when="experiment-name != off")
+        a.step("pick", kind="evaluate", needs=[train])
+    for wft in (hpc_render(build),):
+        tasks = tasks_of(wft)
+        assert {"kaos-gather-train", "kaos-promote", "pick"} <= set(tasks)
+        assert [n for n, t in tasks.items() if "Omitted" in (t.get("depends") or "")] == []
