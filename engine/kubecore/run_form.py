@@ -203,6 +203,9 @@ def validate_raw(raw: dict, params: list, step_names, parse_when: Optional[Calla
         raise RunFormError("optionDefaults must be an object")
     for group, options in option_defaults.items():
         enum = param(group, "optionDefaults").get("enum") or []
+        if not enum:
+            raise RunFormError("optionDefaults names %r, which is not a dropdown: every config group is a "
+                               "dropdown parameter" % group)
         if not isinstance(options, dict):
             raise RunFormError("optionDefaults[%r] must be an object" % group)
         for option, leaves in options.items():
@@ -220,10 +223,21 @@ def validate_raw(raw: dict, params: list, step_names, parse_when: Optional[Calla
     leaf_options = raw["leafOptions"]
     if not isinstance(leaf_options, dict):
         raise RunFormError("leafOptions must be an object")
-    for leaf, options in leaf_options.items():
+    for leaf, entry in leaf_options.items():
         param(leaf, "leafOptions")
-        if not isinstance(options, list) or not all(isinstance(o, str) for o in options):
-            raise RunFormError("leafOptions[%r] must be a list of option names" % leaf)
+        if not isinstance(entry, dict) or set(entry) != {"group", "options"}:
+            raise RunFormError("leafOptions[%r] must be an object with the keys group and options" % leaf)
+        group, options = entry["group"], entry["options"]
+        if not isinstance(group, str) or group not in option_defaults:
+            raise RunFormError("leafOptions[%r] names the group %r, which is not a config group of the form: "
+                               "check the spelling" % (leaf, group))
+        if not isinstance(options, list) or not options or not all(isinstance(o, str) for o in options):
+            raise RunFormError("leafOptions[%r] options must be a list of option names" % leaf)
+        enum = by_name[group].get("enum") or []
+        unknown = [o for o in options if o not in enum]
+        if unknown:
+            raise RunFormError("leafOptions[%r] names the options %s, which are not in the group's options %s"
+                               % (leaf, unknown, enum))
 
     when = raw["when"]
     if not isinstance(when, dict):
@@ -590,16 +604,12 @@ def step_show_if(step: str, text) -> Optional[str]:
     return out
 
 
-def _leaf_show_if(leaf: str, options, choices: dict) -> Optional[str]:
-    """`<group> == a or <group> == b` for a config leaf that only the options `options` of its group have. The
-    group is the longest group field whose name prefixes the leaf's and whose options hold them all; None
-    when there is none (the field is then always shown)."""
+def _leaf_show_if(leaf: str, entry: dict) -> Optional[str]:
+    """`<group> == a or <group> == b` for a config leaf that only the options of `entry` have; `entry` is the
+    raw form's {group, options}."""
+    group, options = entry["group"], entry["options"]
     if not options:
         return None
-    found = [g for g, enum in choices.items() if leaf.startswith(g + "-") and set(options) <= set(enum)]
-    if not found:
-        return None
-    group = max(found, key=len)
     out = form_grammar.normalize([(group, "==", o) for o in options], ["or"] * (len(options) - 1))
     if len(out) > MAX_SHOW_IF:
         raise RunFormError("field %r: the options that have it make a condition of %d characters, over the run "
@@ -625,7 +635,6 @@ def fields(params: list, table: list, raw: Optional[dict] = None, step_shows: Op
     producer = {promote_field(p["name"]): (e["name"], p["name"]) for e in table for p in e.get("produces", [])
                 if p.get("type") == "dataset"}
     inputs = {name for e in table for name in e.get("inputs", [])}
-    choices = {q["name"]: q.get("enum") or [] for q in params if q["name"] in option_defaults}
     out = []
     for p in params:
         name = p["name"]
@@ -664,7 +673,7 @@ def fields(params: list, table: list, raw: Optional[dict] = None, step_shows: Op
                 if key in spec:
                     f[key] = spec[key]
         if f["source"] == "config" and name in leaf_options:
-            show = _leaf_show_if(name, leaf_options[name], choices)
+            show = _leaf_show_if(name, leaf_options[name])
             if show:
                 f["showIf"] = show
         out.append(f)

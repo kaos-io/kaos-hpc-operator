@@ -190,8 +190,8 @@ def test_a_config_leaf_under_some_options_is_shown_for_them():
     params = [{"name": "model", "value": "a", "enum": ["a", "b", "c"]}, {"name": "model-lr", "value": "0.1"},
               {"name": "model-depth", "value": "3"}, {"name": "model-head-size", "value": "8"},
               {"name": "other", "value": "1"}]
-    raw = {"version": 1, "types": {"model-depth": "integer"}, "leafOptions": {"model-depth": ["b", "c"],
-                                                                              "other": ["b"], "model-lr": ["b"]},
+    raw = {"version": 1, "types": {"model-depth": "integer"}, "leafOptions": {
+        "model-depth": {"group": "model", "options": ["b", "c"]}, "model-lr": {"group": "model", "options": ["b"]}},
            "optionDefaults": {"model": {"b": {"model-lr": "0.2", "model-depth": "4"}, "c": {"model-lr": "0.3"}}},
            "when": {}, "overrides": {"fields": {"model-lr": {"tier": "hidden"}}}}
     run_form.validate_raw(raw, params, [])
@@ -201,7 +201,7 @@ def test_a_config_leaf_under_some_options_is_shown_for_them():
     assert f["model"]["optionDefaults"] == {"b": {"model-depth": "4"}}
     assert f["model-depth"]["showIf"] == "model == b or model == c" and f["model-depth"]["type"] == "integer"
     assert f["model-lr"]["showIf"] == "model == b" and f["model-lr"]["tier"] == "hidden"
-    assert "showIf" not in f["other"], "no group prefixes it: always shown"
+    assert "showIf" not in f["other"], "no leafOptions entry: always shown"
     assert "showIf" not in f["model-head-size"]
 
 
@@ -570,7 +570,7 @@ def test_a_when_value_that_starts_with_image_says_to_rename_the_value():
 
 def test_a_group_option_that_starts_with_image_says_to_rename_the_option():
     params = [{"name": "model", "value": "a", "enum": ["a", "image-b"]}, {"name": "model-x", "value": "1"}]
-    raw = {"version": 1, "types": {}, "leafOptions": {"model-x": ["image-b"]}, "when": {}, "overrides": {},
+    raw = {"version": 1, "types": {}, "leafOptions": {"model-x": {"group": "model", "options": ["image-b"]}}, "when": {}, "overrides": {},
            "optionDefaults": {"model": {"image-b": {"model-x": "2"}}}}
     field_list = run_form.fields(params, [], raw)
     form = {"version": 1, "stamp": {}, "groups": run_form.groups(field_list), "fields": field_list, "machines": [],
@@ -627,3 +627,16 @@ def test_check_form_names_the_field_not_its_index():
     form["steps"][0]["kind"] = "deploy"
     with pytest.raises(RunFormError, match=r"steps\[%s\].kind" % form["steps"][0]["name"]):
         run_form.check_form(form)
+
+
+def test_the_group_of_a_leaf_is_the_one_leaf_options_names_not_a_prefix_guess():
+    params = [{"name": "model", "value": "a", "enum": ["a", "b"]}, {"name": "model-big", "value": "x", "enum": ["x", "y"]},
+              {"name": "model-big-size", "value": "1"}]
+    raw = {"version": 1, "types": {}, "when": {}, "overrides": {},
+           "optionDefaults": {"model": {}, "model-big": {}},
+           "leafOptions": {"model-big-size": {"group": "model", "options": ["b"]}}}
+    run_form.validate_raw(raw, params, [])
+    f = _by({"fields": run_form.fields(params, [], raw)})
+    assert f["model-big-size"]["showIf"] == "model == b"
+    assert f["model"]["source"] == "group" and f["model-big"]["source"] == "group"
+    assert "optionDefaults" not in f["model"], "an empty group entry adds nothing"

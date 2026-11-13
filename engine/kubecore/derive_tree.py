@@ -34,10 +34,12 @@ derive as form dropdowns.
 
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+import yaml
 from hydra import compose, initialize_config_dir
 from hydra.core.config_store import ConfigStore
 from omegaconf import OmegaConf
@@ -193,6 +195,11 @@ class DerivedForm:
     sections: list = field(default_factory=list)  # top-level config sections
     render_defaults: dict = field(default_factory=dict)  # {override_key: rendered default}
     tree: dict = field(default_factory=dict)  # the composed config tree
+    # The raw data for the run form (1533/F-21): read by kubecore.run_form, never by the Argo parameters.
+    types: dict = field(default_factory=dict)  # {form field name: string|integer|number|boolean|enum}
+    option_defaults: dict = field(default_factory=dict)  # {group name: {option: {leaf: value}}}; every group
+    leaf_options: dict = field(default_factory=dict)  # {leaf: {"group": name, "options": [...]}}
+    overrides: dict = field(default_factory=dict)  # the validated config/_form.yaml, {} when there is none
 
 
 def refuse_platform_group() -> None:
@@ -332,12 +339,151 @@ def _comments() -> dict:
     group (the default option last, so its comments win)."""
     found = {}
     for path in sorted(CONFIG_DIR.glob("*.yaml")):
+        if path.name == FORM_FILE:
+            continue  # the form's own file is read by read_form_overrides, never for comments
         found.update(_file_comments(path.read_text()))
     for group, default in sorted(_group_choices().items()):
         options = sorted((CONFIG_DIR / group).glob("*.yaml"), key=lambda p: p.stem == default)
         for path in options:
             found.update(_file_comments(path.read_text(), group.replace("/", ".")))
     return found
+
+
+FORM_FILE = "_form.yaml"
+FORM_FILE_CAP = 64 * 1024
+FORM_FIELD_KEYS = ("label", "tier", "minimum", "maximum", "group")   # D13: no `pattern` in v1
+FORM_GROUP_KEYS = ("id", "label", "tier", "order")
+FORM_HIDDEN_GROUPS = ("info", "platform")   # fixed groups the form never shows
+
+
+class _NoAliasLoader(yaml.SafeLoader):
+    """SafeLoader that refuses anchors and aliases (no expansion bombs, nothing shared)."""
+
+    def compose_node(self, parent, index):
+        event = self.peek_event()
+        if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None) is not None:
+            raise yaml.YAMLError("anchors and aliases (&name, *name) are not allowed")
+        return super().compose_node(parent, index)
+
+
+def read_form_overrides() -> dict:
+    """config/_form.yaml, the developer's changes to the run form: {"fields": {name: {label, tier, minimum,
+    maximum, group}}, "groups": [{id, label, tier, order}]}; {} when there is no file. Read by the untrusted
+    render, so the file is opened without following a link, must be a regular file and is read bounded. Any
+    problem is a DeriveError (the build fails, nothing is guessed). The values are checked by run_form."""
+    path = CONFIG_DIR / FORM_FILE
+    here = f"config/{FORM_FILE}"
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise DeriveError(f"{here} cannot be read ({exc.strerror}); it must be a regular file, not a link") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise DeriveError(f"{here} must be a regular file")
+        data = b""
+        while len(data) <= FORM_FILE_CAP:
+            chunk = os.read(fd, FORM_FILE_CAP + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        os.close(fd)
+    if len(data) > FORM_FILE_CAP:
+        raise DeriveError(f"{here} is over {FORM_FILE_CAP // 1024} KiB: shorten it")
+    try:
+        doc = yaml.load(data.decode("utf-8"), Loader=_NoAliasLoader)  # noqa: S506 - a SafeLoader subclass
+    except (yaml.YAMLError, UnicodeDecodeError, RecursionError) as exc:
+        raise DeriveError(f"{here} is not valid YAML without anchors or aliases: {exc}") from exc
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        raise DeriveError(f"{here} must be a mapping with `fields` and `groups`")
+    extra = sorted(str(k) for k in doc if k not in ("fields", "groups"))
+    if extra:
+        raise DeriveError(f"{here} has unknown keys {extra}: allowed are fields and groups")
+    out = {}
+    fields = doc.get("fields")
+    if fields is not None:
+        if not isinstance(fields, dict):
+            raise DeriveError(f"{here}: fields must be a mapping of field name to its changes")
+        for name, spec in fields.items():
+            if not isinstance(spec, dict):
+                raise DeriveError(f"{here}: fields.{name} must be a mapping")
+            if "pattern" in spec:
+                raise DeriveError(
+                    f"{here}: fields.{name}.pattern is not supported in v1: remove it (a value is checked by its "
+                    f"type, minimum and maximum)"
+                )
+            bad = sorted(str(k) for k in spec if k not in FORM_FIELD_KEYS)
+            if bad:
+                raise DeriveError(
+                    f"{here}: fields.{name} has unknown keys {bad}: allowed are {', '.join(FORM_FIELD_KEYS)}"
+                )
+            if spec.get("group") in FORM_HIDDEN_GROUPS:
+                raise DeriveError(
+                    f"{here}: fields.{name}.group is `{spec['group']}`, a group the run form never shows: pick "
+                    f"another group"
+                )
+        out["fields"] = fields
+    groups = doc.get("groups")
+    if groups is not None:
+        if not isinstance(groups, list):
+            raise DeriveError(f"{here}: groups must be a list")
+        for i, group in enumerate(groups):
+            if not isinstance(group, dict):
+                raise DeriveError(f"{here}: groups[{i}] must be a mapping")
+            bad = sorted(str(k) for k in group if k not in FORM_GROUP_KEYS)
+            if bad:
+                raise DeriveError(
+                    f"{here}: groups[{i}] has unknown keys {bad}: allowed are {', '.join(FORM_GROUP_KEYS)}"
+                )
+        out["groups"] = groups
+    return out
+
+
+def _leaf_type(value) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, Enum):
+        return "enum"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    return "string"
+
+
+def _option_data(group: str, default: str, options: list, defaults: dict) -> tuple:
+    """For one group: ({option: {leaf: value}} for the leaves that are form fields and differ from the default
+    option, {leaf: [options that have it]}). `defaults` is {leaf name: default value text}, the form fields.
+    The default option has no entry, but counts as an option that has its leaves."""
+    from omegaconf.errors import OmegaConfBaseException
+
+    name = _mapped(group)
+    changed, having = {}, {}
+    for option in options:
+        if option == default:
+            leaves = {_mapped(d): _value_str(v) for d, v in _walk_scalars(OmegaConf.to_container(
+                compose_tree(), resolve=True))}
+        else:
+            try:
+                tree = OmegaConf.to_container(_compose([f"{group}={option}"]), resolve=True)
+            except (OmegaConfBaseException, ValueError) as exc:
+                raise DeriveError(
+                    f"the option `{option}` of the config group {group}/ does not compose ({exc}): fix "
+                    f"config/{group}/{option}.yaml"
+                ) from exc
+            leaves = {_mapped(d): _value_str(v) for d, v in _walk_scalars(tree)}
+        for leaf, value in leaves.items():
+            if leaf not in defaults:
+                continue
+            having.setdefault(leaf, []).append(option)
+            if option != default and value != defaults[leaf]:
+                changed.setdefault(option, {})[leaf] = value
+    partial = {leaf: opts for leaf, opts in having.items() if len(opts) < len(options)}
+    return name, changed, partial
 
 
 def derive() -> DerivedForm:
@@ -366,8 +512,10 @@ def derive() -> DerivedForm:
         seen[name] = origin
 
     # groups -> dropdowns (form order: groups first)
-    for group, default in sorted(_group_choices().items()):
+    choices = sorted(_group_choices().items())
+    for group, default in choices:
         name = _mapped(group)
+        form.types[name] = "enum"
         claim(name, f"config group {group}/")
         options = _group_options(group)
         form.parameters.append(
@@ -388,6 +536,7 @@ def derive() -> DerivedForm:
         claim(name, f"config leaf {dotted}")
         default = _value_str(value)
         enum = [str(m.value) for m in type(value)] if isinstance(value, Enum) else None
+        form.types[name] = _leaf_type(value)
         form.parameters.append(
             Parameter(name=name, value=default, enum=enum, description=comments.get(dotted, ""))
         )
@@ -395,6 +544,15 @@ def derive() -> DerivedForm:
         form.render_defaults[dotted] = default
 
     form.parameters.append(Parameter(**ADVANCED_PARAM_KWARGS))
+
+    # the raw data the run form needs: what each group option changes, and which leaves only some options have
+    defaults = {_mapped(dotted): _value_str(value) for dotted, value in _walk_scalars(tree)}
+    for group, default in choices:
+        name, changed, partial = _option_data(group, default, _group_options(group), defaults)
+        form.option_defaults[name] = changed
+        for leaf, opts in partial.items():
+            form.leaf_options[leaf] = {"group": name, "options": opts}
+    form.overrides = read_form_overrides()
     return form
 
 
