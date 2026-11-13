@@ -1272,7 +1272,7 @@ def add_gather_tasks(spec: dict, steps: list) -> None:
         document = 'tasks["%s"].outputs.parameters[%s]' % (step, "%s")
         dag["tasks"].append({
             "name": gather_task(step), "template": gather_task(step),
-            "depends": "%s && (%s.Succeeded || %s.Skipped || %s.Omitted)" % (COMPOSE_STEP, step, step, step),
+            "depends": "%s && (%s.Succeeded || %s.Skipped)" % (COMPOSE_STEP, step, step),
             "arguments": {"parameters": given + [
                 {"name": "results", "value": '{{=sprig.default("[]", %s)}}' % (document % '"kaos-result"')},
                 {"name": "items", "value": '{{=sprig.default("[]", %s)}}' % (document % '"kaos-item"')},

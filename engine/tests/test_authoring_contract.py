@@ -275,7 +275,7 @@ def test_a_step_that_needs_a_conditional_step_waits_for_it_to_end_either_way():
     wft = render(build)
     tasks = {t["name"]: t for t in next(t for t in wft["spec"]["templates"] if "dag" in t)["dag"]["tasks"]}
     assert tasks["evaluate"]["depends"] == ("compose-and-validate && "
-                                            "(export.Succeeded || export.Skipped || export.Omitted)")
+                                            "(export.Succeeded || export.Skipped)")
     argument = tasks["evaluate"]["arguments"]["parameters"][0]
     assert argument["name"] == "kaos-context"
     assert ('sprig.default("{\\"version\\":1,\\"status\\":\\"absent\\"}", '

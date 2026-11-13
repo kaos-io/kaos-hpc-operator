@@ -661,10 +661,13 @@ What the checks found, and the rules that follow:
   Running with no error (check 3(b)). So the `depends` of a step names compose and every task its
   expression reads:
   - a needed step with no HPC variant and no `when`: `<step>`;
-  - a needed step that is conditional (`when=`): `(<step>.Succeeded || <step>.Skipped || <step>.Omitted)`,
-    the form the engine already renders;
-  - a needed step with an HPC variant: both twins, each in that tolerant form, since one of them is
-    always skipped.
+  - a needed step that is conditional (`when=`): `(<step>.Succeeded || <step>.Skipped)`: it ran well, or its
+    condition was false. **Never `Omitted`**: a task is Omitted when something it needs failed, so a form that
+    accepts Omitted lets the failure through (the step after a failed step's skipped dependant would run);
+  - a needed step with an HPC variant: both twins, in the pair form `((<step>.Succeeded || <step>-hpc.Succeeded) ||
+    (<step>.Skipped && <step>-hpc.Skipped))`, since one of them is always skipped.
+  The rule: a step runs only if every step it needs ran well or was skipped on purpose. No `depends` of the engine
+  (steps, the task that joins a matrix step's items, `kaos-promote`) has an `Omitted` term.
 - The same expression works as a container env value over input parameters (check 3(a), second form).
   The DAG argument is the one to use: the pod and the HPC follower then share one input.
 

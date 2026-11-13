@@ -741,7 +741,7 @@ class pipeline:
                         [COMPOSE_STEP]
                         + [
                             gather_task(n.name) if n.matrix
-                            else f"({n.name}.Succeeded || {n.name}.Skipped || {n.name}.Omitted)"
+                            else f"({n.name}.Succeeded || {n.name}.Skipped)"
                             if n.when
                             else n.name
                             for n in s.needs
