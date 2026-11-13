@@ -114,3 +114,12 @@ def test_a_raw_form_over_128_kib_fails_the_render(tmp_path, monkeypatch):
     tree(tmp_path, monkeypatch, {"config.yaml": "defaults:\n  - _self_\n  - sec\n", "sec.yaml": "sec:\n" + big + "\n"})
     with pytest.raises(authoring.AuthoringError, match="run form"):
         render_app()
+
+
+def test_a_resolver_in_a_non_default_option_fails_the_render_and_is_not_resolved(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROBE_SECRET", "s3cr3t")
+    tree(tmp_path, monkeypatch, {"config.yaml": "defaults:\n  - _self_\n  - g: a\n",
+                                 "g/a.yaml": "x: 1\n", "g/b.yaml": "x: ${oc.env:PROBE_SECRET}\n"})
+    with pytest.raises(derive_tree.DeriveError, match="resolver") as exc:
+        derive_tree.derive()
+    assert "s3cr3t" not in str(exc.value)

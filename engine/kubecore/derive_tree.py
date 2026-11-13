@@ -372,7 +372,9 @@ def _option_defaults(groups: dict) -> tuple[dict, dict]:
         deltas[name] = {}
         for option in _group_options(group):
             try:
-                leaves = dict(_walk_scalars(OmegaConf.to_container(_compose([f"{group}={option}"]), resolve=True)))
+                composed = _compose([f"{group}={option}"])
+                refuse_resolvers(OmegaConf.to_container(composed, resolve=False))   # before anything is resolved
+                leaves = dict(_walk_scalars(OmegaConf.to_container(composed, resolve=True)))
             except DeriveError:
                 raise
             except Exception as exc:
