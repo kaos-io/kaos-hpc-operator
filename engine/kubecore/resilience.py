@@ -168,6 +168,10 @@ def shared_templates(spec: dict) -> set:
     """Templates run by more than one DAG task or by a fan-out: one checkpoint key would be shared."""
     uses, fanned = {}, set()
     for tpl in spec.get("templates", []):
+        # A matrix step runs once for each combination inside a steps template: its checkpoint key would be shared.
+        for entry in (e for group in tpl.get("steps") or [] for e in group):
+            if "withParam" in entry:
+                fanned.add(entry.get("template"))
         for task in (tpl.get("dag") or {}).get("tasks", []):
             name = task.get("template")
             uses[name] = uses.get(name, 0) + 1

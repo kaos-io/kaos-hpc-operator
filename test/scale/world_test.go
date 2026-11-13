@@ -253,6 +253,7 @@ type jobSpec struct {
 	hostTail    string // a node-sharing host: dilated minutes its Slurm job keeps the node after its step
 	guest       bool   // a node-sharing guest: taken by a running host, never started on its own
 	shareable   bool   // a step of the project's sharing scope; the controller plans it as a host or a guest (D-70)
+	stepName    string // the job's step name ("" = one of its own): the items of a matrix step all have the step's name
 }
 
 // createJobs creates the jobs of a project with a bounded number of parallel writers.
@@ -271,7 +272,7 @@ func (w *world) createJobs(p *project, specs []jobSpec) {
 			defer func() { <-sem }()
 			j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.envNS, Annotations: map[string]string{}},
 				Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: s.class, Image: "reg.example/app:v1", WallTimeMinutes: s.wallMinutes,
-					Command: []string{"python", "train.py"}, StepName: "step-" + name}}
+					Command: []string{"python", "train.py"}, StepName: cmpOr(s.stepName, "step-"+name)}}
 			if s.run != "" {
 				j.Annotations[annRunMinutes] = s.run
 			}
@@ -460,4 +461,12 @@ func (w *world) certFile() string {
 		_ = os.WriteFile(path, w.projects[0].site.CertPEM(), 0o600)
 	}
 	return path
+}
+
+// cmpOr is the first of a and b that is not empty.
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }

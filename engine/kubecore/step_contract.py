@@ -40,6 +40,18 @@ RESULT_CAP = 8 * 1024          # one result (kaos-lib refuses a larger one)
 TEMPLATE_CAP = 24 * 1024       # a step's rendered definition without its context, as the workflow engine encodes it
 MAX_NEEDS = 10                 # steps one step may need: ten results leave 16 KiB for the rest of the context
 MAX_INPUTS = 16                # what one step may read by name: its inputs= plus the datasets its needs= steps produce
+MATRIX_MAX_ITEMS = 32          # combinations one matrix step runs
+MATRIX_VALUES_CAP = 16 * 1024  # the `values` of all items of a matrix step together; an item may hand on its share (max_item_values)
+MATRIX_ENTRY_CAP = 56 * 1024   # the whole entry of a matrix step in `upstream`: every item's values, reads and writes
+MATRIX_MIN_BASE = 16 * 1024    # what a step that needs a matrix step keeps for the rest of its context
+MATRIX_MAX_LEDGER = 4          # what an item may read and write together (inputs= plus produces=): see tests/test_matrix.py
+MATRIX_INT_LIMIT = 2 ** 53     # a whole number in matrix= may not be larger: write it as text
+MATRIX_RUN_BYTES = 1024 * 1024 # what fan_output_bytes (the results alone) may reach: the run's whole status is more (contract, section 12)
+MATRIX_STATUS = "matrix"       # the status of the entry a matrix step has in `upstream` (docs/step-contract.md, section 12)
+MATRIX_CLUSTER_ONLY_KINDS = ("ingest", "publish", "control")
+GATHER_STEP_PREFIX = "kaos-gather-"       # the task that joins the results of a matrix step's items: kaos-gather-<step>
+FAN_TEMPLATE_PREFIX = "kaos-matrix-"      # the template that runs a matrix step's items: kaos-matrix-<step>
+ITEMS_PARAM = "kaos-item"                 # an item's entry, as the item's input and output
 MAX_NAME = 40                  # characters of a step, input or produced name
 MAX_APP_NAME = 55              # an HPC job's app field holds no more
 MIN_DATASET_NAME = 3           # dataset-<name> must be a repository id the lake accepts
@@ -103,10 +115,25 @@ def cost(text: str) -> int:
     return len(text) + text.count('"') + text.count("\\")
 
 
-def base_context_cap(needs: int) -> int:
+def base_context_cap(needs: int, matrix_needs: int = 0) -> int:
     """What a step's context may cost before the results of the `needs` steps it needs are joined in:
-    the context cap less one full result for each."""
-    return CONTEXT_CAP - RESULT_CAP * needs
+    the context cap less one full result for each; a needed matrix step holds MATRIX_ENTRY_CAP, which
+    the results of all its items share (`matrix_needs` of the `needs` are such steps)."""
+    return CONTEXT_CAP - RESULT_CAP * (needs - matrix_needs) - MATRIX_ENTRY_CAP * matrix_needs
+
+
+def max_item_values(items: int) -> int:
+    """What the `values` of one item's result may cost: its share of MATRIX_VALUES_CAP, never more than a result."""
+    return min(RESULT_CAP, MATRIX_VALUES_CAP // max(items, 1))
+
+
+def fan_output_bytes(items: int, parallel: int, per_item: int) -> int:
+    """The bytes the workflow system keeps of the results of a matrix step's items, as the run's status holds them:
+    each item's result and index once, and again in the output of every round above it. A round runs `parallel`
+    items, then the template calls itself for the rest, so round k's output holds the items of rounds k to the last."""
+    rounds = -(-items // parallel)
+    held = sum(min(items, (rounds - k) * parallel) for k in range(rounds))
+    return held * per_item
 
 
 def base_cost(base: str, needs: list) -> int:
@@ -254,17 +281,41 @@ def image_of(step: str, compose_task: str = "compose-and-validate") -> str:
     return "{{=fromJSON(%s)[%s]}}" % (_task_output(compose_task, IMAGES_PARAM), _quoted(step))
 
 
-def context_expression(compose_task: str, step: str, needs: list) -> str:
+def context_expression(compose_task: str, step: str, needs: list, matrix=(), open_end: bool = False) -> str:
     """The DAG task argument that joins a step's base context (compose's output) with the results of the
     steps it needs, as text (docs/step-contract.md, section 10). `}}` would end the expression, so the two
-    closing braces are separate strings."""
+    closing braces are separate strings. `open_end` leaves out the last brace: the context of a matrix step, which
+    each item closes after adding its `matrix` field (authoring.pipeline._fan_template)."""
     parts = ["sprig.trimSuffix(\"}\", %s)" % _task_output(compose_task, CONTEXT_OUTPUT_PREFIX + step)]
     for i, need in enumerate(needs):
         parts.append(_quoted(("," if i else ",\"upstream\":{") + _string(need) + ":"))
-        parts.append(result_of(need))
+        parts.append(gathered_result(need) if need in matrix else result_of(need))
     if not needs:
         parts.append(_quoted(",\"upstream\":{"))
-    return "{{=" + " + ".join(parts + ["\"}\"", "\"}\""]) + "}}"
+    return "{{=" + " + ".join(parts + (["\"}\""] if open_end else ["\"}\"", "\"}\""])) + "}}"
+
+
+def gather_task(step: str) -> str:
+    return GATHER_STEP_PREFIX + step
+
+
+def fan_template(step: str) -> str:
+    return FAN_TEMPLATE_PREFIX + step
+
+
+def gathered_result(step: str) -> str:
+    """The expression for the result of a matrix step: what its gather task wrote, or the sentinel when the step
+    did not run. (`result_of` for a step that runs once.)"""
+    return "sprig.default(%s, %s)" % (_quoted(wire(SENTINEL)), _task_output(gather_task(step), RESULT_PARAM))
+
+
+def fan_outputs(parameter: str, sources: list) -> str:
+    """The expression of a fan template's output: the lists the steps `sources` of the template aggregated
+    (a step that did not run has none), joined in order. The workflow engine gives a step that ran once per item
+    its output as a JSON list; `rest` is the same template again for the items that wait for the next round."""
+    parts = ["steps[%s].outputs?.parameters?.[%s] == nil ? [] : fromJSON(steps[%s].outputs.parameters[%s])"
+             % (_quoted(s), _quoted(parameter), _quoted(s), _quoted(parameter)) for s in sources]
+    return "toJSON(concat(%s))" % ", ".join("(%s)" % p for p in parts)
 
 
 def pair_results(expression: str, task: str, twin: str) -> str:

@@ -71,8 +71,13 @@ from omegaconf.nodes import BooleanNode, EnumNode, FloatNode, IntegerNode, Strin
 from kubecore import derive_tree
 from kubecore.run_settings import (
     checkpoint_field,
+    DEFAULT_PARALLEL,
     class_problem,
+    matrix_field,
+    matrix_items,
     minutes,
+    parallel_count,
+    parallel_field,
     promote_field,
     promote_problem,
     time_problem,
@@ -87,6 +92,7 @@ from kubecore.step_contract import (
     MAX_REF_VERSION,
     MAX_REPO,
     RESERVED_CONFIG_KEYS,
+    MATRIX_ENTRY_CAP,
     RESULT_CAP,
     base_context_cap,
     base_cost,
@@ -329,6 +335,25 @@ def run_classes(steps: list, chosen: list, offers: str) -> None:
             raise ComposeError(problem)
 
 
+def run_matrix(steps: list, matrices: list, parallels: list) -> dict:
+    """{step: {"matrix": [{index, of, values}], "parallel": n}} for every matrix step, from the run form's
+    `<step>-matrix` and `<step>-parallel`, checked before any step starts. The refusal names the field."""
+    known = {step["name"]: step for step in steps if step.get("matrix")}
+    given, wanted = _pairs(matrices), _pairs(parallels)
+    for field, flag in ((matrix_field, given), (parallel_field, wanted)):
+        for name in flag:
+            if name not in known:
+                raise ComposeError(f"{field(name)}: step '{name}' is not a matrix step (matrix= in pipeline.py)")
+    out = {}
+    for name, step in known.items():
+        try:
+            items = matrix_items(name, given.get(name, "[]"), list(step["matrix"]))
+            out[name] = {"matrix": items, "parallel": parallel_count(name, wanted.get(name, str(DEFAULT_PARALLEL)), len(items))}
+        except ValueError as exc:
+            raise ComposeError(str(exc)) from None
+    return out
+
+
 def run_promote(steps: list, promotes: list) -> dict:
     """{dataset: True or False} from the run form's `promote-<dataset>` fields, checked before any step starts."""
     produced = sorted({e["name"] for step in steps for e in step["produces"] if e["type"] == "dataset"})
@@ -556,6 +581,7 @@ def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict,
             if problem:
                 raise ComposeError(problem)
     experiment = experiment_of(resolved, app)
+    matrix_steps = {step["name"]: bool(step.get("matrix")) for step in steps}
     out = {}
     for step in steps:
         try:
@@ -564,11 +590,14 @@ def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict,
                                       (settings or {}).get(step["name"], {}).get("checkpoint-every", 0)))
         except (TypeError, ValueError) as exc:   # a value JSON cannot hold (inf, nan)
             raise ComposeError(f"the resolved config cannot be handed to the steps: {exc}") from None
-        cap, size = base_context_cap(len(step["needs"])), base_cost(text, step["needs"])
+        matrix_needs = sum(1 for n in step["needs"] if matrix_steps.get(n))
+        cap, size = base_context_cap(len(step["needs"]), matrix_needs), base_cost(text, step["needs"])
         if size > cap:
             raise ComposeError(
                 f"step '{step['name']}': its context costs {size} bytes; the limit is {cap} "
-                f"({CONTEXT_CAP} less {RESULT_CAP} for each of the {len(step['needs'])} steps it needs). The config "
+                f"({CONTEXT_CAP} less {RESULT_CAP} for each of the {len(step['needs'])} steps it needs"
+                + (f", {MATRIX_ENTRY_CAP} for each of those that runs once per combination" if matrix_needs else "")
+                + f"). The config "
                 f"sections it reads ({', '.join(params) or 'none'}) are {cost(wire(params))} of them. Move large "
                 f"values out of the config into a dataset or an artifact, or read fewer sections")
         out[step["name"]] = text
@@ -615,6 +644,10 @@ def main(argv=None) -> None:
                         help="The run form's <step>-class (repeatable).")
     parser.add_argument("--class-offers", default="",
                         help="JSON {step: {offered, refused}}: the classes the form offers each step.")
+    parser.add_argument("--matrix", action="append", default=[], metavar="STEP=JSON",
+                        help="The run form's <step>-matrix: the combinations of a matrix step (repeatable).")
+    parser.add_argument("--parallel", action="append", default=[], metavar="STEP=VALUE",
+                        help="The run form's <step>-parallel: how many items of a matrix step run at once (repeatable).")
     parser.add_argument("--promote", action="append", default=[], metavar="DATASET=VALUE",
                         help="The run form's promote-<dataset>, true or false (repeatable).")
     parser.add_argument("--resumable-lead", action="append", default=[], metavar="STEP=MINUTES",
@@ -640,6 +673,8 @@ def main(argv=None) -> None:
         if args.steps:
             steps = _steps(args.steps)
             settings = run_settings(steps, args.walltime, args.checkpoint_every, args.resumable_lead)
+            for step, entry in run_matrix(steps, args.matrix, args.parallel).items():
+                settings.setdefault(step, {}).update(entry)
             flags = run_promote(steps, args.promote)   # refuses a value that is not true or false; the final task reads it
             for name in sorted({e["name"] for step in steps for e in step["produces"] if e["type"] == "dataset"}):
                 what = ("true: latest moves at the end of the run, if every step went well" if flags.get(name)

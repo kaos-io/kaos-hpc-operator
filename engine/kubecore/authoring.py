@@ -31,11 +31,23 @@ import os
 import re
 from pathlib import Path
 
-from hera.workflows import DAG, Container, Env, Parameter, Resources, WorkflowTemplate
+from hera.workflows import DAG, Container, Env, Parameter, Resources, Task, WorkflowTemplate
+from hera.workflows import models as m
 from hera.workflows.models import ValueFrom
 
 from kubecore import derive_tree
-from kubecore.run_settings import checkpoint_field, minutes, time_problem, walltime_field
+from kubecore.run_settings import (
+    IMAGES_DOC,
+    SETTINGS_DOC,
+    SETTINGS_PARAM,
+    axis_problem,
+    checkpoint_field,
+    matrix_setting,
+    minutes,
+    time_problem,
+    value_problem,
+    walltime_field,
+)
 from kubecore.step_contract import (
     CONTEXT_DIR,
     CONTEXT_ENV,
@@ -52,12 +64,23 @@ from kubecore.step_contract import (
     MIN_DATASET_NAME,
     LEDGER_PARAM,
     LEDGER_PATH,
+    MATRIX_CLUSTER_ONLY_KINDS,
+    MATRIX_ENTRY_CAP,
+    IMAGES_PARAM,
+    ITEMS_PARAM,
+    MATRIX_MAX_ITEMS,
+    MATRIX_MAX_LEDGER,
+    MATRIX_MIN_BASE,
+    base_context_cap,
     RESERVED_PREFIX,
     RESULT_PARAM,
     RESULT_PATH,
     SENTINEL,
     APP_REPO_ENV,
     context_expression,
+    fan_outputs,
+    fan_template,
+    gather_task,
     value_test,
     when_text_problem,
     step_folder,
@@ -244,9 +267,16 @@ def _classify_when(name, parsed, needs, steps):
     `<step>.<value>` is a step's value when <step> is in this step's needs=; a step that is declared but not
     needed is refused, with the fix. Anything else is a field of the run form (checked when the form is known)."""
     needed = {n.name for n in needs}
+    fanned = {n.name for n in needs if n.matrix}
     compares = []
     for left, op, text in parsed[0]:
         head, dot, key = left.partition(".")
+        if dot and head in fanned:
+            raise AuthoringError(
+                f"step {name!r}: when= reads a value of step {head!r}, which runs once for each combination of its "
+                f"matrix= and so has no one value. A when= may read a field of the run form, or a value of a step "
+                f"that runs once."
+            )
         if dot and head in needed:
             if not _VALUE_KEY.match(key):
                 raise AuthoringError(
@@ -285,7 +315,8 @@ def _when_condition(compares, joiners):
 
 class Step:
     def __init__(self, name, kind, reads, inputs, needs, produces, gpu, when, walltime, resumable,
-                 checkpoint_every, idle_timeout):
+                 checkpoint_every, idle_timeout, matrix=None):
+        self.matrix = matrix      # {name: [values]}: the step runs once for each combination (see _check_matrix)
         self.name = name
         self.kind = kind
         self.reads = reads
@@ -425,8 +456,70 @@ def _check_data(name, kind, inputs, needs, produces):
             )
 
 
+def _check_matrix(name, kind, matrix, reads, inputs, produces, needs, resumable, checkpoint_every):
+    """matrix= of a step: {axis: [values]}. The step runs once for each combination of the values; the run form's
+    `<step>-matrix` holds the combinations (every one by default). Each refusal names the fix."""
+    if not isinstance(matrix, dict) or not matrix:
+        raise AuthoringError(
+            f"step {name!r}: matrix= is {matrix!r}. Write the values to try for each setting, for example "
+            f"matrix={{\"lr\": [0.01, 0.001], \"batch\": [16, 32]}}: the step runs once for each combination."
+        )
+    for axis, values in matrix.items():
+        problem = axis_problem(name, axis)
+        if problem:
+            raise AuthoringError(problem)
+        if axis in reads:
+            raise AuthoringError(
+                f"step {name!r}: matrix= has the name {axis!r}, which is also a section the step reads (reads=). "
+                f"Rename one of them: the step would not know which {axis!r} it reads."
+            )
+        if not isinstance(values, (list, tuple)) or not values:
+            raise AuthoringError(
+                f"step {name!r}: matrix= gives {axis!r} the value {values!r}. Give a list with at least one value, "
+                f"for example {axis!r}: [1, 2]."
+            )
+        for value in values:
+            problem = value_problem(f"step {name!r}: matrix= value {value!r} of {axis!r}", value)
+            if problem:
+                raise AuthoringError(problem)
+    combinations = 1
+    for values in matrix.values():
+        combinations *= len(values)
+    if combinations > MATRIX_MAX_ITEMS:
+        raise AuthoringError(
+            f"step {name!r}: matrix= makes {combinations} combinations; a step runs at most {MATRIX_MAX_ITEMS}. "
+            f"Remove values, or split the step."
+        )
+    if kind in MATRIX_CLUSTER_ONLY_KINDS:
+        raise AuthoringError(
+            f"step {name!r}: a step of kind {kind} runs once, so it cannot have matrix=. Give the step the kind of the work it "
+            f"does (transform, train, evaluate), or remove matrix=."
+        )
+    if any(entry.type == "dataset" for entry in produces):
+        raise AuthoringError(
+            f"step {name!r}: a step with matrix= cannot produce a dataset: a dataset has one writer and one version "
+            f"per run. Produce a model or an artifact from the matrix step, and let the step after it write the dataset."
+        )
+    if len(inputs) + len(produces) > MATRIX_MAX_LEDGER:
+        raise AuthoringError(
+            f"step {name!r}: a step with matrix= may read and write at most {MATRIX_MAX_LEDGER} things in all "
+            f"(inputs= and produces= together; it has {len(inputs) + len(produces)}): up to {MATRIX_MAX_ITEMS} items hand "
+            f"back what they read and wrote in one shared result. Read fewer inputs, or join what the step writes."
+        )
+    if resumable not in (None, RESUMABLE_OFF) or checkpoint_every not in (None, "off"):
+        raise AuthoringError(
+            f"step {name!r}: a step with matrix= is not continued from a checkpoint yet: its runs would share one "
+            f"checkpoint folder. Remove resumable= and checkpoint_every= (the walltime= limit applies to each run)."
+        )
+    if any(n.matrix for n in needs):
+        raise AuthoringError(
+            f"step {name!r}: a step with matrix= cannot need another step with matrix=: each combination would need "
+            f"the matching one. Put a step between them that picks the combinations to use."
+        )
+
+
 def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None, gpu=False,
-         when=None, walltime=None, resumable=None, checkpoint_every=None, idle_timeout=None, **removed) -> Step:
+         when=None, walltime=None, resumable=None, checkpoint_every=None, idle_timeout=None, matrix=None, matrix_allow_failed=False, **removed) -> Step:
     if _current is None:
         raise RuntimeError("step() must be called inside `with pipeline(...):`")
     for keyword in removed:
@@ -450,6 +543,19 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
     _check_kind(name, kind)
     reads, inputs, needs, produces = list(reads or []), list(inputs or []), list(needs or []), list(produces or [])
     _check_data(name, kind, inputs, needs, produces)
+    fanned = [n.name for n in needs if n.matrix]
+    if len(fanned) > 1:
+        raise AuthoringError(
+            f"step {name!r}: it needs two steps with matrix= ({', '.join(fanned)}). The results of all the items of a "
+            f"matrix step share a large part of a step's context, so a step may need one of them. Put a step between."
+        )
+    if fanned and base_context_cap(len(needs), 1) < MATRIX_MIN_BASE:
+        most = next(n for n in range(len(needs), 0, -1) if base_context_cap(n, 1) >= MATRIX_MIN_BASE)
+        raise AuthoringError(
+            f"step {name!r}: it needs {len(needs)} steps, one of them with matrix=; a step that needs a matrix step may "
+            f"need at most {most} steps in all. The items' results take {MATRIX_ENTRY_CAP // 1024} KiB of its context. "
+            f"Join some of the steps it needs, or put a step between."
+        )
     if any(s.name == name for s in _current.steps):
         raise AuthoringError(
             f"duplicate step name {name!r} — every step must be uniquely named "
@@ -481,8 +587,20 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
     checkpoint_every = _checkpoint_every_minutes(name, checkpoint_every)
     idle_timeout = _idle_timeout_minutes(name, idle_timeout)
     parsed_when = _classify_when(name, _parse_when(name, when), needs, _current.steps) if when is not None else None
+    if matrix_allow_failed not in (True, False):
+        raise AuthoringError(f"step {name!r}: matrix_allow_failed={matrix_allow_failed!r} must be True or False.")
+    if matrix_allow_failed and matrix is None:
+        raise AuthoringError(
+            f"step {name!r}: matrix_allow_failed=True is for a step with matrix=: it lets the step after it run when some "
+            f"items failed. Add matrix=, or remove matrix_allow_failed."
+        )
+    if matrix is not None:
+        _check_matrix(name, kind, matrix, reads, inputs, produces, needs, resumable, checkpoint_every)
+        resumable = RESUMABLE_OFF      # never continued from a checkpoint (the platform would share one folder)
+        matrix = {axis: list(values) for axis, values in matrix.items()}
     s = Step(name, kind, reads, inputs, needs, produces, gpu, when, walltime, resumable, checkpoint_every,
-             idle_timeout)
+             idle_timeout, matrix)
+    s.matrix_allow_failed = bool(matrix_allow_failed)
     s.parsed_when = parsed_when
     _current.steps.append(s)
     return s
@@ -540,7 +658,9 @@ class pipeline:
         and what it produces."""
         return wire([
             {"name": s.name, "kind": s.kind, "reads": s.reads, "inputs": s.inputs, "needs": [n.name for n in s.needs],
-             "produces": [{"name": e.name, "type": e.type} for e in s.produces]}
+             "produces": [{"name": e.name, "type": e.type} for e in s.produces],
+             **({"matrix": s.matrix} if s.matrix else {}),
+             **({"allow_failed": True} if s.matrix_allow_failed else {})}
             for s in self.steps
         ])
 
@@ -602,29 +722,81 @@ class pipeline:
                         (CHECKPOINT_EVERY_ANNOTATION, s.checkpoint_every),
                         (IDLE_TIMEOUT_ANNOTATION, s.idle_timeout)) if v}
                     or None,
-                    inputs=[Parameter(name=CONTEXT_PARAM)],
+                    inputs=[Parameter(name=CONTEXT_PARAM)] + ([Parameter(name=ITEMS_PARAM)] if s.matrix else []),
                     # No default: a step that ends well without writing its result fails in the workflow engine,
                     # loudly. A step that did not run is the sentinel through the DAG argument, not through here.
-                    outputs=[Parameter(name=RESULT_PARAM, value_from=ValueFrom(path=RESULT_PATH))],
+                    # An item of a matrix step is the exception: the item that fails or hands back nothing must still
+                    # give its entry to the task that joins the items' results, which then counts it as failed.
+                    outputs=[Parameter(name=RESULT_PARAM, value_from=ValueFrom(
+                        path=RESULT_PATH, **({"default": wire(SENTINEL)} if s.matrix else {})))]
+                    + ([Parameter(name=ITEMS_PARAM, value="{{inputs.parameters.%s}}" % ITEMS_PARAM)] if s.matrix else []),
                 )
 
             with DAG(name="main"):
                 compose()
+                fanned = {n.name for n in self.steps if n.matrix}
                 for s in self.steps:
                     depends = " && ".join(
                         [COMPOSE_STEP]
                         + [
-                            f"({n.name}.Succeeded || {n.name}.Skipped || {n.name}.Omitted)"
+                            gather_task(n.name) if n.matrix
+                            else f"({n.name}.Succeeded || {n.name}.Skipped || {n.name}.Omitted)"
                             if n.when
                             else n.name
                             for n in s.needs
                         ]
                     )
-                    containers[s.name](
-                        arguments={CONTEXT_PARAM: context_expression(COMPOSE_STEP, s.name, [n.name for n in s.needs])},
-                        when=_when_condition(*s.parsed_when) if s.parsed_when else None, depends=depends,
-                    )
+                    context = context_expression(COMPOSE_STEP, s.name, [n.name for n in s.needs], fanned, open_end=bool(s.matrix))
+                    when = _when_condition(*s.parsed_when) if s.parsed_when else None
+                    if s.matrix:     # one task that runs the step once for each combination (_fan_template)
+                        Task(name=s.name, template=fan_template(s.name), depends=depends, when=when, arguments={
+                            "items": "{{=%s}}" % matrix_setting(s.name, "matrix"),
+                            "par": "{{=%s}}" % ("int(fromJSON(%s)[%s][\"parallel\"])" % (SETTINGS_DOC, json.dumps(s.name))),
+                            CONTEXT_PARAM: context,
+                            SETTINGS_PARAM: "{{=%s}}" % SETTINGS_DOC,
+                            IMAGES_PARAM: "{{=%s}}" % IMAGES_DOC,
+                        })
+                    else:
+                        containers[s.name](arguments={CONTEXT_PARAM: context}, when=when, depends=depends)
+            wt.templates.extend(self._fan_template(s) for s in self.steps if s.matrix)
         self.wt = wt
+
+    @staticmethod
+    def _fan_template(s) -> "m.Template":
+        """The template of a matrix step: runs the step's container once for each item of `items`, `par` at a
+        time. A round runs the first `par` items in parallel, then the template runs itself again for the rest, so
+        the form's `<step>-parallel` can be any number (the workflow engine takes none for a limit). A failed item
+        does not end the template: the task that joins the results counts it (kubecore/gather.py)."""
+        own = fan_template(s.name)
+        # The task's context is left open (no last brace); the item adds its `matrix` field and closes it.
+        # The item's `matrix` field is the `text` compose wrote for it (kubecore/run_settings.matrix_items), read from the
+        # settings by the item's index: the workflow system hands a text over unchanged, while it would write a number
+        # again (1.0 as 1), and the text of an item it passes on has its quotes escaped.
+        item = ('{{=inputs.parameters["%s"] + ",\\"matrix\\":" + fromJSON(inputs.parameters["%s"])[%s]["matrix"][int(item.index)].text'
+                ' + "}"}}' % (CONTEXT_PARAM, SETTINGS_PARAM, json.dumps(s.name)))
+        arg = lambda name, value: m.Parameter(name=name, value=value)  # noqa: E731
+        first = 'toJSON(fromJSON(inputs.parameters["items"])[:int(inputs.parameters["par"])])'
+        rest = 'toJSON(fromJSON(inputs.parameters["items"])[int(inputs.parameters["par"]):])'
+        return m.Template(
+            name=own,
+            inputs=m.Inputs(parameters=[m.Parameter(name=n) for n in ("items", "par", CONTEXT_PARAM, SETTINGS_PARAM, IMAGES_PARAM)]),
+            outputs=m.Outputs(parameters=[
+                m.Parameter(name=name, value_from=m.ValueFrom(expression=fan_outputs(name, ["run", "rest"]), default="[]"))
+                for name in (RESULT_PARAM, ITEMS_PARAM)]),
+            steps=[
+                m.ParallelSteps(__root__=[m.WorkflowStep(
+                    name="run", template=s.name, continue_on=m.ContinueOn(failed=True),
+                    with_param="{{=%s}}" % first,
+                    arguments=m.Arguments(parameters=[arg(CONTEXT_PARAM, item), arg(ITEMS_PARAM, "{{item.index}}")]))]),
+                m.ParallelSteps(__root__=[m.WorkflowStep(
+                    name="rest", template=own,
+                    when='{{=len(fromJSON(inputs.parameters["items"])) > int(inputs.parameters["par"])}}',
+                    arguments=m.Arguments(parameters=[
+                        arg("items", "{{=%s}}" % rest), arg("par", "{{inputs.parameters.par}}"),
+                        arg(CONTEXT_PARAM, "{{inputs.parameters.%s}}" % CONTEXT_PARAM),
+                        arg(SETTINGS_PARAM, "{{inputs.parameters.%s}}" % SETTINGS_PARAM),
+                        arg(IMAGES_PARAM, "{{inputs.parameters.%s}}" % IMAGES_PARAM)]))]),
+            ])
 
     def write(self, path) -> None:
         path.parent.mkdir(exist_ok=True)

@@ -382,6 +382,177 @@ func TestScalePacking(t *testing.T) {
 	w.reconcileRows(r, start, time.Since(start))
 }
 
+// TestScaleMatrix: the items of a matrix step (PRD kaos#1911). Each item is one job of one run with the step's name,
+// created together by the follower; they are shareable steps of one scope and class like any others, so the plan of
+// D-70 packs them: four items of a 1-GPU step use one node (a host and three guests), each with its own result. The
+// same four items on a CPU class are four jobs on four nodes: the controller shares a node only between steps that
+// take one GPU each (internal/controller/share.go shareableClass). The test states that as it is, so a change of
+// the rule shows here.
+func TestScaleMatrix(t *testing.T) {
+	r := newResult(t, "S-matrix (the items of a matrix step)", "a 4-item matrix step on a 1-GPU class: one node, a host and "+
+		"three guests, every item succeeds with its own result; the same step on a CPU class: four nodes, no guests.")
+	w := newWorld(t, ctrlOpts{pollInterval: 2 * time.Second, restRate: 4, restBurst: 10, lanes: laneCandidates})
+	gpuSite := fakeslurm.New(siteOptions("meluxina", 41))
+	gpu := w.addProject("mxg", "meluxina", "u1", "acct1", gpuSite, budget{gpuShare: 100, cpuShare: 10, gpuSiteLeft: 90, cpuSiteLeft: 8}, 0)
+	w.enableSharing(gpu)
+	gpu.coverage = true
+	cpuSite := fakeslurm.New(siteOptions("meluxina", 42))
+	cpu := w.addProject("mxc", "meluxina", "u2", "acct2", cpuSite, budget{gpuShare: 10, cpuShare: 100, gpuSiteLeft: 8, cpuSiteLeft: 90}, 0)
+	w.enableSharing(cpu)
+	cpu.coverage = true
+	w.startController()
+	w.startKubelet()
+	w.startSampler()
+	w.startMonitor()
+	start := time.Now()
+	items := func(class string) []jobSpec {
+		out := make([]jobSpec, 4)
+		for i := range out {
+			out[i] = jobSpec{class: class, wallMinutes: 30, run: "5", shareable: true, stepName: "train"}
+		}
+		return out
+	}
+	w.createJobs(gpu, items("hpc-gpu"))
+	w.createJobs(cpu, items("hpc-cpu"))
+	deadline := time.Now().Add(4 * time.Minute)
+	var jobs []hpcv1alpha1.HPCArgoWorkflowJob
+	for time.Now().Before(deadline) {
+		jobs = w.allJobs()
+		open := 0
+		for i := range jobs {
+			if !jobs[i].Status.Phase.Terminal() || jobs[i].Status.Booking != nil {
+				open++
+			}
+		}
+		if len(jobs) == 8 && open == 0 {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	r.row("duration", time.Since(start).Round(time.Second))
+	r.row("final phases", histogram(jobs))
+	verifyPacking(r, gpu, gpuSite, 4, jobs)
+	hosts, guests := 0, 0
+	for i := range jobs {
+		j := &jobs[i]
+		if j.Namespace != cpu.envNS {
+			continue
+		}
+		if j.Spec.StepName != "train" || j.Status.Phase != hpcv1alpha1.PhaseSucceeded {
+			r.fail("%s: step %q ended %s/%s", j.Name, j.Spec.StepName, j.Status.Phase, j.Status.Reason)
+		}
+		if j.Status.Run != nil && j.Status.Run.HostSiteJobID != "" {
+			guests++
+		} else {
+			hosts++
+		}
+	}
+	started := cpuSite.Snapshot().Started
+	r.row("CPU class, 4 items: nodes started / hosts / guests (a CPU class is not shared: want 4 / 4 / 0)", fmt.Sprintf("%d / %d / %d", started, hosts, guests))
+	if started != 4 || hosts != 4 || guests != 0 {
+		r.fail("4 items of a CPU matrix step used %d nodes (%d hosts, %d guests); the controller shares only 1-GPU classes: want 4 / 4 / 0", started, hosts, guests)
+	}
+	names := map[string]bool{}
+	for i := range jobs {
+		names[jobs[i].Namespace+"/"+jobs[i].Name] = true
+		if jobs[i].Namespace == gpu.envNS && jobs[i].Spec.StepName != "train" {
+			r.fail("%s has the step name %q, want the step's own: train", jobs[i].Name, jobs[i].Spec.StepName)
+		}
+	}
+	if len(names) != 8 {
+		r.fail("%d distinct jobs for 8 items", len(names))
+	}
+	w.verifySubmits(r, jobs)
+	w.budgetRows(r, jobs)
+	w.verifyPublishedLedger(r, jobs)
+	w.reconcileRows(r, start, time.Since(start))
+}
+
+// TestScaleMatrixBudget: a 32-item matrix step against a budget of one node-hour (PRD kaos#1911). What the controller
+// does with a fan-out larger than the budget (internal/admission/admission.go, Decide): every item books nodes x its
+// limit when it is admitted, a guest included, and settles to what it used when it ends. An item that fits what is
+// free is admitted; one that fits the share but not what is free (running items hold it) waits with WaitingForBudget;
+// one that is more than what is left this period after what was USED is refused at once with BudgetBlocked, naming
+// the minutes it needs and the minutes left. So no item is submitted beyond the project's share: the first items
+// run, the next wait, and once the spent minutes leave less than one item needs, the rest are refused, not queued
+// for ever. An item whose own limit is more than the whole share is refused before any of this.
+func TestScaleMatrixBudget(t *testing.T) {
+	r := newResult(t, "S-matrix-budget (a 32-item matrix against a one-node-hour budget)", "32 items of 30 minutes on a 1-GPU "+
+		"class with 1 GPU node-hour of share: the first items are admitted, the next wait for budget, the rest are refused "+
+		"with BudgetBlocked once the spent minutes leave less than an item needs; the site is never charged more than the share; "+
+		"one more item of 90 minutes is refused as soon as it is seen.")
+	w := newWorld(t, ctrlOpts{pollInterval: 2 * time.Second, restRate: 4, restBurst: 10, lanes: laneCandidates})
+	site := fakeslurm.New(siteOptions("meluxina", 43))
+	p := w.addProject("mxb", "meluxina", "u1", "acct1", site, budget{gpuShare: 1, cpuShare: 10, gpuSiteLeft: 1, cpuSiteLeft: 8}, 0)
+	w.enableSharing(p)
+	p.coverage = true
+	w.startController()
+	w.startKubelet()
+	w.startSampler()
+	w.startMonitor()
+	start := time.Now()
+	items := make([]jobSpec, 33)
+	for i := range items {
+		items[i] = jobSpec{class: "hpc-gpu", wallMinutes: 30, run: "3", shareable: true, stepName: "train"}
+	}
+	items[32].wallMinutes = 90
+	w.createJobs(p, items)
+	peakWaiting, firstWaiting := 0, ""
+	ok := w.waitTerminal(33, 10*time.Minute, func(jobs []hpcv1alpha1.HPCArgoWorkflowJob) {
+		waiting := 0
+		for i := range jobs {
+			if jobs[i].Status.Phase == hpcv1alpha1.PhaseWaiting && jobs[i].Status.Reason == hpcv1alpha1.ReasonWaitingForBudget {
+				waiting++
+				if firstWaiting == "" {
+					firstWaiting = jobs[i].Status.Message
+				}
+			}
+		}
+		peakWaiting = max(peakWaiting, waiting)
+	})
+	jobs := w.allJobs()
+	r.row("duration", time.Since(start).Round(time.Second))
+	r.row("final phases", histogram(jobs))
+	r.row("peak items waiting for budget", peakWaiting)
+	r.row("a waiting item's message", firstWaiting)
+	if !ok {
+		r.fail("not every job reached a terminal phase: %v", histogram(jobs))
+	}
+	refused, succeeded, oversize := 0, 0, 0
+	for i := range jobs {
+		j := &jobs[i]
+		switch {
+		case j.Status.Phase == hpcv1alpha1.PhaseRefused:
+			refused++
+			if j.Status.Reason != hpcv1alpha1.ReasonBudgetBlocked || !strings.Contains(j.Status.Message, "node-minutes; the project's share has") {
+				r.fail("%s refused (%s: %s), want BudgetBlocked naming the minutes needed and left", j.Name, j.Status.Reason, j.Status.Message)
+			}
+			if j.Spec.WallTimeMinutes == 90 {
+				oversize++
+				r.row("the 90-minute item", fmt.Sprintf("%s/%s: %s", j.Status.Phase, j.Status.Reason, j.Status.Message))
+			} else if refused-oversize == 1 {
+				r.row("the first refused 30-minute item", fmt.Sprintf("%s/%s: %s", j.Status.Phase, j.Status.Reason, j.Status.Message))
+			}
+		case j.Status.Phase == hpcv1alpha1.PhaseSucceeded:
+			succeeded++
+		}
+	}
+	r.row("items succeeded / refused", fmt.Sprintf("%d / %d", succeeded, refused))
+	if oversize != 1 || succeeded < 2 || succeeded+refused != 33 || refused-oversize < 1 {
+		r.fail("want the 90-minute item refused, at least 2 items run and at least 1 refused; got %d succeeded, %d refused (oversize %d)", succeeded, refused, oversize)
+	}
+	if charged := site.Charged(p.account); charged > 60 {
+		r.fail("the site charged %.1f node-minutes against a share of 60", charged)
+	}
+	if peakWaiting == 0 {
+		r.fail("the budget never made an item wait")
+	}
+	w.verifySubmits(r, jobs)
+	w.budgetRows(r, jobs)
+	w.verifyPublishedLedger(r, jobs)
+	w.reconcileRows(r, start, time.Since(start))
+}
+
 // verifyPacking asserts the node count of one run of n shareable steps: the site started ceil(n/4) jobs, those are
 // the steps without a host, the others are guests that settled to zero, and the charge is about one node per host.
 func verifyPacking(r *result, p *project, site *fakeslurm.Site, n int, all []hpcv1alpha1.HPCArgoWorkflowJob) {

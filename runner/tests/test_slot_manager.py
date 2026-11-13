@@ -491,3 +491,26 @@ def test_a_step_stopped_by_the_slot_manager_never_ends_with_exit_0__live_job_544
                mem_mb=1024, own_body="sleep 6\nexit 0\n", extra_env={"FAKE_CANCELLED_STEP_EXITS_0": "1"})
     mem.finish()
     assert mem.jobs()["101"]["comment"] == "kaos-commit=bbbbbbb2 kaos-state=done rc=137 host=100 reason=memkill"
+
+
+def test_the_four_items_of_a_matrix_step_run_on_one_node_each_on_its_own_gpu_with_its_own_result(tmp_path):
+    """PRD kaos#1911 (matrix=): the items of one matrix step are jobs of one run with the same step name; the first
+    is the node's host job, the other three are its guests. Each runs on a GPU of its own, with its own job id and
+    its own result in its own comment, and ends alone."""
+    def item(index, jid):
+        script = ('echo "%d $KAOS_JOB_ID $CUDA_VISIBLE_DEVICES $KUBECORE_SLOT_GPUS" > $OUT/item%d\nsleep 1\nexit 0\n' % (index, index))
+        return _job("kaos-%s-0b7f6c1e-train-%08x-a1" % (SCOPE, index), script, comment="kaos-commit=%07d" % (index + 1000000))
+    guests = {str(101 + i): item(i + 1, 101 + i) for i in range(3)}
+    node = Node(tmp_path, guests, own_body=item(0, 100)["script"].partition("set +e\n")[2])
+    rc, log = node.finish()
+    assert rc == 0, log
+    jobs = node.jobs()
+    seen = [(node.out / ("item%d" % i)).read_text().split() for i in range(4)]
+    assert [s[0] for s in seen] == ["0", "1", "2", "3"], "each item ran, once"
+    assert [s[1] for s in seen] == ["100", "101", "102", "103"], "each ran as its own job: the host and three guests"
+    assert len({s[2] for s in seen}) == 4, "four items, four different GPUs: %s" % [s[2] for s in seen]
+    assert all(s[3] == "1" for s in seen), "each is told it has one GPU"
+    for jid, index in (("101", 1), ("102", 2), ("103", 3)):
+        assert jobs[jid]["state"] == "CANCELLED"
+        assert jobs[jid]["comment"] == "kaos-commit=%07d kaos-state=done rc=0 host=100" % (index + 1000000), "its own result"
+    assert jobs["100"]["comment"] == "kaos-commit=aaaaaaa1 kaos-state=done rc=0"

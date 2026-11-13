@@ -183,9 +183,40 @@ def shape_of_ledger(v):
     return next((b for b in bad if b), "")
 
 
+MATRIX_FIELDS = ["version", "status", "items"]
+MATRIX_ITEM_STATUSES = ("ok", "failed", "skipped")
+MATRIX_ENTRY_FIELDS = ["index", "of", "values"]       # the context's `matrix`: the item this step is, of how many
+MATRIX_MAX_ITEMS = 32
+MATRIX_RESULT_CAP = 56 * 1024  # the whole entry of a matrix step in upstream
+
+
+def shape_of_matrix_result(v):
+    """The entry a matrix step has in `upstream`: one entry per item, in index order, each with the item's values and
+    status; an ok item carries its result, a skipped one its reason."""
+    if list(v) != MATRIX_FIELDS or v["version"] != 1 or not isinstance(v["items"], list) or not v["items"]:
+        return "a matrix result is {version: 1, status: matrix, items: [one entry per item]}"
+    if len(v["items"]) > MATRIX_MAX_ITEMS:
+        return "a matrix result holds at most %d items" % MATRIX_MAX_ITEMS
+    for i, item in enumerate(v["items"]):
+        status = item.get("status") if isinstance(item, dict) else None
+        want = ["index", "values", "status"] + {"ok": ["result"], "skipped": ["reason"]}.get(status, [])
+        if not isinstance(item, dict) or list(item) != want or item["index"] != i or status not in MATRIX_ITEM_STATUSES \
+                or not isinstance(item["values"], dict) or not item["values"]:
+            return "item %d: an item is {index (its position), values, status[, result | reason]}" % i
+        if status == "ok" and shape_of_result(item["result"]):
+            return "item %d: %s" % (i, shape_of_result(item["result"]))
+        if status == "skipped" and not (isinstance(item["reason"], str) and 0 < len(item["reason"]) <= SKIP_REASON_MAX):
+            return "item %d: a skipped item has a reason of 1 to %d characters" % (i, SKIP_REASON_MAX)
+    if not any(item["status"] == "ok" for item in v["items"]):
+        return "a matrix result has at least one ok item: the task that joins the items fails the run otherwise"
+    return ""
+
+
 def shape_of_result(v):
     if v == ABSENT:
         return ""
+    if isinstance(v, dict) and v.get("status") == "matrix":
+        return shape_of_matrix_result(v)
     if isinstance(v, dict) and v.get("status") == "skipped":
         ok = list(v) == SKIPPED_FIELDS and v["version"] == 1 and isinstance(v["reason"], str) \
             and 0 < len(v["reason"]) <= SKIP_REASON_MAX
@@ -199,8 +230,15 @@ def shape_of_result(v):
 
 
 def shape_of_context(v):
-    if not isinstance(v, dict) or list(v) != CONTEXT_FIELDS or v["version"] != 1:
-        return "fields must be %s, in that order" % ", ".join(CONTEXT_FIELDS)
+    matrix = isinstance(v, dict) and "matrix" in v      # only an item of a matrix step has `matrix`, after `upstream`
+    if not isinstance(v, dict) or list(v) != CONTEXT_FIELDS + (["matrix"] if matrix else []) or v["version"] != 1:
+        return "fields must be %s, in that order" % ", ".join(CONTEXT_FIELDS + (["matrix"] if matrix else []))
+    if matrix:
+        entry = v["matrix"]
+        if not isinstance(entry, dict) or list(entry) != MATRIX_ENTRY_FIELDS or type(entry["index"]) is not int \
+                or type(entry["of"]) is not int or not 0 <= entry["index"] < entry["of"] <= MATRIX_MAX_ITEMS \
+                or not isinstance(entry["values"], dict) or not entry["values"]:
+            return "matrix is {index, of, values}: index below of, of at most %d" % MATRIX_MAX_ITEMS
     if not _name(v["step"]) or v["kind"] not in KINDS or not isinstance(v["params"], dict):
         return "step, kind or params is not valid"
     if "platform" in v["params"] or "plan" in v["params"]:
@@ -237,7 +275,8 @@ def check_fixtures():
             want(cost(wire.decode("ascii")) <= CONTEXT_CAP, "%s is over the context cap" % name)
             want(not shape_of_context(value), "%s: %s" % (name, shape_of_context(value)))
         if name.startswith("result-"):
-            want(cost(wire.decode("ascii")) <= RESULT_CAP, "%s is over the result cap" % name)
+            want(cost(wire.decode("ascii")) <= (MATRIX_RESULT_CAP if _load(name).get("status") == "matrix" else RESULT_CAP),
+                 "%s is over the result cap" % name)
             want(not shape_of_result(value), "%s: %s" % (name, shape_of_result(value)))
         if name.startswith("ledger-"):
             want(not shape_of_ledger(value), "%s: %s" % (name, shape_of_ledger(value)))
@@ -250,6 +289,12 @@ def check_fixtures():
          "context-one-upstream.json: upstream.prepare is not result-ok.json")
     want(_load("context-skipped-upstream.json")["upstream"] == {"train": _load("result-model.json"), "export": ABSENT},
          "context-skipped-upstream.json: upstream is not result-model.json plus the sentinel")
+    want(_load("context-matrix-item.json")["upstream"] == _load("context-one-upstream.json")["upstream"],
+         "context-matrix-item.json: upstream is not that of context-one-upstream.json")
+    want(_load("context-matrix-upstream.json")["upstream"] == {"train": _load("result-matrix.json")},
+         "context-matrix-upstream.json: upstream.train is not result-matrix.json")
+    want(shape_of_matrix_result({"version": 1, "status": "matrix", "items": [{"index": 0, "values": {"a": 1}, "status": "failed"}]}) != "",
+         "the shape checks accept a matrix result with no ok item")
     want(_load("result-skipped.json")["status"] == "skipped", "result-skipped.json is not a skipped result")
     want(len(_load("ledger-two-reads.json")["reads"]) == 2, "ledger-two-reads.json does not hold two reads")
     want(_load("hpc-job.json") == _hpc_job(), "hpc-job.json is not derived from the other fixtures (run write-fixtures)")
