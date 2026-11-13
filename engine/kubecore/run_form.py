@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import tempfile
 from typing import Callable, Optional
@@ -1273,7 +1274,7 @@ def _previous_form(previous) -> Optional[dict]:
         meta = (previous or {}).get("metadata") or {}
         form = json.loads(meta["annotations"][RUN_FORM_ANNOTATION])
         return form if isinstance(form["stamp"]["commit"], str) and _COMMIT_RE.match(form["stamp"]["commit"]) else None
-    except (KeyError, TypeError, ValueError, AttributeError):
+    except (KeyError, TypeError, ValueError, AttributeError, RecursionError):
         return None
 
 
@@ -1356,6 +1357,29 @@ def _write_atomic(path: str, text: str) -> None:
         raise
 
 
+PREVIOUS_CAP = 4 * 1024 * 1024    # the run form cap plus a WorkflowTemplate's own size
+
+
+def _load_previous(path: str) -> Optional[dict]:
+    """The live template, or None for ANY failure to read it: a symlink, a FIFO or other non-regular file, a file
+    over PREVIOUS_CAP, bad YAML, nesting too deep. It is an optimisation's input, never a reason to fail."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            with os.fdopen(fd, "rb", closefd=False) as fh:
+                data = fh.read(PREVIOUS_CAP + 1)
+        finally:
+            os.close(fd)
+        if len(data) > PREVIOUS_CAP:
+            return None
+        doc = yaml.safe_load(data.decode("utf-8"))
+        return doc if isinstance(doc, dict) else None
+    except Exception:    # noqa: BLE001
+        return None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m kubecore.run_form")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1366,16 +1390,11 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     try:
         wft = _load(args.wft)
-        previous = None
-        if args.previous:
-            try:
-                previous = _load(args.previous)
-            except (OSError, yaml.YAMLError, RunFormError):
-                previous = None     # no live template yet, or one this seal cannot read: seal as new
+        previous = _load_previous(args.previous) if args.previous else None
         seal(wft, args.source_commit, previous)
         out = yaml.safe_dump(wft, sort_keys=False, default_flow_style=False)
         _write_atomic(args.wft, out)
-    except (RunFormError, OSError, yaml.YAMLError, KeyError, TypeError, AttributeError) as err:
+    except (RunFormError, OSError, yaml.YAMLError, KeyError, TypeError, AttributeError, RecursionError) as err:
         print("GATE FAIL: run form: %s" % (err if isinstance(err, (RunFormError, OSError)) else
                                            "the template is not shaped as expected (%s: %s)"
                                            % (type(err).__name__, err)), file=sys.stderr)

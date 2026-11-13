@@ -448,3 +448,73 @@ def test_an_image_field_needs_source_platform_and_tier_hidden_and_platform_true(
     next(f for f in form["fields"] if f["name"].startswith("image-")).update(change)
     _put(wft, form)
     _fail(wft, "image-")
+
+
+# ------------------------------------------------------------------------------------------- fix round 2
+
+def _seal_new_with(tmp_path, previous_arg):
+    path = tmp_path / "w.yaml"
+    path.write_text(yaml.safe_dump(_wft(), sort_keys=False))
+    res = subprocess.run([sys.executable, "-m", "kubecore.run_form", "seal", "--wft", str(path), "--source-commit",
+                          OTHER, "--previous", str(previous_arg)], cwd=ROOT, capture_output=True, text=True,
+                         timeout=60)
+    assert res.returncode == 0, res.stderr
+    sealed = yaml.safe_load(path.read_text())
+    assert sealed["metadata"]["annotations"][SOURCE_COMMIT_KEY] == OTHER
+
+
+def _sealed_live(tmp_path, name="live.yaml"):
+    live = tmp_path / name
+    wft = _wft()
+    run_form.seal(wft, COMMIT)
+    live.write_text(yaml.safe_dump(wft, sort_keys=False))
+    return live
+
+
+def test_a_deeply_nested_previous_annotation_seals_as_new():
+    live = _wft()
+    live["metadata"]["annotations"][RUN_FORM_ANNOTATION] = "[" * 100000 + "]" * 100000
+    assert run_form.seal(_wft(), OTHER, previous=live)["stamp"]["commit"] == OTHER
+
+
+def test_a_deeply_nested_previous_file_seals_as_new(tmp_path):
+    deep = tmp_path / "deep.yaml"
+    deep.write_text("a: " + "[" * 100000 + "]" * 100000)
+    _seal_new_with(tmp_path, deep)
+
+
+def test_a_fifo_previous_seals_as_new_without_hanging(tmp_path):
+    import os
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    _seal_new_with(tmp_path, fifo)
+
+
+def test_a_symlink_previous_is_not_followed(tmp_path):
+    real = _sealed_live(tmp_path)
+    link = tmp_path / "link.yaml"
+    link.symlink_to(real)
+    _seal_new_with(tmp_path, link)
+
+
+def test_an_oversized_previous_seals_as_new(tmp_path):
+    big = _sealed_live(tmp_path)
+    big.write_text(big.read_text() + "# " + "x" * run_form.PREVIOUS_CAP + "\n")
+    _seal_new_with(tmp_path, big)
+
+
+def test_a_regular_previous_still_keeps_its_commit(tmp_path):
+    live = _sealed_live(tmp_path)
+    assert run_form._load_previous(str(live)) is not None
+    assert run_form._load_previous(str(tmp_path / "absent")) is None
+
+
+def test_main_catches_a_recursion_error(monkeypatch, tmp_path, capsys):
+    path = tmp_path / "w.yaml"
+    path.write_text(yaml.safe_dump(_wft(), sort_keys=False))
+
+    def deep(*a, **k):
+        raise RecursionError("maximum recursion depth exceeded")
+    monkeypatch.setattr(run_form, "seal", deep)
+    assert run_form.main(["seal", "--wft", str(path), "--source-commit", COMMIT]) == 1
+    assert capsys.readouterr().err.startswith("GATE FAIL: run form: ")
