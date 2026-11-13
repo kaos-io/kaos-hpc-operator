@@ -192,20 +192,26 @@ func Holds(j *hpcv1alpha1.HPCArgoWorkflowJob) bool {
 	return false
 }
 
+// CountedFrom is the time from which a settled attempt counts against the site's budget now: the start of the period,
+// except for a source-site budget (D-56), whose share is what the site reported left at ObservedAt. That figure already
+// counts every job that ended before it, so only later ends are used against it; an attempt that was running at ObservedAt is
+// counted whole: conservative, never an overspend. A job object whose last attempt ended before this time can be deleted
+// without changing the ledger; any other cannot.
+func CountedFrom(site *hpcv1alpha1.HPCSite, now time.Time) time.Time {
+	if b := site.Spec.Budget; b.Source == hpcv1alpha1.BudgetSourceSite && b.ObservedAt != nil {
+		return b.ObservedAt.UTC()
+	}
+	return PeriodStart(now)
+}
+
 // Compute derives the ledger of one HPCSite from the jobs booked against it. pending holds
 // bookings made in this process that the informer cache may not show yet, keyed by job UID; a job
 // present in jobs with a booking takes precedence over its pending entry.
 func Compute(site *hpcv1alpha1.HPCSite, jobs []hpcv1alpha1.HPCArgoWorkflowJob,
 	pending map[string]hpcv1alpha1.Booking, now time.Time) Ledger {
 	periodStart := PeriodStart(now)
-	start := periodStart
+	start := CountedFrom(site, now)
 	siteSource := site.Spec.Budget.Source == hpcv1alpha1.BudgetSourceSite
-	// Source site (D-56): the share is what the site reported left at ObservedAt, which already
-	// counts every job that ended before it, so only later ends are used against it. An attempt
-	// that was running at ObservedAt is counted whole: conservative, never an overspend.
-	if b := site.Spec.Budget; b.Source == hpcv1alpha1.BudgetSourceSite && b.ObservedAt != nil {
-		start = b.ObservedAt.UTC()
-	}
 	// Every allocation has its own ledger (AC-84): a spent one never touches another.
 	l := Ledger{PeriodStart: periodStart, CountedFrom: start, Tiers: map[hpcv1alpha1.Tier]Tier{}}
 	for _, tier := range hpcv1alpha1.Tiers {

@@ -49,6 +49,8 @@ spec:
             {{- if .Values.lanes.candidates }}
             - {{ printf "--lane-candidates=%s" (toJson .Values.lanes.candidates) | quote }}
             {{- end }}
+            {{- /* Finished HPC job objects are deleted after this long (0 keeps them). */}}
+            - {{ printf "--job-retention=%s" (.Values.jobRetention | toString) | quote }}
             {{- /* Idle watchdog for in-cluster GPU steps (D-72, D-76): on while a metrics URL is set. */}}
             {{- with .Values.idleWatchdog }}
             {{- if .metricsUrl }}

@@ -90,6 +90,9 @@ type HPCArgoWorkflowJobReconciler struct {
 	HostStartWait time.Duration
 	// GuestTakeWait is how long a guest waits on a running host that has not taken it (DefaultGuestTakeWait).
 	GuestTakeWait time.Duration
+	// JobRetention is how long a finished job object is kept before it is deleted (DefaultJobRetention in the
+	// manager, --job-retention). Zero keeps them (tests).
+	JobRetention time.Duration
 
 	mu           sync.Mutex
 	pending      map[string]hpcv1alpha1.Booking             // by job UID
@@ -102,7 +105,7 @@ type HPCArgoWorkflowJobReconciler struct {
 	trailing     map[client.ObjectKey]bool                  // sites with a deferred write scheduled
 }
 
-// +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcargoworkflowjobs,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups=hpc.kaos.io,resources=hpcargoworkflowjobs,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
@@ -127,6 +130,9 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	if stop, err := r.stripLegacyFinalizer(ctx, &job); stop {
+		return ctrl.Result{}, err
+	}
 	serve := job.Spec.StepName != ""
 	var site *hpcv1alpha1.HPCSite
 	defer func() { r.observePhase(&job, site) }()
@@ -142,7 +148,7 @@ func (r *HPCArgoWorkflowJobReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if job.Status.Phase.Terminal() {
 		r.forget(string(job.UID))
 		r.publishAfterEnd(ctx, &job)
-		return r.resettleHostEnd(ctx, &job)
+		return r.finishedPass(ctx, &job)
 	}
 
 	if serve && job.Status.Sweep != nil && job.Status.Booking != nil {

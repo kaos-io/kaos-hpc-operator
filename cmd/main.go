@@ -109,7 +109,7 @@ func main() {
 	var sitePollInterval time.Duration
 	var siteRestRate float64
 	var siteRestBurst int
-	var siteMissingGrace, sweepGiveUp, ledgerInterval, siteOutageMax time.Duration
+	var siteMissingGrace, sweepGiveUp, ledgerInterval, siteOutageMax, jobRetention time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -145,6 +145,10 @@ func main() {
 	flag.DurationVar(&siteOutageMax, "site-outage-max", controller.DefaultSiteOutageMax,
 		"How long a job waits for an unreachable site (connection errors, 5xx, timeouts, slurmctld down) before it fails "+
 			"with reason SiteUnavailable. The runner waits as long. Needs the site poller (--site-poll-interval > 0).")
+	flag.DurationVar(&jobRetention, "job-retention", controller.DefaultJobRetention,
+		"How long a finished HPCArgoWorkflowJob is kept before it is deleted (35 days: longer than any budget month). "+
+			"One whose last attempt ended in the running budget period, one with a sweep and one with an open host attempt "+
+			"are never deleted. 0 keeps them for ever.")
 	flag.DurationVar(&sweepGiveUp, "sweep-give-up", controller.DefaultSweepGiveUp,
 		"How long the controller waits for the site to confirm that a job's site job ended before it settles without proof.")
 	flag.DurationVar(&ledgerInterval, "ledger-publish-interval", controller.DefaultLedgerPublishInterval,
@@ -348,6 +352,7 @@ func main() {
 		jobs.Health = sitestate.NewHealth()
 	}
 	jobs.SiteOutageMax = siteOutageMax
+	jobs.JobRetention = jobRetention
 	if err := jobs.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HPCArgoWorkflowJob")
 		os.Exit(1)

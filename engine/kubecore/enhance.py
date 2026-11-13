@@ -301,8 +301,43 @@ def enhance_metadata(wft: dict, ctx: dict) -> None:
     annotations.setdefault("platform.kubecore.io/cost-tracking", "enabled")
 
 
+RUN_RETENTION_DAYS = 35
+HPC_MIN_RETENTION_DAYS = 32
+POD_GC_STRATEGY, POD_GC_DELAY = "OnWorkflowCompletion", "168h"
+
+
+def run_retention_seconds(ctx: dict, hpc_steps: bool = False) -> int:
+    """How long a finished run is kept: the context's `runRetentionDays` (a whole number, 1 to 3650), else 35 days.
+
+    Why 35 and not 30: the HPC budget is a calendar month, and the budget ledger is derived from the HPC job records,
+    which are deleted with their run. A run that ends at t is therefore kept longer than any month (31 days at most), so
+    the record of its spend is never collected before the month of t has closed. A pipeline with a step that can run on
+    HPC may not be set below 32 days; one with no such step may go down to 1."""
+    days = ctx.get("runRetentionDays", RUN_RETENTION_DAYS) if "runRetentionDays" in ctx else RUN_RETENTION_DAYS
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 3650:
+        raise EnhanceError(f"context runRetentionDays={days!r}: expected a whole number of days from 1 to 3650")
+    if hpc_steps and days < HPC_MIN_RETENTION_DAYS:
+        raise EnhanceError(f"context runRetentionDays={days}: runs with HPC steps are kept at least {HPC_MIN_RETENTION_DAYS} "
+                           "days, so the month's HPC spend stays counted")
+    return days * 86400
+
+
+def has_hpc_steps(steps: list, ctx: dict) -> bool:
+    """A step that can run on HPC (Slurm) in this pipeline: the project has HPC classes and the step is not of a kind
+    that never runs there."""
+    return bool(hpc_classes(ctx)) and any(runs_on_hpc(step) for step in steps)
+
+
 def enhance_spec_top_level(spec: dict, ctx: dict) -> None:
     spec.setdefault("serviceAccountName", ctx["serviceAccountName"])
+    # Finished runs expire (a Workflow made from this template takes both from it: ttlStrategy and podGC are fields of
+    # the template spec that a Workflow with a workflowTemplateRef is built from): without it they pile up in the
+    # cluster, each with its HPC job records. The run record is kept for the retention (35 days by default, see
+    # run_retention_seconds). The pods are kept for 7 days after the run ends, succeeded or failed, then deleted: a
+    # step's log lives only in its pod until logs are stored. podGC.deleteDelayDuration needs Argo Workflows 3.5 or later.
+    seconds = run_retention_seconds(ctx, has_hpc_steps(step_templates(spec), ctx))
+    spec.setdefault("ttlStrategy", {"secondsAfterSuccess": seconds, "secondsAfterFailure": seconds})
+    spec.setdefault("podGC", {"strategy": POD_GC_STRATEGY, "deleteDelayDuration": POD_GC_DELAY})
 
 
 def step_templates(spec: dict) -> list:

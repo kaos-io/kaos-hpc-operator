@@ -60,6 +60,11 @@ runner:
   # (controllerManager.nodeSelector, tolerations, affinity).
   scheduling: {}
 
+# How long a finished HPCArgoWorkflowJob is kept before the controller deletes it (a Go duration; 0 keeps them for ever).
+# One that ended in the running budget period, or that the site has not settled, is never deleted (its spend is counted
+# from the object). Finished pipeline runs have their own time-to-live, set where the pipeline is rendered.
+jobRetention: 840h
+
 # [LANES]: site lanes (QoS, reservation) the controller tries in order for each serve-mode attempt,
 # after its time limit is known (PRD-HPC-1461 F-42, F-44). A candidate is used only if the HPCSite
 # profile lists the QoS (and the class allows it), the limit fits the QoS's maximum wall time, its

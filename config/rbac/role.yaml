@@ -57,6 +57,7 @@ rules:
   resources:
   - hpcargoworkflowjobs
   verbs:
+  - delete
   - get
   - list
   - patch
