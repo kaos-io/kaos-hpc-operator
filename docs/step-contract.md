@@ -105,7 +105,13 @@ wherever it runs, and the run form shows it: a field `<step>-walltime` for every
 longest the step may run, as minutes or hours: 90m, 12h. Default from pipeline.py." Its default is the step's
 `walltime=`, else `4h` (the same default as an HPC class). On a cluster machine the value is the step's deadline; on
 an HPC class it is the job's limit. The platform's own compose step has a fixed limit of 30 minutes and no field.
-Waiting for a machine does not count: a step that never gets one is bounded by the platform's pending reaper, not by
+On an HPC class a run keeps its access to its data and to tracking for 11.5 hours at most (a step that runs longer
+would lose both partway through and fail late, after spending node-hours). So the form's `<step>-walltime` of a step on an
+HPC class that is not resumable is at most 11.5 hours (690 minutes): compose refuses a longer value before any step
+starts, naming the step, the limit in hours and the two fixes, shorten `walltime=` or make the step resumable
+(`resumable=True` with `checkpoint_every=`). A resumable step may ask for more: it runs as runs that each end inside
+that time, each with fresh access and continuing from its checkpoint, and together they stay within the limit (at most
+six runs: 69 hours). Waiting for a machine does not count: a step that never gets one is bounded by the platform's pending reaper, not by
 this limit. A step that declares `checkpoint_every=` (not `False`) or `resumable=` also has `<step>-checkpoint-every` ("How often
 the 'x' step's checkpoint is saved: minutes or hours, for example 10m or 1h."), default the value in code (10 minutes,
 `resilience.DEFAULT_EVERY_MINUTES`, for a step that declares `resumable=` alone). Both are
@@ -140,7 +146,9 @@ from its newest checkpoint, in each of three cases, on a cluster machine and on 
 after the first run: it reaches its time limit, its machine is lost, or it asks to be restarted (exit code 85,
 `kaos_lib.checkpoint.exit_for_restart`). The time limit applies to each run of the step, not to the sum: on the
 cluster each run is a new pod with the full deadline; on an HPC class each continuation is a new job with the full
-limit, and the follower's own deadline covers the queue and every continuation. On the cluster the step is run
+limit, and the follower's own deadline covers the queue and every continuation. The exception is a limit longer than one run
+can be (the longest the site allows, or the 11.5 hours of access above): that limit is then the total, each run gets at most
+the longest run and never more than what the earlier runs left, and the step ends with its limit used up. On the cluster the step is run
 again by the step's retry rule (a step that does not declare `resumable=` is retried only when its machine is lost)
 and restores its checkpoint folder in the init container; on HPC the controller sends the stop signal the declared
 lead (`resumable=`) before the limit and submits the continuation. The form's `<step>-walltime` must be longer than

@@ -75,9 +75,11 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from omegaconf.nodes import BooleanNode, EnumNode, FloatNode, IntegerNode, StringNode
 
 from kubecore import derive_tree, rerun
+from kubecore.meluxina import HPC_MAX_CONTINUATIONS
 from kubecore.run_settings import (
     checkpoint_field,
     DEFAULT_PARALLEL,
+    TOKEN_COVER_MINUTES,
     class_problem,
     matrix_field,
     matrix_items,
@@ -340,6 +342,36 @@ def run_classes(steps: list, chosen: list, offers: str) -> None:
         problem = class_problem(step, value, table[step])
         if problem:
             raise ComposeError(problem)
+
+
+def _hours(value: int) -> str:
+    return f"{value / 60:.1f}".removesuffix(".0") + " hours"
+
+
+def run_token_cover(steps: list, settings: dict, chosen: list, hpc: set, leads: list = ()) -> None:
+    """A step on an HPC class keeps its access to its data and to tracking for TOKEN_COVER_MINUTES at most. One that
+    is not resumable and asks for longer would lose that access partway through and fail late, after spending
+    node-hours: refused here, before any step starts. A resumable step is run as segments that each end inside
+    that time (the controller does it), so it may ask for longer, up to HPC_MAX_CONTINUATIONS + 1 runs."""
+    resumable = {step for step, lead in _pairs(list(leads)).items() if int(lead)}
+    for step, cls in _pairs(chosen).items():
+        wall = settings.get(step, {}).get("walltime", 0)
+        if cls not in hpc or wall <= TOKEN_COVER_MINUTES:
+            continue
+        field, cover = walltime_field(step), _hours(TOKEN_COVER_MINUTES)
+        if step not in resumable:
+            raise ComposeError(
+                f"step '{step}': {field} is {wall} minutes ({_hours(wall)}), but a step keeps its access to its data and to "
+                f"tracking for at most {cover} and this one is not resumable, so it would lose that access partway through "
+                f"and fail late. Shorten the limit ({field} on the run form, or walltime= in pipeline.py) to "
+                f"{TOKEN_COVER_MINUTES} minutes or less, or make the step resumable (resumable=True with checkpoint_every=) "
+                f"so it continues automatically in runs of up to {cover}.")
+        longest = TOKEN_COVER_MINUTES * (HPC_MAX_CONTINUATIONS + 1)
+        if wall > longest:
+            raise ComposeError(
+                f"step '{step}': {field} is {wall} minutes ({_hours(wall)}). As a resumable step it runs in runs of up to "
+                f"{cover} and at most {HPC_MAX_CONTINUATIONS + 1} runs ({HPC_MAX_CONTINUATIONS + 1} runs, {longest} minutes "
+                f"in all). Shorten the limit ({field} on the run form) to {longest} minutes or less.")
 
 
 def run_matrix(steps: list, matrices: list, parallels: list) -> dict:
@@ -832,6 +864,7 @@ def main(argv=None) -> None:
                         else "false: its version stays sealed and latest does not move")
                 print(f"dataset {name}: {promote_field(name)} is {what}")
             run_classes(steps, args.classes, args.class_offers)
+            run_token_cover(steps, settings, args.classes, {c for c in args.hpc_classes.split(",") if c}, args.resumable_lead)
             claim_run(args.app, args.run, args.run_uid)
             if reuse_run:
                 reuse = rerun.prepare(

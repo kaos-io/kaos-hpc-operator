@@ -22,7 +22,7 @@ import (
 // admission with a reason the follower prints when it is not resumable, run as continuations of at most
 // the lane maximum when it is, and refused again beyond the continuation cap.
 var _ = Describe("a step longer than the longest lane", func() {
-	const laneMax = int32(2880)
+	const laneMax = int32(600) // shorter than what a run's data access covers, so the lane is what binds
 	var (
 		r      *HPCArgoWorkflowJobReconciler
 		envNS  string
@@ -85,7 +85,7 @@ var _ = Describe("a step longer than the longest lane", func() {
 		got := submit(4*1440, nil)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused))
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonTooLongNotResumable))
-		for _, w := range []string{"4 days (5760 min)", "2 days (2880 min)", "resumable=True", "walltime"} {
+		for _, w := range []string{"4 days (5760 min)", "10 h (600 min)", "resumable=True", "walltime"} {
 			Expect(got.Status.Message).To(ContainSubstring(w))
 		}
 		Expect(got.Status.Booking).To(BeNil())
@@ -104,13 +104,13 @@ var _ = Describe("a step longer than the longest lane", func() {
 	})
 
 	It("runs a declared resumable step as continuations of at most the lane maximum", func() {
-		got := submit(5*1440, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+		got := submit(3000, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
 			j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: 5}
 		})
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
 		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(laneMax))
 		Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(laneMax)), "one run is booked, not the whole declared limit")
-		Expect(runnerEnv(got)).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "2880"))
+		Expect(runnerEnv(got)).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "600"))
 	})
 
 	It("refuses a resumable step that would need more runs than the continuation cap", func() {
@@ -127,8 +127,44 @@ var _ = Describe("a step longer than the longest lane", func() {
 		orig := old.DeepCopy()
 		old.Status.ResumeEvidence = &hpcv1alpha1.ResumeEvidence{Verified: true, At: metav1.Now()}
 		Expect(k8sClient.Status().Patch(ctx, old, client.MergeFrom(orig))).To(Succeed())
-		got := submit(4*1440, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = image })
+		got := submit(3000, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = image })
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted), got.Status.Message)
 		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(laneMax))
+	})
+
+	// A run's access to its data and to tracking ends before most lanes do (PRD kaos#1911 F-40, issue 2212).
+	Context("on a site whose lane is longer than a run's data access", func() {
+		BeforeEach(func() {
+			site := &hpcv1alpha1.HPCSite{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: hpcNS, Name: "meluxina"}, site)).To(Succeed())
+			site.Spec.Profile.Classes[0].MaxWallTimeMinutes = 2880
+			Expect(k8sClient.Update(ctx, site)).To(Succeed())
+		})
+
+		It("refuses a step that is not resumable and asks for longer than the access, naming the step and the fixes", func() {
+			got := submit(12*60, nil)
+			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused))
+			Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonTooLongNotResumable))
+			for _, w := range []string{"step train asks for 12 h", "11.5 h at most", "walltime=", "resumable=True", "checkpoint_every="} {
+				Expect(got.Status.Message).To(ContainSubstring(w))
+			}
+			Expect(got.Status.Booking).To(BeNil())
+		})
+
+		It("admits a step exactly as long as the access", func() {
+			got := submit(690, nil)
+			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted), got.Status.Message)
+			Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(690)))
+		})
+
+		It("runs a resumable step of 20 hours as a first run that ends inside the access", func() {
+			got := submit(20*60, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+				j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: 5}
+			})
+			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted), got.Status.Message)
+			Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(690)))
+			Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(690)))
+			Expect(runnerEnv(got)).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "690"))
+		})
 	})
 })

@@ -53,7 +53,7 @@ the job's class. Every `Reason` the operator writes, what it means and what the 
 | `Refused` / `SharedInput` | An entry of `spec.inputs` names an `owner`: a dataset another project shares cannot be staged on an HPC site yet. The follower refuses it first, with the same sentence |
 | `Failed` / `ResultNotHandedBack` | The step ended well, but its result could not be brought from the site to `status.result`: the job could not read or upload the result file (job exit 243), the runner could not fetch it, or the run has no way to hand a result back (no data-plane token, lakeFS endpoint or app), in which case nothing is submitted. Never a success with an empty result |
 | `Failed` / `InvalidResult` | The result file reached the runner but is not a result of the step contract (not a JSON object, not version 1 with status `ok` and `values`, `reads`, `writes`, or over 8 KiB by cost). Runner exit 244 |
-| `Refused` / `TooLongNotResumable` | The declared limit is above the longest run the class or site allows (2 days on MeluXina `default`) and the step is not resumable (declared or verified, D-74), so it would be cut. The message gives the declared limit, the maximum and the two fixes: make it resumable or shorten it. Never cut silently |
+| `Refused` / `TooLongNotResumable` | The declared limit is above the longest run the class or site allows (2 days on MeluXina `default`), or above 11.5 hours, how long one run keeps its access to its data and tracking (`timelimit.TokenCoverMinutes`), and the step is not resumable (declared or verified, D-74), so it would be cut. The message gives the declared limit, the maximum and the two fixes: make it resumable or shorten it. Never cut silently |
 | `Refused` / `TooLongBeyondContinuations` | The step is resumable, but its declared limit needs more runs than the continuation cap allows (cap 5: 6 runs, 12 days on MeluXina `default`) |
 | `Refused` / `InvalidImage` | The step's image is not `<registry-host>/<repository>:<tag>` (or `@sha256:` digest), so it can never be pulled (a half-rendered `:app-latest`). Nothing is booked, no runner starts, no site job is submitted. The runner checks the same before it stages or submits and reports exit 239 (`Failed` / `InvalidImage`); a bad reference never triggers the fresh-credentials resubmit |
 | `Refused` / `MultiNodeUnsupported`, `WallTimeOverLimit` (the class's limit is unknown), `ClassNotAllowed`, `NoProject`, `NoSite`, `InvalidSpec` (an `env` name other than `KAOS_LIB_SUPPORT`) | It can never run as asked |
@@ -313,8 +313,10 @@ Controller flags (chart `controllerManager.container.args`, `runnerImage`, `runn
   guest or run alone. A resumable host's end is reported when its Slurm job ends, so the node time it held is settled to
   that end, and its job is not padded to twice its step. Details and tests: `docs/extreme-cases.md` 4.13-4.18.
 - **Steps longer than the longest lane (D-67, D-74):** a resumable step whose time limit (the run form's `<step>-walltime`) is above the class or
-  site maximum is admitted and run as continuations of at most that maximum each (`status.placement.timeLimitMinutes`,
-  one run booked at a time), up to the continuation cap + 1 runs in all; the follower prints "declared N min runs as
+  site maximum, or above the 11.5 hours a run keeps its access to its data and tracking, is admitted and run as
+  continuations of at most that long each (`status.placement.timeLimitMinutes`, one run booked at a time, each
+  submitted with fresh access), up to the continuation cap + 1 runs in all, and together within the declared limit (a
+  run gets at most what the earlier runs left of it; when none is left the step ends `WallTimeReached`); the follower prints "declared N min runs as
   continuations of up to M min each". A step that is not resumable is refused at admission (`TooLongNotResumable`).
   The `long` QoS (6 days, one job per user) is not used for this: `placement="long"` (D-71) is not built.
 - **Reported:** `status.run.checkpoint` (progress, size of the newest copy, the step's and the project's total,

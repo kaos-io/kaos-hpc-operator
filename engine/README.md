@@ -49,7 +49,7 @@ step(name, *, kind=, reads=, inputs=, needs=, produces=, gpu=, when=, walltime=,
 | `needs=` | At most ten steps. A name in `inputs=` and a name a needed step produces must differ; two needed steps must not produce the same name. `inputs=` plus the datasets the needed steps produce: at most 16 |
 | `produces=` | `model("name")`, `artifact("name")`, `dataset("name")`, same name rule. A dataset has one producing step in the pipeline. `dataset(name, of=...)` is refused until that form ships |
 | `when=` | `"<field> == <value>"` or `!=`, joined by `and` / `or` (`and` first, no parentheses). `<field>` must be a field of the run form (a setting's path with dashes); the value is a bare word or number, or quoted. Rendered as `{{=workflow.parameters['<field>'] == '<value>' ...}}` on the task and on its HPC variant. The workflow system's own `{{...}}` form is refused |
-| `walltime=` | `'90m'`, `'12h'` or `'720'`: the step's time limit on the cluster and on an HPC class; the default of the run-form field `<step>-walltime` (`4h` when not declared) |
+| `walltime=` | `'90m'`, `'12h'` or `'720'`: the step's time limit on the cluster and on an HPC class; the default of the run-form field `<step>-walltime` (`4h` when not declared); on an HPC class a step that is not resumable may ask for 11.5 h at most, compose refuses more |
 
 Per kind: `ingest`, `publish` and `control` steps are offered no HPC class and get no HPC variant; a `control`
 step takes no `inputs=` and no `produces=`.

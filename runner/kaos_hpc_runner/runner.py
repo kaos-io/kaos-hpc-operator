@@ -429,7 +429,7 @@ class Runner:
     def fresh_wallet(self):
         """The wallet minted at submit lives 12 h; a long job ends after that. Outputs and the
         checkpoint check need a valid one, so a wallet about to expire is minted again."""
-        if not self.wallet or time.time() > self.wallet_exp - 300:
+        if not self.wallet or time.time() > self.wallet_exp - wallet.REFRESH_SLACK_S:
             w = self._mint()
             if w:
                 self.wallet, self.wallet_exp = w, wallet.wallet_exp(w)
@@ -839,10 +839,10 @@ class Runner:
                 # A job a host took stays queued (held) while its step runs: never resubmit it. The
                 # host checked its token outlives the step (D-07).
                 if ('PENDING' in st and share.get('kaos-state') != 'taken' and self.wallet_exp
-                        and time.time() > self.wallet_exp - wallet.WALLET_MARGIN_S):
-                    self.resubmit('wallet expires within %d min and the job is still queued - resubmitting '
-                                  'with a fresh wallet (queue position is lost, credentials are not)'
-                                  % (wallet.WALLET_MARGIN_S // 60), 'TokenRefresh')
+                        and time.time() > self.wallet_exp - self.cfg.time_limit * 60 - wallet.REFRESH_SLACK_S):
+                    self.resubmit('the wallet no longer covers the step\'s %d min limit and the job is still queued - '
+                                  'resubmitting with a fresh wallet (queue position is lost, credentials are not)'
+                                  % self.cfg.time_limit, 'TokenRefresh')
                     continue
                 if self.saved_host_waits(st, share):
                     continue

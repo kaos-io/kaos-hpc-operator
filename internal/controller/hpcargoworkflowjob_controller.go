@@ -427,7 +427,7 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		}
 	}
 
-	v := r.recoverAttempt(job, run, attempt, attemptEnd{phase: phase, reason: reason, msg: msg})
+	v := r.recoverAttempt(job, run, capsOf(job, site), attempt, attemptEnd{phase: phase, reason: reason, msg: msg})
 	phase, reason, msg, next := v.phase, v.reason, v.msg, v.next
 	if retry := timeoutRetry(job, site, run); !next && reason == hpcv1alpha1.ReasonWallTimeReached && retry != nil {
 		// D-67: a learned limit that was too tight is not a failure; one more attempt with twice
@@ -438,7 +438,7 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		job.Status.Placement = retry
 		phase, reason = hpcv1alpha1.PhasePending, hpcv1alpha1.ReasonTimeLimitRetry
 	}
-	stopped := !next && reason == hpcv1alpha1.ReasonWallTimeReached
+	stopped := !next && !v.spent && reason == hpcv1alpha1.ReasonWallTimeReached
 	if stopped {
 		// The step ran its whole declared limit: say so in plain words (settled minutes are in attempts).
 		msg = timelimit.StopMessage(job.EffectiveWallMinutes(), capsOf(job, site).Max(), job.Spec.Resumable != nil)

@@ -20,10 +20,13 @@ import urllib.request
 
 from . import settings
 
-# Resubmit a still-PENDING job before its wallet (MLflow/lakeFS bearer, 12 h lifetime) expires: a job
-# that starts after a queue wait longer than the wallet would train blind. The wallet cannot be
-# refreshed inside a queued job, so the job itself is replaced.
-WALLET_MARGIN_S = 30 * 60
+# A still-PENDING job is replaced while its wallet (MLflow/lakeFS bearer, about 12 h lifetime) can still cover the
+# step's whole time limit: a job that starts later would lose access to its data and to tracking partway through
+# and fail late. The wallet cannot be refreshed inside a job, so the job itself is replaced and a fresh wallet is
+# minted at its submit. REFRESH_SLACK_S is the room kept for the poll interval and the clock (also the point at
+# which the runner's own wallet is minted again, fresh_wallet). The controller refuses a step whose limit is
+# longer than the wallet covers, and cuts a resumable one into runs that fit (internal/timelimit).
+REFRESH_SLACK_S = 300
 
 _SHA256_PREFIX = bytes.fromhex('3031300d060960864801650304020105000420')
 

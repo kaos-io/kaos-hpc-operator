@@ -46,6 +46,10 @@ def parallel_field(step: str) -> str:
     return f"{step}-parallel"
 
 
+# What one run's access to its data and to tracking covers (PRD kaos#1911 F-40): the life of the access minus the
+# margin kept for handing the result back. The controller's figure (internal/timelimit/timelimit.go,
+# TokenCoverMinutes); tests/test_token_cover.py keeps the two equal.
+TOKEN_COVER_MINUTES = 12 * 60 - 30
 LONGEST_MINUTES = 30 * 24 * 60   # 30 days: no step runs longer, and a larger number is a typing mistake
 
 

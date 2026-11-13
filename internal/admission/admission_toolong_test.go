@@ -7,12 +7,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
+	"github.com/kaos-io/kaos-hpc-operator/internal/timelimit"
 )
+
+// laneMaxSite is a site whose longest lane (10 h) is shorter than what a run's data access covers, so these cases
+// are about the lane alone; the access bound has its own test below.
+func laneMaxSite(laneMax int32) *hpcv1alpha1.HPCSite {
+	return site(func(s *hpcv1alpha1.HPCSite) {
+		s.Spec.Budget.GPUNodeHours = 1000
+		for i := range s.Spec.Profile.Classes {
+			s.Spec.Profile.Classes[i].MaxWallTimeMinutes = laneMax
+		}
+	})
+}
 
 // A declared limit above the longest lane (PRD-HPC-1461 D-67, D-74): a step that is not resumable is
 // refused with numbers and the fix; a resumable one is admitted up to (continuation cap + 1) runs.
 func TestDecideStepLongerThanTheLongestLane(t *testing.T) {
-	const laneMax = 2880
+	const laneMax = 600
 	resumable := func(caps int32) func(*hpcv1alpha1.HPCArgoWorkflowJob) {
 		return func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
 			j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: caps}
@@ -32,7 +44,7 @@ func TestDecideStepLongerThanTheLongestLane(t *testing.T) {
 	}{
 		{"should_refuse_too_long_not_resumable_with_numbers_and_both_fixes", 4320, nil,
 			hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonTooLongNotResumable,
-			[]string{"3 days (4320 min)", "2 days (2880 min)", "not resumable", "resumable=True", "to 2880 minutes or less"}},
+			[]string{"3 days (4320 min)", "10 h (600 min)", "not resumable", "resumable=True", "to 600 minutes or less"}},
 		{"should_refuse_one_minute_over_the_lane_when_not_resumable", laneMax + 1, nil,
 			hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonTooLongNotResumable, nil},
 		{"should_admit_exactly_the_lane_maximum_without_resumable", laneMax, nil,
@@ -40,15 +52,15 @@ func TestDecideStepLongerThanTheLongestLane(t *testing.T) {
 		{"should_refuse_when_resumable_is_opted_out_even_if_verified", 4320,
 			func(j *hpcv1alpha1.HPCArgoWorkflowJob) { verified(j); j.Spec.ResumableOptOut = true },
 			hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonTooLongNotResumable, nil},
-		{"should_admit_a_declared_resumable_step_longer_than_the_lane", 4320, resumable(5),
+		{"should_admit_a_declared_resumable_step_longer_than_the_lane", 3000, resumable(5),
 			hpcv1alpha1.PhaseAdmitted, hpcv1alpha1.ReasonAdmitted, nil},
-		{"should_admit_a_verified_resumable_step_longer_than_the_lane", 4320, verified,
+		{"should_admit_a_verified_resumable_step_longer_than_the_lane", 3000, verified,
 			hpcv1alpha1.PhaseAdmitted, hpcv1alpha1.ReasonAdmitted, nil},
 		{"should_admit_resumable_up_to_the_cap_times_the_lane", 6 * laneMax, resumable(5),
 			hpcv1alpha1.PhaseAdmitted, hpcv1alpha1.ReasonAdmitted, nil},
 		{"should_refuse_resumable_beyond_the_continuation_cap", 6*laneMax + 1, resumable(5),
 			hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonTooLongBeyondContinuations,
-			[]string{"5 continuations", "6 runs", "17280 min", "maxContinuations"}},
+			[]string{"5 continuations", "6 runs", "3600 min", "maxContinuations"}},
 		{"should_use_the_declared_cap_of_the_step", 3*laneMax + 1, resumable(2),
 			hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonTooLongBeyondContinuations, nil},
 		{"should_use_the_default_cap_for_a_verified_step", 6*laneMax + 1, verified,
@@ -56,7 +68,7 @@ func TestDecideStepLongerThanTheLongestLane(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			s := site(func(s *hpcv1alpha1.HPCSite) { s.Spec.Budget.GPUNodeHours = 1000 })
+			s := laneMaxSite(laneMax)
 			j := job("meluxina-gpu", c.wall, 1)
 			if c.mod != nil {
 				c.mod(j)
@@ -84,5 +96,66 @@ func TestDecideLongStepUsesTheLowestOfClassAndProjectLimit(t *testing.T) {
 	d := DecideFor(job("meluxina-gpu", 720, 1), s, led(s, 0, 0, 0), 360)
 	if d.Reason != hpcv1alpha1.ReasonTooLongNotResumable || !strings.Contains(d.Message, "6 h (360 min)") {
 		t.Fatalf("got %s: %s", d.Reason, d.Message)
+	}
+}
+
+// A run's access to its data and to tracking lasts TokenCoverMinutes (PRD kaos#1911 F-40, issue 2212): a step
+// that is not resumable and asks for longer is refused before anything is booked, with the limit in hours, the
+// step's name and both fixes. A resumable one runs as segments that each end inside that time.
+func TestDecideStepLongerThanTheDataAccessOfOneRun(t *testing.T) {
+	const cover = timelimit.TokenCoverMinutes // 690, on a site whose lane allows 2 days
+	resumable := func(caps int32) func(*hpcv1alpha1.HPCArgoWorkflowJob) {
+		return func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
+			j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: caps}
+		}
+	}
+	cases := []struct {
+		name   string
+		wall   int32
+		mod    func(*hpcv1alpha1.HPCArgoWorkflowJob)
+		phase  hpcv1alpha1.Phase
+		reason string
+		in     []string
+	}{
+		{"should_admit_a_step_shorter_than_the_access", cover - 1, nil, hpcv1alpha1.PhaseAdmitted, hpcv1alpha1.ReasonAdmitted, nil},
+		{"should_admit_a_step_exactly_as_long_as_the_access", cover, nil, hpcv1alpha1.PhaseAdmitted, hpcv1alpha1.ReasonAdmitted, nil},
+		{"should_refuse_a_step_one_minute_longer_not_resumable", cover + 1, nil,
+			hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonTooLongNotResumable,
+			[]string{"step train asks for 11.5 h", "11.5 h at most", "not resumable", "walltime=", "690 minutes", "resumable=True", "checkpoint_every="}},
+		{"should_refuse_twelve_hours_not_resumable", 720, nil, hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonTooLongNotResumable,
+			[]string{"step train asks for 12 h"}},
+		{"should_refuse_when_opted_out_of_resuming", 1440,
+			func(j *hpcv1alpha1.HPCArgoWorkflowJob) { resumable(5)(j); j.Spec.ResumableOptOut = true },
+			hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonTooLongNotResumable, nil},
+		{"should_admit_a_resumable_step_of_a_day", 1440, resumable(5), hpcv1alpha1.PhaseAdmitted, hpcv1alpha1.ReasonAdmitted, nil},
+		{"should_admit_a_resumable_step_of_several_runs", 3 * cover, resumable(5), hpcv1alpha1.PhaseAdmitted, hpcv1alpha1.ReasonAdmitted, nil},
+		{"should_admit_a_resumable_step_up_to_the_cap_times_the_access", 6 * cover, resumable(5), hpcv1alpha1.PhaseAdmitted, hpcv1alpha1.ReasonAdmitted, nil},
+		{"should_refuse_a_resumable_step_beyond_the_continuation_cap", 6*cover + 1, resumable(5),
+			hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonTooLongBeyondContinuations,
+			[]string{"step train asks for", "6 runs", "4140 min", "its access to its data and to tracking"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := laneMaxSite(2880)
+			j := job("meluxina-gpu", c.wall, 1)
+			j.Spec.StepName = "train"
+			if c.mod != nil {
+				c.mod(j)
+			}
+			d := DecideFor(j, s, led(s, 0, 0, 0), min(c.wall, cover))
+			if d.Phase != c.phase || d.Reason != c.reason {
+				t.Fatalf("got %s/%s (%s), want %s/%s", d.Phase, d.Reason, d.Message, c.phase, c.reason)
+			}
+			for _, w := range c.in {
+				if !strings.Contains(d.Message, w) {
+					t.Errorf("message %q lacks %q", d.Message, w)
+				}
+			}
+			for _, banned := range []string{"token", "wallet", "Zitadel", "bearer", "Slurm", "lakeFS", "MLflow"} {
+				if strings.Contains(strings.ToLower(d.Message), strings.ToLower(banned)) {
+					t.Errorf("message %q names an internal thing: %s", d.Message, banned)
+				}
+			}
+		})
 	}
 }
