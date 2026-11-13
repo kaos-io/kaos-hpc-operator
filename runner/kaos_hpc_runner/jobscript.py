@@ -106,6 +106,45 @@ SWEEP_HELPER = [
 ]
 
 
+# The project's own root on scratch (SCR) and the folder above it, shared by every project of the site project. One
+# site project (one account, one scratch, one Unix group) holds several platform projects, each as its own site user, so
+# nothing of a project may sit directly under the shared scratch: everything is under SCR = <scratch>/kaos/<project>,
+# which only this project's user can enter (0700). The folder above, <scratch>/kaos, must be creatable and enterable by
+# every user of the group and (sticky) must not let one user remove another's root: mode 3770, the group of the scratch.
+# Whoever comes first makes it. One that finds it unusable stops with ONE plain sentence naming the folder, its mode and
+# the command the site owner must run; a folder this script did not make is never chmod-ed or chgrp-ed (kaos_root never
+# changes what the site owner set). The stager (kubecore-operator images/meluxina-tokenmint/stager/stager.py,
+# ensure_root) applies the same rule on the login node: keep the two in step. A folder another user is just making is
+# given KAOS_ROOT_RETRY_SLEEP (default 1) seconds, three times, before it is called unusable.
+ROOT_HELPER = [
+    'kaos_root(){',
+    '  local root=$1 parent=${1%/*} site made=0 mode try grp',
+    '  site=${parent%/*}',
+    '  if mkdir "$parent" 2>/dev/null; then made=1; fi',
+    '  if [ $made = 1 ]; then',
+    '    chgrp "$(stat -c %g "$site" 2>/dev/null)" "$parent" 2>/dev/null && chmod 3770 "$parent" 2>/dev/null || made=2',
+    '  fi',
+    '  for try in 1 2 3; do',
+    '    mode=$(stat -c %a "$parent" 2>/dev/null)',
+    '    if [ $made != 2 ] && [ -n "$mode" ] && [ $((8#$mode & 8#3070)) -eq $((8#3070)) ] && [ -w "$parent" ] && [ -x "$parent" ]; then',
+    '      break',
+    '    fi',
+    '    if [ $try = 3 ] || [ $made = 2 ]; then',
+    '      grp=$(stat -c %G "$parent" 2>/dev/null)',
+    '      echo "The shared folder $parent has mode ${mode:-unknown} and group ${grp:-unknown}, but every user of the site project"'
+    ' "must be able to create and enter it. The site owner must run once: chgrp $(stat -c %G "$site" 2>/dev/null) $parent && chmod 3770 $parent"',
+    '      return 1',
+    '    fi',
+    '    sleep ${KAOS_ROOT_RETRY_SLEEP:-1}',
+    '  done',
+    '  mkdir "$root" 2>/dev/null || [ -d "$root" ] || { echo "The project folder $root cannot be created."; return 1; }',
+    '  chmod 700 "$root" 2>/dev/null || { echo "The project folder $root must be private to the project user and cannot be made so:'
+    ' it belongs to another user. The site owner must remove it or give it to the project user."; return 1; }',
+    '  return 0',
+    '}',
+]
+
+
 # The ONLY code that writes this job's comment from the node (fail(), the checkpoint copier). It never
 # overwrites blindly: it reads the live comment, drops the words being set and any old err tail, appends the
 # new words (and the err text), writes, and reads back that every new word is there, up to 3 tries. Every
@@ -160,6 +199,7 @@ def batch_lines(scope, scratch):
         'export -f kaos_comment',
         *REDACT_HELPER,
         *SWEEP_HELPER,
+        *ROOT_HELPER,
         'SCR=' + scratch,
         # The job's private folder, only a shared-node host makes one. It is removed on every way out of this
         # script: the end, fail(), a signal (Slurm's TERM at cancel or at the time limit).
@@ -181,6 +221,9 @@ def batch_lines(scope, scratch):
         'fail(){ KAOS_NOTE=$(cat "$KAOS_WORK/.kaos-note" 2>/dev/null);'
         ' kaos_comment -e "err$1:$(tail -c 65536 slurm-$KAOS_JOB_ID.out 2>/dev/null | kaos_redact | tail -c 700 | tr "\\n" "|")"'
         ' $KAOS_NOTE; exit $1; }',
+        # The project's own root and the shared folder above it (see ROOT_HELPER): a refusal is one plain sentence in the job
+        # output, which fail() copies into the job comment. Before anything is created under $SCR.
+        'kaos_root "$SCR" || fail 233',
         # PRD-1609 F-03: with sharing on, the job's batch step is the host. It runs
         # this same script as one Slurm job step per slot (its own step and taken
         # guests' scripts), each with KAOS_IN_STEP=1 and that step's KAOS_JOB_ID.
@@ -205,8 +248,13 @@ def batch_lines(scope, scratch):
         # The caches are shared between the jobs of this user on purpose, so they are readable by this user only. The
         # staged-image folder and the data cache are made by the login-node staging tool (not this repository), so
         # their modes are set here, on every job, to what a private cache needs.
-        'chmod 700 "$SCR/kaos-apptainer-cache" "$SCR/kaos-tmp" "$SCR/sif-cache" "$SCR/kaos-work" "$SCR/data-cache" 2>/dev/null',
-        '[ -n "$IMAGE_STAGED" ] && chmod 700 "${IMAGE_STAGED%/*}" 2>/dev/null',
+        # A chmod that fails says which folder (a folder another user made is never taken silently).
+        'for d in "$SCR/kaos-apptainer-cache" "$SCR/kaos-tmp" "$SCR/sif-cache" "$SCR/kaos-work" "$SCR/data-cache"'
+        ' ${IMAGE_STAGED:+"${IMAGE_STAGED%/*}"}; do',
+        '  [ -d "$d" ] || continue',
+        '  chmod 700 "$d" || { echo "The folder $d must be private to the project user and cannot be made so (it belongs to"'
+        ' "another user, or the site refuses the change)."; fail 233; }',
+        'done; unset d',
         'KEY=$(printf %s "$IMAGE_REF" | sha256sum | cut -c1-16)',
         'SIF=$SCR/sif-cache/$KEY.sif',
         # The step's inputs (spec.inputs), each a whole dataset commit, presented to the step under one root,

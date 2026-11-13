@@ -47,10 +47,13 @@ esac
 
 def one(context, mode, work, lakefs):
     shared = mode == 'shared'
-    scratch = work / mode / 'scratch'
+    # The site project's scratch holds the shared folder kaos/ (3770); the job's root is the project's own folder in it.
+    site_scratch = work / mode / 'scratch'
+    scratch = site_scratch / 'kaos' / 'proj'
     bindir = work / mode / 'bin'
-    for d in (scratch, bindir):
+    for d in (scratch.parent, bindir):
         d.mkdir(parents=True)
+    scratch.parent.chmod(0o3770)
     out = work / mode / 'step-saw.json'
     step = work / mode / 'step.py'
     step.write_text(STEP)

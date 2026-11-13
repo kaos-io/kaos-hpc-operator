@@ -4,6 +4,63 @@ What the runner's job script (`runner/kaos_hpc_runner/jobscript.py`) does to kee
 going further than they have to. Proven by `runner/tests/test_hardening.py`, which runs the whole script in bash against
 a fake Apptainer and a fake Slurm.
 
+## Layout on the site: one folder per platform project
+One site project (one account, one scratch root `/project/scratch/<account>`, one Unix group) holds several platform
+projects, and each platform project has its OWN site user. So nothing of a project sits directly under the shared scratch:
+everything is under the project's own root, which is the job script's `SCR` (the HPCSite's `profile.scratchRoot`, set by the
+platform to `<scratch>/kaos/<project>`; the runner reads it from `HPC_SCRATCH` and derives nothing).
+
+```
+/project/scratch/<account>/            site project's scratch: the group's, quota is measured here (lfs quota -u/-g/-p)
+  kaos/                                SHARED parent: mode 3770 (setgid + sticky), group = the site project's group
+    <project-A>/                       0700, owned by project A's site user  = SCR of A's jobs
+      kaos-work/<job>/ (output/ ckpt/)   the job's work folder
+      kaos-tmp/  in-<job> env-<job> idle-<job>   inputs, step variables, idle marker
+      kaos-priv/host-<job>/              a shared-node host's private script copy (holds the job's credentials)
+      kaos-claims/                       the slot manager's locks (node sharing)
+      kaos-ckpt/<workflow uid>/<step>/   checkpoint copies
+      sif-cache/  kaos-apptainer-cache/  data-cache/     image and in-job dataset caches
+      images/  datasets/<repo>/<commit>/  locks/         made by the login-node staging tool (--root is this folder)
+    <project-B>/                       0700, owned by project B's site user, the same tree
+```
+
+Who owns what: a project's root and everything under it belongs to that project's user and is closed to the group (0700 on
+the root; the files the job script makes are 0600/0700). The one thing the group can read is the shared parent `kaos/`: it
+lists the project names, which is what lets a user create and enter its own root. The tools never loosen anything below it.
+A place for data one project would share with another, later, is the receiving project's own subtree
+(`<project-B>/datasets/<repo>/<commit>/`): B stages its own copy; nothing is linked across users.
+
+The shared parent `kaos/` is made by whoever comes first (a job script's `kaos_root`, or the staging tool's `ensure_root`)
+with mode 3770 and the group of the site project's scratch. A user who finds it with any other mode gets ONE sentence and the
+job ends 233 (the staging tool answers an `error` event): `The shared folder <path> has mode 755 and group <g>, but every
+user of the site project must be able to create and enter it. The site owner must run once: chgrp <group> <path> && chmod
+3770 <path>`. Nothing is ever chmod-ed or chgrp-ed silently on a folder somebody else made, and a `chmod` whose failure
+matters is never muted.
+
+**What the site owner sets up once** (recommended, instead of leaving it to the first job): as a site administrator, not
+as a project user, `mkdir <scratch>/kaos && chgrp <group> <scratch>/kaos && chmod 3770 <scratch>/kaos`. Why: the owner of a
+sticky folder can rename or remove anything in it, so when a project user's job made it, that user (and only that user)
+could move another project's root away (shown by `hack/local-lab/two_users.py`). Owned by the site owner, no project user can.
+
+**A site used before this change**: the folders `kaos-work`, `kaos-tmp`, `kaos-priv`, `kaos-ckpt`, `kaos-claims`,
+`sif-cache`, `data-cache` and `kaos-apptainer-cache` directly under the site scratch are no longer used. Nothing migrates;
+the staging tool's `clean` names them once ("old layout, not cleaned") and the site owner may remove them.
+
+**Live checklist** (a site with two project users, A and B; login node unless said):
+1. `ls -ld <scratch>/kaos`: mode `drwxrws--T` (3770), group = the site project's group, owned by the site owner.
+2. A job of project A runs to the end; `ls -l <scratch>/kaos` lists `<project-A>` (0700, A's user).
+3. A job of project B runs to the end (before this change it failed on `kaos-priv`/`kaos-claims`); `ls -l` now lists both.
+4. As A's user: `ls <scratch>/kaos/<project-B>` and `cat` of a file in it are refused; as B's user the reverse.
+5. `lfs quota -u <A's user> <scratch>`, `lfs quota -u <B's user> <scratch>` and `lfs quota -p <project id> <scratch>`:
+   each user's figure matches its own tree; the project figure is the sum (one quota, shared).
+6. Run the cleanup form of A (scope known-jobs): it removes A's old folders, B's are untouched and B's jobs keep working.
+
+Proven without a site: `hack/local-lab/two-users.sh` runs two projects as two different Unix users (distinct uids, one shared
+group) on one scratch in a throw-away container (the real job script, slot manager and checkpoint copier; with
+`STAGER=<stager.py>` also image staging, `usage` and `clean`), and `runner/tests/test_two_users.py` runs it in the normal
+suite where real uids can be had (root in a container, or podman/docker) and is skipped with the reason elsewhere. What only
+a live site proves: the site's real group and ACL setup, Lustre quota per user and per project, lakeFS dataset downloads.
+
 ## The image reference
 A step's image is parsed once (`settings.parse_image`, and the same grammar in `runnerjob.ValidateImage`):
 `<host>/<repository>[:<tag>][@sha256:<digest>]`, lowercase, with a tag or a digest, and only the characters
@@ -74,8 +131,9 @@ prove a 100 KB context holding `$HOME $(...)`, backticks, `\` and `"` arrives by
 * `umask 077` at the top of every script, and in every program the script starts: files are 0600, folders 0700.
 * The job's work folder `$SCR/kaos-work/<job>` (and `output/`, `ckpt/`), the checkpoint root, the SIF cache, the Apptainer
   cache and temporary folder, the data cache and the staged-image folder are made 0700 on every job (folders that an older
-  job or the login-node staging tool left open are closed). The caches are shared between the jobs of the site user on
-  purpose; nobody else can enter them.
+  job or the login-node staging tool left open are closed; a `chmod` that fails ends the job 233 naming the folder). They are
+  all under `$SCR`, the project's own root (0700): the caches are shared between the jobs of that project's site user on
+  purpose; no other user, including another project's, can enter them.
 * A shared-node host copies its own script for the slot manager to run (a host reads a script, never an environment, so the
   copy holds the job's credentials). The copy and the slot-manager program live in `$SCR/kaos-priv/host-<job>/` (0700,
   files 0600), not in `/tmp`, and the folder is removed on every way out of the script: end, `fail()`, TERM/HUP/INT.
@@ -129,7 +187,7 @@ no `python3` shows none of the output (`[output withheld ...]`): unknown never m
 ## What this does not do
 * Jobs of one project run as ONE site user. The site sees one user, so no mode separates two jobs of that user from each
   other, and a job can read the folders and the scratch of its project's other jobs. Separating them needs an account per
-  app on the site, or the operator refusing to bind one site user to two projects (not in this repository).
+  app on the site. Separate PROJECTS are separated: each has its own site user and its own root (see Layout above).
 * On a shared node the credentials of a waiting guest travel in its script as `export` lines: a host can read a waiting
   job's script, never its environment (PRD-1609 probe), and the runner has no channel that puts a file on the site. They
   are in Slurm's own record of the script, in the host's private copy (removed as above), and in the guest's step

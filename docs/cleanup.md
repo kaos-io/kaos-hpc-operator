@@ -46,7 +46,9 @@ Step logs are not kept after a run's pods are collected: [issue #76](https://git
 The site's staging tool (shipped from the platform repository, `images/meluxina-tokenmint/stager`) has the verb `clean`;
 the project's `hpc-cleanup` form and its suspended schedule call it over the staging key. What accumulates there, what
 removes it today and what `clean` adds is in that repository, `docs/mlops/hpc-cleanup.md`. This repository's part is
-what the job script and the runner write: `kaos-work/<job>`, `kaos-tmp/in-<job>`, `kaos-tmp/idle-<job>`,
+what the job script and the runner write, all under the platform project's own root on scratch
+(`<scratch>/kaos/<project>`, the job script's `SCR`; the layout and who owns what are in `docs/job-environment.md`):
+`kaos-work/<job>`, `kaos-tmp/in-<job>`, `kaos-tmp/idle-<job>`,
 `kaos-priv/host-<job>`, `kaos-ckpt/<workflow uid>/<step>/<seq>.tar` and the `kaos-ckpt-lease=` / `kaos-commit=` /
 `kaos-image=` words of the job comment, which are what `clean` reads to leave a queued or running job alone. Changing
 one of those names or words changes what `clean` can match: the stager's name patterns and tests name them.
