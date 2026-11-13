@@ -3,6 +3,7 @@ check it. Trusted code: standard library and PyYAML only. It never imports hera,
 asserts that), so the render side (derive_tree, authoring) is the only code that may use them.
 """
 import json
+import math
 import re
 import sys
 from typing import Callable, Optional
@@ -301,6 +302,9 @@ def _validate_overrides(overrides, types: dict, param) -> None:
             if not isinstance(gid, str) or not GROUP_ID_RE.match(gid):
                 raise RunFormError("%s: group %r must match %s" % (where, gid, GROUP_ID_RE.pattern))
             # check_form refuses it again on the finished form (a field's group must be one of its groups)
+            if gid in HIDDEN_FIXED_GROUP_IDS:
+                raise RunFormError("%s: group %r is a hidden group of the platform, and the run form would not show "
+                                   "the field: pick a group the form shows" % (where, gid))
             if gid not in ids and gid not in FIXED_GROUP_IDS:
                 raise RunFormError("%s: group %r is not declared: add it to groups in _form.yaml, or use one of "
                                    "the fixed groups %s" % (where, gid, sorted(FIXED_GROUP_IDS)))
@@ -321,6 +325,7 @@ GROUPS = (
     ("platform", "hidden"),
 )
 _STEP_SUFFIXES = ("class", "walltime", "checkpoint-every")
+HIDDEN_FIXED_GROUP_IDS = frozenset(g for g, tier in GROUPS if tier == "hidden")
 
 
 def form_rank(params: list, step_table: list, overrides: Optional[dict] = None) -> dict:
@@ -349,7 +354,7 @@ def form_rank(params: list, step_table: list, overrides: Optional[dict] = None) 
             rank[name] = ("promote", 0)
         elif name == "config":
             rank[name] = ("advanced", 0)
-        elif name.startswith("image-"):
+        elif is_image_field(name):
             rank[name] = ("platform", 0)
         else:
             rank[name] = ("settings", 0)
@@ -397,8 +402,27 @@ def truncate_text(text, limit=MAX_DESCRIPTION):
     return text.encode("utf-8")[:room].decode("utf-8", "ignore") + ellipsis
 
 
-def _number(value):
-    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+def _number(value, where: str):
+    """A number of the context, or None when it is not one. NaN and infinity are refused, naming the field."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    if not math.isfinite(value):
+        raise RunFormError("the pipeline context's %s is %r: it must be a finite number" % (where, value))
+    return value
+
+
+def _whole(value, where: str):
+    """An integer of the context as a Python int (OSR decodes these into Go ints, which refuse 1.0): a whole
+    float is coerced, anything else that is not a whole number is refused, naming the field. None stays None."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RunFormError("the pipeline context's %s is %r: it must be a whole number" % (where, value))
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            raise RunFormError("the pipeline context's %s is %r: it must be a whole number" % (where, value))
+        return int(value)
+    return value
 
 
 def machines(ctx: dict) -> list:
@@ -418,14 +442,17 @@ def machines(ctx: dict) -> list:
         names.add(cls["name"])
         alloc = cls.get("allocatable") or (defaults.get(cls["name"]) or {}).get("allocatable") or {}
         accel = cls.get("guestAccelerator")
+        where = "computeClasses class %r " % cls["name"]
+        count = _whole(accel.get("count"), where + "guestAccelerator.count") if isinstance(accel, dict) else None
         out.append({
             "name": cls["name"],
             "tier": cls.get("tier") or "cpu",
             "machineType": cls.get("machineType"),
-            "accelerator": ({"type": accel.get("type"), "count": accel["count"]}
-                            if accel and accel.get("count") else None),
-            "allocatable": {"cpu": _number(alloc.get("cpu")), "memoryGiB": _number(alloc.get("memoryGiB")),
-                            "ephemeralStorageGiB": _number(alloc.get("ephemeralStorageGiB"))},
+            "accelerator": {"type": accel.get("type"), "count": count} if count else None,
+            "allocatable": {"cpu": _number(alloc.get("cpu"), where + "allocatable.cpu"),
+                            "memoryGiB": _number(alloc.get("memoryGiB"), where + "allocatable.memoryGiB"),
+                            "ephemeralStorageGiB": _number(alloc.get("ephemeralStorageGiB"),
+                                                           where + "allocatable.ephemeralStorageGiB")},
             "description": truncate_text(cls.get("description")),
             "kind": "cluster",
         })
@@ -434,18 +461,21 @@ def machines(ctx: dict) -> list:
         if cls["name"] in names:
             continue
         names.add(cls["name"])
-        gpus = cls.get("gpus") or 0
+        where = "hpc class %r " % cls["name"]
+        gpus = _whole(cls.get("gpus"), where + "gpus") or 0
         hpc = {"provider": provider, "partition": cls.get("partition", ""), "qos": cls.get("qos", ""),
                "gpus": gpus}
-        if isinstance(cls.get("maxTimeLimitMinutes"), int) and cls["maxTimeLimitMinutes"] >= 1:
-            hpc["maxTimeLimitMinutes"] = cls["maxTimeLimitMinutes"]
+        limit = _whole(cls.get("maxTimeLimitMinutes"), where + "maxTimeLimitMinutes")
+        if limit is not None and limit >= 1:
+            hpc["maxTimeLimitMinutes"] = limit
         hpc["sharesNode"] = True
         out.append({
             "name": cls["name"],
             "tier": cls.get("tier") or "cpu",
             "machineType": None,
             "accelerator": {"type": None, "count": gpus} if gpus > 0 else None,
-            "allocatable": {"cpu": _number(cls.get("cpus")), "memoryGiB": _number(cls.get("memoryGiB")),
+            "allocatable": {"cpu": _number(cls.get("cpus"), where + "cpus"),
+                            "memoryGiB": _number(cls.get("memoryGiB"), where + "memoryGiB"),
                             "ephemeralStorageGiB": None},
             "description": truncate_text(cls.get("description")),
             "kind": "hpc",
@@ -635,8 +665,51 @@ def fields(params: list, table: list, raw: Optional[dict] = None, step_shows: Op
     return out
 
 
+# OSR's credential-name rule (kaos-osr-edge-operator internal/readapi/handlers/pipeline_redact.go, PRD 1533 F-50:
+# isSensitiveKey, its word lists copied as they are). OSR withholds the value of a parameter so named; the
+# annotation must not carry it either, so optionDefaults leaves out such a leaf.
+_CRED_WORDS = frozenset({
+    "token", "secret", "secrets", "password", "passwords", "passwd", "pass", "pwd", "credential", "credentials",
+    "auth", "authorization", "apikey", "passphrase", "privatekey", "accesskey", "sig", "accountkey"})
+_CRED_PAIRS = frozenset({("api", "key"), ("access", "key"), ("private", "key"), ("secret", "key"),
+                         ("client", "secret"), ("signing", "key"), ("account", "key")})
+_STRONG_STEMS = ("password", "passwd", "secret", "token", "apikey", "accesskey", "privatekey", "secretkey",
+                 "credential")
+_STEM_EXCLUSIONS = frozenset({"author", "authority"})
+_STEM_EXCLUSION_PREFIXES = ("tokeniz", "secretar", "authori")
+_ML_NAME_ALLOWLIST = frozenset({
+    "pad_token_id", "eos_token", "bos_token", "pad_token", "unk_token", "sep_token", "cls_token", "mask_token",
+    "token_type_ids", "max_token_length", "token_budget", "token_count", "pass_rate", "password_policy",
+    "credential_type", "eos_token_id", "bos_token_id", "unk_token_id", "sep_token_id", "cls_token_id",
+    "mask_token_id", "decoder_start_token_id", "max_tokens", "num_tokens", "max_new_tokens", "total_tokens",
+    "tokens_per_second", "special_tokens"})
+_KEY_WORD_SPLIT = re.compile(r"[^A-Za-z0-9]+")
+_CAMEL_HUMP = re.compile(r"([a-z0-9])([A-Z])")
+
+
+def _strong_stem(word: str) -> bool:
+    if word in _STEM_EXCLUSIONS or "tokeniz" in word or word.startswith(_STEM_EXCLUSION_PREFIXES):
+        return False
+    return any(stem in word for stem in _STRONG_STEMS)
+
+
+def is_sensitive_key(name: str) -> bool:
+    """OSR's isSensitiveKey: `name` names a credential (matched by word: "api_token", "x-api-key", "DB_PASS" and
+    "githubToken" do; "tokenizer-version", "max_tokens" and "author" do not)."""
+    words = _KEY_WORD_SPLIT.split(_CAMEL_HUMP.sub(r"\1_\2", name).lower())
+    if "_".join(words).strip("_") in _ML_NAME_ALLOWLIST:
+        return False
+    for i, word in enumerate(words):
+        if word in _CRED_WORDS or _strong_stem(word):
+            return True
+        if i > 0 and (words[i - 1], word) in _CRED_PAIRS:
+            return True
+    return False
+
+
 def _option_defaults(field_list: list, option_defaults: dict, group_list: list) -> None:
-    """Each group dropdown's optionDefaults, keeping only the leaves the form serves as config fields."""
+    """Each group dropdown's optionDefaults, keeping only the leaves the form serves as config fields, and never
+    one whose name names a credential (OSR withholds such a value; the annotation does not carry it)."""
     served_groups = {g["id"] for g in group_list if g["tier"] != "hidden"}
     served = {f["name"] for f in field_list if f["source"] == "config" and not f["platform"]
               and f["tier"] != "hidden" and f["group"] in served_groups and not is_image_field(f["name"])}
@@ -645,7 +718,7 @@ def _option_defaults(field_list: list, option_defaults: dict, group_list: list) 
             continue
         kept = {}
         for option, leaves in (option_defaults.get(f["name"]) or {}).items():
-            leaves = {leaf: value for leaf, value in leaves.items() if leaf in served}
+            leaves = {leaf: value for leaf, value in leaves.items() if leaf in served and not is_sensitive_key(leaf)}
             if leaves:
                 kept[option] = leaves
         if len(kept) > MAX_OPTION_DEFAULTS:
@@ -711,6 +784,12 @@ _STEP_KEYS = _STEP_REQUIRED | {"walltimeField", "checkpointField", "promoteField
 _HPC_REQUIRED = {"provider", "partition", "qos", "gpus"}
 
 
+def _at(kind: str, i: int, item, key: str = "name") -> str:
+    """The path of an item of a list, by its name (or id) when it has one, else by its index."""
+    name = item.get(key) if isinstance(item, dict) else None
+    return "%s[%s]" % (kind, name) if isinstance(name, str) and name else "%s[%d]" % (kind, i)
+
+
 def _bad(path: str, why: str):
     raise RunFormError("run form %s %s" % (path, why))
 
@@ -739,20 +818,22 @@ def _text(value, path, max_len=None, regex=None, nullable=False):
 
 
 def _is_num(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    """A JSON number: not a boolean, and finite (NaN and infinity have no JSON form)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _num(value, path, nullable=False):
     if value is None and nullable:
         return
     if not _is_num(value):
-        _bad(path, "must be a number")
+        _bad(path, "must be a finite number")
 
 
 def _int(value, path, minimum=None, maximum=None):
-    # JSON Schema: an integer is a number with no fraction, so 3.0 is one
-    if not _is_num(value) or (isinstance(value, float) and not value.is_integer()):
-        _bad(path, "must be an integer")
+    # Stricter than JSON Schema (which takes 3.0 as an integer): OSR decodes these into Go ints, and 3.0 fails
+    # there, so the engine writes a Python int and nothing else.
+    if not isinstance(value, int) or isinstance(value, bool):
+        _bad(path, "must be an integer (written without a fraction)")
     if minimum is not None and value < minimum:
         _bad(path, "must be at least %s" % minimum)
     if maximum is not None and value > maximum:
@@ -892,7 +973,7 @@ def check_form(form, stamped: bool = True) -> None:
             _bad("stamp." + key, "must be empty until the form is sealed")
     ids = []
     for i, g in enumerate(_array(form["groups"], "groups", MAX_GROUPS)):
-        path = "groups[%d]" % i
+        path = _at("groups", i, g, "id")
         _obj(g, path, {"id", "label", "order", "tier"}, {"id", "label", "order", "tier"})
         _text(g["id"], path + ".id", regex=_GROUP_RE)
         _text(g["label"], path + ".label", MAX_LABEL)
@@ -901,12 +982,12 @@ def check_form(form, stamped: bool = True) -> None:
         ids.append(g["id"])
     field_list = _array(form["fields"], "fields", 1000)
     for i, f in enumerate(field_list):
-        _check_field(f, "fields[%d]" % i)
+        _check_field(f, _at("fields", i, f))
     for i, m in enumerate(_array(form["machines"], "machines", 200)):
-        _check_machine(m, "machines[%d]" % i)
+        _check_machine(m, _at("machines", i, m))
     step_list = _array(form["steps"], "steps", 200)
     for i, s in enumerate(step_list):
-        _check_step(s, "steps[%d]" % i)
+        _check_step(s, _at("steps", i, s))
     # beyond the schema
     if len(set(ids)) != len(ids):
         _bad("groups", "repeat a group id")
@@ -916,12 +997,12 @@ def check_form(form, stamped: bool = True) -> None:
     seen = set()
     for i, f in enumerate(field_list):
         if f["name"] in seen:
-            _bad("fields[%d]" % i, "repeats the field %r" % f["name"])
+            _bad("fields[%d]" % i, "repeats the field %r" % f["name"])  # the index tells the two apart
         seen.add(f["name"])
         if f["group"] not in ids:
-            _bad("fields[%d].group" % i, "is %r, which is not one of the groups %s" % (f["group"], ids))
+            _bad(_at("fields", i, f) + ".group", "is %r, which is not one of the groups %s" % (f["group"], ids))
         if "step" in f and f["step"] not in step_names:
-            _bad("fields[%d].step" % i, "is %r, which is not one of the steps %s" % (f["step"], step_names))
+            _bad(_at("fields", i, f) + ".step", "is %r, which is not one of the steps %s" % (f["step"], step_names))
 
 
 def withheld_names(form: dict) -> set:
@@ -945,11 +1026,17 @@ def check_join(form: dict, params: list) -> None:
     for p in params:
         if p.get("name") and not withheld(p["name"]) and p["name"] not in names:
             raise RunFormError("the Argo parameter %r has no run form field" % p["name"])
+    def refuse(what, token):
+        if token in names:
+            raise RunFormError("%s reads the field %r, which the run form does not serve (platform, hidden or "
+                               "image-*): compare a field the form shows" % (what, token))
+        raise RunFormError("%s names %r, a value or group option that starts with image- (OSR reads every word of "
+                           "the condition as a name, quoted or not): rename that value or option" % (what, token))
+
     for s in form["steps"]:
         hit = [t for t in form_grammar.names(s.get("showIf", "")) if withheld(t)]
         if hit:
-            raise RunFormError("step %r: its when= reads %r, which the run form does not serve (platform, hidden "
-                               "or image-*): compare a field the form shows" % (s["name"], hit[0]))
+            refuse("step %r: its when=" % s["name"], hit[0])
         refs = [s.get("walltimeField"), s.get("checkpointField"), s.get("classField")] + list(s.get("promoteFields") or [])
         for ref in refs:
             if ref and withheld(ref):
@@ -960,8 +1047,7 @@ def check_join(form: dict, params: list) -> None:
             continue
         hit = [t for t in form_grammar.names(f.get("showIf", "")) if withheld(t)]
         if hit:
-            raise RunFormError("the field %r is shown on a condition that reads %r, which the run form does not "
-                               "serve (platform, hidden or image-*): change the condition or the field" % (f["name"], hit[0]))
+            refuse("the field %r is shown on a condition that" % f["name"], hit[0])
 
 
 # ------------------------------------------------------------------------------ encode and attach

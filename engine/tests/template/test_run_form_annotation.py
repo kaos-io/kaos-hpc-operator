@@ -355,7 +355,10 @@ MUTATIONS = [
     ("field minimum ok", lambda f: _set(["fields", 1, "minimum"], 1.5)),
     ("minMinutes", lambda f: _set(["fields", _field(f, "train-walltime"), "minMinutes"], 0)),
     ("maxMinutes", lambda f: _set(["fields", _field(f, "train-walltime"), "maxMinutes"], 43201)),
-    ("maxMinutes float ok", lambda f: _set(["fields", _field(f, "train-walltime"), "maxMinutes"], 43200.0)),
+    ("maxMinutes float", lambda f: _set(["fields", _field(f, "train-walltime"), "maxMinutes"], 43200.0)),
+    ("order float", lambda f: _set(["groups", 0, "order"], 0.0)),
+    ("accelerator count float", lambda f: _set(["machines", _machine(f, "hpc"), "accelerator", "count"], 4.0)),
+    ("minimum nan", lambda f: _set(["fields", 1, "minimum"], float("nan"))),
     ("pattern long", lambda f: _set(["fields", _field(f, "train-walltime"), "pattern"], "x" * 257)),
     ("picker", lambda f: _set(["fields", _field(f, "train-class"), "picker"], "class")),
     ("optionDefaults value", lambda f: _set(["fields", 1, "optionDefaults"], {"a": {"x": 3}})),
@@ -379,6 +382,11 @@ MUTATIONS = [
 ]
 
 
+# Where check_form is stricter than Python's jsonschema, on purpose: OSR decodes the schema's integers into Go ints
+# (1.0 fails there), and NaN has no JSON form (OSR cannot receive it; Python's jsonschema takes it as a number).
+STRICTER = {"maxMinutes float", "order float", "accelerator count float", "minimum nan"}
+
+
 @pytest.mark.parametrize("name, mutate", MUTATIONS, ids=[m[0] for m in MUTATIONS])
 def test_check_form_agrees_with_the_schema(name, mutate):
     form = _base_form()
@@ -389,7 +397,10 @@ def test_check_form_agrees_with_the_schema(name, mutate):
         ours = True
     except RunFormError:
         ours = False
-    assert ours == schema_ok, "%s: check_form %s, the schema %s" % (name, ours, schema_ok)
+    if name in STRICTER:
+        assert schema_ok and not ours, "%s: check_form must refuse what OSR cannot decode" % name
+    else:
+        assert ours == schema_ok, "%s: check_form %s, the schema %s" % (name, ours, schema_ok)
 
 
 def test_the_mutations_both_pass_and_fail():
@@ -472,7 +483,7 @@ def test_the_output_passes_osrs_check_join():
 
 def test_a_when_on_a_hidden_field_is_refused_as_osr_would():
     raw = _raw(overrides={"fields": {"experiment-name": {"tier": "hidden"}}})
-    with pytest.raises(RunFormError, match="step 'train': its when= reads 'experiment-name'"):
+    with pytest.raises(RunFormError, match="step 'train': its when= reads the field 'experiment-name'"):
         _attached(raw=raw)
 
 
@@ -501,3 +512,118 @@ def test_run_form_and_enhance_import_in_either_order(first, second):
     code = "import sys; sys.path.insert(0, %r); import %s; import %s" % (str(ROOT), first, second)
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+# ------------------------------------------------------------------------------------------- fix round 1
+
+@pytest.mark.parametrize("group", ["info", "platform"])
+def test_form_yaml_cannot_move_a_field_into_a_hidden_fixed_group(group):
+    raw = _raw(overrides={"fields": {"experiment-description": {"group": group}}})
+    with pytest.raises(RunFormError, match="group %r is a hidden group of the platform" % group):
+        _attached(raw=raw)
+    assert run_form.HIDDEN_FIXED_GROUP_IDS == {"info", "platform"}
+
+
+def test_machines_coerce_whole_floats_and_refuse_fractions():
+    ctx = _ctx()
+    gpu = next(c for c in ctx["computeClasses"]["all"] if c.get("guestAccelerator"))
+    gpu["guestAccelerator"]["count"] = 1.0
+    hpc = next(c for c in ctx["hpc"]["classes"] if c["name"] == "meluxina-gpu")
+    hpc.update(gpus=4.0, maxTimeLimitMinutes=2880.0)
+    out = {m["name"]: m for m in run_form.machines(ctx)}
+    count = out[gpu["name"]]["accelerator"]["count"]
+    assert count == 1 and type(count) is int
+    assert type(out["meluxina-gpu"]["hpc"]["gpus"]) is int and out["meluxina-gpu"]["accelerator"]["count"] == 4
+    assert out["meluxina-gpu"]["hpc"]["maxTimeLimitMinutes"] == 2880
+    assert type(out["meluxina-gpu"]["hpc"]["maxTimeLimitMinutes"]) is int
+    gpu["guestAccelerator"]["count"] = 1.5
+    with pytest.raises(RunFormError, match="guestAccelerator.count is 1.5: it must be a whole number"):
+        run_form.machines(ctx)
+    gpu["guestAccelerator"]["count"] = True
+    with pytest.raises(RunFormError, match="must be a whole number"):
+        run_form.machines(ctx)
+
+
+@pytest.mark.parametrize("where, value", [("cluster", float("nan")), ("cluster", float("inf")),
+                                          ("hpc", float("-inf")), ("count", float("nan"))])
+def test_a_non_finite_number_in_the_context_is_refused_naming_the_field(where, value):
+    ctx = _ctx()
+    if where == "cluster":
+        ctx["computeClasses"]["all"][0]["allocatable"]["cpu"] = value
+        match = r"computeClasses class '%s' allocatable.cpu" % ctx["computeClasses"]["all"][0]["name"]
+    elif where == "hpc":
+        ctx["hpc"]["classes"][0]["memoryGiB"] = value
+        match = r"hpc class '%s' memoryGiB" % ctx["hpc"]["classes"][0]["name"]
+    else:
+        next(c for c in ctx["computeClasses"]["all"] if c.get("guestAccelerator"))["guestAccelerator"]["count"] = value
+        match = r"guestAccelerator.count"
+    wft, _, steps, offers = _enhanced()
+    with pytest.raises(RunFormError, match=match):
+        run_form.attach(wft, ctx, steps, offers, None)
+
+
+def test_a_when_value_that_starts_with_image_says_to_rename_the_value():
+    with pytest.raises(RunFormError, match="names 'image-net', a value or group option that starts with image-.*"
+                                           "rename that value or option"):
+        _attached(raw=_raw(when={"train": "experiment-name == image-net"}))
+
+
+def test_a_group_option_that_starts_with_image_says_to_rename_the_option():
+    params = [{"name": "model", "value": "a", "enum": ["a", "image-b"]}, {"name": "model-x", "value": "1"}]
+    raw = {"version": 1, "types": {}, "leafOptions": {"model-x": ["image-b"]}, "when": {}, "overrides": {},
+           "optionDefaults": {"model": {"image-b": {"model-x": "2"}}}}
+    field_list = run_form.fields(params, [], raw)
+    form = {"version": 1, "stamp": {}, "groups": run_form.groups(field_list), "fields": field_list, "machines": [],
+            "steps": []}
+    with pytest.raises(RunFormError, match="field 'model-x' is shown on a condition that names 'image-b', a value "
+                                           "or group option"):
+        run_form.check_join(form, params)
+
+
+# OSR's own cases (pipelines_internal_test.go TestRedactionTuning, TestRedactionMLAllowlistAndRareGaps).
+OSR_SENSITIVE = ["token", "api_token", "auth_token", "x-api-key", "password", "passwd", "pass", "DB_PASS", "secret",
+                 "githubToken", "client_secret", "AWS_SECRET_ACCESS_KEY", "mapillary-token", "PGPASSWORD",
+                 "githubtoken", "clientsecret", "REFRESHTOKEN", "MYSQL_ROOTPASSWORD", "ACCESSTOKEN", "secretkey",
+                 "mapillarytoken", "GitHubAPIToken", "Authorization", "hf_token", "pad_token_secret", "AccountKey",
+                 "sig", "access_token", "password_hash", "credential", "my_tokens_secret"]
+OSR_NOT_SENSITIVE = ["tokenizer-version", "max_tokens", "author", "passenger", "compass", "authority", "secretary",
+                     "keyboard", "monkey", "bypass_cache", "tokenizer", "Tokenization", "authorship", "pad_token_id",
+                     "eos_token", "bos_token", "pad_token", "unk_token", "sep_token", "cls_token", "mask_token",
+                     "token_type_ids", "max_token_length", "token_budget", "token_count", "pass_rate",
+                     "password_policy", "credential_type", "padTokenId", "pretokenized", "num_tokens",
+                     "max_new_tokens", "total_tokens", "tokens_per_second", "special_tokens", "TokenizerConfig", "sv",
+                     "signal", "cookies_enabled"]
+
+
+def test_the_sensitive_key_rule_is_osrs():
+    assert [n for n in OSR_SENSITIVE if not run_form.is_sensitive_key(n)] == []
+    assert [n for n in OSR_NOT_SENSITIVE if run_form.is_sensitive_key(n)] == []
+
+
+def test_option_defaults_never_carry_a_credential_named_leaf():
+    params = [{"name": "db", "value": "a", "enum": ["a", "b"]}, {"name": "db-password", "value": ""},
+              {"name": "db-api-key", "value": ""}, {"name": "db-host", "value": "h"},
+              {"name": "db-max-tokens", "value": "1"}]
+    raw = {"version": 1, "types": {}, "leafOptions": {}, "when": {}, "overrides": {},
+           "optionDefaults": {"db": {"b": {"db-password": "hunter2", "db-api-key": "k", "db-host": "h2",
+                                           "db-max-tokens": "9"}}}}
+    f = _by({"fields": run_form.fields(params, [], raw)})
+    # "db-max-tokens" is a credential name for OSR too: only the whole name max_tokens is allowlisted
+    assert f["db"]["optionDefaults"] == {"b": {"db-host": "h2"}}
+    assert run_form.is_sensitive_key("db-max-tokens") and not run_form.is_sensitive_key("max-tokens")
+
+
+def test_form_rank_reads_image_fields_in_any_case():
+    rank = run_form.form_rank([{"name": "IMAGE-x"}, {"name": "Image-y"}], [], None)
+    assert rank == {"IMAGE-x": ("platform", 0), "Image-y": ("platform", 0)}
+
+
+def test_check_form_names_the_field_not_its_index():
+    form = _base_form()
+    form["fields"][_field(form, "train-class")]["label"] = "x" * 81
+    with pytest.raises(RunFormError, match=r"fields\[train-class\].label"):
+        run_form.check_form(form)
+    form = _base_form()
+    form["steps"][0]["kind"] = "deploy"
+    with pytest.raises(RunFormError, match=r"steps\[%s\].kind" % form["steps"][0]["name"]):
+        run_form.check_form(form)
