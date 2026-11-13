@@ -363,3 +363,88 @@ def test_the_cli_runs_from_the_engine_directory_and_loads_no_renderer(tmp_path):
                          cwd=ROOT, capture_output=True, text=True)
     assert res.returncode == 0, res.stdout + res.stderr
     assert res.stdout.strip() == "[]"
+
+
+# ------------------------------------------------------------------------------------------- fix round 1
+
+@pytest.mark.parametrize("change", [
+    lambda f: f.update(fields={"a": 1}),
+    lambda f: f.update(fields=["x"]),
+    lambda f: f.update(steps="x"),
+    lambda f: f.update(steps=[1]),
+    lambda f: f.update(groups={}),
+    lambda f: f["steps"][0].pop("classField"),
+    lambda f: f["steps"][0].update(offered="abc"),
+    lambda f: f["fields"][0].pop("tier"),
+    lambda f: f["fields"][0].update(name=3),
+    lambda f: f["groups"][0].update(order="1"),
+])
+def test_a_malformed_shape_is_a_run_form_error_not_a_crash(change):
+    wft = _wft()
+    form = _form(wft)
+    change(form)
+    _put(wft, form)
+    _fail(wft, ".")
+
+
+def test_the_cli_turns_a_malformed_form_into_a_gate_fail_line(tmp_path):
+    wft = _wft()
+    form = _form(wft)
+    form["steps"][0].pop("classField")
+    _put(wft, form)
+    path = tmp_path / "w.yaml"
+    path.write_text(yaml.safe_dump(wft, sort_keys=False))
+    res = _cli("seal", "--wft", str(path), "--source-commit", COMMIT)
+    assert res.returncode == 1 and res.stderr.startswith("GATE FAIL: run form: ") and "Traceback" not in res.stderr
+
+
+def test_main_catches_stray_key_type_and_attribute_errors(monkeypatch, tmp_path, capsys):
+    path = tmp_path / "w.yaml"
+    path.write_text(yaml.safe_dump(_wft(), sort_keys=False))
+    for exc in (KeyError("k"), TypeError("t"), AttributeError("a")):
+        def boom(*a, _e=exc, **k):
+            raise _e
+        monkeypatch.setattr(run_form, "seal", boom)
+        assert run_form.main(["seal", "--wft", str(path), "--source-commit", COMMIT]) == 1
+        assert capsys.readouterr().err.startswith("GATE FAIL: run form: ")
+
+
+def test_the_cli_writes_through_a_temp_file_and_a_write_error_is_a_gate_fail(monkeypatch, tmp_path, capsys):
+    path = tmp_path / "w.yaml"
+    path.write_text(yaml.safe_dump(_wft(), sort_keys=False))
+    before = path.read_text()
+    assert run_form.main(["seal", "--wft", str(path), "--source-commit", COMMIT]) == 0
+    assert path.read_text() != before and [p.name for p in tmp_path.iterdir()] == ["w.yaml"]
+    path.write_text(before)
+
+    def full(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(run_form.os, "replace", full)
+    assert run_form.main(["seal", "--wft", str(path), "--source-commit", COMMIT]) == 1
+    assert "GATE FAIL: run form: " in capsys.readouterr().err
+    assert path.read_text() == before and [p.name for p in tmp_path.iterdir()] == ["w.yaml"]
+
+
+@pytest.mark.parametrize("name", ["pipeline-info", "dataset-sha"])
+def test_a_platform_param_that_the_form_would_serve_fails(name):
+    wft = _wft()
+    if name == "dataset-sha":
+        _params(wft).append({"name": name, "value": "x"})
+        form = _form(wft)
+        form["fields"].append({"name": name, "group": "experiment", "type": "string", "tier": "basic",
+                               "platform": False, "source": "config"})
+    else:
+        form = _form(wft)
+        f = next(f for f in form["fields"] if f["name"] == name)
+        f.update(tier="basic", platform=False, source="config", group="experiment")
+    _put(wft, form)
+    _fail(wft, name)
+
+
+@pytest.mark.parametrize("change", [{"tier": "basic"}, {"source": "config"}, {"platform": False}])
+def test_an_image_field_needs_source_platform_and_tier_hidden_and_platform_true(change):
+    wft = _wft()
+    form = _form(wft)
+    next(f for f in form["fields"] if f["name"].startswith("image-")).update(change)
+    _put(wft, form)
+    _fail(wft, "image-")

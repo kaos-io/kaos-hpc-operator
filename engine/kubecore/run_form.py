@@ -7,8 +7,10 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
 import sys
+import tempfile
 from typing import Callable, Optional
 
 import yaml
@@ -1152,6 +1154,32 @@ def params_digest(params: list) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _shapes(form: dict, params: list) -> None:
+    """The shapes the seal reads before check_form can validate them: lists of objects with the keys it uses."""
+    for i, p in enumerate(params):
+        if not isinstance(p, dict) or not isinstance(p.get("name"), str):
+            raise RunFormError("spec.arguments.parameters[%d] is not a parameter with a name" % i)
+    for key, needs in (("fields", ("name", "group", "tier", "platform", "source")), ("groups", ("id", "order", "tier")),
+                       ("steps", ("name", "classField", "default", "offered"))):
+        if not isinstance(form.get(key), list):
+            raise RunFormError("the run form's %s must be a list" % key)
+        for i, item in enumerate(form[key]):
+            if not isinstance(item, dict):
+                raise RunFormError("%s[%d] must be an object" % (key, i))
+            gone = [k for k in needs if k not in item]
+            if gone:
+                raise RunFormError("%s[%d] has no %s" % (key, i, ", ".join(gone)))
+    for i, f in enumerate(form["fields"]):
+        if not isinstance(f["name"], str):
+            raise RunFormError("fields[%d].name must be text" % i)
+    for i, s in enumerate(form["steps"]):
+        if not isinstance(s["offered"], list):
+            raise RunFormError("steps[%d].offered must be a list" % i)
+    for i, g in enumerate(form["groups"]):
+        if isinstance(g["order"], bool) or not isinstance(g["order"], int):
+            raise RunFormError("groups[%d].order must be a whole number" % i)
+
+
 def _cover(form: dict, params: list) -> None:
     """Every Argo parameter has exactly one field, in Argo order. A CHART_ADDED parameter without a field gets a
     hidden platform field; anything else that does not line up is refused."""
@@ -1207,9 +1235,14 @@ def _classes(form: dict, params: list) -> None:
 def _join(form: dict, params: list) -> None:
     served_refs = {f["name"] for f in form["fields"]}
     for f in form["fields"]:
-        if is_image_field(f["name"]) and not f["platform"]:
-            raise RunFormError("the field %r is an image-* field and is not marked platform: image parameters "
-                               "are the platform's" % f["name"])
+        if is_image_field(f["name"]) and not (f["platform"] is True and f["source"] == "platform"
+                                              and f["tier"] == "hidden"):
+            raise RunFormError("the field %r is an image-* field and is not source platform, tier hidden and "
+                               "platform true: image parameters are the platform's" % f["name"])
+        if (f["name"] == "pipeline-info" or f["name"] in CHART_ADDED) and not (f["platform"] is True
+                                                                              or f["tier"] == "hidden"):
+            raise RunFormError("the field %r is the platform's and must be withheld (tier hidden or platform "
+                               "true)" % f["name"])
     for s in form["steps"]:
         refs = [s.get("walltimeField"), s.get("checkpointField"), s.get("classField")] + list(s.get("promoteFields") or [])
         for ref in refs:
@@ -1264,9 +1297,9 @@ def seal(wft: dict, source_commit: str, previous: Optional[dict] = None) -> dict
     if not isinstance(source_commit, str) or not _COMMIT_RE.match(source_commit):
         raise RunFormError("the source commit %r is not 40 lower-case hex digits" % (source_commit,))
     params = (spec.get("arguments") or {}).get("parameters") or []
-    for key in ("fields", "groups", "steps", "stamp"):
-        if not isinstance(form.get(key), (list, dict)):
-            raise RunFormError("the run form has no %s" % key)
+    if not isinstance(form.get("stamp"), dict):
+        raise RunFormError("the run form has no stamp")
+    _shapes(form, params)
     _cover(form, params)
     _classes(form, params)
     form["stamp"] = {"by": STAMP_BY, "engine": engine, "commit": source_commit,
@@ -1298,6 +1331,21 @@ def _load(path: str) -> dict:
     return doc
 
 
+def _write_atomic(path: str, text: str) -> None:
+    """Write `text` to a temp file next to `path`, then replace it: a failed write leaves `path` as it was."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)), prefix=".run-form-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m kubecore.run_form")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1316,11 +1364,12 @@ def main(argv=None) -> int:
                 previous = None     # no live template yet, or one this seal cannot read: seal as new
         seal(wft, args.source_commit, previous)
         out = yaml.safe_dump(wft, sort_keys=False, default_flow_style=False)
-    except (RunFormError, OSError, yaml.YAMLError) as err:
-        print("GATE FAIL: run form: %s" % err, file=sys.stderr)
+        _write_atomic(args.wft, out)
+    except (RunFormError, OSError, yaml.YAMLError, KeyError, TypeError, AttributeError) as err:
+        print("GATE FAIL: run form: %s" % (err if isinstance(err, (RunFormError, OSError)) else
+                                           "the template is not shaped as expected (%s: %s)"
+                                           % (type(err).__name__, err)), file=sys.stderr)
         return 1
-    with open(args.wft, "w", encoding="utf-8") as fh:
-        fh.write(out)
     return 0
 
 
