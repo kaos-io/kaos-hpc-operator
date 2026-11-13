@@ -126,19 +126,17 @@ def fetch_workdir(image, reg_token):
     "No module named 'app'". Read from the image config in the registry at submit time and passed as
     `--pwd`. Best-effort: any failure yields '' (no --pwd), never a blocked submit."""
     try:
-        ref_host, _, rest = image.partition('/')
-        if '@' in rest:
-            path, ref = rest.split('@', 1)
-        elif ':' in rest.rsplit('/', 1)[-1]:
-            path, ref = rest.rsplit(':', 1)
-        else:
-            path, ref = rest, 'latest'
+        parsed = settings.parse_image(image)
+        if parsed is None:
+            return ''
+        ref_host, path, tag, digest = parsed
+        ref = digest or tag
         hdr = {'Accept': ', '.join([
             'application/vnd.oci.image.index.v1+json',
             'application/vnd.docker.distribution.manifest.list.v2+json',
             'application/vnd.oci.image.manifest.v1+json',
             'application/vnd.docker.distribution.manifest.v2+json'])}
-        if reg_token and ref_host.endswith('-docker.pkg.dev'):
+        if reg_token and settings.registry_token_host(ref_host):
             hdr['Authorization'] = 'Bearer ' + reg_token
         base = 'https://' + ref_host + '/v2/' + path
 

@@ -68,11 +68,37 @@ def fail_start(msg, code=2):
     sys.exit(code)
 
 
+# The characters an image reference may have: nothing a shell, a URL or a header could read as more than a name.
+IMAGE_CHARS = re.compile(r'[A-Za-z0-9._:/@-]+')
+_HOST = r'(?:localhost(?::[0-9]{1,5})?|[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::[0-9]{1,5})?|[a-z0-9-]+:[0-9]{1,5})'
+_REPO = r'[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*'
+IMAGE_REF = re.compile(r'(%s)/(%s)(?::([A-Za-z0-9_][A-Za-z0-9_.-]{0,127}))?(?:@(sha256:[0-9a-f]{64}))?' % (_HOST, _REPO))
+# The only hosts the platform's registry token is ever presented to: Artifact Registry, <region>-docker.pkg.dev,
+# exactly one label before the suffix. The job script applies the same rule to the host it parses out of the reference.
+TOKEN_HOST = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*-docker\.pkg\.dev')
+
+
+def registry_token_host(host):
+    return TOKEN_HOST.fullmatch(host or '') is not None
+
+
+def parse_image(ref):
+    """(host, repository, tag, digest) of an image reference, or None when it is not exactly
+    <host>/<repository>[:<tag>][@sha256:<digest>] with a tag or a digest. The one parse every use of a
+    reference goes through before it is staged, submitted or written into a script."""
+    m = IMAGE_REF.fullmatch(ref or '')
+    if not m or not (m.group(3) or m.group(4)):
+        return None
+    return m.groups()
+
+
 def image_problem(ref):
     """Why an image reference cannot be pulled, or '' when it is registry-host/repository with a tag or digest.
     Checked before anything is staged or submitted: a half-rendered reference such as ':probe-learn-latest' would
     otherwise cost a site job and three credential resubmits for a failure no credential fixes."""
-    ref = normalize_image(ref or '')
+    ref = ref or ''
+    if not IMAGE_CHARS.fullmatch(ref):
+        return 'it holds a space, a control character or another character an image reference never has'
     name, _, digest = ref.partition('@')
     if digest:
         if not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
@@ -86,6 +112,8 @@ def image_problem(ref):
     if not (host and repo and not repo.startswith('/') and not repo.endswith('/')) or \
             not ('.' in host or ':' in host or host == 'localhost'):
         return 'it has no registry host and repository (want <registry>/<repository>:<tag>)'
+    if parse_image(ref) is None:
+        return 'it is not a lowercase <registry>/<repository>:<tag> reference'
     return ''
 
 
@@ -95,7 +123,8 @@ def normalize_image(img):
     - normalize to the digest-only form, which Apptainer accepts and which is the stronger pin."""
     if '@' in img:
         name, digest = img.split('@', 1)
-        if ':' in name.rsplit('/', 1)[-1]:
+        tag = name.rsplit('/', 1)[-1].partition(':')[2]
+        if tag:       # `name:@digest` (an empty tag) is not a reference: it stays as written, and the grammar refuses it
             name = name.rsplit(':', 1)[0]
         img = name + '@' + digest
     return img

@@ -1,6 +1,10 @@
 
 import os, re, signal, subprocess, sys, time
 
+# Everything this program and the steps it launches create is private to the site user (the job script sets the
+# same umask; jobs of one project share that user, so this protects from other users, not from the same user's other jobs).
+os.umask(0o077)
+
 # A step's environment: Slurm's own variables, the GPU it was given and the login
 # basics. Nothing of the host's inputs reaches a guest; each script exports its own.
 STEP_ENV = re.compile(r'^(SLURM_|CUDA_VISIBLE_DEVICES$|GPU_DEVICE_ORDINAL$|ROCR_VISIBLE_DEVICES$'
@@ -318,7 +322,7 @@ def take(slot, job, name, job_limit):
     # remaining time only shrinks), so it is skipped for good.
     now = time.time()
     if not os.path.isdir(CLAIMS):
-        os.makedirs(CLAIMS, exist_ok=True)
+        os.makedirs(CLAIMS, mode=0o700, exist_ok=True)
     peek = os.path.join(CLAIMS, '.peek-%s-%s.sh' % (ME, job))
     rc, _ = run('scontrol', 'write', 'batch_script', job, peek)
     text = open(peek).read() if rc == 0 and os.path.exists(peek) else ''
@@ -456,7 +460,8 @@ def requeue_all(signum, frame):
 signal.signal(signal.SIGTERM, requeue_all)
 OWN_LIMIT = int(os.environ.get('KAOS_STEP_LIMIT_MIN') or 0) * 60 or None
 OWN_PIDFILE = os.path.join(CLAIMS, '.own-%s.pid' % ME)
-os.makedirs(CLAIMS, exist_ok=True)
+os.makedirs(CLAIMS, mode=0o700, exist_ok=True)
+os.chmod(CLAIMS, 0o700)
 slots[0] = {'job': ME, 'claim': None, 'name': 'own', 'memkill': False, 'attempt': 1,
             'start': time.time(), 'limit': given_limit(OWN_LIMIT), 'pidfile': OWN_PIDFILE,
             'lead': int(os.environ.get('KAOS_RESUMABLE_LEAD_MIN') or 0) * LEAD_UNIT_S,

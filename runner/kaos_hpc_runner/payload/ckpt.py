@@ -17,6 +17,7 @@
 # The comment is written by the job script's exported bash function kaos_comment (read-modify-write, verified);
 # `final` exits 1 when the comment could not be set.
 import hashlib, json, os, re, shutil, signal, subprocess, sys, tarfile, time, urllib.parse
+os.umask(0o077)   # checkpoint copies are private to the site user
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else ''
 WORK = os.environ.get('KAOS_WORK', '')

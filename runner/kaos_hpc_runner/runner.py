@@ -24,7 +24,8 @@ from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone
                     share_state, site_time, submit_limit_refusal)
 from .settings import (CHECKPOINT_EXIT, CONTEXT_ENV, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT,
                        INVALID_IMAGE_EXIT, INVALID_RESULT_EXIT, OFFER_S, ROLE_POLL_S, RESERVED_NAME_EXIT,
-                       RESULT_NOT_HANDED_BACK_EXIT, STAGING_MISMATCH_EXIT, SUBMIT_LIMIT_EXIT, Settings, image_problem)
+                       RESULT_NOT_HANDED_BACK_EXIT, STAGING_MISMATCH_EXIT, SUBMIT_LIMIT_EXIT, Settings, image_problem,
+                       registry_token_host)
 
 POLL_S = 30
 # --cancel-only (the controller's orphan sweep, PRD AC-08): how long one such runner works before it gives up
@@ -119,7 +120,7 @@ class Runner:
         self.slurm = slurm or Slurm(cfg)
         self.stager = stager or staging.Stager(cfg)
         self.reporter = reporter or Reporter(cfg)
-        self.logs = logs or LogStreamer(cfg, self.stager, self.reporter)
+        self.logs = logs or LogStreamer(cfg, self.stager, self.reporter, secrets=lambda: (self.wallet,))
         self._mint = mint or (lambda: wallet.mint_wallet(cfg.env))
         self.jid = None
         self.submitted_at = 0.0      # when the current site job was submitted (its queue time starts here)
@@ -231,6 +232,13 @@ class Runner:
         cfg = self.cfg
         hpc = cfg.hpc_class()
         ident = cfg.identity()
+        # Nothing of a reference that does not parse is ever written into a script; the registry token only
+        # goes into the job when the reference's host is one it may be presented to.
+        problem = image_problem(cfg.image)
+        if problem:
+            raise ValueError('the step image %r cannot be used: %s' % (cfg.image, problem))
+        if not registry_token_host(cfg.image.partition('/')[0]):
+            reg = ''
         batch = '\n'.join(jobscript.batch_lines(cfg.scope if cfg.sharing else '-', ident['scratch']))
         env = ['PATH=/usr/bin:/bin:/usr/local/bin', 'HOME=' + ident['home'],
                'USER=' + ident['user'], 'IMAGE_REF=' + cfg.image, 'REG_TOKEN=' + reg,
@@ -257,6 +265,7 @@ class Runner:
             env += ['KAOS_RESUME_REF=' + cfg.resume[0], 'KAOS_RESUME_PREFIX=' + cfg.resume[1]]
         # D-74, D-75: the checkpoint copier every job carries (the step's KAOS_CHECKPOINT_DIR). Quota ids: the
         # project's Lustre project id is the digits of its account.
+        env.append('REDACT_B64=' + payloads.b64(payloads.REDACT))     # the job's failure tail is redacted with it
         env += ['CKPT_B64=' + payloads.b64(payloads.CKPT), 'KAOS_CKPT_BUDGET_PCT=%d' % cfg.ckpt_budget_pct,
                 'KAOS_PROJID=' + ''.join(c for c in ident['account'] if c.isdigit())]
         if cfg.env.get('KAOS_LIB_SUPPORT'):      # the one variable a job's spec.env may hand to the step
