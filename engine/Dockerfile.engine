@@ -27,6 +27,9 @@ COPY engine /src/engine
 COPY Dockerfile /src/Dockerfile
 # the step contract's fixtures, which the engine tests load
 COPY docs/step-contract /src/docs/step-contract
+# the run form's contract (OSR's schema, byte for byte) and its fixtures
+COPY docs/run-form.schema.json /src/docs/run-form.schema.json
+COPY docs/run-form /src/docs/run-form
 COPY internal/follower/config.go /src/internal/follower/config.go
 COPY api/v1alpha1/hpcargoworkflowjob_types.go /src/api/v1alpha1/hpcargoworkflowjob_types.go
 WORKDIR /src

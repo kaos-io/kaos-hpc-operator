@@ -172,3 +172,23 @@ def context_expression(compose_task: str, step: str, needs: list) -> str:
 def pair_results(expression: str, task: str, twin: str) -> str:
     """`expression` with every result of `task` read from the pair (`task`, its HPC `twin`)."""
     return expression.replace(result_of(task), result_of(task, twin))
+
+
+# The run form (PRD 1533/F-21 and 1533/F-22). docs/run-form.schema.json, copied byte for byte from the OSR
+# edge operator, is the contract; tests/test_run_form_contract.py pins it and these constants to it.
+RUN_FORM_ANNOTATION = "ui.kubecore.io/run-form"     # the finished form, written by the chart's enhance step
+RAW_FORM_ANNOTATION = "ui.kubecore.io/raw-form"     # the render's raw form, taken and stripped by enhance
+RUN_FORM_CAP = 128 * 1024      # bytes of the finished form: OSR's maxRunFormBytes
+RUN_FORM_WARN = 96 * 1024      # CI warns above this
+RAW_FORM_CAP = 128 * 1024      # bytes of the raw form
+FORM_OVERRIDES_CAP = 64 * 1024  # bytes of config/_form.yaml
+
+ENGINE_VERSION_ANNOTATION = "platform.kubecore.io/engine-version"   # on the template; stamp.engine copies it
+ENGINE_RUN_LABEL = "platform.kubecore.io/engine"
+SOURCE_COMMIT_KEY = "platform.kubecore.io/source-commit"
+PARAMS_DIGEST_KEY = "platform.kubecore.io/params-digest"
+PIPELINE_VERSION_KEY = "platform.kubecore.io/pipeline-version"      # reserved: nothing writes it
+
+STAMP_BY = "kubecore.run_form"
+ENGINE_VERSION_RE = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"
+COMMIT_RE = r"^[0-9a-f]{40}$"

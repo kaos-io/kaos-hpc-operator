@@ -1,0 +1,424 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kubecore.io/schemas/run-form/v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "stamp",
+    "groups",
+    "fields",
+    "machines",
+    "steps"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "stamp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "by",
+        "engine",
+        "commit",
+        "paramsDigest"
+      ],
+      "properties": {
+        "by": {
+          "const": "kubecore.run_form"
+        },
+        "engine": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "paramsDigest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "groups": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "label",
+          "order",
+          "tier"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "order": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tier": {
+            "$ref": "#/$defs/tier"
+          }
+        }
+      }
+    },
+    "fields": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "$ref": "#/$defs/field"
+      }
+    },
+    "machines": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "$ref": "#/$defs/machine"
+      }
+    },
+    "steps": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    }
+  },
+  "$defs": {
+    "tier": {
+      "enum": [
+        "basic",
+        "advanced",
+        "hidden"
+      ]
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,252}$"
+    },
+    "showIf": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "group",
+        "type",
+        "tier",
+        "platform",
+        "source"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "group": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "enum",
+            "duration",
+            "yaml",
+            "text"
+          ]
+        },
+        "picker": {
+          "enum": [
+            "dataset",
+            "machine"
+          ]
+        },
+        "source": {
+          "enum": [
+            "info",
+            "group",
+            "config",
+            "input",
+            "run-setting",
+            "advanced",
+            "platform"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "tier": {
+          "$ref": "#/$defs/tier"
+        },
+        "platform": {
+          "type": "boolean"
+        },
+        "step": {
+          "$ref": "#/$defs/name"
+        },
+        "showIf": {
+          "$ref": "#/$defs/showIf"
+        },
+        "minimum": {
+          "type": "number"
+        },
+        "maximum": {
+          "type": "number"
+        },
+        "pattern": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "minMinutes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxMinutes": {
+          "type": "integer",
+          "maximum": 43200
+        },
+        "optionDefaults": {
+          "type": "object",
+          "maxProperties": 64,
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          }
+        }
+      }
+    },
+    "machine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "tier",
+        "machineType",
+        "accelerator",
+        "allocatable",
+        "description",
+        "kind"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "tier": {
+          "enum": [
+            "cpu",
+            "gpu"
+          ]
+        },
+        "machineType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "accelerator": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "count"
+              ],
+              "properties": {
+                "type": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          ]
+        },
+        "allocatable": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cpu",
+            "memoryGiB",
+            "ephemeralStorageGiB"
+          ],
+          "properties": {
+            "cpu": {
+              "type": "number"
+            },
+            "memoryGiB": {
+              "type": "number"
+            },
+            "ephemeralStorageGiB": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          }
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "kind": {
+          "enum": [
+            "cluster",
+            "hpc"
+          ]
+        },
+        "hpc": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "partition",
+            "qos",
+            "gpus"
+          ],
+          "properties": {
+            "provider": {
+              "type": "string"
+            },
+            "partition": {
+              "type": "string"
+            },
+            "qos": {
+              "type": "string"
+            },
+            "gpus": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "maxTimeLimitMinutes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "sharesNode": {
+              "const": true
+            }
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "hpc"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "hpc"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "hpc"
+          ]
+        }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "classField",
+        "default",
+        "offered",
+        "refused"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "kind": {
+          "enum": [
+            "ingest",
+            "transform",
+            "train",
+            "evaluate",
+            "publish",
+            "control"
+          ]
+        },
+        "classField": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "default": {
+          "type": "string"
+        },
+        "offered": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "refused": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "items": false,
+            "minItems": 2
+          }
+        },
+        "walltimeField": {
+          "type": "string"
+        },
+        "checkpointField": {
+          "type": "string"
+        },
+        "promoteFields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "showIf": {
+          "$ref": "#/$defs/showIf"
+        }
+      }
+    }
+  }
+}
