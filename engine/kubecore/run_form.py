@@ -2,11 +2,16 @@
 check it. Trusted code: standard library and PyYAML only. It never imports hera, hydra or omegaconf (a test
 asserts that), so the render side (derive_tree, authoring) is the only code that may use them.
 """
+import argparse
+import copy
+import hashlib
 import json
 import math
 import re
 import sys
 from typing import Callable, Optional
+
+import yaml
 
 from kubecore import step_contract
 from kubecore import form_grammar
@@ -1116,3 +1121,208 @@ def attach(wft: dict, ctx: dict, steps: list, offers: dict, raw: Optional[dict])
         meta["annotations"] = {}
     meta["annotations"][RUN_FORM_ANNOTATION] = text
     return form
+
+
+# ------------------------------------------------------------------------------ the seal
+
+# Parameters the chart's trusted step may ADD after the engine's enhance (and so after attach), found in the charts
+# repo at origin/main (charts/custom/kubecore-ci-workflows): files/dataset-choices.py fill() only sets the enum and
+# value of a parameter that exists (a missing one is a KeyError), files/engine.py stamp() writes the engine-version
+# annotation and label, and hera-enhance-commit (templates/clusterworkflowtemplate-ml.yaml) adds no parameter
+# either: its `dataset-sha` is a key of the {app}-pipeline-images ConfigMap. The list holds `dataset-sha` all the
+# same (controller ruling: the dataset fill may add it), so the seal is not the place a chart change breaks.
+# Any other missing, extra, duplicated or reordered parameter fails the seal.
+CHART_ADDED = ("dataset-sha",)
+_PLATFORM_GROUP = "platform"
+_PROJECT_LABEL = PLATFORM_PREFIX + "project"
+_APP_LABEL = PLATFORM_PREFIX + "app"
+
+
+def params_digest(params: list) -> str:
+    """sha256 over the Argo parameters in Argo order, each as {name, value} or {name, valueFrom}: compact sorted
+    JSON, UTF-8. Enum and description are left out, so filling a dataset enum does not move it and changing a
+    default does."""
+    items = []
+    for p in params:
+        if "valueFrom" in p:
+            items.append({"name": p["name"], "valueFrom": p["valueFrom"]})
+        else:
+            items.append({"name": p["name"], "value": p.get("value")})
+    text = json.dumps(items, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _cover(form: dict, params: list) -> None:
+    """Every Argo parameter has exactly one field, in Argo order. A CHART_ADDED parameter without a field gets a
+    hidden platform field; anything else that does not line up is refused."""
+    names = [p["name"] for p in params]
+    if len(set(names)) != len(names):
+        raise RunFormError("the Argo parameters repeat %s: rename one" % sorted({n for n in names if names.count(n) > 1}))
+    field_names = [f["name"] for f in form["fields"]]
+    if len(set(field_names)) != len(field_names):
+        raise RunFormError("the run form lists the field(s) %s more than once"
+                           % sorted({n for n in field_names if field_names.count(n) > 1}))
+    extra = [n for n in field_names if n not in names]
+    if extra:
+        raise RunFormError("the run form has field(s) %s that are not Argo parameters: the parameters are the "
+                           "authority, rebuild the pipeline" % extra)
+    missing = [n for n in names if n not in field_names]
+    other = [n for n in missing if n not in CHART_ADDED]
+    if other:
+        raise RunFormError("the Argo parameter(s) %s have no run form field: the template changed after the form "
+                           "was built, rebuild the pipeline" % other)
+    if field_names != [n for n in names if n in field_names]:
+        raise RunFormError("the run form's fields are not in the order of the Argo parameters")
+    have = {f["name"]: f for f in form["fields"]}
+    form["fields"] = [have[n] if n in have else
+                      {"name": n, "group": _PLATFORM_GROUP, "type": "string", "tier": "hidden", "platform": True,
+                       "source": "platform"} for n in names]
+    if missing and _PLATFORM_GROUP not in [g["id"] for g in form["groups"]]:
+        form["groups"].append({"id": _PLATFORM_GROUP, "label": GROUP_LABELS[_PLATFORM_GROUP], "tier": "hidden",
+                               "order": 1 + max([g["order"] for g in form["groups"]] or [-1])})
+
+
+def _classes(form: dict, params: list) -> None:
+    """Each step's `<step>-class` parameter: its value is one of the step's `offered` classes and is the step's
+    default, and its enum (when it has one) is `offered`."""
+    by = {p["name"]: p for p in params}
+    for s in form["steps"]:
+        if s["classField"] is None:
+            continue
+        p = by.get(s["classField"])
+        if p is None:
+            raise RunFormError("step %r: its class field %r is not an Argo parameter" % (s["name"], s["classField"]))
+        value = p.get("value")
+        if value not in s["offered"]:
+            raise RunFormError("step %r: %r is %r, which is not one of the classes it offers %s: set a class the "
+                               "step offers" % (s["name"], s["classField"], value, s["offered"]))
+        if value != s["default"]:
+            raise RunFormError("step %r: the default class is %r but %r is %r: rebuild the pipeline"
+                               % (s["name"], s["default"], s["classField"], value))
+        if "enum" in p and list(p["enum"]) != s["offered"]:
+            raise RunFormError("step %r: the enum of %r is %s, not the classes it offers %s"
+                               % (s["name"], s["classField"], list(p["enum"]), s["offered"]))
+
+
+def _join(form: dict, params: list) -> None:
+    served_refs = {f["name"] for f in form["fields"]}
+    for f in form["fields"]:
+        if is_image_field(f["name"]) and not f["platform"]:
+            raise RunFormError("the field %r is an image-* field and is not marked platform: image parameters "
+                               "are the platform's" % f["name"])
+    for s in form["steps"]:
+        refs = [s.get("walltimeField"), s.get("checkpointField"), s.get("classField")] + list(s.get("promoteFields") or [])
+        for ref in refs:
+            if ref and ref not in served_refs:
+                raise RunFormError("step %r refers to %r, which is not a field of the run form" % (s["name"], ref))
+    check_join(form, params)
+
+
+def _without_commit(form: dict) -> dict:
+    out = copy.deepcopy(form)
+    out["stamp"].pop("commit", None)
+    return out
+
+
+def _previous_form(previous) -> Optional[dict]:
+    """The sealed form on the live template, or None (an unreadable or foreign one is no reason to fail)."""
+    try:
+        meta = (previous or {}).get("metadata") or {}
+        form = json.loads(meta["annotations"][RUN_FORM_ANNOTATION])
+        return form if isinstance(form["stamp"]["commit"], str) and _COMMIT_RE.match(form["stamp"]["commit"]) else None
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def seal(wft: dict, source_commit: str, previous: Optional[dict] = None) -> dict:
+    """Write the stamp on the run form of an enhanced template and return the sealed form. Refuses (RunFormError)
+    a template whose form does not match its Argo parameters; the seal calls neither enhance nor the renderer.
+    `previous` is the live template: a form equal to its own once the commit is left out keeps the live commit,
+    so an unchanged form does not churn with every commit of the app."""
+    meta = wft.get("metadata") or {}
+    annotations = meta.get("annotations") or {}
+    text = annotations.get(RUN_FORM_ANNOTATION)
+    if not isinstance(text, str):
+        raise RunFormError("the template has no %s annotation: the enhance step did not write the run form"
+                           % RUN_FORM_ANNOTATION)
+    try:
+        form = json.loads(text, object_pairs_hook=_object, parse_constant=_refuse_constant)
+    except ValueError as err:
+        raise RunFormError("the %s annotation is not JSON: %s" % (RUN_FORM_ANNOTATION, err)) from None
+    _find_repeat(form, "run form")
+    if not isinstance(form, dict):
+        raise RunFormError("the %s annotation is not a JSON object" % RUN_FORM_ANNOTATION)
+    engine = annotations.get(ENGINE_VERSION_ANNOTATION)
+    if not isinstance(engine, str) or not _ENGINE_RE.match(engine):
+        raise RunFormError("the template's %s annotation is %r, not an engine version: the stamp step did not run"
+                           % (ENGINE_VERSION_ANNOTATION, engine))
+    spec = wft.get("spec") or {}
+    labels = (spec.get("workflowMetadata") or {}).get("labels") or {}
+    if labels.get(step_contract.ENGINE_RUN_LABEL) != engine:
+        raise RunFormError("the workflowMetadata label %s is %r but the annotation says %r"
+                           % (step_contract.ENGINE_RUN_LABEL, labels.get(step_contract.ENGINE_RUN_LABEL), engine))
+    if not isinstance(source_commit, str) or not _COMMIT_RE.match(source_commit):
+        raise RunFormError("the source commit %r is not 40 lower-case hex digits" % (source_commit,))
+    params = (spec.get("arguments") or {}).get("parameters") or []
+    for key in ("fields", "groups", "steps", "stamp"):
+        if not isinstance(form.get(key), (list, dict)):
+            raise RunFormError("the run form has no %s" % key)
+    _cover(form, params)
+    _classes(form, params)
+    form["stamp"] = {"by": STAMP_BY, "engine": engine, "commit": source_commit,
+                     "paramsDigest": params_digest(params)}
+    check_form(form)
+    _join(form, params)
+    old = _previous_form(previous)
+    if old is not None and _key_sorted(_without_commit(old)) == _key_sorted(_without_commit(form)):
+        form["stamp"]["commit"] = old["stamp"]["commit"]
+    commit = form["stamp"]["commit"]
+    out = enforce_cap(form)
+    annotations = meta.setdefault("annotations", {})
+    annotations[RUN_FORM_ANNOTATION] = out
+    annotations[SOURCE_COMMIT_KEY] = commit
+    wm_labels = spec.setdefault("workflowMetadata", {}).setdefault("labels", {})
+    wm_labels[SOURCE_COMMIT_KEY] = commit
+    # D4 (pending meter-peter): the run carries the project and app labels of its template
+    for key in (_PROJECT_LABEL, _APP_LABEL):
+        if (meta.get("labels") or {}).get(key):
+            wm_labels[key] = meta["labels"][key]
+    return form
+
+
+def _load(path: str) -> dict:
+    with open(path, encoding="utf-8") as fh:
+        doc = yaml.safe_load(fh)
+    if not isinstance(doc, dict):
+        raise RunFormError("%s is not a WorkflowTemplate" % path)
+    return doc
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="python3 -m kubecore.run_form")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("seal", help="stamp the run form of a rendered, enhanced WorkflowTemplate, in place")
+    s.add_argument("--wft", required=True)
+    s.add_argument("--source-commit", required=True)
+    s.add_argument("--previous", help="the live WorkflowTemplate: an unchanged form keeps its commit")
+    args = ap.parse_args(argv)
+    try:
+        wft = _load(args.wft)
+        previous = None
+        if args.previous:
+            try:
+                previous = _load(args.previous)
+            except (OSError, yaml.YAMLError, RunFormError):
+                previous = None     # no live template yet, or one this seal cannot read: seal as new
+        seal(wft, args.source_commit, previous)
+        out = yaml.safe_dump(wft, sort_keys=False, default_flow_style=False)
+    except (RunFormError, OSError, yaml.YAMLError) as err:
+        print("GATE FAIL: run form: %s" % err, file=sys.stderr)
+        return 1
+    with open(args.wft, "w", encoding="utf-8") as fh:
+        fh.write(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

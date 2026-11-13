@@ -40,6 +40,12 @@ def test_should_ship_the_engine_under_kaos_pipeline_engine_and_no_toplevel_kubec
     assert sorted(top) == ["kaos_engine", "kaos_pipeline_engine"]
 
 
+def test_should_ship_the_run_form_seal_and_its_grammar(wheel):
+    names = zipfile.ZipFile(wheel).namelist()
+    assert "kaos_pipeline_engine/kubecore/run_form.py" in names
+    assert "kaos_pipeline_engine/kubecore/form_grammar.py" in names
+
+
 def test_should_ship_the_data_files(wheel):
     names = zipfile.ZipFile(wheel).namelist()
     assert "kaos_pipeline_engine/authoring-schema.json" in names
