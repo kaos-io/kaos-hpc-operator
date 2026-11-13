@@ -483,6 +483,14 @@ the twin the same way a step does.
 Fixture: `hpc-job` (its `spec.context` is `context-one-upstream.wire`, its `status.result` is
 `result-model.wire`).
 
+### Retention of runs that have HPC steps
+
+The HPC job records of a run are deleted with the run (the follower makes the Workflow their owner), and the HPC budget ledger is
+derived from them: a month's spend is the sum of the settled attempts the records still hold. A budget period is a calendar
+month, so a run is kept longer than any month: the engine's default `ttlStrategy` is 35 days (the pipeline context's
+`runRetentionDays` may change it, 1 to 3650), and for a pipeline with a step that can run on HPC the render refuses less than 32
+days with "runs with HPC steps are kept at least 32 days, so the month's HPC spend stays counted". See `docs/cleanup.md`.
+
 ## 9. Reserved names
 
 | What | Reserved |

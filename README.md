@@ -285,6 +285,7 @@ Controller flags (chart `controllerManager.container.args`, `runnerImage`, `runn
 | `--site-missing-grace` | 15 min | how long a booked job survives its HPCSite or project label being gone |
 | `--sweep-give-up` | 6 h | how long the orphan sweep waits for the site to confirm a job ended before settling without proof |
 | `--ledger-publish-interval` | 1 s | shortest time between two writes of one HPCSite's status; `0` writes on every change |
+| `--job-retention` (chart `jobRetention`) | 840 h (35 days) | how long a finished HPCArgoWorkflowJob is kept before the controller deletes it; `0` keeps them. A job whose last attempt ended in the running budget period (the ledger is derived from the objects), one with a sweep and one with an open host attempt are never deleted; nothing holds a finished job (no finalizer) |
 | `--idle-metrics-url` and `--idle-*` | off | the in-cluster GPU idle watchdog (below) |
 | `--leader-elect`, `--metrics-bind-address`, `--metrics-secure`, `--health-probe-bind-address` | off, `0`, true, `:8081` | the usual controller-runtime options (the chart passes `:8443` for metrics) |
 
