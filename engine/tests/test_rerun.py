@@ -83,6 +83,21 @@ def test_a_step_keeps_its_own_when_after_the_gate_and_a_step_that_is_not_run_aga
     assert task["when"].index("start-from-step") < first, "the gate is first: `&&` stops there for a step not run again"
 
 
+def test_a_sweep_that_is_not_run_ends_skipped_with_its_gather_task_giving_the_sentinel():
+    def build(a):
+        load = a.step("load", kind="ingest", produces=[a.dataset("loaded")])
+        a.step("tune", kind="train", needs=[load], matrix={"lr": [1, 2]}, produces=[a.model("tuned")])
+        fit = a.step("fit", kind="train", needs=[load], produces=[a.model("fitted")])
+        a.step("score", kind="evaluate", needs=[fit])
+    tasks = tasks_of(hpc_render(build))
+    assert not run_when(tasks["tune"]["when"], **{"start-from-step": "score"}), "the sweep task is skipped"
+    assert tasks["kaos-gather-tune"]["depends"] == "compose-and-validate && (tune.Succeeded || tune.Skipped)"
+    assert "when" not in tasks["kaos-gather-tune"], "so the gather task runs, and hands on the sentinel"
+    assert "tune" not in tasks["score"]["depends"], "the step that runs does not wait for the sweep"
+    from kubecore import gather
+    assert gather.gather("tune", "Skipped", [], [], []) == {"version": 1, "status": "absent"}
+
+
 def test_a_step_that_depends_on_a_step_that_is_not_run_again_still_waits_for_it_the_usual_way():
     tasks = tasks_of(render(diamond))
     assert tasks["join"]["depends"] == "compose-and-validate && left && right", \
@@ -430,12 +445,65 @@ def test_a_step_that_produces_something_else_than_before_is_refused():
     assert "its produces was [{" in refused(steps=steps)
 
 
-def test_a_step_with_a_matrix_that_is_not_run_again_is_refused():
+def with_sweep(consumer=None, **extra):
+    """STEPS with a step `tune` that has a matrix and needs `prepare`; `consumer` (a step name) is made to need it too."""
+    sweep = {"name": "tune", "kind": "train", "reads": [], "inputs": [], "needs": ["prepare"], "matrix": {"lr": [1, 2]},
+             "produces": [{"name": "tuned", "type": "artifact"}]}
+    steps = [dict(s, needs=s["needs"] + ["tune"], **extra) if s["name"] == consumer else s for s in STEPS]
+    return steps[:1] + [sweep] + steps[1:]
+
+
+def test_a_step_with_a_matrix_that_a_step_that_runs_needs_is_refused():
     steps = [dict(s, matrix={"lr": [1, 2]}) if s["name"] == "train" else s for s in STEPS]
     assert refused(steps=steps) == (
         "step 'train' runs once for each combination of its matrix= and this run does not run it again (it starts from "
-        "'evaluate'): a step with matrix= cannot be reused yet. Start from step 'train'.")
+        "'evaluate'), and step 'evaluate' needs its result: a step with matrix= cannot be reused yet. Start from step 'train'.")
     assert prepare("train", steps=steps, docs=earlier_run(steps)).reused == ["prepare"]    # starting from it is fine
+
+
+def test_the_refusal_names_every_step_that_runs_and_needs_the_sweep():
+    steps = with_sweep("evaluate")
+    steps = [dict(s, needs=s["needs"] + ["tune"]) if s["name"] == "publish" else s for s in steps]
+    assert refused(steps=steps) == (
+        "step 'tune' runs once for each combination of its matrix= and this run does not run it again (it starts from "
+        "'evaluate'), and steps 'evaluate' and 'publish' need its result: a step with matrix= cannot be reused yet. "
+        "Start from step 'tune'.")
+
+
+def test_a_step_that_reads_what_the_sweep_wrote_is_refused():
+    """What a step reads of an earlier step (its datasets, models, artifacts) comes through needs=; so does the sweep's."""
+    steps = with_sweep("evaluate")
+    assert "step 'evaluate' needs its result" in refused(steps=steps)
+
+
+def test_a_step_whose_when_reads_the_value_of_the_sweep_is_refused():
+    steps = with_sweep("evaluate", when_text="tune.best == 1", when_fields=[])
+    assert "step 'tune' runs once" in refused(steps=steps) and "step 'evaluate' needs its result" in refused(steps=steps)
+
+
+def test_a_step_with_a_matrix_that_no_step_that_runs_needs_is_not_run_and_is_not_reused():
+    steps = with_sweep()
+    docs = earlier_run(steps, {**RESULTS}, {**PARAMS, "tune": {}}, images={**IMAGES, "tune": IMAGES["prepare"]})
+    got = prepare("evaluate", steps=steps, docs=docs, params={**PARAMS, "tune": {}}, images={**IMAGES, "tune": IMAGES["prepare"]})
+    assert got.reused == ["prepare", "train"] and "tune" not in got.entries
+    assert "step tune: not run (its matrix is not needed by a step this run runs)" in got.notes
+    assert f"step tune: reused from run {RUN}" not in got.notes
+    assert "tune" not in [step for entry in got.pins.values() for step in entry["steps"]]
+
+
+def test_a_sweep_that_is_not_run_needs_no_record_in_the_earlier_run():
+    """It does not run, so the earlier run's record of it (failed, or never written) does not matter."""
+    steps = with_sweep()
+    got = prepare("evaluate", steps=steps, docs=earlier_run(steps, RESULTS, {**PARAMS, "tune": {}}), params={**PARAMS, "tune": {}})
+    assert "tune" not in got.entries
+
+
+def test_a_dataset_made_by_a_sweep_that_is_not_run_cannot_be_promoted_from_this_run():
+    steps = with_sweep()
+    steps[1] = dict(steps[1], produces=[{"name": "tuned", "type": "dataset"}])
+    docs = earlier_run(steps, RESULTS, {**PARAMS, "tune": {}})
+    message = refused(steps=steps, docs=docs, params={**PARAMS, "tune": {}}, promotes={"tuned": True})
+    assert message.startswith("promote-tuned is true, but the dataset tuned was made by step tune of run")
 
 
 def test_a_step_that_ran_on_an_hpc_class_in_the_earlier_run_is_refused():

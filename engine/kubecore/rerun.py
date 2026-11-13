@@ -13,8 +13,9 @@ refusal is one plain sentence that says what to change. What this run takes from
   it), with `path` on every model or artifact written: it lives under the earlier run's folder;
 * the commit of every input a step it does not run read: the new run reads the same data, never a newer `latest`.
 
-Not in this version, each a refusal: a step with matrix= that would not run again, a step that ran on an HPC class, an HPC
-step that reads a reused model or artifact, a run that itself reused another.
+Not in this version, each a refusal: a step with matrix= that would not run again while a step that runs needs it (one
+that no step that runs needs is simply not run), a step that ran on an HPC class, an HPC step that reads a reused model
+or artifact, a run that itself reused another.
 
 What makes a record trustworthy: the plan and every record carry the run's name, its app and its instance (the workflow's
 uid), and compose refuses records of another instance; a run whose name was used before is refused when it starts. The code of
@@ -204,6 +205,14 @@ def _same_step(old: dict, new: dict) -> str:
     return ""
 
 
+def _quoted_list(names: list) -> str:
+    """"step 'a' needs", "steps 'a' and 'b' need", "steps 'a', 'b' and 'c' need"."""
+    quoted = [f"'{n}'" for n in names]
+    if len(quoted) == 1:
+        return f"step {quoted[0]} needs"
+    return "steps " + ", ".join(quoted[:-1]) + " and " + quoted[-1] + " need"
+
+
 def _log(text: str) -> None:
     """Detail for the compose log; what a refusal says is never a client error, a host or an exception's name."""
     print(text, file=sys.stderr, flush=True)
@@ -266,10 +275,18 @@ def prepare(steps: list, run: str, start: str, app: str, params: dict, when: dic
     {dataset: whether the form promotes it} and `images` {step: the image reference compose resolved for it}."""
     reused = reused_steps(steps, start)
     by_name = {s["name"]: s for s in steps}
-    for name in reused:
-        if by_name[name].get("matrix"):
+    # What a step that runs reads of the steps before it comes only through `needs=` (its `upstream`, its `when=` on
+    # `<step>.<value>`, the datasets and artifacts of the steps it needs); a reused step's own needs are not read, its result
+    # comes from the record. A step with matrix= has no record to reuse: it is refused when a step that runs needs it, and
+    # otherwise it is not run at all.
+    sweeps = [name for name in reused if by_name[name].get("matrix")]
+    for name in sweeps:
+        consumers = [s["name"] for s in steps if s["name"] not in reused and name in s["needs"]]
+        if consumers:
             raise Refused(f"step '{name}' runs once for each combination of its matrix= and this run does not run it again "
-                          f"(it starts from '{start}'): a step with matrix= cannot be reused yet. Start from step '{name}'.")
+                          f"(it starts from '{start}'), and {_quoted_list(consumers)} its result: a step with matrix= "
+                          f"cannot be reused yet. Start from step '{name}'.")
+    reused = [name for name in reused if name not in sweeps]
     plan = _read(record, client, app, run, PLAN) if _RUN.match(run) else None
     if plan is None:
         raise Refused(f"{REUSE_FIELD}: run '{run}' saved no record for this app (its step images may be older than this "
@@ -370,9 +387,10 @@ def prepare(steps: list, run: str, start: str, app: str, params: dict, when: dic
         if not promoted:
             continue
         maker = next((s["name"] for s in steps for e in s["produces"] if e["type"] == "dataset" and e["name"] == dataset), None)
-        if maker in reused:
+        if maker in reused or maker in sweeps:
             raise Refused(f"promote-{dataset} is true, but the dataset {dataset} was made by step {maker} of run {run}, "
                           f"which this run does not run again. Promote it from run {run}, or start from step {maker}.")
+    out.notes.extend(f"step {name}: not run (its matrix is not needed by a step this run runs)" for name in sweeps)
     out.notes.append(f"the images of the steps that are not run again are the ones run {run} used (same digests)")
     return out
 

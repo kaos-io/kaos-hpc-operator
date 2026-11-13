@@ -899,7 +899,7 @@ version that is another commit, is refused. An input read only by steps that run
 |---|---|
 | one field empty | `reuse-from-run and start-from-step go together: <field> is empty.` |
 | X is not a step | `start-from-step: this pipeline has no step 'X'. Its steps are: a, b, c.` |
-| a step that is not run again has `matrix=` | `step 'S' runs once for each combination of its matrix= and this run does not run it again (it starts from 'X'): a step with matrix= cannot be reused yet. Start from step 'S'.` |
+| a step that is not run again has `matrix=` and a step that runs needs it | `step 'S' runs once for each combination of its matrix= and this run does not run it again (it starts from 'X'), and step 'C' needs its result: a step with matrix= cannot be reused yet. Start from step 'S'.` (`steps 'C' and 'D' need its result` for several) |
 | no plan of R for this app | `reuse-from-run: run 'R' saved no record for this app (its step images may be older than this feature, or saving failed: see that run's log). Check the name: it must be a run of this app.` |
 | the plan is not at version 1, or is not R's or the app's | `reuse-from-run: the record of run 'R' is not one this platform reads. Choose another run, or start a run of the whole pipeline.` |
 | a record of R belongs to another instance, app, run or step | `the records of run 'R' do not all belong to one run: the record of step 'S' was saved by another run that had the same name. Choose another run, or start a run of the whole pipeline.` |
@@ -917,8 +917,8 @@ version that is another commit, is refused. An input read only by steps that run
 | `promote-<d>` is true and a step not run again made `<d>` | `promote-<d> is true, but the dataset <d> was made by step S of run R, which this run does not run again. Promote it from run R, or start from step S.` |
 
 On success compose logs one line for each step not run again (`step S: reused from run R`, `(it was skipped there)` for one
-the earlier run skipped), and each pin taken from R. **The code of a step that is not run again is the code of R, and it is
+the earlier run skipped), and each pin taken from R. A step with `matrix=` that is not run again and that no step that runs needs (through `needs=`: its result, what it wrote, a `when=` on its value) is not run at all: it has no result taken from R, no pin, and compose logs `step S: not run (its matrix is not needed by a step this run runs)`; its task and its gather task end skipped like the other steps not run again. **The code of a step that is not run again is the code of R, and it is
 compared:** the image reference compose resolved for the step, which carries a digest, must be the same as the one in R's
-plan. Not in this version: a step with `matrix=` that is not run again, a result from an HPC step, an HPC step that reads
+plan. Not in this version: a step with `matrix=` that is not run again while a step that runs needs it, a result from an HPC step, an HPC step that reads
 a reused model or artifact, a run that reused another (so the earlier run to name is the one that ran the steps), a step
 skipped by its `when=` in R on a value of another step that is not run again (it has no record: start from it).
