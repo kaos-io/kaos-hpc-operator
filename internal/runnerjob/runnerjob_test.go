@@ -417,10 +417,11 @@ func TestTheRunnerGetsTheContextUnchangedAndEveryInput(t *testing.T) {
 		Repo   string `json:"repo"`
 		Commit string `json:"commit"`
 		Ref    string `json:"ref,omitempty"`
+		Owner  string `json:"owner,omitempty"`
 	}
 	ins := make([]input, 0, len(job.Spec.Inputs))
 	for _, in := range job.Spec.Inputs {
-		ins = append(ins, input{in.Name, in.Repo, in.Commit, in.Ref})
+		ins = append(ins, input{in.Name, in.Repo, in.Commit, in.Ref, in.Owner})
 	}
 	raw, _ := json.Marshal(ins)
 	want := string(raw)
@@ -438,9 +439,9 @@ func TestTheRunnerGetsTheContextUnchangedAndEveryInput(t *testing.T) {
 }
 
 // PRD kaos#1911 T-04: a job without its step context (created by a follower from before the contract, or stored
-// before the definition changed and read back without the removed fields) is refused with its own reason;
-// so is a job with a dataset another project shares.
-func TestAJobWithoutItsContextOrWithASharedInputIsRefused(t *testing.T) {
+// before the definition changed and read back without the removed fields) is refused with its own reason.
+// A job with a dataset another project shares is not: the runner asks the owner's data store.
+func TestAJobWithoutItsContextIsRefusedAndOneWithASharedInputIsNot(t *testing.T) {
 	job := contractJob(t)
 	if reason, err := ValidateContract(&job.Spec); err != nil || reason != "" {
 		t.Fatalf("the fixture job is fine: %s, %v", reason, err)
@@ -454,9 +455,15 @@ func TestAJobWithoutItsContextOrWithASharedInputIsRefused(t *testing.T) {
 	}
 	shared := job.DeepCopy()
 	shared.Spec.Inputs[0].Owner = "other"
-	reason, err = ValidateContract(&shared.Spec)
-	if reason != hpcv1alpha1.ReasonSharedInput || err == nil || !strings.Contains(err.Error(), "shared by project other") {
-		t.Errorf("want SharedInput naming the project, got %q, %v", reason, err)
+	if reason, err = ValidateContract(&shared.Spec); err != nil || reason != "" {
+		t.Errorf("a shared input is the runner's to check, got %q, %v", reason, err)
+	}
+	env, err := Env(shared, func() *hpcv1alpha1.HPCSite { _, s := fixtures(); return s }(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envOf(t, env)["HPC_INPUTS"]; !strings.Contains(got, `"owner":"other"`) {
+		t.Errorf("the runner is told the owner of the shared input: %s", got)
 	}
 }
 

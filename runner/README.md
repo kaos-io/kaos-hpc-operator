@@ -64,6 +64,7 @@ The job script and the runner reserve these codes; the controller turns them int
 | 242 | runner | the dataset holds an object that cannot be copied to the site: a name ending in `.kaos-part`, a path that could leave the dataset's folder, a name too long, or a file that is also a folder (reported FAILED, nothing staged, no site job) | `ReservedName` |
 | 243 | job script, or runner | the step ended well but its result could not be handed back: the job could not read or upload the result file (job script); the runner could not fetch it, nothing arrived, or the run has no way to hand a result back, in which case nothing is submitted (runner, reported FAILED) | `ResultNotHandedBack` |
 | 244 | runner | the result file the job handed back is not a result of the step contract (reported FAILED) | `InvalidResult` |
+| 245 | runner | a dataset another project shares cannot be read: not shared with this project (any more), the owner unknown or without a public address, or the site could not stage it; the job never downloads it itself (reported FAILED, nothing staged, no site job) | `SharedDatasetUnavailable` |
 
 ## What the step gets and hands back (the step contract)
 
@@ -76,7 +77,7 @@ the job script parses it.
 
 **The inputs.** Each entry of `HPC_INPUTS` is staged whole, at its pinned commit: from a login node by the site's
 staging tool when the runner has the staging key, else in the job (`payload/stagein.py`, on the job's own time). The
-job script is told where (`KAOS_INPUTS`, one word per input: `name|repository|commit|resident path`, the path being the
+job script is told where (`KAOS_INPUTS`, one word per input: `name|repository|commit|resident path|owner`, the owner empty for the project's own dataset and the path being the
 copy's `data/` folder) and presents both kinds the same way, read-only in the container:
 
 ```

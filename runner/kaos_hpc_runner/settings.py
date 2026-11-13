@@ -37,6 +37,9 @@ STAGING_MISMATCH_EXIT = 241
 # The runner reports it (FAILED, no site job) when the dataset holds an object whose name is reserved for the platform,
 # or whose path could leave the dataset's folder.
 RESERVED_NAME_EXIT = 242
+# The runner reports it (FAILED, no site job) when a dataset another project shares cannot be read: not shared (any more),
+# the owner unknown or not reachable from a site, or the site could not stage it (a job never downloads it itself).
+SHARED_DATASET_UNAVAILABLE_EXIT = 245
 # The step ended well but its result could not be handed back: the job script exits with it when it cannot read or
 # upload the result file; the runner reports it (FAILED) when it cannot fetch what the job uploaded, or before it
 # submits anything when the run has no way to hand a result back (reason ResultNotHandedBack).
@@ -286,6 +289,8 @@ class Settings:
                     raise ValueError('input name %r' % (i['name'],))
                 if not re.fullmatch(INPUT_REPO, i['repo']):
                     raise ValueError('input %s: %r is not a dataset repository' % (i['name'], i['repo']))
+                if i.get('owner') and not re.fullmatch(INPUT_OWNER, i['owner']):
+                    raise ValueError('input %s: %r is not a project' % (i['name'], i['owner']))
                 if not re.fullmatch('[0-9a-f]{64}', i['commit']):
                     raise ValueError('input %s: dataset %s has no pinned commit (got %r)' % (i['name'], i['repo'], i['commit']))
             if len({i['name'] for i in inputs}) != len(inputs):
@@ -293,7 +298,7 @@ class Settings:
         except (ValueError, KeyError, TypeError) as e:
             fail_start('the job\'s inputs (HPC_INPUTS) are not a list of pinned datasets: %s. The pipeline pins every '
                        'input before any step runs; the runner never resolves a version.' % e, 1)
-        self.inputs = [{'name': i['name'], 'repo': i['repo'], 'commit': i['commit'],
+        self.inputs = [{'name': i['name'], 'repo': i['repo'], 'commit': i['commit'], 'owner': i.get('owner') or '',
                         # The label the site's staging tool files the copy under: `main` for `latest` (as
                         # before), else what the run asked for; the commit for a dataset a needed step
                         # wrote. The commit, not this label, decides what is copied.
@@ -303,3 +308,4 @@ class Settings:
 
 INPUT_NAME = '[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?'
 INPUT_REPO = 'dataset-[a-z0-9][a-z0-9-]{0,54}'
+INPUT_OWNER = '[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'      # the project that shares the dataset (spec.inputs[].owner)

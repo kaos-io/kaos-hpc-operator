@@ -229,6 +229,9 @@ func (c *Config) readContext(raw string) error {
 // run's own project is an error.
 func stepInput(e contextEntry) (hpcv1alpha1.StepInput, error) {
 	in := hpcv1alpha1.StepInput{Name: e.Name, Repo: e.Repo, Commit: e.Commit, Ref: e.Ref, Line: e.Line}
+	if e.Owner != nil {
+		in.Owner = *e.Owner
+	}
 	switch {
 	case len(e.Name) > maxInputName || !inputName.MatchString(e.Name):
 		return in, fmt.Errorf("the step context names an input %q: an input's name is at most %d letters, digits, "+
@@ -240,9 +243,6 @@ func stepInput(e contextEntry) (hpcv1alpha1.StepInput, error) {
 			e.Name, e.Repo, e.Commit)
 	case e.Ref != "" && (len(e.Ref) > maxInputRef || !inputRef.MatchString(e.Ref)):
 		return in, fmt.Errorf("input %s: %q is not a dataset version", e.Name, e.Ref)
-	case e.Owner != nil && *e.Owner != "":
-		return in, fmt.Errorf("input %s is the dataset %s shared by project %s: a dataset of another project cannot be "+
-			"read on HPC yet. Run this step on a cluster class, or copy the dataset into this project", e.Name, e.Repo, *e.Owner)
 	}
 	return in, nil
 }

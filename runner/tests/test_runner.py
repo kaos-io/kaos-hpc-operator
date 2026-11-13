@@ -252,7 +252,7 @@ def test_the_submitted_job_is_the_proven_one(rig):
     assert env["KAOS_LIB_SUPPORT"] == '{"a":1}' and "HANDBACK_B64" in env and "STAGEIN_B64" in env
     # The step contract: the one value the step receives, unchanged; the inputs to present; nothing of before.
     assert env["KAOS_STEP_CONTEXT"] == helpers.fixture("context-one-upstream.wire")
-    assert env["KAOS_INPUTS"] == "dataset|dataset-default|%s|" % helpers.COMMIT, "not staged from a login node: in-job"
+    assert env["KAOS_INPUTS"] == "dataset|dataset-default|%s||" % helpers.COMMIT, "not staged from a login node: in-job"
     gone = ("CHECKPOINT_BUCKET", "CHECKPOINT_PREFIX", "KUBECORE_RUN_ID", "KUBECORE_WORKFLOW_NAME", "OUTPUTS_REPO",
             "OUTPUTS_REF", "STEP_OUTPUTS", "STAGEOUT_B64", "DATASET_REPO", "DATASET_COMMIT", "DATASET_STAGED",
             "KAOS_COMMIT", "KAOS_LIB_LOCK")
@@ -638,7 +638,7 @@ def test_the_dataset_staging_record_is_reported_from_the_first_report_on(rig):
     runs = [c[2]["status"]["run"] for c in rig.kube.patches() if "run" in c[2]["status"]]
     assert runs[0]["state"] == "PENDING" and runs[0]["staged"] == [rec] and runs[-1]["staged"] == [rec]
     env = dict(e.split("=", 1) for e in slurm.submitted[0]["job"]["environment"])
-    assert env["KAOS_INPUTS"] == "dataset|dataset-default|%s|/scr/kaos/p/datasets/ds/c2" % helpers.COMMIT, \
+    assert env["KAOS_INPUTS"] == "dataset|dataset-default|%s|/scr/kaos/p/datasets/ds/c2|" % helpers.COMMIT, \
         "the job is told where the resident copy of each input is"
 
 

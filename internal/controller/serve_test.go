@@ -213,16 +213,19 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(all.Items).To(HaveLen(1))
 	})
 
-	It("should_refuse_a_job_with_a_dataset_another_project_shares_and_book_nothing", func() {
+	It("should_admit_a_job_with_a_dataset_another_project_shares_and_tell_the_runner_the_owner", func() {
 		j := newServeJob(newWorkflow(), func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
 			j.Spec.Inputs = []hpcv1alpha1.StepInput{{Name: "raw", Repo: "dataset-raw", Commit: strings.Repeat("c2", 32), Owner: "other"}}
 		})
 		_, got := reconcileOnce(j)
-		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused))
-		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonSharedInput))
-		Expect(got.Status.Message).To(ContainSubstring("shared by project other"))
-		Expect(got.Status.Booking).To(BeNil())
-		Expect(runnerJob(got, 1)).To(BeNil())
+		Expect(got.Status.Phase).NotTo(Equal(hpcv1alpha1.PhaseRefused))
+		rj := runnerJob(got, 1)
+		Expect(rj).NotTo(BeNil())
+		env := map[string]string{}
+		for _, e := range rj.Spec.Template.Spec.Containers[0].Env {
+			env[e.Name] = e.Value
+		}
+		Expect(env["HPC_INPUTS"]).To(Equal(`[{"name":"raw","repo":"dataset-raw","commit":"` + strings.Repeat("c2", 32) + `","owner":"other"}]`))
 	})
 
 	It("should_refuse_a_job_without_a_step_context_at_the_definition", func() {

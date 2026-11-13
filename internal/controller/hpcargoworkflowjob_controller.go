@@ -408,7 +408,8 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		}
 	}
 
-	if reason == hpcv1alpha1.ReasonStagingMismatch || reason == hpcv1alpha1.ReasonReservedName {
+	if reason == hpcv1alpha1.ReasonStagingMismatch || reason == hpcv1alpha1.ReasonReservedName ||
+		reason == hpcv1alpha1.ReasonSharedDatasetUnavailable {
 		msg = strings.TrimSpace(run.Message)
 		if msg == "" {
 			msg = "staging was refused before it began; nothing was staged or submitted to the site"
@@ -475,15 +476,16 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 // failedExitReasons are the exit codes the job script and the runner reserve for an attempt that FAILED, each
 // with the reason it means.
 var failedExitReasons = map[int32]string{
-	hpcv1alpha1.ExitCodeIdle:                hpcv1alpha1.ReasonIdle,
-	hpcv1alpha1.ExitCodeInsufficientQuota:   hpcv1alpha1.ReasonInsufficientQuota,
-	hpcv1alpha1.ExitCodeInvalidImage:        hpcv1alpha1.ReasonInvalidImage,
-	hpcv1alpha1.ExitCodeStagingMismatch:     hpcv1alpha1.ReasonStagingMismatch,
-	hpcv1alpha1.ExitCodeReservedName:        hpcv1alpha1.ReasonReservedName,
-	hpcv1alpha1.ExitCodeResultNotHandedBack: hpcv1alpha1.ReasonResultNotHandedBack,
-	hpcv1alpha1.ExitCodeInvalidResult:       hpcv1alpha1.ReasonInvalidResult,
-	hpcv1alpha1.ExitCodeSubmitLimit:         hpcv1alpha1.ReasonSubmitLimit,
-	hpcv1alpha1.ExitCodeGPUViolation:        hpcv1alpha1.ReasonGPUViolation,
+	hpcv1alpha1.ExitCodeIdle:                     hpcv1alpha1.ReasonIdle,
+	hpcv1alpha1.ExitCodeInsufficientQuota:        hpcv1alpha1.ReasonInsufficientQuota,
+	hpcv1alpha1.ExitCodeInvalidImage:             hpcv1alpha1.ReasonInvalidImage,
+	hpcv1alpha1.ExitCodeStagingMismatch:          hpcv1alpha1.ReasonStagingMismatch,
+	hpcv1alpha1.ExitCodeReservedName:             hpcv1alpha1.ReasonReservedName,
+	hpcv1alpha1.ExitCodeSharedDatasetUnavailable: hpcv1alpha1.ReasonSharedDatasetUnavailable,
+	hpcv1alpha1.ExitCodeResultNotHandedBack:      hpcv1alpha1.ReasonResultNotHandedBack,
+	hpcv1alpha1.ExitCodeInvalidResult:            hpcv1alpha1.ReasonInvalidResult,
+	hpcv1alpha1.ExitCodeSubmitLimit:              hpcv1alpha1.ReasonSubmitLimit,
+	hpcv1alpha1.ExitCodeGPUViolation:             hpcv1alpha1.ReasonGPUViolation,
 }
 
 // outcome maps the site's final state and exit code of one attempt to the job's phase.

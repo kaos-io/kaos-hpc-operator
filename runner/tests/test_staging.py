@@ -39,7 +39,7 @@ class _LakeFS:
 class _Stager:
     """Stand-in for the login-node stager: canned version and status, records stage calls."""
 
-    def __init__(self, status, stage_rcs=(0,), key=True, version=(0, 2), status_rc=0):
+    def __init__(self, status, stage_rcs=(0,), key=True, version=(0, 3), status_rc=0):
         self.status, self.stage_rcs, self.calls, self.key = status, list(stage_rcs), [], key
         self.version, self.status_rc = version, status_rc
         # What ssh printed for the last call. Exit 2 from `version` with the tool's own usage error is a tool from
@@ -57,7 +57,7 @@ class _Stager:
             return rc, ([{"event": "version", "contract": contract}] if rc == 0 else [])
         if words[0] == "status":
             if self.status_rc:
-                return self.status_rc, [{"event": "contract", "contract": 3, "got": 2}]
+                return self.status_rc, [{"event": "contract", "contract": 4, "got": 3}]
             return 0, [dict(self.status, event="status", path="/scr/kaos/p/datasets/ds/" + COMMIT)]
         rc = self.stage_rcs.pop(0)
         return rc, ([{"event": "done", "path": "/scr/kaos/p/datasets/ds/" + COMMIT}] if rc == 0 else [])
@@ -307,13 +307,13 @@ def test_the_runner_asks_the_staging_tool_for_its_contract_and_sends_its_own(mon
     calls = [w for w, _ in stager.calls]
     assert [w[0] for w in calls] == ["version", "status", "stage"]
     for w in calls[1:]:
-        assert w[w.index("--contract") + 1] == staging.CONTRACT == 2
+        assert w[w.index("--contract") + 1] == staging.CONTRACT == 3
 
 
 @pytest.mark.parametrize("version", [
     (2, None),   # a staging tool from before `version`: the forced command answers a usage error
     (0, 1),      # another contract
-    (0, 3),
+    (0, 2),
     (0, None),   # an answer without a contract
 ])
 def test_a_staging_tool_of_another_contract_stops_the_run_before_anything_is_staged(monkeypatch, version):

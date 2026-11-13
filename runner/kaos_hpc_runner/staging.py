@@ -13,6 +13,12 @@ before anything is submitted: no room in the quota (InsufficientQuota), a stagin
 another staging contract (StagingMismatch), and a dataset object whose name is reserved for the
 platform (ReservedName).
 
+A dataset another project shares (AC-44, D-61; the input names an owner) is staged the same way from the OWNER's
+data store: its public address comes from the own data store's peers, the credential is the same wallet bearer
+(the owner's data store accepts it for exactly what the owner shares with the project, and the project's own
+key or admin token is never sent), and the copy is filed under `<repo>@<owner>` on the site (dataset_key). The job never
+downloads it itself: a shared dataset the site cannot stage ends the run SharedDatasetUnavailable, before submit.
+
 Names that are not copied. Reserved: the staging tool's half-downloaded files end in `.kaos-part`, beside the
 file they become; a dataset object with such a name would be refused by the staging tool mid-copy. (A copy on
 the site keeps the dataset's files under `<copy>/data/` and every file of the platform beside that folder, so
@@ -39,6 +45,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -46,7 +53,7 @@ from . import settings
 
 STAGE_BUDGET_S = 4 * 3600
 EX_RETRY, EX_NOSPACE, EX_USAGE, EX_CONTRACT = 75, 76, 2, 78
-CONTRACT = 2   # 2 = the whole tree of the commit, its files under <copy>/data/; the tool's CONTRACT is the same number
+CONTRACT = 3   # 3 = the whole tree of the commit under <copy>/data/, and a dataset another project shares filed as repo@owner; the tool's CONTRACT is the same number
 
 
 class InsufficientQuota(Exception):
@@ -59,6 +66,13 @@ class StagingMismatch(Exception):
     """The site's staging tool speaks another staging contract than this runner (one of the two was updated
     first). Nothing is staged with it and the job does not stage in-job either: the run ends StagingMismatch
     before anything is submitted. The message is a plain sentence for the job's status and the pipeline log."""
+
+
+class SharedDatasetUnavailable(Exception):
+    """A dataset another project shares cannot be read for this step: the share is not approved or was withdrawn,
+    the owner is not known or has no public address, or the site could not stage it (a job never downloads a
+    shared dataset itself). Nothing is staged and nothing is submitted. The message names the dataset and the owner
+    and says what to do, for the job's status and the pipeline log."""
 
 
 class ReservedName(Exception):
@@ -356,6 +370,53 @@ class Stager:
         return rc, events
 
 
+def dataset_key(repo, owner=''):
+    """What a copy is filed under on the site and in a staging record: the repository, and for a dataset another
+    project shares `<repo>@<owner>`, so two projects that each have a repository of one name are two copies. Neither
+    a repository nor a project name holds an `@`."""
+    return '%s@%s' % (repo, owner) if owner else repo
+
+
+def _unavailable(repo, owner, why):
+    return SharedDatasetUnavailable(
+        'dataset %s is shared by project %s, and %s. Nothing was staged and nothing was submitted to the site. '
+        'Ask project %s to share it with this project.' % (repo, owner, why, owner))
+
+
+def _no_job_download(repo, owner, why):
+    return SharedDatasetUnavailable(
+        'dataset %s is shared by project %s, and %s: the job does not download it itself (a job reads only its own '
+        'project\'s data store). Nothing was staged and nothing was submitted to the site. Run the step again; if it '
+        'keeps failing, a platform operator can read why the site\'s staging tool is not used.' % (repo, owner, why))
+
+
+def owner_store(own_url, wallet, owner, repo, commit):
+    """The public address of project `owner`'s data store, once it is clear that the owner shares `repo` at `commit`
+    with this project. The address is the `url` of the owner in the own data store's peers (`endpoint` is an address
+    on the platform's network, which a login node cannot reach). The one credential sent anywhere is the wallet
+    bearer; the owner's data store lets it read what the owner shares with the project and nothing else. Raises
+    SharedDatasetUnavailable; any other failure is a transient one the caller asks again."""
+    def get(url, what):
+        try:
+            return json.load(urllib.request.urlopen(urllib.request.Request(
+                url, headers={'Authorization': 'Bearer ' + wallet}), timeout=60))
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403, 404):
+                raise _unavailable(repo, owner, what % e.code) from None
+            raise
+    peers = get(own_url + '/kaos/v1/peers',
+                'this project\'s data store does not list the projects it knows (HTTP %s)')
+    found = next((p for p in peers.get('peers') or [] if isinstance(p, dict) and p.get('project') == owner), None)
+    if found is None:
+        raise _unavailable(repo, owner, '%s is not a project of this organisation that the data store knows' % owner)
+    url = (found.get('url') or '').rstrip('/')
+    if not url.startswith(('https://', 'http://')):
+        raise _unavailable(repo, owner, 'project %s\'s data store has no public address, so it cannot be read from a site' % owner)
+    get('%s/api/v1/repositories/%s/refs/%s/objects/ls?amount=1' % (url, urllib.parse.quote(repo, safe=''), commit),
+        'project %s\'s data store does not share it with this project (HTTP %%s): it was not approved, or the share was withdrawn' % owner)
+    return url
+
+
 def staging_record(repo, commit, kind, files=0, nbytes=0, seconds=0):
     """One record of status.run.staged (bounded, no paths): how a dataset came to be on scratch. The follower prints it."""
     return {'repo': repo, 'commit': commit[:12], 'kind': kind, 'files': int(files), 'bytes': int(nbytes),
@@ -369,9 +430,11 @@ def refused(rc, ev):
             next((e.get('contract') for e in reversed(ev) if e.get('event') == 'contract'), None)))
 
 
-def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
+def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None, key=None):
     # One staging attempt. Returns (path, retry): the ready path, or '' with
-    # whether a later attempt can help. info (a dict) receives the staging record when the copy is ready.
+    # whether a later attempt can help. info (a dict) receives the staging record when the copy is ready. repo is the
+    # repository in the data store at `lakefs`; key (default repo) is what the copy is filed under on the site.
+    key = key or repo
     rc, ev = stager(['version'])
     theirs = next((e.get('contract') for e in reversed(ev) if e.get('event') == 'version'), None)
     if rc in (EX_USAGE, 126, 127) and theirs is None:
@@ -384,7 +447,7 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
         raise StagingMismatch(mismatch_message(theirs))
     if rc != 0:
         return '', rc in (EX_RETRY, 255)
-    rc, ev = stager(['status', '--contract', CONTRACT, '--repo', repo, '--commit', commit, '--ref', ref])
+    rc, ev = stager(['status', '--contract', CONTRACT, '--repo', key, '--commit', commit, '--ref', ref])
     refused(rc, ev)
     st = next((e for e in reversed(ev) if e.get('event') == 'status'), None)
     if rc != 0 or st is None:
@@ -392,7 +455,7 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
     if st.get('ready'):
         print('stage: cache hit', st['path'], flush=True)
         if info is not None:
-            info.update(staging_record(repo, commit, 'cached'))
+            info.update(staging_record(key, commit, 'cached'))
         return st['path'], False
     api = lakefs + '/api/v1/repositories/' + urllib.parse.quote(repo, safe='')
     # The whole tree of the commit, from the repository root.
@@ -425,7 +488,7 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
                        'url': api + '/refs/' + commit + '/objects?'
                        + urllib.parse.urlencode({'path': path})}
         yield {'op': 'end', 'files': files, 'bytes': need_bytes, 'ref': ref, 'prefix': prefix}
-    words = ['stage', '--contract', CONTRACT, '--repo', repo, '--commit', commit, '--ref', ref,
+    words = ['stage', '--contract', CONTRACT, '--repo', key, '--commit', commit, '--ref', ref,
              '--need-bytes', need_bytes, '--need-files', need_files]
     if base:
         words += ['--base', base]
@@ -435,8 +498,8 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None):
     if rc == 0 and done:
         if info is not None:
             # A stage another runner finished while this one waited for the stager's lock is a cache hit.
-            info.update(staging_record(repo, commit, 'cached') if done.get('cached') else staging_record(
-                repo, commit, 'delta' if base else 'first', need_files, need_bytes))
+            info.update(staging_record(key, commit, 'cached') if done.get('cached') else staging_record(
+                key, commit, 'delta' if base else 'first', need_files, need_bytes))
         return done['path'], False
     if rc == EX_NOSPACE:
         print('stage: NOT ENOUGH SPACE on MeluXina scratch for this version even after'
@@ -459,19 +522,29 @@ def stage_dataset(cfg, inp, stager, mint_wallet, info=None):
     are not a fallback:
     InsufficientQuota when the dataset does not fit the project's scratch quota (AC-33), StagingMismatch
     when the site's staging tool speaks another staging contract, and ReservedName when the dataset holds an
-    object whose name is reserved for the platform or whose path could leave the dataset's folder.
+    object whose name is reserved for the platform or whose path could leave the dataset's folder. An input with an
+    owner (a dataset another project shares) is staged from the owner's data store and never in-job: whatever
+    would make an own dataset fall back to the job's download ends the run SharedDatasetUnavailable instead.
     info (a dict), when given, receives the staging record (staging_record) once the copy is resident; it stays
     empty when the job stages in-job."""
     repo, ref, commit = inp['repo'], inp['ref'], inp['commit']
+    owner = inp.get('owner') or ''
+    key = dataset_key(repo, owner)
     lakefs = cfg.lakefs_url
     if not lakefs:
+        if owner:
+            raise _no_job_download(repo, owner, 'this project has no data store address')
         print('stage: skipped (needs the lakeFS endpoint) - the job stages in-job', flush=True)
         return ''
     wallet = mint_wallet()
     if not wallet:
+        if owner:
+            raise _no_job_download(repo, owner, 'no data-plane token could be minted')
         return ''
     api = lakefs + '/api/v1/repositories/' + urllib.parse.quote(repo, safe='')
     if not stager.have_key() or not ssh_present():
+        if owner:
+            raise _no_job_download(repo, owner, 'the site\'s staging tool cannot be used (no staging key, or no ssh client)')
         print('stage: skipped (needs the staging key and an ssh client) - the job stages in-job', flush=True)
         refuse_names(api, repo, commit, wallet)     # the in-job copy joins every name to its folder: check them all
         return ''
@@ -480,8 +553,9 @@ def stage_dataset(cfg, inp, stager, mint_wallet, info=None):
     while True:
         attempt += 1
         try:
-            path, retry = stage_once(stager, repo, ref, commit, lakefs, wallet, info)
-        except (InsufficientQuota, StagingMismatch, ReservedName):
+            source = owner_store(lakefs, wallet, owner, repo, commit) if owner else lakefs
+            path, retry = stage_once(stager, repo, ref, commit, source, wallet, info, key)
+        except (InsufficientQuota, StagingMismatch, ReservedName, SharedDatasetUnavailable):
             raise
         except ToolAbsent as e:
             if absent_since is None:
@@ -499,6 +573,8 @@ def stage_dataset(cfg, inp, stager, mint_wallet, info=None):
         time.sleep(min(60 * attempt, 600))
     if path and info and info.get('kind') != 'cached':
         info['seconds'] = int(time.time() - began)    # the whole staging, including resumed attempts
+    if not path and owner:
+        raise _no_job_download(repo, owner, 'the site could not stage it')
     if not path:
         print('stage: NOT STAGED - the job will download the dataset in-job on GPU time',
               flush=True)

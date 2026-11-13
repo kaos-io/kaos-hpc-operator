@@ -295,7 +295,7 @@ def test_a_successful_in_job_stage_in_binds_the_downloaded_copy(tmp_path):
     root = tmp_path / 'scr' / 'kaos-tmp' / 'in-9'
     assert p.returncode == 0 and 'BIND=-B %s:/kaos/inputs:ro -B %s:/kaos/inputs/raw:ro' % (root, copy / 'data') in p.stdout, p.stdout + p.stderr
     # The record the step finds the input by is BESIDE the folder the copy is bound onto, never inside it.
-    assert json.loads((root / 'raw.kaos-ready').read_text()) == {'repo': 'dataset-r', 'commit': 'c0ffee12', 'full': True}
+    assert json.loads((root / 'raw.kaos-ready').read_text()) == {'repo': 'dataset-r', 'commit': 'c0ffee12', 'owner': None, 'full': True}
     assert (root / 'raw').is_dir() and list((root / 'raw').iterdir()) == []
 
 

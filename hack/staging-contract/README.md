@@ -18,6 +18,7 @@ Python 3.12+ (the runner's). With `STAGER=<checkout of the platform repository>/
 
 | Scenario | Runner dir | stager.py | Proves |
 |---|---|---|---|
+| `shared-two-stores` | `runner` | `$STAGER/stager.py` | Two data stores (the project's own and its owner's) each hold a repository named `dataset-ds`. The owner's is staged from the owner's store (address from the project's peers, only the project's bearer sent anywhere) and filed as `dataset-ds@owner` beside the project's own copy; a second run is a cache hit; once the owner's store refuses the project, the run stops naming the dataset and the owner, although the copy is on the site |
 | `any-shape` | `runner` | `$STAGER/stager.py` | A dataset with no `data.yaml`, `images/` or `labels/` is complete on the site, under `<copy>/data/` with the tool's own files beside it, and the path handed to the job is that `data/` folder; the next version is a delta; a whole copy is a cache hit |
 | `old-partial` | `runner` | `$STAGER/stager.py` | A copy made when only the YOLO folders were staged is never served and never a base; one a job leases or that was used in the last day stays; the same commit is completed in the folder the job reads |
 | `old-layout` | `runner` | `$STAGER/stager.py` | A copy whose marker says `full` but whose files are directly in the commit folder (no `data/`) is never served and never a base; staging the same commit completes it into `data/` |

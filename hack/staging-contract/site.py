@@ -5,7 +5,7 @@ staging tool (stager.py of the platform repository, in forced-command mode), whi
 lakeFS and reads fake `lfs` / `squeue`. No test in either repository imports this file.
 
 usage: site.py <runner dir> <stager.py> <dir of the staging tool's test_stager.py> <scenario>
-scenarios: any-shape, old-partial, old-layout, marker-like-names, reserved-name, unsafe-name, uncopyable,
+scenarios: shared-two-stores, any-shape, old-partial, old-layout, marker-like-names, reserved-name, unsafe-name, uncopyable,
            folder-marker, file-folder-delta, tool-absent (give a stager.py path that does not exist),
            new-runner-old-tool, old-runner-new-tool
 """
@@ -30,7 +30,7 @@ import test_stager        # noqa: E402  (FAKE_LFS, FAKE_SQUEUE)
 from kaos_hpc_runner import staging   # noqa: E402
 
 REPO = 'dataset-ds'
-C1, C2, C3, C4, C5, C6, C7, C8, C9, CA, CB, CC = ('c%s' % c * 32 for c in '123456789abc')
+C1, C2, C3, C4, C5, C6, C7, C8, C9, CA, CB, CC, CD, CE = ('c%s' % c * 32 for c in '123456789abcde')
 YOLO = {'data.yaml': b'names: [x]', 'images/a.jpg': b'a' * 100, 'labels/a.txt': b'0 0.5'}
 TREES = {
     # not YOLO-shaped: no data.yaml, images/ or labels/
@@ -49,6 +49,9 @@ TREES = {
     C9: {'a/b': b'1', 'a/c/d': b'2', 'f': b'3', 'keep': b'k'},
     CA: {'a': b'now a file', 'f/g': b'now a folder', 'keep': b'k'},
     # names of the platform's files in a copy: the dataset lives under data/, so they are data
+    # a repository of the same name in two projects' data stores: the reading project's own (CE) and the owner's (CD)
+    CD: {'owner-only.csv': b'the owner\'s rows', 'sub/b.csv': b'2'},
+    CE: {'own-only.csv': b'the reading project\'s own, different dataset'},
     CC: {'.kaos-ready': b'not a marker', '.kaos-used': b'u', '.kaos-plan': b'p', 'sub/.kaos-ready': b'x', 'data': b'a file',
          'k': b'2'},
 }
@@ -58,8 +61,21 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(url.query)
+        self.server.log.append((url.path, self.headers.get('Authorization')))
+        if getattr(self.server, 'refuse', 0):
+            self.send_error(self.server.refuse)
+            return
+        if url.path == '/kaos/v1/peers':     # the own data store's answer: the owner, its platform address and its public one
+            body = json.dumps({'project': 'reader', 'peers': [{'project': 'owner', 'endpoint': 'http://lakefs.owner.svc:8000',
+                                                                 'url': 'http://127.0.0.1:%d' % owner_httpd.server_address[1]}]}).encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         parts = url.path.split('/')          # /api/v1/repositories/<repo>/refs/<ref>/...
         ref, rest = parts[6], parts[7:]
+        TREES = self.server.trees
         prefix = (q.get('prefix') or [''])[0]
         if rest == ['objects', 'ls']:
             body = json.dumps({'results': [{'path': p, 'path_type': 'object', 'size_bytes': len(b)}
@@ -82,15 +98,23 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
 
-httpd = socketserver.ThreadingTCPServer(('127.0.0.1', 0), H)
-httpd.daemon_threads = True
-threading.Thread(target=httpd.serve_forever, daemon=True).start()
+def serve(trees):
+    server = socketserver.ThreadingTCPServer(('127.0.0.1', 0), H)
+    server.daemon_threads, server.trees, server.log = True, trees, []
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+httpd = serve(TREES)                       # the reading project's own data store
+owner_httpd = serve({CD: TREES[CD]})       # the owner's: it holds no commit of the project's own
 
 tmp = tempfile.mkdtemp(prefix='site-')
 atexit.register(shutil.rmtree, tmp, True)
 root = os.path.join(tmp, 'kaos', 'proj')
 bindir = os.path.join(tmp, 'bin')
 os.makedirs(bindir)
+test_stager.shared_folder(tmp)             # the site owner's shared folder, and the connection's set-up of the project's root
+test_stager.prepared_root(root)
 ssh = '''#!/bin/sh
 # the login node: no shared connection, and the forced command of the staging key
 case " $* " in *" -O "*|*" -N -f "*) exit 255 ;; esac
@@ -121,10 +145,16 @@ def tree(path, skip_markers=False):
     return out
 
 
-def stage(commit):
+def stage(commit, owner=''):
     url = 'http://127.0.0.1:%d' % httpd.server_address[1]
     info = {}
-    if 'inp' in staging.stage_dataset.__code__.co_varnames[:staging.stage_dataset.__code__.co_argcount]:
+    if owner:
+        cfg = helpers.settings(HPC_INPUTS=json.dumps([{'name': 'dataset', 'repo': REPO, 'ref': 'main', 'commit': commit,
+                                                       'owner': owner}]), LAKEFS_EXTERNAL_URL=url)
+        cfg.check_job()
+        path = staging.stage_dataset(cfg, cfg.inputs[0], staging.Stager(cfg, staging_dir=keydir), lambda: 'wallet',
+                                     info=info)
+    elif 'inp' in staging.stage_dataset.__code__.co_varnames[:staging.stage_dataset.__code__.co_argcount]:
         cfg = helpers.settings(HPC_INPUTS=json.dumps([{'name': 'dataset', 'repo': REPO, 'ref': 'main', 'commit': commit}]),
                                LAKEFS_EXTERNAL_URL=url)
         cfg.check_job()
@@ -148,7 +178,34 @@ def check(what, ok):
         sys.exit(1)
 
 
-if scenario == 'any-shape':
+if scenario == 'shared-two-stores':
+    # AC-44 / D-61: the reading project and the owner each have a repository named dataset-ds, in their own data stores.
+    # The owner's is staged from the owner's store, beside (not over) a copy of the reading project's own.
+    own_path, _ = stage(CE)
+    check('the reading project\'s own dataset of that name is staged as before', own_path and tree(own_path) == TREES[CE]
+          and '/datasets/%s/%s/data' % (REPO, CE) in own_path)
+    httpd.log.clear()
+    path, info = stage(CD, 'owner')
+    check('the owner\'s dataset is complete on the site, under the owner', path and tree(path) == TREES[CD]
+          and '/datasets/%s@owner/%s/data' % (REPO, CD) in path and info['repo'] == REPO + '@owner')
+    check('the bytes came from the owner\'s data store; the own one was asked for the peers only',
+          {p for p, _ in httpd.log} == {'/kaos/v1/peers'}
+          and any(p.endswith('/objects') for p, _ in owner_httpd.log))
+    check('one credential went anywhere, the project\'s wallet bearer (the staging tool sends it with each fetch)',
+          {a for _, a in httpd.log + owner_httpd.log} == {'Bearer wallet'})
+    path, info = stage(CD, 'owner')
+    check('a second run of the project is a cache hit', info['kind'] == 'cached')
+    check('the two are two copies side by side, neither over the other', tree(own_path) == TREES[CE]
+          and sorted(os.listdir(os.path.join(root, 'datasets'))) == [REPO, REPO + '@owner'])
+    owner_httpd.refuse = 403               # the owner withdraws the share: its data store refuses the project's token
+    try:
+        stage(CD, 'owner')
+        check('the run stops', False)
+    except staging.SharedDatasetUnavailable as e:
+        print('message:', e)
+        check('a withdrawn share is not served from the copy already on the site: the run stops naming the dataset and the owner',
+              REPO in str(e) and 'owner' in str(e) and 'Ask project owner to share it' in str(e))
+elif scenario == 'any-shape':
     path, info = stage(C1)
     check('a tree with no data.yaml, images/ or labels/ is complete on the site (%d files)' % len(TREES[C1]),
           path and tree(path) == TREES[C1])
