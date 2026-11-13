@@ -22,20 +22,18 @@ one beside it: every app moves once.
 
 ## 0. What exists today
 
-This page is the target. Sections 1 to 10 are written in the present tense, as rules; most of what they
-describe is not on `main` yet.
+This page is the contract, and sections 1 to 10 are written in the present tense, as rules. The engine and the HPC
+side of it are on `main` of this repository; the library and the app templates are other repositories.
 
-| On `main` today | State |
+| Where | State |
 |---|---|
-| This page, the fixtures, the checks under `hack/contract-checks/` | Here. The checks prove the mechanisms the contract rests on; they do not test an implementation. |
-| The engine | The contract before this one: `outputs=`, `hpc_time_limit=`, steps started with `--params` and one argument per output, a data lock at version 1. No `kind=`, `inputs=`, `produces=`, no context, no `kaos-result`. |
-| The HPC job definition, follower, controller, runner | `spec.dataset`, `spec.datasetRef`, `spec.outputs`, `status.outputs`. No `spec.context`, `spec.app`, `spec.inputs`, `status.result`. |
-| kaos-lib | No `kaos_lib.step`. The data lock is version 1. |
+| This page, the fixtures, the checks under `hack/contract-checks/` | On `main`. The checks prove the mechanisms the contract rests on; the engine's and the HPC side's tests load the fixtures. |
+| The engine (`engine/`) | On `main`: `kind=`, `inputs=`, `produces=`, `walltime=`, `matrix=`, the context and the `kaos-result` of every step, the render-time refusals, conditions on a value, the final promotion task. `outputs=`, `hpc_time_limit=` and `disk=` are refused, and so is an app from before the contract (section 1). |
+| The HPC job definition, follower, controller, runner (`api/`, `internal/`, `runner/`) | On `main`: `spec.app`, `spec.context`, `spec.inputs`, `status.result`, the hand-back of the result and its checks (section 8). |
+| kaos-lib (another repository) | `kaos_lib.step` and the data lock at version 2 (the ledger) are on its `main`, in the release it prepares. |
 
-Everything else on this page is being built by the wave (PRD kaos#1911, work packages W1 to W5): the
-keywords and render-time refusals, compose's outputs and caps, `kaos_lib.step`, the HPC job fields, the
-runner's hand-back and its checks. Where a section says "the engine refuses" or "the runner removes", read
-"will, once its work package lands".
+What is not on this page and not in this repository: the app templates and the console. They follow the contract
+from their own repositories; their state is in the PRD (kaos#1911), not here.
 
 ## 1. Authoring keywords
 
@@ -65,7 +63,9 @@ Everything after `name` is keyword-only.
 Removed, with no alias: `outputs=` (the result replaces it), `hpc_time_limit=` (`walltime=` replaces it) and
 `disk=`: a step is not told its disk, it gets the disk of the machine its class runs on (the usable disk of that
 class, less a fixed reserve for the container images, or 10Gi where the platform does not say). A step that
-that passes one is refused with what to write instead: "step 'x': outputs= is gone. Declare what the step writes with produces=[...] and hand it on with step.result()."; "step 'x': hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\"."; "step 'x': disk= is gone. The step gets the disk of the machine class it runs on." Any other unknown keyword is refused with a sentence that lists the keywords that exist.
+passes one is refused with what to write instead, and then with the sentence for an app from before the contract
+(`OLD_APP_NOTICE`: "This app was made before the current pipelines. Create it again from the template."), because a
+pipeline that still uses one is an old app: "step 'x': outputs= is gone. Declare what the step writes with produces=[...] and hand it on with step.result(). This app was made before the current pipelines. Create it again from the template."; "step 'x': hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\". This app was made before the current pipelines. Create it again from the template."; "step 'x': disk= is gone. The step gets the disk of the machine class it runs on. This app was made before the current pipelines. Create it again from the template." Any other unknown keyword is refused with a sentence that lists the keywords that exist.
 
 **Step kinds.** A kind says what the step is for, and the engine refuses a step that does not do it:
 

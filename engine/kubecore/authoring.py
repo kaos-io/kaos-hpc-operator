@@ -116,7 +116,7 @@ _current = None
 # Kubernetes resource quantity ("10Gi", "512Mi", "2G"); anchored so a typo
 # ("10 Gi", "10GB") fails the render instead of rendering an invalid manifest.
 _WALLTIME_RE = re.compile(r"^[0-9]+[mh]?$")
-# Keywords the step contract removed, with what to write instead (the render says it after "step '<name>': ").
+# Keywords the step contract removed, with what to write instead (the render says it after "step '<name>': ", and ends with the old-app sentence).
 _REMOVED_KEYWORDS = {
     "outputs": "outputs= is gone. Declare what the step writes with produces=[...] and hand it on with "
                "step.result().",
@@ -526,7 +526,8 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
         if keyword not in _REMOVED_KEYWORDS:
             raise TypeError(f"step() got an unexpected keyword argument {keyword!r}. The keywords are: name, "
                             f"{', '.join(step.__kwdefaults__)}.")
-        raise AuthoringError(f"step {name!r}: {_REMOVED_KEYWORDS[keyword]}")
+        # A pipeline that still uses a removed keyword is from before the step contract: say what to write, then so.
+        raise AuthoringError(f"step {name!r}: {_REMOVED_KEYWORDS[keyword]} {OLD_APP_NOTICE}")
     if not _well_formed(name):
         raise AuthoringError(
             f"step name {name!r} is invalid — use a DNS-label name: lowercase "
