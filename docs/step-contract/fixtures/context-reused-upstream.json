@@ -6,6 +6,7 @@
   "step": "evaluate",
   "kind": "evaluate",
   "experiment": "baseline",
+  "instance": "5d2a9c44-aaaa-bbbb-cccc-ddddeeee0001",
   "params": {"evaluate": {"threshold": 0.5}},
   "ledger": {"version": 2, "reads": [], "writes": []},
   "produces": [

@@ -258,6 +258,7 @@ under the run's work folder.
 | `step` | string | This step's name. |
 | `kind` | string | This step's kind (section 1). |
 | `experiment` | string | The experiment the run belongs to: the config value `experiment.name`, else the app's name. It is the `<experiment>` folder of the run's artifacts, `<name>/<experiment>/<run>/`. |
+| `instance` | string | The run's own identity: the Workflow's uid. A run's name can be used again; its instance cannot. kaos-lib puts it in the record of the step (section 13). Empty only outside the platform. |
 | `params` | object | The config sections this step names in `reads=`, as compose resolved them, and nothing else. It never holds a `plan` section. It never holds a `platform` section either, because the wave removes the `platform` config group altogether: an app whose config still names it is refused as an app made before the current pipelines. |
 | `ledger` | object | A [ledger](#5-the-ledger) with one read for each input this step declares in `inputs=`, at the commit compose pinned. `writes` is empty. |
 | `produces` | array | What this step declares in `produces=`: `{"name", "type", "repo"}` each, in that order. `type` is `model`, `artifact` or `dataset`; `repo` is the repository it is written to. There is no `promote`: a step only seals a version of a dataset, and the run's final task moves `latest` (below). |
@@ -825,19 +826,31 @@ A run may start from a step and take the results of an earlier run for the steps
 run again are not started, and their results and outputs are the earlier run's. It is a run like any other for what it
 runs: its own name, its own ledger, its own `latest` rules.
 
-**The record.** Every step that ends well writes, as its last act, the exact result it hands on (section 4, wire form)
-as `kaos-runs/<run>/<step>.json` on `main` of the app's `outputs-<app>`, through kaos-lib (`kaos_lib.record`): on its own
-branch `run-<run>-<step>-record`, merged into `main` as one commit, the way a model is saved. A step that ends itself with
-`step.skip()` writes its skipped result. Writing is best effort: when it fails the step warns in its log and still
-succeeds (a later run then cannot start after that step from this run). A step with `matrix=` writes none; a step that
-failed or was never reached has none, and a step skipped by its `when=` ran no code and has none. Compose writes the
-run's plan, `kaos-runs/<run>/plan.json` (fixture `run-plan`), when the checks pass, before any step starts, also best
-effort: `{version, run, app, project, experiment, steps, pins}`, and `reused_from: {run, start}` when the run took results
-from another. For each step the plan holds `name`, `kind`, `needs`, `inputs`, `produces` (names and types), `matrix` (when
-it has one), the class the run form gave it (`class`), its settings (`params`, the config sections it reads) and `when`,
-the values of the run form fields its `when=` names (the render writes them into the step table as `when_fields`);
-`pins` holds the read of every input, as the ledger does. `kaos-runs/` is in the repository of the outputs, beside the
-folders of the models.
+**The record.** Every step that ends well writes, as its last act, `kaos-runs/<run>/<step>.json` on `main` of the app's
+`outputs-<app>`, through kaos-lib (`kaos_lib.record`): on its own branch `run-<run>-<step>-record`, merged into `main` as
+one commit, the way a model is saved. The file says whose it is, around the exact result the step handed on (section 4,
+wire form): `{version: 1, app, run, instance, step, result}` (fixture `record-train`); a step that ends itself with
+`step.skip()` has its skipped result there. A step calls `step.result()` last: what it does after is not in the record.
+Writing is best effort: when it fails the step warns in its log ("This run cannot be reused from a later step") and still
+succeeds. A step with `matrix=` writes none; a step that failed or was never reached has none, and a step skipped by its
+`when=` ran no code and has none. Compose writes the run's plan, `kaos-runs/<run>/plan.json` (fixture `run-plan`), when the
+checks pass, before any step starts, also best effort: `{version, run, instance, app, project, experiment, steps, pins}`,
+and `reused_from: {run, start}` when the run took results from another. For each step the plan holds `name`, `kind`,
+`needs`, `inputs`, `produces` (names and types), `matrix` (when it has one), the class the run form gave it (`class`), the
+image reference compose resolved for it (`image`, with its digest), its settings (`params`, the config sections it reads),
+`when`, the values of the run form fields its `when=` names (the render writes their names into the step table as
+`when_fields`), and `when_text`, the condition as written; `pins` holds the read of every input, as the ledger does.
+`kaos-runs/` is in the repository of the outputs, beside the folders of the models.
+
+**Whose a record is.** The folder `kaos-runs/<run>/` belongs to one run instance. A run whose name an earlier run of the
+app used, and whose `plan.json` is still there with another `instance`, is refused when it starts ("a run named 'R' already
+saved its records for this app. Start the run again under a name no earlier run had."); a run that starts compose again
+(same instance) is not. When a run is reused, compose checks that the plan is at `version` 1 and is the run's and the app's,
+and that every record it takes has the same app, run, instance and step as the plan; one that does not is refused.
+
+**Retention.** `kaos-runs/` is never removed: a record is the size of a result (at most 8 KiB) and a plan the size of the
+step table and the settings, one file for each step of each run, and they stay with the repository. Nothing in the platform
+deletes them yet.
 
 **The run form.** Two text fields, empty by default, which mean a normal run:
 
@@ -887,21 +900,25 @@ version that is another commit, is refused. An input read only by steps that run
 | one field empty | `reuse-from-run and start-from-step go together: <field> is empty.` |
 | X is not a step | `start-from-step: this pipeline has no step 'X'. Its steps are: a, b, c.` |
 | a step that is not run again has `matrix=` | `step 'S' runs once for each combination of its matrix= and this run does not run it again (it starts from 'X'): a step with matrix= cannot be reused yet. Start from step 'S'.` |
-| no plan of R for this app | `reuse-from-run: no saved record of run 'R' for this app. It may belong to another app, be misspelled, or be older than what the platform keeps.` |
+| no plan of R for this app | `reuse-from-run: run 'R' saved no record for this app (its step images may be older than this feature, or saving failed: see that run's log). Check the name: it must be a run of this app.` |
+| the plan is not at version 1, or is not R's or the app's | `reuse-from-run: the record of run 'R' is not one this platform reads. Choose another run, or start a run of the whole pipeline.` |
+| a record of R belongs to another instance, app, run or step | `the records of run 'R' do not all belong to one run: the record of step 'S' was saved by another run that had the same name. Choose another run, or start a run of the whole pipeline.` |
+| the records of R cannot be read | `reuse-from-run: the records of run 'R' cannot be read right now. Run again in a minute; if it keeps happening, tell the platform team the name of the run.` (what the store answered is in compose's log, never in the sentence) |
 | R took results from another run | `reuse-from-run: run 'R' took the results of some of its steps from run 'R0', so it has no record of them. Reuse run 'R0' instead, or choose a run that ran every step it has.` |
-| a step that is not run again has no `ok` or `skipped` record in R | `run 'R' has no result for step 'S' (it failed, did not finish or was not run). A step before 'X' is not run again without one. Start from step 'S', or choose a run that finished it.` |
+| a step that is not run again has no `ok` or `skipped` record in R | `run 'R' has no result for step 'S' (it failed or did not finish). A step before 'X' is not run again without one. Start from step 'S', or choose a run that finished it.` A step with no record whose `when=` is on run form fields only is taken as skipped when that condition is false with the form values R recorded (what R's other steps saw: no result); one whose `when=` reads a value of another step cannot be told: `step 'S' has no record in run 'R' and its condition reads a value of another step, so it cannot be told whether it was skipped or did not finish. ...` |
 | the step is not in R's plan | `step 'S' is not in run 'R': the pipeline has changed since. A step before 'X' is not run again. Start from step 'S'.` |
 | its kind, needs, inputs or produces differ | `step 'S' is not the step run 'R' ran: its <kind> was <old> and is <new>. A step before 'X' is not run again. Start from step 'S'.` |
 | its settings or the form values its `when=` names differ | `step 'S' reads different settings than in run 'R': <key: old -> new, ...>. A step before 'X' is not run again, so its settings cannot change. Set them back, or start from step 'S'.` |
+| its image differs from R's | `step 'S' was built from a different image in run 'R' than it has now, so its code changed. Start from step 'S'.` An image reference without a digest, in R or now, cannot be compared: `step 'S' has no image with a digest in run 'R' or now, so its code cannot be compared. ...` |
 | it ran on an HPC class in R | `step 'S' ran on the HPC (Slurm) class 'C' in run 'R': the result of a step that ran there cannot be reused yet. Start from step 'S'.` |
 | a step that runs again on an HPC class reads a model or an artifact of a step not run again | `step 'T' is set to run on the HPC (Slurm) class 'C' and reads 'M' of step 'S', which this run takes from run 'R': an HPC step cannot read it yet. Choose a machine class of the cluster for 'T', or start from step 'S'.` |
 | an input's form value differs from what R read | `input 'I': step S is not run again and read <repo>@<ref> (commit <12>) in run 'R', but the form now names '<value>'. Set it back, or leave the version out, or start from step 'S'.` |
 | an output a step that runs again needs is gone (a dataset commit not readable, no object under a model's or artifact's path) | `output 'O' of step 'S' (run 'R') is no longer there: <why>. Run that step again: start from step 'S'.` |
 | `promote-<d>` is true and a step not run again made `<d>` | `promote-<d> is true, but the dataset <d> was made by step S of run R, which this run does not run again. Promote it from run R, or start from step S.` |
 
-On success compose logs one line for each step not run again (`step S: reused from run R`), each pin taken from R, and that
-the images are not compared: **a step that is not run again is whatever ran in R**, its code and its image included.
-Not in this version: a step with `matrix=` that is not run again, a result from an HPC step, an HPC step that reads
-a reused model or artifact, a run that reused another (so the earlier run to name is the one that ran the steps), a
-step skipped by its `when=` in R that is not run again (it has no record: start from it).
-
+On success compose logs one line for each step not run again (`step S: reused from run R`, `(it was skipped there)` for one
+the earlier run skipped), and each pin taken from R. **The code of a step that is not run again is the code of R, and it is
+compared:** the image reference compose resolved for the step, which carries a digest, must be the same as the one in R's
+plan. Not in this version: a step with `matrix=` that is not run again, a result from an HPC step, an HPC step that reads
+a reused model or artifact, a run that reused another (so the earlier run to name is the one that ran the steps), a step
+skipped by its `when=` in R on a value of another step that is not run again (it has no record: start from it).

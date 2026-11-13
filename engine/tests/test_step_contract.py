@@ -62,7 +62,7 @@ def base_of(context, step):
     from kubecore import compose
     reads = {r["name"]: r for r in fixture("ledger-two-reads")["reads"]}
     return compose.base_context(STEPS[step], context["run"], context["app"], context["project"],
-                                context["experiment"], context["params"], reads)
+                                context["experiment"], context["params"], reads, instance=context["instance"])
 
 
 # ---------------------------------------------------------------- the wire form
@@ -165,7 +165,7 @@ def test_braces_quotes_and_numbers_cross_unchanged():
     step = {"name": "prepare", "kind": "transform", "inputs": [], "needs": [], "produces": []}
     from kubecore import compose
     base = wire(compose.base_context(step, want["run"], want["app"], want["project"], want["experiment"],
-                                     want["params"], {}))
+                                     want["params"], {}, instance=want["instance"]))
     got = evaluate(context_expression(COMPOSE, "prepare", []), {COMPOSE: {"kaos-context-prepare": base}})
     assert got == wire_of("context-escapes")
     assert "1e-05" in got and "1.0" in got and "12345678901234567890" in got

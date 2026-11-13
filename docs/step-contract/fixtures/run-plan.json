@@ -1,14 +1,15 @@
 {
   "version": 1,
   "run": "hera-demo-x7k2p",
+  "instance": "0b7f6c1e-1111-2222-3333-444455556666",
   "app": "hera-demo",
   "project": "vision",
   "experiment": "baseline",
   "steps": [
-    {"name": "prepare", "kind": "transform", "needs": [], "inputs": ["raw"], "produces": [{"name": "embeddings", "type": "dataset"}], "class": "cpu-standard", "params": {"prepare": {"size": 224}}, "when": {}},
-    {"name": "train", "kind": "train", "needs": ["prepare"], "inputs": ["labels"], "produces": [{"name": "model", "type": "model"}], "class": "gpu-a100", "params": {"train": {"epochs": 3, "lr": 0.001}}, "when": {}},
-    {"name": "export", "kind": "publish", "needs": ["train"], "inputs": [], "produces": [], "class": "cpu-standard", "params": {}, "when": {"export-mode": "on"}},
-    {"name": "evaluate", "kind": "evaluate", "needs": ["train", "export"], "inputs": [], "produces": [{"name": "report", "type": "artifact"}], "class": "cpu-standard", "params": {"evaluate": {"threshold": 0.5}}, "when": {}}
+    {"name": "prepare", "kind": "transform", "needs": [], "inputs": ["raw"], "produces": [{"name": "embeddings", "type": "dataset"}], "class": "cpu-standard", "image": "registry.example/vision/hera-demo/prepare@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "params": {"prepare": {"size": 224}}, "when": {}, "when_text": ""},
+    {"name": "train", "kind": "train", "needs": ["prepare"], "inputs": ["labels"], "produces": [{"name": "model", "type": "model"}], "class": "gpu-a100", "image": "registry.example/vision/hera-demo/train@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "params": {"train": {"epochs": 3, "lr": 0.001}}, "when": {}, "when_text": ""},
+    {"name": "export", "kind": "publish", "needs": ["train"], "inputs": [], "produces": [], "class": "cpu-standard", "image": "registry.example/vision/hera-demo/export@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "params": {}, "when": {"export-mode": "on"}, "when_text": "export-mode == on"},
+    {"name": "evaluate", "kind": "evaluate", "needs": ["train", "export"], "inputs": [], "produces": [{"name": "report", "type": "artifact"}], "class": "cpu-standard", "image": "registry.example/vision/hera-demo/evaluate@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "params": {"evaluate": {"threshold": 0.5}}, "when": {}, "when_text": ""}
   ],
   "pins": {
     "raw": {"name": "raw", "repo": "dataset-raw-images", "owner": null, "ref": "latest", "commit": "1111111111111111111111111111111111111111111111111111111111111111"},

@@ -6,6 +6,7 @@
   "step": "train",
   "kind": "train",
   "experiment": "baseline",
+  "instance": "0b7f6c1e-1111-2222-3333-444455556666",
   "params": {"train": {"epochs": 3, "lr": 0.001}},
   "ledger": {
     "version": 2,

@@ -125,7 +125,7 @@ PRODUCES_FIELDS = ["name", "type", "repo"]
 RESULT_FIELDS = ["version", "status", "values", "reads", "writes"]
 SKIPPED_FIELDS = ["version", "status", "reason"]
 SKIP_REASON_MAX = 300      # characters of the reason a step gives when it ends as skipped
-CONTEXT_FIELDS = ["version", "run", "app", "project", "step", "kind", "experiment", "params", "ledger", "produces",
+CONTEXT_FIELDS = ["version", "run", "app", "project", "step", "kind", "experiment", "instance", "params", "ledger", "produces",
                   "upstream"]
 LEDGER_FIELDS = ["version", "reads", "writes"]
 KINDS = ("ingest", "transform", "train", "evaluate", "publish", "control")
@@ -250,8 +250,8 @@ def shape_of_context(v):
     return next((b for b in bad if b), "")
 
 
-PLAN_FIELDS = ["version", "run", "app", "project", "experiment", "steps", "pins"]
-PLAN_STEP_FIELDS = ["name", "kind", "needs", "inputs", "produces", "class", "params", "when"]
+PLAN_FIELDS = ["version", "run", "instance", "app", "project", "experiment", "steps", "pins"]
+PLAN_STEP_FIELDS = ["name", "kind", "needs", "inputs", "produces", "class", "image", "params", "when", "when_text"]
 
 
 def shape_of_plan(v):
@@ -260,13 +260,16 @@ def shape_of_plan(v):
     (after `produces`)."""
     if not isinstance(v, dict) or list(v) not in (PLAN_FIELDS, PLAN_FIELDS + ["reused_from"]) or v["version"] != 1:
         return "fields must be %s (and optionally reused_from), in that order" % ", ".join(PLAN_FIELDS)
+    if not isinstance(v["instance"], str) or not v["instance"]:
+        return "instance is the run's identity: non-empty text"
     if "reused_from" in v and (not isinstance(v["reused_from"], dict) or list(v["reused_from"]) != ["run", "start"]):
         return "reused_from is {run, start}"
     for i, e in enumerate(v["steps"]):
         fields = PLAN_STEP_FIELDS[:5] + (["matrix"] if "matrix" in e else []) + PLAN_STEP_FIELDS[5:]
         if not isinstance(e, dict) or list(e) != fields:
             return "step %d: fields must be %s, in that order" % (i, ", ".join(fields))
-        if not _name(e["name"]) or e["kind"] not in KINDS or not isinstance(e["params"], dict) or not isinstance(e["when"], dict):
+        if not _name(e["name"]) or e["kind"] not in KINDS or not isinstance(e["params"], dict) or not isinstance(e["when"], dict) \
+                or not isinstance(e["image"], str) or not isinstance(e["when_text"], str):
             return "step %d: name, kind, params or when is not valid" % i
         if not all(_name(n) for n in e["needs"] + e["inputs"]) or not all(
                 isinstance(p, dict) and list(p) == ["name", "type"] and _name(p["name"]) and p["type"] in TYPES
@@ -275,6 +278,18 @@ def shape_of_plan(v):
     bad = [shape_of_read(r) for r in v["pins"].values()] + ["a pin is under another name" for k, r in v["pins"].items()
                                                               if isinstance(r, dict) and r.get("name") != k]
     return next((b for b in bad if b), "")
+
+
+RECORD_FIELDS = ["version", "app", "run", "instance", "step", "result"]
+
+
+def shape_of_record(v):
+    """What a step keeps as kaos-runs/<run>/<step>.json: whose it is, around the exact result it handed on."""
+    if not isinstance(v, dict) or list(v) != RECORD_FIELDS or v["version"] != 1:
+        return "fields must be %s, in that order" % ", ".join(RECORD_FIELDS)
+    if not all(isinstance(v[k], str) and v[k] for k in RECORD_FIELDS[1:5]) or not _name(v["step"]):
+        return "app, run, instance and step are non-empty text"
+    return shape_of_result(v["result"]) or ("a record holds a result, not the sentinel" if v["result"] == ABSENT else "")
 
 
 def check_fixtures():
@@ -307,6 +322,8 @@ def check_fixtures():
             want(not shape_of_result(value), "%s: %s" % (name, shape_of_result(value)))
         if name.startswith("ledger-"):
             want(not shape_of_ledger(value), "%s: %s" % (name, shape_of_ledger(value)))
+        if name.startswith("record-"):
+            want(not shape_of_record(value), "%s: %s" % (name, shape_of_record(value)))
         if name.startswith("run-plan"):
             want(not shape_of_plan(value), "%s: %s" % (name, shape_of_plan(value)))
     sample = (FIXTURES / "context-escapes.wire").read_text()
@@ -332,6 +349,9 @@ def check_fixtures():
     want(_load("result-reused.json") == reused, "result-reused.json is not result-model.json with the path of the run that wrote it")
     want(all(p["path"].endswith("/hera-demo-x7k2p/") for p in _load("result-reused.json")["writes"]),
          "result-reused.json: a path is <name>/<experiment>/<run>/ of the run that wrote it")
+    want(_load("record-train.json")["result"] == _load("result-model.json"), "record-train.json: result is not result-model.json")
+    want(_load("record-train.json")["instance"] == _load("run-plan.json")["instance"] == _load("context-no-upstream.json")["instance"],
+         "the fixtures' run has one instance in its plan, its record and its contexts")
     want(_load("run-plan.json")["run"] == _load("context-no-upstream.json")["run"], "run-plan.json is not the plan of the fixtures' run")
     want(_load("run-plan.json")["pins"] == {r["name"]: r for r in _load("ledger-two-reads.json")["reads"]},
          "run-plan.json: pins are not the reads of ledger-two-reads.json")

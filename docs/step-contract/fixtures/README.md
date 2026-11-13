@@ -30,6 +30,7 @@ not in these fixtures, because an input is read through `ledger`, not through `p
 | `result-matrix.json` | The entry of a matrix step in `upstream`: four items in index order, one ok with a result, one failed, one skipped with a reason, one ok. |
 | `ledger-two-reads.json` | A ledger with two reads, as compose writes it when the run starts. |
 | `ledger-run-union.json` | The ledger of the whole run: the union of compose's reads and every step's result. |
+| `record-train.json` | What `train` keeps as `kaos-runs/hera-demo-x7k2p/train.json`: the app, run, instance and step around `result-model` (section 13). |
 | `run-plan.json` | The plan compose keeps for the fixtures' run as `kaos-runs/hera-demo-x7k2p/plan.json` (section 13): each step's definition, settings and class, and the commit of every input. |
 | `hpc-job.json` | An `HPCArgoWorkflowJob` for `train` with the contract's fields: `spec.app`, `spec.inputs[]`, `spec.context` (equal to `context-one-upstream.wire`) and `status.result` (equal to `result-model.wire`). |
 

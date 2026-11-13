@@ -619,6 +619,17 @@ def _record():
     return record
 
 
+def claim_run(app: str, run: str, instance: str) -> None:
+    """Refuse a run whose name an earlier run of the app used (kubecore/rerun.claim). Best effort when the records cannot be
+    reached: the run goes on."""
+    try:
+        record, lake = _record(), _kaos_lib()[1]
+    except Exception as exc:   # noqa: BLE001
+        print(f"WARNING: cannot look for an earlier run named {run} ({exc}).", file=sys.stderr)
+        return
+    rerun.claim(record, lake, app, run, instance)
+
+
 def keep_plan(plan: dict, app: str, run: str) -> None:
     """Keep the run's plan as kaos-runs/<run>/plan.json, so that a later run can start from one of its steps. Best effort: a
     plan that cannot be kept is a warning, and the run goes on (a later run then cannot start from this one)."""
@@ -626,7 +637,7 @@ def keep_plan(plan: dict, app: str, run: str) -> None:
         _record().write(_kaos_lib()[1], app, run, rerun.PLAN, wire(plan))
         print(f"kept the plan of this run as kaos-runs/{run}/plan.json")
     except Exception as exc:   # noqa: BLE001
-        print(f"WARNING: the plan of this run could not be kept ({exc}). A later run cannot start from a step of this run.",
+        print(f"WARNING: the plan of this run could not be kept ({exc}). This run cannot be reused from a later step.",
               file=sys.stderr)
 
 
@@ -675,7 +686,7 @@ def run_settings(steps: list, walltimes: list, checkpoints: list, leads: list = 
 
 
 def base_context(step: dict, run: str, app: str, project: str, experiment: str, params: dict, reads: dict,
-                 checkpoint_every: int = 0) -> dict:
+                 checkpoint_every: int = 0, instance: str = "") -> dict:
     """A step's context without `upstream` (the DAG task argument adds it), in the contract's field order.
     `params` is the step's own (step_params)."""
     produces = []
@@ -684,7 +695,7 @@ def base_context(step: dict, run: str, app: str, project: str, experiment: str, 
                          "repo": produced_repo(app, entry["type"], entry["name"])})
     context = {
         "version": CONTEXT_VERSION, "run": run, "app": app, "project": project, "step": step["name"],
-        "kind": step["kind"], "experiment": experiment, "params": params,
+        "kind": step["kind"], "experiment": experiment, "instance": instance, "params": params,
         "ledger": ledger([reads[name] for name in step["inputs"] if name in reads]),
         "produces": produces,
     }
@@ -694,7 +705,7 @@ def base_context(step: dict, run: str, app: str, project: str, experiment: str, 
 
 
 def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict, reads: dict,
-                  settings: dict = None) -> dict:
+                  settings: dict = None, instance: str = "") -> dict:
     """{step: its base context in wire form}, each within its cap.
 
     `params` holds the config sections the step names in reads=. The cap is checked on the real text,
@@ -714,7 +725,7 @@ def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict,
         try:
             params = step_params(step, resolved)
             text = wire(base_context(step, run, app, project, experiment, params, reads,
-                                      (settings or {}).get(step["name"], {}).get("checkpoint-every", 0)))
+                                      (settings or {}).get(step["name"], {}).get("checkpoint-every", 0), instance))
         except (TypeError, ValueError) as exc:   # a value JSON cannot hold (inf, nan)
             raise ComposeError(f"the resolved config cannot be handed to the steps: {exc}") from None
         matrix_needs = sum(1 for n in step["needs"] if matrix_steps.get(n))
@@ -760,6 +771,7 @@ def main(argv=None) -> None:
                         help="The pipeline's steps (JSON): name, kind, reads, inputs, needs, produces. With it, every step's "
                              "context is written; --run, --app, --project and --context-dir are then required.")
     parser.add_argument("--run", default="", help="The run's name.")
+    parser.add_argument("--run-uid", default="", help="The run's own identity (the workflow's uid): a name can be used again, this cannot.")
     parser.add_argument("--app", default="", help="The app.")
     parser.add_argument("--project", default="", help="The project.")
     parser.add_argument("--context-dir", default="", help="Where to write each step's context: <dir>/<step>.json.")
@@ -820,16 +832,17 @@ def main(argv=None) -> None:
                         else "false: its version stays sealed and latest does not move")
                 print(f"dataset {name}: {promote_field(name)} is {what}")
             run_classes(steps, args.classes, args.class_offers)
+            claim_run(args.app, args.run, args.run_uid)
             if reuse_run:
                 reuse = rerun.prepare(
                     steps, reuse_run, start, args.app, {s["name"]: step_params(s, resolved) for s in steps},
                     _pairs(args.when_field), _pairs(args.classes), {c for c in args.hpc_classes.split(",") if c}, flags,
-                    _record(), _kaos_lib()[1])
+                    images, _record(), _kaos_lib()[1])
                 for line in reuse.notes:
                     print(line)
             wait_for_grants(steps, args.app)
             reads = pin_inputs(resolved, steps, fixed={k: dict(v, run=reuse_run) for k, v in reuse.pins.items()} if reuse else None)
-            contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, settings)
+            contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, settings, args.run_uid)
     except Exception as exc:  # any composition failure = hard error, pre-GPU
         message = str(exc)
         if exc.__cause__ is not None:  # e.g. enum ValidationError inside Hydra's wrapper
@@ -871,8 +884,9 @@ def main(argv=None) -> None:
         print(f"wrote {args.reused_dir}: {', '.join(reuse.reused) if reuse and reuse.reused else 'no step'} reused")
     if steps:
         keep_plan(rerun.plan_of(
-            args.run, args.app, args.project, experiment_of(resolved, args.app), steps,
-            {s["name"]: step_params(s, resolved) for s in steps}, _pairs(args.when_field), _pairs(args.classes), reads, reuse),
+            args.run, args.run_uid, args.app, args.project, experiment_of(resolved, args.app), steps,
+            {s["name"]: step_params(s, resolved) for s in steps}, _pairs(args.when_field), _pairs(args.classes), images, reads,
+            reuse),
             args.app, args.run)
 
 

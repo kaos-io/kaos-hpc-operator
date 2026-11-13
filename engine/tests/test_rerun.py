@@ -15,6 +15,7 @@ from kubecore import compose, rerun
 from kubecore.step_contract import RECORD_DIR, RESULT_CAP, cost, result_of, wire
 
 RUN, NEW, APP = "hera-demo-aaaaa", "hera-demo-bbbbb", "hera-demo"
+UID, NEW_UID = "11111111-aaaa-4aaa-8aaa-111111111111", "22222222-bbbb-4bbb-8bbb-222222222222"
 SENTINEL_TEXT = '{"version":1,"status":"absent"}'
 
 
@@ -254,7 +255,7 @@ STEPS = [
     {"name": "train", "kind": "train", "reads": ["train"], "inputs": [], "needs": ["prepare"],
      "produces": [{"name": "model", "type": "model"}]},
     {"name": "evaluate", "kind": "evaluate", "reads": ["evaluate"], "inputs": [], "needs": ["train"], "produces": [],
-     "when_fields": ["mode"]},
+     "when_fields": ["mode"], "when_text": "mode == full"},
     {"name": "publish", "kind": "publish", "reads": [], "inputs": [], "needs": ["evaluate"], "produces": []},
 ]
 PARAMS = {"prepare": {"prepare": {"rows": 10}}, "train": {"train": {"lr": 0.1, "epochs": 3}}, "evaluate": {"evaluate": {"k": 5}},
@@ -271,11 +272,20 @@ RESULTS = {
 }
 
 
-def earlier_run(steps=STEPS, results=RESULTS, params=PARAMS, **changes):
-    """The records of run RUN: its plan (as compose writes it) and the result of each step in `results`."""
-    plan = rerun.plan_of(RUN, APP, "vision", "exp", steps, params, WHEN, CLASSES, {"raw": READ_RAW})
+IMAGES = {step["name"]: f"registry.example/hera-demo/{step['name']}@sha256:{'ab' * 32}" for step in STEPS}
+
+
+def record_of(name, result, instance=UID, run=RUN):
+    """What a step keeps: whose it is, around the exact result."""
+    return {"version": 1, "app": APP, "run": run, "instance": instance, "step": name, "result": result}
+
+
+def earlier_run(steps=STEPS, results=RESULTS, params=PARAMS, images=None, **changes):
+    """The records of run RUN: its plan (as compose writes it) and the record of each step in `results`."""
+    plan = rerun.plan_of(RUN, UID, APP, "vision", "exp", steps, params, WHEN, CLASSES, images or IMAGES,
+                         {"raw": READ_RAW})
     plan.update(changes)
-    return {(RUN, rerun.PLAN): plan, **{(RUN, name): result for name, result in results.items()}}
+    return {(RUN, rerun.PLAN): plan, **{(RUN, name): record_of(name, result) for name, result in results.items()}}
 
 
 def lake(**more):
@@ -284,9 +294,9 @@ def lake(**more):
 
 
 def prepare(start="evaluate", docs=None, steps=STEPS, params=None, when=None, classes=None, hpc=(), promotes=None,
-            client=None, run=RUN):
+            client=None, run=RUN, images=None):
     return rerun.prepare(steps, run, start, APP, params or PARAMS, when or WHEN, classes or CLASSES, set(hpc), promotes or {},
-                         Records(earlier_run() if docs is None else docs), client or lake())
+                         images or IMAGES, Records(earlier_run() if docs is None else docs), client or lake())
 
 
 def refused(**kwargs):
@@ -316,8 +326,10 @@ def test_a_step_on_a_branch_that_does_not_meet_the_start_is_not_run_again_either
                       "produces": [{"name": "r", "type": "artifact"}]}]
     more = {**PARAMS, "report": {}}
     docs = earlier_run(steps, {**RESULTS, "report": {"version": 1, "status": "ok", "values": {}, "reads": [], "writes": [
-        {"name": "r", "type": "artifact", "repo": "outputs-hera-demo", "commit": "e3" * 32}]}}, more)
-    got = prepare("train", docs=docs, steps=steps, params=more, client=Lake(commits=[("dataset-hera-demo-clean", C["clean"])]))
+        {"name": "r", "type": "artifact", "repo": "outputs-hera-demo", "commit": "e3" * 32}]}}, more,
+                      images={**IMAGES, "report": IMAGES["prepare"]})
+    got = prepare("train", docs=docs, steps=steps, params=more, images={**IMAGES, "report": IMAGES["prepare"]},
+                  client=Lake(commits=[("dataset-hera-demo-clean", C["clean"])]))
     assert got.reused == ["prepare", "report"] and "path" in got.entries["report"]["writes"][0]
 
 
@@ -346,11 +358,12 @@ def test_the_start_is_a_step_of_the_pipeline():
                               "publish.")
 
 
-def test_a_run_that_has_no_record_is_refused_whatever_the_reason():
-    expected = ("reuse-from-run: no saved record of run 'hera-demo-zzzzz' for this app. It may belong to another app, be "
-                "misspelled, or be older than what the platform keeps.")
+def test_a_run_that_saved_no_record_is_refused_without_saying_it_is_too_old():
+    expected = ("reuse-from-run: run 'hera-demo-zzzzz' saved no record for this app (its step images may be older than this "
+                "feature, or saving failed: see that run's log). Check the name: it must be a run of this app.")
     assert refused(run="hera-demo-zzzzz") == expected
-    assert refused(run="../hera-demo-aaaaa").startswith("reuse-from-run: no saved record of run '../hera-demo-aaaaa'")
+    assert refused(run="../hera-demo-aaaaa").startswith("reuse-from-run: run '../hera-demo-aaaaa' saved no record")
+    assert "older than what the platform keeps" not in expected
 
 
 def test_a_run_that_reused_another_cannot_be_reused():
@@ -367,7 +380,7 @@ def test_a_run_that_reused_another_cannot_be_reused():
 ])
 def test_a_step_with_no_result_in_the_earlier_run_is_refused_by_name(results, why):
     message = refused(docs=earlier_run(results=results))
-    assert message == (f"run '{RUN}' has no result for step '{why}' (it failed, did not finish or was not run). A step before "
+    assert message == (f"run '{RUN}' has no result for step '{why}' (it failed or did not finish). A step before "
                        f"'evaluate' is not run again without one. Start from step '{why}', or choose a run that finished it.")
 
 
@@ -428,7 +441,8 @@ def test_a_step_with_a_matrix_that_is_not_run_again_is_refused():
 def test_a_step_that_ran_on_an_hpc_class_in_the_earlier_run_is_refused():
     plan_classes = dict(CLASSES, train="meluxina-gpu")
     docs = earlier_run()
-    docs[(RUN, rerun.PLAN)] = rerun.plan_of(RUN, APP, "vision", "exp", STEPS, PARAMS, WHEN, plan_classes, {"raw": READ_RAW})
+    docs[(RUN, rerun.PLAN)] = rerun.plan_of(RUN, UID, APP, "vision", "exp", STEPS, PARAMS, WHEN, plan_classes, IMAGES,
+                                            {"raw": READ_RAW})
     assert refused(docs=docs, hpc={"meluxina-gpu"}) == (
         f"step 'train' ran on the HPC (Slurm) class 'meluxina-gpu' in run '{RUN}': the result of a step that ran there cannot "
         "be reused yet. Start from step 'train'.")
@@ -478,18 +492,146 @@ def test_a_result_that_would_be_over_its_cap_with_the_path_added_is_refused():
     assert prepare(docs=earlier_run(results={**RESULTS, "train": dict(big, values={"x": "y"})})).reused
 
 
-def test_the_log_says_the_code_of_a_reused_step_is_whatever_ran_in_the_earlier_run():
-    assert prepare().notes[-1] == (f"the code of a step that is not run again is whatever ran in run {RUN}: the images are "
-                                   "not compared")
+def test_the_log_says_the_images_of_the_reused_steps_are_the_earlier_runs():
+    assert prepare().notes[-1] == f"the images of the steps that are not run again are the ones run {RUN} used (same digests)"
 
 
-def test_a_store_that_does_not_answer_ends_the_run_and_does_not_guess():
+def test_a_store_that_does_not_answer_ends_the_run_and_the_sentence_has_no_error_text(capsys):
     class Down(Records):
         def read(self, client, app, run, name):
-            raise ConnectionError("the data store is down")
-    with pytest.raises(rerun.Refused, match=r"cannot read the record of run 'hera-demo-aaaaa' for step 'plan' "
-                                            r"\(ConnectionError: the data store is down\)"):
-        rerun.prepare(STEPS, RUN, "train", APP, PARAMS, WHEN, CLASSES, set(), {}, Down(), lake())
+            raise ConnectionError("HTTPConnectionPool(host='lake.internal', port=8000): the data store is down")
+    with pytest.raises(rerun.Refused) as exc:
+        rerun.prepare(STEPS, RUN, "train", APP, PARAMS, WHEN, CLASSES, set(), {}, IMAGES, Down(), lake())
+    assert str(exc.value) == ("reuse-from-run: the records of run 'hera-demo-aaaaa' cannot be read right now. Run again in a "
+                              "minute; if it keeps happening, tell the platform team the name of the run.")
+    assert "ConnectionError" not in str(exc.value) and "lake.internal" not in str(exc.value)
+    assert "ConnectionError: HTTPConnectionPool(host='lake.internal'" in capsys.readouterr().err, "the detail is in the log"
+
+
+# ----------------------------------------------------------- whose a record is: the run's instance, the plan's version
+
+def test_records_of_another_run_that_had_the_same_name_are_refused():
+    docs = earlier_run()
+    docs[(RUN, "train")] = record_of("train", RESULTS["train"], instance="99999999-0000-4000-8000-999999999999")
+    assert refused(docs=docs) == (
+        f"the records of run '{RUN}' do not all belong to one run: the record of step 'train' was saved by another run that "
+        "had the same name. Choose another run, or start a run of the whole pipeline.")
+
+
+@pytest.mark.parametrize("change", [{"step": "prepare"}, {"app": "other"}, {"run": "hera-demo-zzzzz"}, {"version": 2},
+                                    {"result": "nope"}])
+def test_a_record_that_is_not_the_one_of_its_step_run_and_app_is_refused(change):
+    docs = earlier_run()
+    docs[(RUN, "train")] = dict(record_of("train", RESULTS["train"]), **change)
+    assert "do not all belong to one run" in refused(docs=docs)
+
+
+@pytest.mark.parametrize("change", [{"version": 2}, {"instance": ""}, {"app": "other"}, {"run": "elsewhere"}, {"version": None}])
+def test_a_plan_this_platform_does_not_read_is_refused(change):
+    assert refused(docs=earlier_run(**change)) == (
+        f"reuse-from-run: the record of run '{RUN}' is not one this platform reads. Choose another run, or start a run of "
+        "the whole pipeline.")
+
+
+def test_a_run_whose_name_an_earlier_run_used_is_refused_when_it_starts_and_its_own_restart_is_not():
+    records = Records(earlier_run())
+    with pytest.raises(rerun.Refused) as exc:
+        rerun.claim(records, lake(), APP, RUN, NEW_UID)
+    assert str(exc.value) == (f"a run named '{RUN}' already saved its records for this app. Start the run again under a name "
+                              "no earlier run had.")
+    rerun.claim(records, lake(), APP, RUN, UID)                    # the same run: compose started again
+    rerun.claim(records, lake(), APP, NEW, NEW_UID)                # a name nobody used
+    rerun.claim(records, lake(), APP, RUN, "")                     # no instance given: nothing to tell
+
+
+def test_a_store_that_does_not_answer_does_not_stop_a_run_from_starting(capsys):
+    class Down(Records):
+        def read(self, client, app, run, name):
+            raise ConnectionError("down")
+    rerun.claim(Down(), lake(), APP, RUN, UID)
+    assert "cannot look for an earlier run named" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------------------------------- the code: the image
+
+def test_a_step_built_from_another_image_than_in_the_earlier_run_is_refused():
+    now = dict(IMAGES, train=f"registry.example/hera-demo/train@sha256:{'cd' * 32}")
+    assert refused(images=now) == (
+        f"step 'train' was built from a different image in run '{RUN}' than it has now, so its code changed. Start from "
+        "step 'train'.")
+    assert prepare("train", images=now).reused == ["prepare"], "starting from it runs it with the new image"
+
+
+def test_a_step_that_runs_again_may_have_another_image():
+    assert prepare(images=dict(IMAGES, evaluate="registry.example/hera-demo/evaluate@sha256:" + "ef" * 32)).reused
+
+
+@pytest.mark.parametrize("where", ["earlier", "now"])
+def test_an_image_without_a_digest_cannot_be_compared_and_is_refused(where, capsys):
+    plain = {k: v.split("@")[0] + ":v1" for k, v in IMAGES.items()}
+    docs = earlier_run()
+    if where == "earlier":
+        docs[(RUN, rerun.PLAN)]["steps"][0]["image"] = plain["prepare"]
+        got = refused(docs=docs)
+    else:
+        got = refused(images=plain)
+    assert got.endswith("has no image with a digest in run 'hera-demo-aaaaa' or now, so its code cannot be compared. A step "
+                        "before 'evaluate' is not run again. Start from step 'prepare'.")
+    assert "image in run hera-demo-aaaaa" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------------- a step the earlier run skipped by its when=
+
+def no_record_of(step):
+    docs = earlier_run()
+    del docs[(RUN, step)]
+    return docs
+
+
+def test_a_step_skipped_by_its_when_on_form_fields_is_reused_as_skipped_when_the_earlier_form_made_it_false():
+    docs = no_record_of("evaluate")
+    docs[(RUN, rerun.PLAN)]["steps"][2]["when"] = {"mode": "off"}
+    got = prepare("publish", docs=docs, when={"mode": "off"})
+    assert got.entries["evaluate"] == {"version": 1, "status": "absent"}
+    assert f"step evaluate: reused from run {RUN} (it was skipped there)" in got.notes
+    assert "evaluate" not in {n for p in got.pins.values() for n in p["steps"]}
+
+
+def test_a_step_with_no_record_whose_when_was_true_did_not_finish():
+    message = refused(start="publish", docs=no_record_of("evaluate"))
+    assert message.startswith(f"run '{RUN}' has no result for step 'evaluate' (it failed or did not finish).")
+
+
+def test_a_step_with_no_record_whose_when_reads_a_value_of_another_step_cannot_be_told():
+    docs = no_record_of("evaluate")
+    docs[(RUN, rerun.PLAN)]["steps"][2]["when_text"] = "train.better == true"
+    assert refused(start="publish", docs=docs) == (
+        f"step 'evaluate' has no record in run '{RUN}' and its condition reads a value of another step, so it cannot be told "
+        "whether it was skipped or did not finish. A step before 'publish' is not run again without one. Start from step "
+        "'evaluate'.")
+
+
+@pytest.mark.parametrize("text, values, want", [
+    ("mode == full", {"mode": "full"}, True), ("mode == full", {"mode": "off"}, False), ("mode != off", {"mode": "off"}, False),
+    ("mode == 'two words'", {"mode": "two words"}, True), ('mode == "x"', {}, False),
+    ("a == 1 or b == 2", {"a": "0", "b": "2"}, True), ("a == 1 and b == 2", {"a": "1", "b": "3"}, False),
+    ("a == 1 or b == 2 and c == 3", {"a": "1", "b": "0", "c": "0"}, True),
+    ("a == 1 or b == 2 and c == 3", {"a": "0", "b": "2", "c": "0"}, False),
+    ("train.better == true", {}, None), ("a == 1 and train.x == 2", {"a": "1"}, None),
+    ("not a condition", {}, None), ("", {}, None),
+])
+def test_what_a_when_on_form_fields_said_in_the_earlier_run(text, values, want):
+    assert rerun.when_value(text, values, ["train"]) is want
+
+
+# ------------------------------------------------------------------------------------------------ settings, with types
+
+def test_a_setting_that_differs_only_by_its_type_is_shown_with_both_types():
+    assert rerun.changed_settings({"t": {"n": 1, "b": True, "s": "x"}}, {"t": {"n": "1", "b": 1, "s": "x"}}) == [
+        't.n: 1 (number) -> "1" (text)', "t.b: true (boolean) -> 1 (number)"]
+    assert rerun.changed_settings({"x": 1}, {"x": 1.0}) == [], "1 and 1.0 are the same number"
+    assert rerun.changed_settings({"x": None}, {"x": "null"}) == ['x: null -> "null" (text)']
+    assert rerun.changed_settings({"x": "a"}, {"x": "b"}) == ["x: a -> b"], "plain when the type is the same"
 
 
 # ----------------------------------------------------------------------------------------------------- pinned inputs
@@ -564,7 +706,9 @@ def run_main(tmp_path, monkeypatch, records, lake_client, *args):
     monkeypatch.setattr(compose, "_record", lambda: records)
     monkeypatch.setattr(compose, "_kaos_lib", lambda: (Datasets({"dataset-raw@v3": "a1" * 32, "dataset-raw@latest": "a1" * 32}),
                                                        lake_client))
-    argv = ["--run", NEW, "--app", APP, "--project", "vision", "--steps", table(*STEPS), "--context-dir", str(tmp_path / "ctx"),
+    monkeypatch.setenv("KAOS_STEP_IMAGES", json.dumps(IMAGES))
+    argv = ["--run", NEW, "--run-uid", NEW_UID, "--app", APP, "--project", "vision", "--steps", table(*STEPS),
+            "--context-dir", str(tmp_path / "ctx"),
             "--reused-dir", str(tmp_path / "reused"), "--ledger-output", str(tmp_path / "ledger.json"),
             "--advanced", "experiment: {name: exp}\nraw: dataset-raw@latest\nprepare: {rows: 10}\ntrain: {lr: 0.1, epochs: 3}\n"
                           "evaluate: {k: 5}", "--when-field", "mode=full", *args]
@@ -591,7 +735,9 @@ def test_a_normal_run_writes_an_empty_reused_result_for_every_step_and_keeps_its
     for step in STEPS:
         assert (tmp_path / "reused" / f"{step['name']}.json").read_text() == ""
     (app, run, name, plan), = records.written
-    assert (app, run, name) == (APP, NEW, "plan") and "reused_from" not in plan
+    assert (app, run, name) == (APP, NEW, "plan") and "reused_from" not in plan and plan["instance"] == NEW_UID
+    assert plan["steps"][0]["image"] == IMAGES["prepare"] and plan["steps"][2]["when_text"] == "mode == full"
+    assert json.loads((tmp_path / "ctx" / "train.json").read_text())["instance"] == NEW_UID
     assert [s["name"] for s in plan["steps"]] == ["prepare", "train", "evaluate", "publish"]
     assert plan["steps"][1]["params"] == {"train": {"lr": 0.1, "epochs": 3}} and plan["steps"][2]["when"] == {"mode": "full"}
     assert plan["pins"]["raw"]["commit"] == "a1" * 32 and plan["experiment"] == "exp"
@@ -644,7 +790,8 @@ def test_a_plan_that_cannot_be_kept_is_a_warning_and_the_run_goes_on(tmp_path, m
             raise RuntimeError("the lake is busy")
     compose.main(run_main(tmp_path, monkeypatch, Broken(), lake()))
     captured = capsys.readouterr()
-    assert "WARNING: the plan of this run could not be kept (the lake is busy)." in captured.err
+    assert ("WARNING: the plan of this run could not be kept (the lake is busy). This run cannot be reused from a later step."
+            in captured.err)
     assert (tmp_path / "ctx" / "train.json").is_file() and (tmp_path / "reused" / "train.json").read_text() == ""
 
 

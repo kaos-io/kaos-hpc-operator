@@ -686,6 +686,7 @@ class pipeline:
         return wire([
             {"name": s.name, "kind": s.kind, "reads": s.reads, "inputs": s.inputs, "needs": [n.name for n in s.needs],
              "produces": [{"name": e.name, "type": e.type} for e in s.produces],
+             **({"when_text": s.when} if s.when else {}),
              **({"when_fields": _when_fields(s.parsed_when)} if _when_fields(s.parsed_when) else {}),
              **({"matrix": s.matrix} if s.matrix else {}),
              **({"allow_failed": True} if s.matrix_allow_failed else {})}
@@ -722,7 +723,7 @@ class pipeline:
                 + ["--render-defaults", json.dumps(form.render_defaults, separators=(",", ":"))]
                 + ["--advanced", "{{workflow.parameters.config}}"]
                 + [f"--require={sec}" for sec in required]
-                + ["--run", "{{workflow.name}}", "--steps", self._step_table(),
+                + ["--run", "{{workflow.name}}", "--run-uid", "{{workflow.uid}}", "--steps", self._step_table(),
                    "--context-dir", CONTEXT_DIR, "--ledger-output", LEDGER_PATH, "--reused-dir", REUSED_DIR]
                 # what the run form says to the `when=` of each step: compose keeps it in the run's plan (docs/step-contract.md, 13)
                 + [arg for field in dict.fromkeys(f for s in self.steps for f in _when_fields(s.parsed_when))
