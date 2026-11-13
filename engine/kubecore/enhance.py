@@ -111,6 +111,7 @@ from kubecore.run_settings import (
 )
 from kubecore.resilience import enhance_resilience, every_field_default, every_minutes, shared_templates, write_helper_configmap
 from kubecore.step_contract import (
+    RAW_FORM_ANNOTATION,
     CLUSTER_ONLY_KINDS,
     CONTEXT_PARAM,
     DATASET_PRODUCER_LABEL,
@@ -285,6 +286,36 @@ def pipeline_wft_name(ctx: dict) -> str:
     return f"{app}-pipeline"
 
 
+RESERVED_METADATA_PREFIXES = ("ui.kubecore.io/", "platform.kubecore.io/")
+
+
+def strip_render_metadata(wft: dict) -> "str | None":
+    """Delete every ui.kubecore.io/* and platform.kubecore.io/* key from metadata.labels, metadata.annotations,
+    spec.workflowMetadata.labels, spec.workflowMetadata.annotations and spec.workflowMetadata.labelsFrom of the RAW template. Returns the text of
+    ui.kubecore.io/raw-form (author data, unvalidated) or None.
+
+    Why: the render is untrusted. These keys are the platform's (project/app scoping, the run form, the stamp),
+    so the trusted step takes them all away and writes its own (engine issue 80)."""
+    raw_form = None
+    spec = wft.get("spec")
+    holders = [wft.get("metadata"), spec.get("workflowMetadata") if isinstance(spec, dict) else None]
+    for holder in holders:
+        if not isinstance(holder, dict):
+            continue
+        for field in ("labels", "annotations", "labelsFrom"):
+            # labelsFrom: Argo's controller writes each key onto the Workflow as a label, so it is a label too
+            if field == "labelsFrom" and holder is wft.get("metadata"):
+                continue
+            mapping = holder.get(field)
+            if not isinstance(mapping, dict):
+                continue
+            if holder is wft.get("metadata") and field == "annotations":
+                raw_form = mapping.get(RAW_FORM_ANNOTATION)
+            for key in [k for k in mapping if isinstance(k, str) and k.startswith(RESERVED_METADATA_PREFIXES)]:
+                del mapping[key]
+    return raw_form
+
+
 def enhance_metadata(wft: dict, ctx: dict) -> None:
     meta = wft["metadata"]
 
@@ -299,16 +330,16 @@ def enhance_metadata(wft: dict, ctx: dict) -> None:
     authoritative = pipeline_wft_name(ctx)
     if meta.get("name") != authoritative:
         meta["name"] = authoritative
-    meta.setdefault("namespace", ctx["namespace"])
+    meta["namespace"] = ctx["namespace"]  # ArgoCD applies the manifest's namespace: the render does not choose it
 
     labels = meta.setdefault("labels", {})
-    labels.setdefault("platform.kubecore.io/project", ctx["project"])
-    labels.setdefault("platform.kubecore.io/app", ctx["app"])
-    labels.setdefault("platform.kubecore.io/managed-by", "kubecore-ci")
+    labels["platform.kubecore.io/project"] = ctx["project"]
+    labels["platform.kubecore.io/app"] = ctx["app"]
+    labels["platform.kubecore.io/managed-by"] = "kubecore-ci"
 
     annotations = meta.setdefault("annotations", {})
-    annotations.setdefault("platform.kubecore.io/generated-by", "ml-ci-build/hera-render")
-    annotations.setdefault("platform.kubecore.io/cost-tracking", "enabled")
+    annotations["platform.kubecore.io/generated-by"] = "ml-ci-build/hera-render"
+    annotations["platform.kubecore.io/cost-tracking"] = "enabled"
 
 
 RUN_RETENTION_DAYS = 35
@@ -1356,6 +1387,25 @@ def add_promote_task(spec: dict, steps: list) -> None:
         "arguments": {"parameters": given + [{"name": PROMOTE_PARAM, "value": "{{=toJSON([%s])}}" % plan}]}})
 
 
+def refuse_step_table_mismatch(steps: list) -> None:
+    """The compose `--steps` table is author data and names the steps the run form gives fields to; the step
+    templates are what runs. They must be the same set, or a render could hide a step from the table while
+    declaring its `<step>-class` itself, and the form would rank that field as a plain setting."""
+    compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
+    args = compose["container"].get("args", []) if compose else []
+    table = json.loads(args[args.index("--steps") + 1]) if "--steps" in args else []
+    named = {e["name"] for e in table}
+    templates = {s["name"] for s in steps if s["name"] != COMPOSE_STEP}
+    if named != templates:
+        missing, extra = sorted(templates - named), sorted(named - templates)
+        raise EnhanceError(
+            "the steps table the render gave compose does not match the step templates"
+            + (f"; steps missing from the table: {', '.join(missing)}" if missing else "")
+            + (f"; table steps with no template: {', '.join(extra)}" if extra else "")
+            + ". Render the pipeline again with the platform's authoring module."
+        )
+
+
 def enhance_pipeline_info(spec: dict, ctx: dict, steps: list) -> None:
     """The text at the top of the run form: how to run, the machine classes, the developer's steps. It is a
     field because the form shows nothing else; it speaks about the developer's pipeline, not the platform."""
@@ -1414,40 +1464,60 @@ def enhance_compose_class(spec: dict, steps: list, ctx: dict) -> None:
     parameters[:] = [p for p in parameters if p["name"] != field]
 
 
-def order_form(spec: dict, steps: list) -> None:
-    """The form in the order a developer reads it: the text, the experiment fields, the settings in config
-    order, the dataset fields, then each step's class, time limit and checkpoint interval, the two fields that
-    start a run from a step, the promote ticks, the extra YAML, and last what the platform owns."""
-    parameters = spec["arguments"]["parameters"]
+ROLES = ("info", "experiment", "setting", "input", "class", "walltime", "checkpoint-every", "matrix",
+         "parallel", "reuse", "start", "promote", "advanced", "platform")
+STEP_ROLES = ("class", "walltime", "checkpoint-every", "matrix", "parallel")    # the per-step fields, in form order
+
+
+def form_rank(spec: dict, steps: list, rendered: "set | None" = None) -> dict:
+    """{param name: {"role": one of ROLES, "step": step name or None, "sort": (group, index)}} for every
+    spec.arguments.parameters entry. "sort" is the key the form is ordered by (order_form): the text, the
+    experiment fields, the settings in config order, the dataset fields, then each step's class, time limit and
+    checkpoint interval, the two fields that start a run from a step, the promote ticks, the extra YAML, and last
+    what the platform owns.
+
+    A role is decided by the engine's own names first (what it adds: the text, the per-step fields, the rerun
+    fields, the promote ticks), then `experiment-*`, a step's inputs and `config`. A name left over is a `setting`
+    when `rendered` (the parameter names the raw render declared, enhance's form_data) holds it, else `platform`:
+    something the engine or a later pass added without a role, which the run form withholds. `rendered` is author
+    data, but it only classifies the author's own names: an engine name is matched first, so a render cannot turn
+    one into a setting. Both leftovers sort at (2, 0), after the experiment fields, in config order."""
     compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
     table = json.loads(compose["container"]["args"][compose["container"]["args"].index("--steps") + 1]) \
         if compose and "--steps" in compose["container"]["args"] else []
     inputs = [name for entry in table for name in entry["inputs"]]
     own = [e["name"] for e in table]
-    rank = {}
-
-    def place(name: str, group: int, index: int = 0) -> None:
-        rank[name] = (group, index)
-
-    for p in parameters:
-        name = p["name"]
-        if name == "pipeline-info":
-            place(name, 0)
-        elif name.startswith("experiment-"):
-            place(name, 1)
-        elif name in inputs:
-            place(name, 3)
-        elif name in (REUSE_FIELD, START_FIELD):
-            place(name, 5, (REUSE_FIELD, START_FIELD).index(name) - 2)    # before the promote ticks
-        elif name.startswith("promote-"):
-            place(name, 5)
-        elif name == "config":
-            place(name, 6)
-    suffixes = ("class", "walltime", "checkpoint-every", "matrix", "parallel")
+    producers = {promote_field(p["name"]): e["name"] for e in table for p in e["produces"] if p["type"] == "dataset"}
+    per_step = {}
     for i, step in enumerate(own):
-        for suffix in suffixes:
-            place(f"{step}-{suffix}", 4, i * len(suffixes) + suffixes.index(suffix))
-    parameters.sort(key=lambda p: rank.get(p["name"], (2, 0)))     # sort is stable: config order within a group
+        for index, role in enumerate(STEP_ROLES):
+            per_step[f"{step}-{role}"] = {"role": role, "step": step, "sort": (4, i * len(STEP_ROLES) + index)}
+
+    def decide(name: str) -> dict:
+        if name in per_step:    # last in the old loop, so it wins over a name the loop also placed
+            return per_step[name]
+        if name == "pipeline-info":
+            return {"role": "info", "step": None, "sort": (0, 0)}
+        if name.startswith("experiment-"):
+            return {"role": "experiment", "step": None, "sort": (1, 0)}
+        if name in inputs:
+            return {"role": "input", "step": None, "sort": (3, 0)}
+        if name in (REUSE_FIELD, START_FIELD):
+            return {"role": "reuse" if name == REUSE_FIELD else "start", "step": None,
+                    "sort": (5, (REUSE_FIELD, START_FIELD).index(name) - 2)}    # before the promote ticks
+        if name.startswith("promote-"):
+            return {"role": "promote", "step": producers.get(name), "sort": (5, 0)}
+        if name == "config":
+            return {"role": "advanced", "step": None, "sort": (6, 0)}
+        return {"role": "setting" if rendered and name in rendered else "platform", "step": None, "sort": (2, 0)}
+
+    return {p["name"]: decide(p["name"]) for p in spec["arguments"]["parameters"]}
+
+
+def order_form(spec: dict, steps: list) -> None:
+    """The form in the order a developer reads it (form_rank's sort key)."""
+    rank = form_rank(spec, steps)
+    spec["arguments"]["parameters"].sort(key=lambda p: rank[p["name"]]["sort"])    # stable: config order within a group
 
 
 def connection_env_from(ctx: dict) -> list:
@@ -1499,14 +1569,22 @@ def enhance_connections(step: dict, ctx: dict) -> None:
 # ---------------------------------------------------------------------- main
 
 
-def enhance(wft: dict, ctx: dict) -> dict:
+def enhance(wft: dict, ctx: dict, form_data: "dict | None" = None) -> dict:
+    """The raw render with the platform's wiring. When `form_data` is given it is filled with what the trusted
+    form seal needs and the render cannot forge: version, offers (step -> class_offer, None when pinned), pinned
+    (step -> class), rendered (the raw parameter names), rank (form_rank of the result) and raw (the render's own
+    raw-form text, author data)."""
     refuse_client_identity(wft)  # before the platform adds its own account and patches
+    raw_form = strip_render_metadata(wft)  # the render's ui.* and platform.* keys never survive
+    rendered = [p["name"] for p in wft["spec"]["arguments"]["parameters"]] if form_data is not None else []
     enhance_metadata(wft, ctx)
     spec = wft["spec"]
     enhance_spec_top_level(spec, ctx)
     steps = step_templates(spec)
+    refuse_step_table_mismatch(steps)   # before any engine pass reads the table or a render-declared field
     gpu_step_names: set = set()
     offers: dict = {}    # step -> what its {step}-class choice offers (None: pinned to one class)
+    pinned: dict = {}    # step -> the class it is pinned to
     shared = shared_templates(spec)  # before enhance_hpc adds twin tasks
     for step in steps:
         annots = platform_annotations(step)  # validates; raises on unknown keys
@@ -1519,6 +1597,8 @@ def enhance(wft: dict, ctx: dict) -> dict:
         # Before enhance_gpu_routing strips the typed request, which class_offer reads.
         offer = class_offer(step, ctx, annots) if "compute-class" not in annots else None
         offers[step["name"]] = offer
+        if "compute-class" in annots:
+            pinned[step["name"]] = annots["compute-class"]
         enhance_class_param(spec, step, ctx, annots, offer)
         compute_class = resolve_compute_class(step, ctx, annots)
         enhance_class_sizing(spec, step, ctx, annots)  # the node of the chosen class
@@ -1553,6 +1633,9 @@ def enhance(wft: dict, ctx: dict) -> dict:
         if step["name"] in gpu_step_names:
             enhance_gpu_driver(step)
     refuse_large_templates(spec)  # last: it measures the templates as they are released
+    if form_data is not None:
+        form_data.update(version=1, offers=offers, pinned=pinned, rendered=rendered,
+                         rank=form_rank(spec, steps, set(rendered)), raw=raw_form)
     return wft
 
 
@@ -1569,12 +1652,18 @@ def main(argv=None) -> None:
                         help="Path to write the ConfigMap that carries the checkpoint helper source once for "
                              "every step that mounts it (removed when no step does). The CI commits it next to "
                              "the WorkflowTemplate; without it a render that uses the helper is not runnable.")
+    parser.add_argument("--form-data", default="",
+                        help="Path to write the trusted form data (class offers, the raw parameter names, the "
+                             "form roles) the run-form seal reads, as compact JSON. Without it nothing is written.")
     args = parser.parse_args(argv)
 
     raw = yaml.safe_load(Path(args.raw).read_text())
     ctx = yaml.safe_load(Path(args.context).read_text())
 
-    enhanced = enhance(raw, ctx)
+    form_data: "dict | None" = {} if args.form_data else None
+    enhanced = enhance(raw, ctx, form_data)
+    if form_data is not None:
+        Path(args.form_data).write_text(json.dumps(form_data, sort_keys=True, separators=(",", ":")))
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(yaml.safe_dump(enhanced, sort_keys=False, default_flow_style=False))
