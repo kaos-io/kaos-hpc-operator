@@ -9,7 +9,6 @@ import pytest
 from kubecore import compose
 from kubecore.compose import ComposeError
 from kubecore.run_settings import TOKEN_COVER_MINUTES
-
 from paths import ENGINE
 
 STEPS = [{"name": "train"}, {"name": "report"}]
