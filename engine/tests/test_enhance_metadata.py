@@ -94,3 +94,22 @@ def test_enhance_metadata_assigns_over_preset_values():
     enhance.enhance_metadata(wft, CTX)
     assert wft["metadata"]["namespace"] == CTX["namespace"]
     assert wft["metadata"]["labels"][PLATFORM + "project"] == CTX["project"]
+
+
+def test_labels_from_keys_under_the_platform_prefixes_are_removed():
+    """Argo's controller writes each labelsFrom key onto the Workflow, so a forged one would stamp it."""
+    wft = _raw()
+    wft["spec"].setdefault("workflowMetadata", {})["labelsFrom"] = {
+        PLATFORM + "submitted-by": {"expression": "'attacker'"},
+        UI + "run-form": {"expression": "'x'"},
+        "keep.example.com/from": {"expression": "workflow.name"},
+    }
+    out = enhance.enhance(wft, copy.deepcopy(CTX))
+    assert out["spec"]["workflowMetadata"]["labelsFrom"] == {"keep.example.com/from": {"expression": "workflow.name"}}
+
+
+def test_strip_render_metadata_leaves_a_template_without_labels_from_alone():
+    wft = _raw()
+    wft["spec"].setdefault("workflowMetadata", {}).pop("labelsFrom", None)
+    enhance.strip_render_metadata(wft)
+    assert "labelsFrom" not in wft["spec"]["workflowMetadata"]

@@ -291,7 +291,7 @@ RESERVED_METADATA_PREFIXES = ("ui.kubecore.io/", "platform.kubecore.io/")
 
 def strip_render_metadata(wft: dict) -> "str | None":
     """Delete every ui.kubecore.io/* and platform.kubecore.io/* key from metadata.labels, metadata.annotations,
-    spec.workflowMetadata.labels and spec.workflowMetadata.annotations of the RAW template. Returns the text of
+    spec.workflowMetadata.labels, spec.workflowMetadata.annotations and spec.workflowMetadata.labelsFrom of the RAW template. Returns the text of
     ui.kubecore.io/raw-form (author data, unvalidated) or None.
 
     Why: the render is untrusted. These keys are the platform's (project/app scoping, the run form, the stamp),
@@ -302,7 +302,10 @@ def strip_render_metadata(wft: dict) -> "str | None":
     for holder in holders:
         if not isinstance(holder, dict):
             continue
-        for field in ("labels", "annotations"):
+        for field in ("labels", "annotations", "labelsFrom"):
+            # labelsFrom: Argo's controller writes each key onto the Workflow as a label, so it is a label too
+            if field == "labelsFrom" and holder is wft.get("metadata"):
+                continue
             mapping = holder.get(field)
             if not isinstance(mapping, dict):
                 continue
