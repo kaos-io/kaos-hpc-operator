@@ -74,6 +74,7 @@ def fake_bin(d):
 
 
 def job_side(project):
+    os.umask(0o077)   # as the real job script: everything a job writes is private
     from kaos_hpc_runner import jobscript, payloads
     from test_slot_manager import Node, SCOPE, _job
     root = "%s/kaos/%s" % (SCRATCH, project)
@@ -202,8 +203,9 @@ def main():
         for p in entries:
             check(os.lstat(p).st_uid == uid, "%s owned by %s" % (p, project)) if os.lstat(p).st_uid != uid else None
         check(stat.S_IMODE(os.stat(root).st_mode) & 0o077 == 0, "the root of %s has no group or other bits (%o): this is what closes the tree" % (project, stat.S_IMODE(os.stat(root).st_mode)))
-        loose = [p for p in entries if os.lstat(p).st_mode & 0o077 and not os.path.islink(p)]
-        say("note: %d of %d entries under %s carry group/other bits (the staging tool's own folders, made with umask 022); none is reachable, the root is 0700" % (len(loose), len(entries), root))
+        loose = ["%s %o" % (p, stat.S_IMODE(os.lstat(p).st_mode)) for p in entries
+                 if stat.S_IMODE(os.lstat(p).st_mode) & 0o077 and not (os.path.isdir(p) and stat.S_IMODE(os.lstat(p).st_mode) & 0o7077 == 0o2000)]
+        check(not loose, "all %d of %d entries under %s carry no group or other permission bits: %s" % (len(entries) - len(loose), len(entries), root, loose[:3]))
         r = run_as(other, [sys.executable, "-c", "import os,sys\nbad=[p for p in sys.stdin.read().split('\\n') if p and (lambda f: f)(os.path.exists(p))]\nprint(len(bad)); sys.exit(1 if bad else 0)"],
                    input="\n".join(entries[1:]) + "\n")
         check(r.returncode == 0, "%s can reach none of the %d entries under %s (stat fails for every one)" % (other, len(entries) - 1, root))

@@ -42,6 +42,14 @@ as a project user, `mkdir <scratch>/kaos && chgrp <group> <scratch>/kaos && chmo
 sticky folder can rename or remove anything in it, so when a project user's job made it, that user (and only that user)
 could move another project's root away (shown by `hack/local-lab/two_users.py`). Owned by the site owner, no project user can.
 
+**What to ask the site** (three answers settle the setup; the live checklist then proves it):
+1. Who creates `<scratch>/kaos/`? Ideally the site, once, as `root:<site project group>` with mode 3770; if it is left to the first
+   job, that project user owns it and can move another project's root away.
+2. What are the real mode, owner, group and any ACL (`getfacl`) of `/project/scratch/<account>` itself? The shared folder's group
+   comes from it, and an ACL or a different default group changes what a new folder inherits.
+3. May a project user `chgrp` a folder to the site project group (is the user a member of it)? If not, the job cannot make
+   `kaos/` itself and the site must.
+
 **A site used before this change**: the folders `kaos-work`, `kaos-tmp`, `kaos-priv`, `kaos-ckpt`, `kaos-claims`,
 `sif-cache`, `data-cache` and `kaos-apptainer-cache` directly under the site scratch are no longer used. Nothing migrates;
 the staging tool's `clean` names them once ("old layout, not cleaned") and the site owner may remove them.
