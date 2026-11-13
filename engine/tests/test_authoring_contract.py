@@ -79,17 +79,17 @@ def test_the_keywords_after_the_name_are_given_by_name():
 def test_outputs_says_what_to_write_instead():
     message = refused(lambda a: a.step("prepare", kind="evaluate", outputs=["dataset-info"]))
     assert message == ("step 'prepare': outputs= is gone. Declare what the step writes with produces=[...] and "
-                       "hand it on with step.result().")
+                       "hand it on with step.result(). " + OLD_APP_NOTICE)
 
 
 def test_hpc_time_limit_says_what_to_write_instead():
     message = refused(lambda a: a.step("train", kind="evaluate", hpc_time_limit="12h"))
-    assert message == "step 'train': hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\"."
+    assert message == "step 'train': hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\". " + OLD_APP_NOTICE
 
 
 def test_disk_says_a_step_gets_the_disk_of_its_class():
     message = refused(lambda a: a.step("train", kind="evaluate", disk="20Gi"))
-    assert message == "step 'train': disk= is gone. The step gets the disk of the machine class it runs on."
+    assert message == "step 'train': disk= is gone. The step gets the disk of the machine class it runs on. " + OLD_APP_NOTICE
 
 
 def test_any_other_unknown_keyword_lists_the_keywords_that_exist():
@@ -114,6 +114,7 @@ def test_an_app_on_the_old_contract_fails_the_render_and_writes_nothing(tmp_path
     done = run_render(repo)
     assert done.returncode == 1
     assert "step 'dataset-loading': outputs= is gone." in done.stderr
+    assert OLD_APP_MARKER in done.stderr
     assert not (repo / "out").exists()
 
 
