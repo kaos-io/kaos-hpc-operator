@@ -94,13 +94,33 @@ def test_take_counts_utf8_bytes_not_characters():
 
 @pytest.mark.parametrize("text, message", [
     ("{not json", "not JSON"),
-    ('{"version": 1, "version": 1}', "repeats the key"),
-    ('{"a": {"b": 1, "b": 2}}', "repeats the key"),
+    ('{"version": 1, "version": 1}', "raw form repeats the key 'version'"),
+    ('{"a": {"b": 1, "b": 2}}', r"raw form\.a repeats the key 'b'"),
+    ('{"a": [{"b": 1, "b": 2}]}', r"raw form\.a\[0\] repeats the key 'b'"),
+    ('{"version": NaN}', "contains NaN"),
+    ('{"version": -Infinity}', "contains -Infinity"),
     ("[1]", "must be a JSON object"),
 ])
 def test_take_refuses(text, message):
     with pytest.raises(RunFormError, match=message):
         take_raw_form(_wft(text))
+
+
+@pytest.mark.parametrize("edit, message", [
+    (lambda w: w["metadata"].update(annotations="x"), "metadata.annotations must be a mapping"),
+    (lambda w: w["metadata"].update(labels=["a"]), "metadata.labels must be a mapping"),
+    (lambda w: w["metadata"].update(annotations={1: "a"}), "not text"),
+    (lambda w: w["spec"].update(workflowMetadata="x"), "workflowMetadata must be a mapping"),
+    (lambda w: w["spec"]["workflowMetadata"].update(labels="x"), "workflowMetadata.labels must be a mapping"),
+    (lambda w: w["spec"]["workflowMetadata"].update(annotations={2: "x"}), "not text"),
+    (lambda w: w.update(metadata="x"), "metadata must be a mapping"),
+    (lambda w: w.update(spec=[]), "spec must be a mapping"),
+])
+def test_take_refuses_a_template_of_the_wrong_shape(edit, message):
+    wft = _wft(json.dumps(GOOD))
+    edit(wft)
+    with pytest.raises(RunFormError, match=message):
+        take_raw_form(wft)
 
 
 # ------------------------------------------------------------------------------------------ validation
@@ -168,6 +188,11 @@ def _lacking():
     (_with(["overrides", "groups"], [{"id": "g"}, {"id": "g"}]), "declared twice"),
     (_with(["overrides", "groups"], [{"id": "g%d" % i} for i in range(33)]), "at most 32"),
     (_with(["overrides", "stuff"], 1), "unknown keys"),
+    (_with(["types", "train.lr"], ["number"]), "not a type"),
+    (_with(["types", "train.lr"], {"a": 1}), "not a type"),
+    (_over(**{"train.epochs": {"tier": ["basic"]}}), "tier must be"),
+    (_over(**{"train.epochs": {"tier": {}}}), "tier must be"),
+    (_with(["overrides", "groups"], [{"id": "g", "tier": ["basic"]}]), "tier must be"),
 ])
 def test_validate_refuses(raw, message):
     with pytest.raises(RunFormError, match=message):

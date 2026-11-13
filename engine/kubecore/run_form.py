@@ -33,20 +33,65 @@ class RunFormError(Exception):
     """A refusal; the message names the field and the fix. Callers turn it into a build failure."""
 
 
-def _no_duplicates(pairs):
-    out = {}
+class _Dict(dict):
+    """A decoded object that remembers the keys it repeated."""
+    repeated = ()
+
+
+def _object(pairs):
+    out = _Dict()
+    repeated = []
     for key, value in pairs:
         if key in out:
-            raise RunFormError("the raw form repeats the key %r: each key may appear once" % key)
+            repeated.append(key)
         out[key] = value
+    out.repeated = repeated
     return out
+
+
+def _refuse_constant(name):
+    raise RunFormError("the raw form contains %s: use a finite number" % name)
+
+
+def _find_repeat(node, path="raw form"):
+    if isinstance(node, _Dict):
+        if node.repeated:
+            raise RunFormError("%s repeats the key %r: each key may appear once" % (path, node.repeated[0]))
+        for key, value in node.items():
+            _find_repeat(value, "%s.%s" % (path, key))
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            _find_repeat(value, "%s[%d]" % (path, i))
+
+
+def _mapping(holder, where):
+    """`holder` as a dict with text keys, or None when absent."""
+    if holder is None:
+        return None
+    if not isinstance(holder, dict):
+        raise RunFormError("%s must be a mapping, not %s: fix the template" % (where, type(holder).__name__))
+    for key in holder:
+        if not isinstance(key, str):
+            raise RunFormError("%s has the key %r, which is not text: fix the template" % (where, key))
+    return holder
 
 
 def take_raw_form(wft: dict) -> Optional[dict]:
     """Pop the raw form off `wft` and strip every key a developer could use to forge the finished form.
     Returns the decoded raw form, or None when the render wrote none."""
     meta = wft.setdefault("metadata", {})
-    annotations = meta.get("annotations") or {}
+    if not isinstance(meta, dict):
+        raise RunFormError("metadata must be a mapping, not %s" % type(meta).__name__)
+    annotations = _mapping(meta.get("annotations"), "metadata.annotations") or {}
+    labels = _mapping(meta.get("labels"), "metadata.labels")
+    spec = wft.get("spec", {})
+    if not isinstance(spec, dict):
+        raise RunFormError("spec must be a mapping, not %s" % type(spec).__name__)
+    workflow_metadata = spec.get("workflowMetadata")
+    if workflow_metadata is not None and not isinstance(workflow_metadata, dict):
+        raise RunFormError("spec.workflowMetadata must be a mapping, not %s" % type(workflow_metadata).__name__)
+    workflow_metadata = workflow_metadata or {}
+    wm = [_mapping(workflow_metadata.get(f), "spec.workflowMetadata." + f) for f in ("labels", "annotations")]
     text = annotations.pop(RAW_FORM_ANNOTATION, None)
     raw = None
     if text is not None:
@@ -57,21 +102,18 @@ def take_raw_form(wft: dict) -> Optional[dict]:
             raise RunFormError("the raw form is %d bytes, over the %d byte cap: shorten the config comments, "
                                "option lists or _form.yaml" % (size, RAW_FORM_CAP))
         try:
-            raw = json.loads(text, object_pairs_hook=_no_duplicates)
+            raw = json.loads(text, object_pairs_hook=_object, parse_constant=_refuse_constant)
         except ValueError as exc:
             raise RunFormError("the raw form is not JSON: %s" % exc) from None
+        _find_repeat(raw)
         if not isinstance(raw, dict):
             raise RunFormError("the raw form must be a JSON object")
-    for holder in (meta.get("annotations"), meta.get("labels")):
-        if isinstance(holder, dict):
-            for key in [k for k in holder if k.startswith(UI_PREFIX) or k in FORGED_KEYS]:
-                del holder[key]
-    workflow_metadata = (wft.get("spec") or {}).get("workflowMetadata") or {}
-    for field in ("labels", "annotations"):
-        holder = workflow_metadata.get(field)
-        if isinstance(holder, dict):
-            for key in [k for k in holder if k.startswith(UI_PREFIX) or k.startswith(PLATFORM_PREFIX)]:
-                del holder[key]
+    for holder in (annotations, labels):
+        for key in [k for k in holder or () if k.startswith(UI_PREFIX) or k in FORGED_KEYS]:
+            del holder[key]
+    for holder in wm:
+        for key in [k for k in holder or () if k.startswith(UI_PREFIX) or k.startswith(PLATFORM_PREFIX)]:
+            del holder[key]
     return raw
 
 
@@ -88,7 +130,7 @@ def _label_ok(where: str, label) -> None:
 
 def _check_type(name: str, kind: str, param: dict) -> None:
     value = param.get("value")
-    if kind not in TYPES:
+    if not isinstance(kind, str) or kind not in TYPES:
         raise RunFormError("types[%r]: %r is not a type; use one of %s" % (name, kind, sorted(TYPES)))
     if kind == "enum":
         if not param.get("enum"):
@@ -213,7 +255,7 @@ def _validate_overrides(overrides, types: dict, param) -> None:
         ids.add(gid)
         if "label" in group:
             _label_ok("overrides.groups[%s]" % gid, group["label"])
-        if "tier" in group and group["tier"] not in TIERS:
+        if "tier" in group and (not isinstance(group["tier"], str) or group["tier"] not in TIERS):
             raise RunFormError("overrides.groups[%s]: tier must be one of %s" % (gid, sorted(TIERS)))
         if "order" in group and (not isinstance(group["order"], int) or isinstance(group["order"], bool)
                                  or group["order"] < 0):
@@ -235,7 +277,7 @@ def _validate_overrides(overrides, types: dict, param) -> None:
                                                                          sorted(OVERRIDE_FIELD_KEYS)))
         if "label" in spec:
             _label_ok(where, spec["label"])
-        if "tier" in spec and spec["tier"] not in TIERS:
+        if "tier" in spec and (not isinstance(spec["tier"], str) or spec["tier"] not in TIERS):
             raise RunFormError("%s: tier must be one of %s" % (where, sorted(TIERS)))
         for bound in ("minimum", "maximum"):
             if bound in spec:
@@ -248,5 +290,6 @@ def _validate_overrides(overrides, types: dict, param) -> None:
             raise RunFormError("%s: minimum %s is above maximum %s" % (where, spec["minimum"], spec["maximum"]))
         if "group" in spec:
             gid = spec["group"]
+            # TODO(T8): enforce that `gid` is a declared override group or a fixed group (check_form).
             if not isinstance(gid, str) or not GROUP_ID_RE.match(gid):
                 raise RunFormError("%s: group %r must match %s" % (where, gid, GROUP_ID_RE.pattern))
