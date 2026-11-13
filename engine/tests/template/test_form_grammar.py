@@ -31,7 +31,13 @@ VALID = [
 INVALID = [
     "", "mode", "mode ==", "== on", "a = b", "a === b", "a == b and", "or a == b", "a == b c == d",
     "a == b AND c == d", "(a == b)", "a == b && c == d", "a == b,", "{{workflow.parameters.x}} == 1", "a == {{x}}", "a == 'open",
-    "a == b\nand c == d", 5, None, ["a == b"],
+    5, None, ["a == b"],
+]
+# form_grammar refuses control characters, as in PR 79; authoring adopts this at T2b. Until then authoring
+# accepts the ones that are whitespace to a regex, so these are the documented, intended difference.
+CONTROL = [
+    "a == b\nand c == d", "a == b\tand c == d", "a\n== b", "a ==\r b", "a == b\n", "\ta == b",
+    "a == b\x00", "a == \"x\x1fy\"", "a == b\x7f", "a == b and\x0bc == d", "a == b\x0c",
 ]
 
 
@@ -39,6 +45,24 @@ def _authoring():
     pytest.importorskip("hera")
     from kubecore import authoring
     return authoring
+
+
+@pytest.mark.parametrize("text", VALID, ids=repr)
+def test_every_valid_vector_parses(text):
+    compares, joiners = parse_when(text)
+    assert compares and len(joiners) == len(compares) - 1
+
+
+@pytest.mark.parametrize("text", INVALID + CONTROL, ids=repr)
+def test_every_invalid_vector_is_refused(text):
+    with pytest.raises(GrammarError):
+        parse_when(text)
+
+
+@pytest.mark.parametrize("text", CONTROL, ids=repr)
+def test_a_control_character_is_refused_by_name(text):
+    with pytest.raises(GrammarError, match=r"control character, found U\+[0-9A-F]{4} at position \d+"):
+        parse_when(text)
 
 
 @pytest.mark.parametrize("text", VALID + INVALID, ids=repr)

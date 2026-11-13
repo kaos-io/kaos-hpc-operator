@@ -14,11 +14,21 @@ _WHEN_COMPARE = rf"({_WHEN_NAME})\s*(==|!=)\s*(\"[^\"]*\"|'[^']*'|{_WHEN_NAME})"
 _WHEN_ALL = re.compile(rf"\s*{_WHEN_COMPARE}(?:\s+(?:and|or)\s+{_WHEN_COMPARE})*\s*")
 _WHEN_TOKEN = re.compile(rf"{_WHEN_COMPARE}|\s+(and|or)\s+")
 _WHEN_EXAMPLE = 'when="mode != off"'
+# Intended difference from authoring until T2b: a control character anywhere is refused (as in open engine PR 79).
+_CONTROL = re.compile("[\x00-\x1f\x7f]")
 
 
 def parse_when(when):
     """when= in plain words: `<field> == <value>` or `!=`, joined by `and` / `or` (`and` binds tighter, no
-    parentheses). Returns the (field, operator, value) comparisons and the joiners between them."""
+    parentheses). Returns the (field, operator, value) comparisons and the joiners between them. A control
+    character (U+0000 to U+001F, U+007F), a newline or tab included, is refused anywhere in the text."""
+    if isinstance(when, str):
+        bad = _CONTROL.search(when)
+        if bad:
+            raise GrammarError(
+                f"when= must not contain a control character, found U+{ord(bad.group()):04X} at position "
+                f"{bad.start()}. Write the whole comparison on one line with plain spaces."
+            )
     if isinstance(when, str) and ("{{" in when or "}}" in when):
         raise GrammarError(
             f"when= is written with the name of a run-form field, for example {_WHEN_EXAMPLE}. "
