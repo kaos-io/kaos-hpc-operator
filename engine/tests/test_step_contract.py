@@ -147,7 +147,7 @@ def test_a_skipped_upstream_arrives_as_the_sentinel():
 
 
 def test_a_step_that_is_not_run_again_arrives_as_the_earlier_runs_result_with_its_path():
-    """`train` did not run in this run: compose took its result from the earlier run (`kaos-reused-train`), `export` was skipped."""
+    """`train` did not run in this run: compose took its result from the earlier run (`kaos-reused-train`)."""
     from kubecore.step_contract import context_expression, wire
     want = fixture("context-reused-upstream")
     base = wire(base_of(want, "evaluate"))
