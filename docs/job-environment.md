@@ -4,6 +4,104 @@ What the runner's job script (`runner/kaos_hpc_runner/jobscript.py`) does to kee
 going further than they have to. Proven by `runner/tests/test_hardening.py`, which runs the whole script in bash against
 a fake Apptainer and a fake Slurm.
 
+## Layout on the site: one folder per platform project
+One site project (one account, one scratch root `/project/scratch/<account>`, one Unix group) holds several platform
+projects, and each platform project has its OWN site user. So nothing of a project sits directly under the shared scratch:
+everything is under the project's own root, which is the job script's `SCR` (the HPCSite's `profile.scratchRoot`, set by the
+platform to `<scratch>/kaos/<project>`; the runner reads it from `HPC_SCRATCH` and derives nothing).
+
+```
+/project/scratch/<account>/            site project's scratch: the group's, quota is measured here (lfs quota -u/-g/-p)
+  kaos/                                SHARED parent: mode 3770 (setgid + sticky), group = the site project's group
+    <project-A>/                       0700, owned by project A's site user  = SCR of A's jobs
+      kaos-work/<job>/ (output/ ckpt/)   the job's work folder
+      kaos-tmp/  in-<job> env-<job> idle-<job>   inputs, step variables, idle marker
+      kaos-priv/host-<job>/              a shared-node host's private script copy (holds the job's credentials)
+      kaos-claims/                       the slot manager's locks (node sharing)
+      kaos-ckpt/<workflow uid>/<step>/   checkpoint copies
+      sif-cache/  kaos-apptainer-cache/  data-cache/     image and in-job dataset caches
+      images/  datasets/<repo>/<commit>/  locks/         made by the login-node staging tool (--root is this folder)
+    <project-B>/                       0700, owned by project B's site user, the same tree
+```
+
+Who owns what: a project's root and everything under it belongs to that project's user and is closed to the group (0700 on
+the root; the files the job script makes are 0600/0700). The one thing the group can read is the shared parent `kaos/`: it
+lists the project names, which is what lets a user create and enter its own root. The tools never loosen anything below it.
+A place for data one project would share with another, later, is the receiving project's own subtree
+(`<project-B>/datasets/<repo>/<commit>/`): B stages its own copy; nothing is linked across users.
+
+**Who creates what, and when.** The platform makes both folders when the project is CONNECTED to the site, in the step that already
+runs as the project's own site user to keep its access working: the token mint's run (every 15 minutes, which is the connection
+refresh) runs the staging tool's `prepare` verb over the project's own key. `prepare` makes `<scratch>/kaos` (mode 3770, the group
+of the scratch) or, when it exists with the wrong mode and the same user made it, repairs it and says so in one line; and it makes
+`<scratch>/kaos/<project>` (0700, that user). It is idempotent, so it runs again at every refresh. It refuses, in one sentence, a
+`kaos/` or project folder that is a symbolic link, a project folder another user owns, and a `kaos/` another user owns with the
+wrong mode (the sentence names that owner as the one who must run `chgrp <group> <path> && chmod 3770 <path>`, or the site owner);
+it never changes a folder it did not make. When it refuses, the project's `HPCReady` condition is False with reason
+`HPCScratchNotReady` and the same sentence as the message, and the project's HPC gate is closed.
+
+**A job never creates either folder.** The job script (`kaos_root`) and every staging-tool verb other than `prepare` only verify that
+the project's root exists, is a real folder, is owned by the user and has no group or other bits (and that `kaos` is not a link).
+Otherwise the job ends 233 with ONE sentence: `The project's connection to the site has not prepared its folder <root> (<why>);
+nothing was changed.` A `HPC_SCRATCH` that is not `<x>/kaos/<name>` (an operator older than this runner publishes the bare scratch)
+ends with "the platform has not published a per-project folder for this job yet (operator older than this runner); nothing was
+changed" and names nothing above `kaos/`. Sub-folders under the root (work, tmp, caches, claims, checkpoints) are made by the job.
+So a job of B before A is connected cannot affect A: nobody's job makes A's folder.
+
+**What the site owner sets up once** (recommended, instead of leaving it to the first project's connection): as a site administrator, not
+as a project user, `mkdir <scratch>/kaos && chgrp <group> <scratch>/kaos && chmod 3770 <scratch>/kaos`. Why: the owner of a
+sticky folder can rename or remove anything in it, so when a project user's connection made it, that user (and only that user)
+could move another project's root away (shown by `hack/local-lab/two_users.py`). Owned by the site owner, no project user can.
+
+**What to ask the site** (three answers settle the setup; the live checklist then proves it):
+1. Who creates `<scratch>/kaos/`? Ideally the site, once, as `root:<site project group>` with mode 3770; if it is left to the first
+   project's connection, that project user owns it and can move another project's root away.
+2. What are the real mode, owner, group and any ACL (`getfacl`) of `/project/scratch/<account>` itself? The shared folder's group
+   comes from it, and an ACL or a different default group changes what a new folder inherits.
+3. May a project user `chgrp` a folder to the site project group (is the user a member of it)? If not, the connection cannot make
+   `kaos/` itself (the project shows `HPCScratchNotReady`) and the site must.
+
+Folders from before this change: see Upgrading an existing site, below.
+
+**Live checklist** (a site with two project users, A and B; login node unless said):
+1. `ls -ld <scratch>/kaos`: mode `drwxrws--T` (3770), group = the site project's group, owned by the site owner.
+2. After the next connection refresh (15 minutes) `ls -l <scratch>/kaos` lists `<project-A>` and `<project-B>` (0700 each, owned by its own user); a job of A runs to the end.
+3. A job of project B runs to the end (before this change it failed on `kaos-priv`/`kaos-claims`).
+4. As A's user: `ls <scratch>/kaos/<project-B>` and `cat` of a file in it are refused; as B's user the reverse.
+5. `lfs quota -u <A's user> <scratch>`, `lfs quota -u <B's user> <scratch>` and `lfs quota -p <project id> <scratch>`:
+   each user's figure matches its own tree; the project figure is the sum (one quota, shared).
+6. Run the cleanup form of A (scope known-jobs): it removes A's old folders, B's are untouched and B's jobs keep working.
+
+Proven without a site: `hack/local-lab/two-users.sh` runs two projects as two different Unix users (distinct uids, one shared
+group) on one scratch in a throw-away container (the real job script, slot manager and checkpoint copier; with
+`STAGER=<stager.py>` required: it connects each project first, then image staging, `usage`, `clean`, the upgrade cases and planted folders), and `runner/tests/test_two_users.py` runs it in the normal
+suite where real uids can be had (root in a container, or podman/docker) and is skipped with the reason elsewhere. What only
+a live site proves: the site's real group and ACL setup, Lustre quota per user and per project, lakeFS dataset downloads.
+
+## Upgrading an existing site
+A site that ran the old layout (job folders and caches directly under the site scratch, and a `kaos/` folder the old staging tool
+made at its creator's umask) needs nothing from a person to start working:
+* **Automatic: existing projects are prepared at their next connection refresh.** The token mint runs every 15 minutes
+  (`mintSchedule = "*/15 * * * *"`, kubecore-operator `internal/hpc/meluxina/mint.go`) once the operator and its tool-image pin are
+  updated and the mint CronJob has been re-applied (the operator re-applies it on its reconcile). Its `prepare` step repairs a
+  `kaos/` the same user's old tool made (group of the scratch, mode 3770, one line) and makes the project's folder (0700). Until
+  then a job of an upgraded project ends 233 saying its folder has not been prepared, and nothing is changed.
+* **Refused, never guessed.** A `kaos/` or a project folder that is a symbolic link; a project folder owned by someone else; a
+  `kaos/` owned by another user with the wrong mode (the sentence names its owner); and a scratch path that is not
+  `<scratch>/kaos/<project>`. Each is shown on the project as `HPCReady=False`, reason `HPCScratchNotReady`, with the sentence.
+  Nothing above `kaos/` is ever named or changed.
+* **Not carried over.** Jobs, checkpoints, image caches and data caches from before the change are not carried over: steps start
+  fresh (a resume whose checkpoint is missing fails and the message says where it looked, the project's own folder). Nothing reads
+  the old folders to keep anything working.
+* **What a person may do.** The storage report (`usage`) lists the caller's old folders with their sizes (`old_layout`), and
+  `clean` names them once ("old layout, not cleaned"). They count against the project's quota until removed: the cleanup form's
+  `what = old-layout` (dry run first) removes only the entries directly under the site scratch that the caller owns and that have the
+  tool's own names (`kaos-work`, `kaos-tmp`, `kaos-priv`, `kaos-claims`, `kaos-ckpt`, `sif-cache`, `kaos-apptainer-cache`,
+  `data-cache`), that nothing wrote to for the chosen number of days, and that no queued or running job of the caller holds (a job
+  id, a checkpoint, image or dataset lease). It is opt-in: not part of `all` and not in the weekly schedule. A link is never followed.
+* **What stays.** Old folders owned by other users of the site project (another project's user) are not touched by anyone but their
+  owner or the site owner; each project user cleans its own.
+
 ## The image reference
 A step's image is parsed once (`settings.parse_image`, and the same grammar in `runnerjob.ValidateImage`):
 `<host>/<repository>[:<tag>][@sha256:<digest>]`, lowercase, with a tag or a digest, and only the characters
@@ -74,8 +172,9 @@ prove a 100 KB context holding `$HOME $(...)`, backticks, `\` and `"` arrives by
 * `umask 077` at the top of every script, and in every program the script starts: files are 0600, folders 0700.
 * The job's work folder `$SCR/kaos-work/<job>` (and `output/`, `ckpt/`), the checkpoint root, the SIF cache, the Apptainer
   cache and temporary folder, the data cache and the staged-image folder are made 0700 on every job (folders that an older
-  job or the login-node staging tool left open are closed). The caches are shared between the jobs of the site user on
-  purpose; nobody else can enter them.
+  job or the login-node staging tool left open are closed; a `chmod` that fails ends the job 233 naming the folder). They are
+  all under `$SCR`, the project's own root (0700): the caches are shared between the jobs of that project's site user on
+  purpose; no other user, including another project's, can enter them.
 * A shared-node host copies its own script for the slot manager to run (a host reads a script, never an environment, so the
   copy holds the job's credentials). The copy and the slot-manager program live in `$SCR/kaos-priv/host-<job>/` (0700,
   files 0600), not in `/tmp`, and the folder is removed on every way out of the script: end, `fail()`, TERM/HUP/INT.
@@ -129,7 +228,7 @@ no `python3` shows none of the output (`[output withheld ...]`): unknown never m
 ## What this does not do
 * Jobs of one project run as ONE site user. The site sees one user, so no mode separates two jobs of that user from each
   other, and a job can read the folders and the scratch of its project's other jobs. Separating them needs an account per
-  app on the site, or the operator refusing to bind one site user to two projects (not in this repository).
+  app on the site. Separate PROJECTS are separated: each has its own site user and its own root (see Layout above).
 * On a shared node the credentials of a waiting guest travel in its script as `export` lines: a host can read a waiting
   job's script, never its environment (PRD-1609 probe), and the runner has no channel that puts a file on the site. They
   are in Slurm's own record of the script, in the host's private copy (removed as above), and in the guest's step

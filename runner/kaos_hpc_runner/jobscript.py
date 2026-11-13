@@ -106,6 +106,43 @@ SWEEP_HELPER = [
 ]
 
 
+# The project's own root on scratch (SCR). One site project (one account, one scratch, one Unix group) holds several platform
+# projects, each as its own site user, so nothing of a project sits directly under the shared scratch: everything is under
+# SCR = <scratch>/kaos/<project>, which only this project's user can enter (0700). A JOB NEVER CREATES that folder or the shared
+# folder <scratch>/kaos above it: the platform prepares them as the project's own user when the project is connected to the
+# site (and at every refresh of the connection; the stager's `prepare` verb, kubecore-operator images/meluxina-tokenmint). The
+# job only VERIFIES, and changes nothing:
+#  * SCR must be <something>/kaos/<name>: anything else (an operator older than this runner publishes the bare scratch) fails
+#    with a sentence saying the platform has not published a per-project folder for this job yet;
+#  * `kaos` and SCR must be real folders (never links), SCR must be owned by the caller and have no group or other bits (0700);
+#  * otherwise the job ends 233 with ONE sentence saying the project's connection has not prepared its folder, and why.
+# Sub-folders of SCR (work, tmp, caches, checkpoints, claims) are created by the job as before. Nothing above `kaos/` is named.
+ROOT_HELPER = r"""kaos_root(){
+  local root=$1 parent name site me m why
+  parent=${root%/*}; name=${root##*/}; site=${parent%/*}; me=${USER:-$(id -un)}
+  case "$root" in /*) ;; *) parent=;; esac
+  if [ "${parent##*/}" != kaos ] || [ -z "$site" ] || [ -z "$name" ]; then
+    echo "The platform has not published a per-project folder for this job yet (operator older than this runner); nothing was changed."
+    return 1
+  fi
+  why=
+  if [ -L "$parent" ]; then why="the shared folder $parent is a symbolic link"
+  elif [ -L "$root" ]; then why="it is a symbolic link"
+  elif [ ! -e "$root" ]; then why="it does not exist"
+  elif [ ! -d "$root" ]; then why="it is not a folder"
+  elif [ ! -O "$root" ]; then why="it is owned by $(stat -c %U "$root" 2>/dev/null), not by $me"
+  else
+    m=$(stat -c %a "$root" 2>/dev/null)
+    [ $((8#${m:-777} & 8#077)) -eq 0 ] || why="it has mode $m and must be private (0700)"
+  fi
+  if [ -n "$why" ]; then
+    echo "The project's connection to the site has not prepared its folder $root ($why); nothing was changed. The platform prepares it when the connection is refreshed and shows the reason on the project."
+    return 1
+  fi
+  return 0
+}""".split("\n")
+
+
 # The ONLY code that writes this job's comment from the node (fail(), the checkpoint copier). It never
 # overwrites blindly: it reads the live comment, drops the words being set and any old err tail, appends the
 # new words (and the err text), writes, and reads back that every new word is there, up to 3 tries. Every
@@ -160,6 +197,7 @@ def batch_lines(scope, scratch):
         'export -f kaos_comment',
         *REDACT_HELPER,
         *SWEEP_HELPER,
+        *ROOT_HELPER,
         'SCR=' + scratch,
         # The job's private folder, only a shared-node host makes one. It is removed on every way out of this
         # script: the end, fail(), a signal (Slurm's TERM at cancel or at the time limit).
@@ -181,6 +219,9 @@ def batch_lines(scope, scratch):
         'fail(){ KAOS_NOTE=$(cat "$KAOS_WORK/.kaos-note" 2>/dev/null);'
         ' kaos_comment -e "err$1:$(tail -c 65536 slurm-$KAOS_JOB_ID.out 2>/dev/null | kaos_redact | tail -c 700 | tr "\\n" "|")"'
         ' $KAOS_NOTE; exit $1; }',
+        # The project's own root is VERIFIED, never made here (see ROOT_HELPER): a refusal is one plain sentence in the job
+        # output, which fail() copies into the job comment. Before anything is created under $SCR.
+        'kaos_root "$SCR" || fail 233',
         # PRD-1609 F-03: with sharing on, the job's batch step is the host. It runs
         # this same script as one Slurm job step per slot (its own step and taken
         # guests' scripts), each with KAOS_IN_STEP=1 and that step's KAOS_JOB_ID.
@@ -205,8 +246,13 @@ def batch_lines(scope, scratch):
         # The caches are shared between the jobs of this user on purpose, so they are readable by this user only. The
         # staged-image folder and the data cache are made by the login-node staging tool (not this repository), so
         # their modes are set here, on every job, to what a private cache needs.
-        'chmod 700 "$SCR/kaos-apptainer-cache" "$SCR/kaos-tmp" "$SCR/sif-cache" "$SCR/kaos-work" "$SCR/data-cache" 2>/dev/null',
-        '[ -n "$IMAGE_STAGED" ] && chmod 700 "${IMAGE_STAGED%/*}" 2>/dev/null',
+        # A chmod that fails says which folder (a folder another user made is never taken silently).
+        'for d in "$SCR/kaos-apptainer-cache" "$SCR/kaos-tmp" "$SCR/sif-cache" "$SCR/kaos-work" "$SCR/data-cache"'
+        ' ${IMAGE_STAGED:+"${IMAGE_STAGED%/*}"}; do',
+        '  [ -d "$d" ] || continue',
+        '  chmod 700 "$d" || { echo "The folder $d must be private to the project user and cannot be made so (it belongs to"'
+        ' "another user, or the site refuses the change)."; fail 233; }',
+        'done; unset d',
         'KEY=$(printf %s "$IMAGE_REF" | sha256sum | cut -c1-16)',
         'SIF=$SCR/sif-cache/$KEY.sif',
         # The step's inputs (spec.inputs), each a whole dataset commit, presented to the step under one root,

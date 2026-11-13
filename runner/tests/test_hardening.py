@@ -350,7 +350,8 @@ def test_a_shared_node_host_removes_the_copy_of_its_script_on_every_way_out(tmp_
     info = json.loads(seen.read_text())
     print(out)
     assert info["token_in_copy"] is True, "the copy is a real copy of the script: " + out
-    assert info["copy_mode"] == 0o600 and info["dir_mode"] == 0o700 and info["umask"] == 0o077
+    # (& 0o777: a folder in the project's root inherits the setgid bit of the shared folder above it; the group stays)
+    assert info["copy_mode"] == 0o600 and info["dir_mode"] & 0o777 == 0o700 and info["umask"] == 0o077
     assert str(site.scratch / "kaos-priv") in info["copy"] and not info["copy"].startswith("/tmp/")
     assert not os.path.exists(info["copy"]) and not os.path.exists(os.path.dirname(info["copy"])), "gone"
     assert proc.returncode == (143 if cancel else 7)
@@ -717,7 +718,7 @@ def test_the_variables_of_a_running_step_are_in_a_private_folder_and_gone_on_can
         time.sleep(0.05)
     env_dir = site.scratch / "kaos-tmp" / "env-5001"
     try:
-        assert stat.S_IMODE(os.stat(str(env_dir)).st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(str(env_dir)).st_mode) & 0o777 == 0o700
         files = {f.name: stat.S_IMODE(f.stat().st_mode) for f in env_dir.iterdir()}
         assert set(files) == {"KAOS_STEP_CONTEXT", "LAKEFS_BEARER_TOKEN", "MLFLOW_TRACKING_TOKEN"} or \
             set(files) >= {"KAOS_STEP_CONTEXT", "LAKEFS_BEARER_TOKEN"}, files
