@@ -107,7 +107,7 @@ class Net:
         if "/objects?" in url:
             name = urllib.parse.unquote(url.split("path=", 1)[1])
             if name.startswith("hpc-outputs/"):
-                assert "/repositories/outputs-yolo/branches/hpc-%s-model-training/objects?" % WF in url, url
+                assert "/repositories/outputs-yolo/refs/hpc-%s-model-training/objects?" % WF in url, url   # lakeFS has no GET on branches/<b>/objects
                 assert req.get_header("Authorization", "").startswith("Basic "), "fetched with the app's key"
                 self.fetched.append(name)
                 if self.fail:
