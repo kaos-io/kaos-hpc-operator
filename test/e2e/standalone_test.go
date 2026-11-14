@@ -139,9 +139,10 @@ spec:
   limits: {maxConcurrentJobs: 2}
 `
 
-// appGrantManifest is what the platform renders for a deployed app (the app's composition): its workflow service account
-// in the environment namespace, and the Role and RoleBinding that let the runner's service account (in the site's
-// namespace) create a token for that one service account and no other. The runner exchanges that token at the data store.
+// appGrantManifest is what the platform renders for a deployed app (the app's composition): its workflow service
+// account in the environment namespace, and the Role and RoleBinding that let the runner's service account (in the
+// site's namespace) create a token for that one service account and no other. The runner exchanges that token at the
+// data store.
 const appGrantManifest = `
 apiVersion: v1
 kind: ServiceAccount
@@ -198,7 +199,8 @@ spec:
   workflow: {name: e2e-stranger-wf, uid: ` + e2eStrangerWF + `}
 `
 
-const strangerContext = `{"version":1,"run":"e2e-stranger-wf","app":"e2e-stranger","project":"e2e","step":"e2e-step","kind":"train",` +
+const strangerContext = `{"version":1,"run":"e2e-stranger-wf","app":"e2e-stranger","project":"e2e",` +
+	`"step":"e2e-step","kind":"train",` +
 	`"experiment":"e2e","params":{},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[],"upstream":{}}`
 
 // e2eContext is the step context of the standalone job (docs/step-contract.md, section 3).
@@ -214,8 +216,8 @@ func kubectlGet(jsonpath string, args ...string) string {
 	return strings.TrimSpace(out)
 }
 
-// fakeSiteGet reads one of the fake site's inspection endpoints from inside the controller's container (same DNS and trust
-// as the runner's own calls).
+// fakeSiteGet reads one of the fake site's inspection endpoints from inside the controller's container (same DNS and
+// trust as the runner's own calls).
 func fakeSiteGet(path string, out any) {
 	probe := "import urllib.request as u;r=u.Request('https://" + fakeSlurmHost + path + "'," +
 		"headers={'X-SLURM-USER-TOKEN':'" + fakeSlurmTok + "'});print(u.urlopen(r,timeout=10).read().decode())"
@@ -270,7 +272,8 @@ func standaloneSpecs() {
 			"--from-literal=ZITADEL_MACHINE_KEY="+key))
 		Expect(err).NotTo(HaveOccurred())
 
-		By("rendering what the platform renders for the deployed app: its workflow service account and the runner's grant to it")
+		By("rendering what the platform renders for the deployed app: " +
+			"its workflow service account and the runner's grant to it")
 		out, err = kubectlApply(appGrantManifest)
 		Expect(err).NotTo(HaveOccurred(), out)
 
@@ -335,10 +338,12 @@ func standaloneSpecs() {
 		Expect(sent.Script).To(ContainSubstring("/kaos/key"))
 		Expect(sent.Env).To(HaveKey("LAKEFS_ENDPOINT"))
 		for k, v := range sent.Env {
-			Expect(k).NotTo(MatchRegexp(`(?i)LAKEFS_(ACCESS|SECRET|TOKEN|KEY_ID|AUTH)`), "no data-store credential in the environment")
+			Expect(k).NotTo(MatchRegexp(`(?i)LAKEFS_(ACCESS|SECRET|TOKEN|KEY_ID|AUTH)`),
+				"no data-store credential in the environment")
 			Expect(v).NotTo(HavePrefix("eyJ"), "%s holds a bearer token", k)
 		}
-		Expect(sent.Env["LAKEFS_KEY_FILE"]).To(BeEmpty(), "the key file's path is set by the job script, never in the environment")
+		Expect(sent.Env["LAKEFS_KEY_FILE"]).To(BeEmpty(),
+			"the key file's path is set by the job script, never in the environment")
 		for _, key := range []string{"fake-app-secret-key", "AKIAFAKEAPPKEY"} {
 			Expect(sent.Script).NotTo(ContainSubstring(key), "the app's key is never in the job script")
 			for k, v := range sent.Env {
@@ -373,7 +378,8 @@ func standaloneSpecs() {
 		for _, e := range exchanges {
 			Expect(e.Subject).NotTo(ContainSubstring(e2eStrangerApp))
 		}
-		Expect(kubectlGet("{.status.bookedNodeMinutes}", "hpcsite", "site", "-n", e2eHPCNS)).To(SatisfyAny(BeEmpty(), Equal("0")))
+		Expect(kubectlGet("{.status.bookedNodeMinutes}", "hpcsite", "site", "-n", e2eHPCNS)).
+			To(SatisfyAny(BeEmpty(), Equal("0")))
 	})
 }
 
