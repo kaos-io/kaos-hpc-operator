@@ -20,7 +20,7 @@ import (
 //	                                                         app (audience kaos-lake) for the app's key pair
 //	GET    /fake/v1/submissions, /fake/v1/exchanges          what reached the site (environment and script of each submitted
 //	                                                         job) and what the key exchange was asked: for a test to read
-//	GET    /lakefs/api/v1/repositories/<r>/branches/<b>/objects?path=hpc-outputs/<wf>/<step>/<job id>/<name>
+//	GET    /lakefs/api/v1/repositories/<r>/refs/<b>/objects?path=hpc-outputs/<wf>/<step>/<job id>/<name>
 //	DELETE /lakefs/api/v1/repositories/<r>/branches/<b>      the hand-off branch, when the runner is done
 //	GET    /lakefs/api/v1/repositories/<r>/refs/<c>/objects/ls   an empty listing (no dataset is served)
 //
@@ -78,7 +78,7 @@ func (s *Site) dataPlane(w http.ResponseWriter, r *http.Request) bool {
 		w.WriteHeader(http.StatusNoContent)
 	case len(parts) == 5 && parts[1] == "refs" && parts[3] == "objects" && parts[4] == "ls":
 		writeJSON(w, http.StatusOK, map[string]any{"results": []any{}, "pagination": map[string]any{"has_more": false}})
-	case len(parts) == 4 && parts[1] == "branches" && parts[3] == "objects" && r.Method == http.MethodGet:
+	case len(parts) == 4 && parts[1] == "refs" && parts[3] == "objects" && r.Method == http.MethodGet:
 		s.handedBack(w, r.URL.Query())
 	default:
 		writeErr(w, http.StatusNotFound, "no such endpoint")
