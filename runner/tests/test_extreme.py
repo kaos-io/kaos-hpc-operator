@@ -433,7 +433,7 @@ def test_should_retry_an_unreachable_stager_with_bounded_waits_then_stage_in_job
         sleeps.append(s)
         clock[0] += s
     monkeypatch.setattr(staging.time, "sleep", sleep)
-    path = staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt")
+    path = staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key)
     assert path == "", "nothing staged: the job stages in-job and the step is not failed"
     assert sleeps and max(sleeps) <= 600, "waits are capped at 10 min"
     assert sum(sleeps) <= staging.STAGE_BUDGET_S + 600, "the whole wait is bounded by the staging budget (4 h)"

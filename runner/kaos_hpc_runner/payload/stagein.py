@@ -1,12 +1,22 @@
 
-import concurrent.futures, json, os, pathlib, sys, time, urllib.parse, urllib.request
+import base64, concurrent.futures, json, os, pathlib, sys, time, urllib.parse, urllib.request
 os.umask(0o077)   # every file and folder of a copy is private to the site user (the data cache is shared between ITS jobs only)
 EP = os.environ['LAKEFS_ENDPOINT'].rstrip('/')
-H = {'Authorization': 'Bearer ' + os.environ['LAKEFS_BEARER_TOKEN']}
+KEY_FILE = os.environ['LAKEFS_KEY_FILE']
+def auth():
+    # The app's key pair, read from the key file at every call: the platform replaces the file before the key ends, so a
+    # stage-in longer than the key's life carries on with the new one. The values never go into a message.
+    try:
+        d = json.load(open(KEY_FILE))
+        pair = d['access_key_id'] + ':' + d['secret_access_key']
+    except (OSError, ValueError, KeyError, TypeError):
+        sys.exit('stage-in: the key file %s has no access key (it is missing or unreadable). Nothing more was downloaded. '
+                 'Run the step again.' % KEY_FILE)
+    return {'Authorization': 'Basic ' + base64.b64encode(pair.encode()).decode()}
 REPO = os.environ['DATASET_REPO']
 def get(url):
     return urllib.request.urlopen(
-        urllib.request.Request(url, headers=H), timeout=120)
+        urllib.request.Request(url, headers=auth()), timeout=120)
 base = EP + '/api/v1/repositories/' + urllib.parse.quote(REPO, safe='')
 # The commit the pipeline pinned for the run, so this step reads exactly what
 # the in-cluster steps read. Nothing is resolved here.

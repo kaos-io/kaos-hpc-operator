@@ -82,6 +82,13 @@ const (
 	// submits anything; its message names the dataset and the owner. Terminal: ask the owner to share it, then run
 	// the pipeline again.
 	ReasonSharedDatasetUnavailable = "SharedDatasetUnavailable"
+	// ReasonAppIdentityUnavailable: the step's app has no identity in the data store, so a job could not read or write
+	// the app's data as the app: the app has no workflow service account in the job's namespace, is not declared in the
+	// data store with that namespace, the runner may not ask for its token, or the data store did not give a key. The
+	// runner reports it with ExitCodeAppIdentityUnavailable before it stages or submits anything (the job script
+	// reports it too when the app's key never reached the site); its message names the app. There is no fallback to
+	// the project's token. Terminal: have the app declared and deployed to the project, then run the pipeline again.
+	ReasonAppIdentityUnavailable = "AppIdentityUnavailable"
 	// ReasonResultNotHandedBack: the step ended well, but no result of it reached status.result: the step wrote
 	// none, the job could not read or upload the result file, or the runner could not fetch it (PRD kaos#1911
 	// CON-04). Also when the run has no way to hand a result back at all (no data-plane token,
@@ -148,6 +155,9 @@ const (
 	// ExitCodeSharedDatasetUnavailable is the exit code the runner reports (state FAILED, no site job) when a
 	// dataset another project shares cannot be read for the step.
 	ExitCodeSharedDatasetUnavailable = int32(245)
+	// ExitCodeAppIdentityUnavailable is the exit code the runner reports (state FAILED, no site job) when the app has
+	// no identity in the data store; the job script exits with it when the app's key never reached the site.
+	ExitCodeAppIdentityUnavailable = int32(246)
 	// ExitCodeResultNotHandedBack is the exit code of a job whose step ended well but whose result could not be
 	// handed back: the job script exits with it when it cannot read or upload the result file, and the runner
 	// reports it (state FAILED) when it cannot fetch what the job uploaded, or before it submits anything when
@@ -490,7 +500,7 @@ type RunStatus struct {
 	// reserve: 210 (no Apptainer), 231 (image pull), 232 (staging), 233 (batch script), 234 (no verified
 	// checkpoint to restore), 235 (checkpoint copy or job comment failed), 236 (Idle), 237 (InsufficientQuota),
 	// 238 (SubmitLimit), 239 (InvalidImage), 240 (GPUViolation), 241 (StagingMismatch), 242 (ReservedName),
-	// 243 (ResultNotHandedBack), 244 (InvalidResult), 245 (SharedDatasetUnavailable).
+	// 243 (ResultNotHandedBack), 244 (InvalidResult), 245 (SharedDatasetUnavailable), 246 (AppIdentityUnavailable).
 	// +optional
 	ExitCode *int32 `json:"exitCode,omitempty"`
 	// StartTime and EndTime as the site reports them.

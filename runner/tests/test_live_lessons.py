@@ -270,7 +270,7 @@ def _stagein(tmp_path, stagein_py, staged_ready=False):
     staged.mkdir(parents=True)
     if staged_ready:
         (staged.parent / '.kaos-ready').write_text('{}')
-    env = dict(os.environ, SCR=str(tmp_path / 'scr'), KAOS_JOB_ID='9', LAKEFS_BEARER_TOKEN='w', LAKEFS_ENDPOINT='http://x',
+    env = dict(os.environ, SCR=str(tmp_path / 'scr'), KAOS_JOB_ID='9', LAKEFS_KEY_FILE=str(tmp_path / 'key.json'), LAKEFS_ENDPOINT='http://x',
                KAOS_INPUTS='raw|dataset-r|c0ffee12|%s' % staged,
                STAGEIN_B64=base64.b64encode(stagein_py.encode()).decode())
     (tmp_path / 'scr' / 'kaos-tmp').mkdir(parents=True)

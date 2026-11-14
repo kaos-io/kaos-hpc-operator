@@ -12,6 +12,7 @@ The whole job script runs here in bash against the stand-in node of test_step_co
 Slurm), so the script under test is the one the runner submits. No token is printed by any test: they are
 compared by value only.
 """
+import base64
 import json
 import os
 import signal
@@ -27,11 +28,12 @@ import test_step_contract as tsc
 from test_jobscript import FakeLakeFS
 from test_runner import FakeSlurm, rig  # noqa: F401
 
-from kaos_hpc_runner import jobscript, payloads, settings
+from kaos_hpc_runner import identity, jobscript, payloads, settings
 from kaos_hpc_runner import runner as runmod
 from kaos_hpc_runner.redact import Redactor
 
-WALLET = "WALLET-SECRET-" + "w" * 24          # stands in for the data/MLflow bearer
+WALLET = "WALLET-SECRET-" + "w" * 24          # stands in for the tracker's token
+KEY_SECRET = "KEY-SECRET-" + "k" * 24            # stands in for the app's data store key
 REGISTRY = "REGISTRY-SECRET-" + "r" * 24       # stands in for the registry token
 GAR = "europe-docker.pkg.dev/proj/yolo:v0.0.0"
 
@@ -194,7 +196,7 @@ if mode in ("result", "fail"):
 sys.exit(3 if mode == "fail" else 0)
 '''
 
-FILE_TOKENS = (WALLET, REGISTRY)
+FILE_TOKENS = (WALLET, REGISTRY, KEY_SECRET)
 
 
 class HSite(tsc.Site):
@@ -202,10 +204,10 @@ class HSite(tsc.Site):
         monkeypatch.setattr(tsc, "APPTAINER", CLEAN_APPTAINER)
         super().__init__(tmp_path, lakefs, shared, context or helpers.fixture("context-one-upstream.wire"), inputs=inputs,
                          does=does, monkeypatch=monkeypatch)
-        lakefs.bearer = WALLET
         self.cfg_image = image
         self.cfg.image = image
         self.runner._mint = lambda: WALLET
+        self.runner._keys = lambda: identity.Key("KAOSXHARD", KEY_SECRET, 1e12, "2099-01-01T00:00:00Z")
         self.runner.cfg = self.cfg
         (tmp_path / "step.py").write_text(STEP % dict(saw=str(self.saw), mode=does, started=str(tmp_path / "started"),
                                                       result=helpers.fixture("result-model.wire")))
@@ -213,6 +215,7 @@ class HSite(tsc.Site):
 
     def start(self, jid="5001", extra=None):
         self.runner.prepare_handback()
+        self.place_key(jid)
         batch, env, _, _ = self.runner.site_job(REGISTRY, "")
         self.batch, self.env = batch, env
         node = dict(e.split("=", 1) for e in env)
@@ -275,7 +278,7 @@ def lakefs():
 
 
 SHELL_ADDED = {"PWD", "OLDPWD", "SHLVL", "_", "LC_CTYPE"}      # what the shell that runs the step command adds itself
-STEP_ALLOWED = set(jobscript.STEP_ENV) | {"PATH", "KAOS_STAGED_ROOT", "KAOS_CHECKPOINT_DIR", "KAOS_RESUME_PATH"}
+STEP_ALLOWED = set(jobscript.STEP_ENV) | {"LAKEFS_KEY_FILE", "PATH", "KAOS_STAGED_ROOT", "KAOS_CHECKPOINT_DIR", "KAOS_RESUME_PATH"}
 
 
 @tsc.MODES
@@ -286,9 +289,10 @@ def test_the_step_receives_the_allow_list_and_nothing_else(tmp_path, lakefs, mon
     outside = set(saw) - SHELL_ADDED - STEP_ALLOWED
     assert not outside, "outside the allow-list: " + ", ".join(sorted(outside))
     assert "REG_TOKEN" not in saw and REGISTRY not in json.dumps(saw), "the registry token never reaches the step"
-    for k in ("KAOS_STEP_CONTEXT", "LAKEFS_ENDPOINT", "LAKEFS_BEARER_TOKEN", "KAOS_CHECKPOINT_DIR"):
+    for k in ("KAOS_STEP_CONTEXT", "LAKEFS_ENDPOINT", "LAKEFS_KEY_FILE", "KAOS_CHECKPOINT_DIR"):
         assert saw.get(k), k + " is what the step needs"
-    assert saw["LAKEFS_BEARER_TOKEN"] == WALLET
+    assert "LAKEFS_BEARER_TOKEN" not in saw and KEY_SECRET not in json.dumps(saw), "the step gets a file, never the key itself"
+    assert saw["LAKEFS_KEY_FILE"].endswith("/kaos/key/lakefs-key.json"), "the file the folder is bound to inside the container"
     assert saw["KAOS_STEP_CONTEXT"] == helpers.fixture("context-one-upstream.wire"), "the context, unchanged"
     assert not {"WF_UID", "STEP_NAME", "STEP_CMD", "IMAGE_REF", "CKPT_B64", "HANDBACK_B64", "STAGEIN_B64", "IDLEWATCH_B64",
                 "KAOS_OUTPUTS_REPO", "HPC_GPUS", "KAOS_WORK", "SAW", "FAKE_ROOT"} & set(saw)
@@ -481,12 +485,12 @@ def test_the_exact_credentials_the_job_holds_are_redacted_in_every_spelling_with
     forms = [HELD, base64.b64encode(HELD.encode()).decode(), base64.urlsafe_b64encode(HELD.encode()).decode().rstrip("="),
              urllib.parse.quote(HELD, safe=""), base64.b64encode(b"oauth2accesstoken:" + HELD.encode()).decode()]
     text = "".join("line %d: the server said [%s] and nothing else\n" % (i, f) for i, f in enumerate(forms))
-    out = _node_redact(text, env={"LAKEFS_BEARER_TOKEN": HELD})
+    out = _node_redact(text, env={"MLFLOW_TRACKING_TOKEN": HELD})
     for f in forms:
         assert f not in out
     assert out.count("[redacted]") == len(forms) and "the server said [[redacted]]" in out
     # the same held value, in a log line, is not redacted when it is not a credential this job holds
-    assert _node_redact(text, env={"LAKEFS_BEARER_TOKEN": "something-else-entirely"}) == text
+    assert _node_redact(text, env={"MLFLOW_TRACKING_TOKEN": "something-else-entirely"}) == text
 
 
 def test_a_value_too_short_to_be_a_credential_does_not_blot_out_the_output():
@@ -522,13 +526,23 @@ def test_the_comment_of_a_failed_job_holds_no_credential(tmp_path):
         + "\nhttps://u:PASSWD123@h/x\nlogin failed for " + WALLET + "\nboom\n")
     env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], OUT=str(tmp_path / "args"),
                KAOS_JOB_ID="4242", KAOS_COMMENT_RETRY_SLEEP="0", REDACT_B64=payloads.b64(payloads.REDACT),
-               LAKEFS_BEARER_TOKEN=WALLET)
+               MLFLOW_TRACKING_TOKEN=WALLET)
     assert subprocess.run(["bash", "-c", fail + "\nfail 7"], cwd=str(tmp_path), env=env).returncode == 7
     comment = (tmp_path / "args").read_text().split("\n")[2]
     assert comment.startswith("Comment=err7:") and "boom" in comment and "[redacted" in comment
     for secret in (WALLET, "BEARERVALUE123", "eyJhbGci", "A" * 40, "PASSWD123"):
         assert secret not in comment, "a credential or a piece of one is in the job comment"
     assert len(comment) < 800
+
+
+def test_the_app_key_in_its_file_is_redacted_on_the_node_in_every_spelling(tmp_path):
+    """AC-14 B: the key is in a file, not a variable: the node's redactor reads the file and hides the secret, the id
+    with it, and the pair a Basic header holds."""
+    path = helpers.write_key_file(tmp_path / "key", identity.Key("KAOSXHARD", KEY_SECRET, 1e12, "x"))
+    pair = base64.b64encode(("KAOSXHARD:" + KEY_SECRET).encode()).decode()
+    text = "bad: %s\nid %s\nAuthorization header %s\nfine line\n" % (KEY_SECRET, "KAOSXHARD", pair)
+    out = _node_redact(text, env={"LAKEFS_KEY_FILE": path})
+    assert KEY_SECRET not in out and pair not in out and "KAOSXHARD" not in out and "fine line" in out, out
 
 
 def test_the_log_stream_redacts_every_line_before_it_prints_it():
@@ -557,7 +571,7 @@ def test_the_two_places_that_run_the_step_name_the_same_variables():
     # The allow-list is one tuple; the script's loop and the contract text read it.
     line = next(ln for ln in jobscript.batch_lines("-", "/scr") if ln.startswith("KAOS_STEP_ENV="))
     assert line == 'KAOS_STEP_ENV="%s"' % " ".join(jobscript.STEP_ENV)
-    assert "LAKEFS_BEARER_TOKEN" in jobscript.STEP_ENV and "REG_TOKEN" not in jobscript.STEP_ENV
+    assert "LAKEFS_BEARER_TOKEN" not in jobscript.STEP_ENV and "REG_TOKEN" not in jobscript.STEP_ENV
     assert sys.version_info >= (3, 6)
 
 
@@ -720,10 +734,12 @@ def test_the_variables_of_a_running_step_are_in_a_private_folder_and_gone_on_can
     try:
         assert stat.S_IMODE(os.stat(str(env_dir)).st_mode) & 0o777 == 0o700
         files = {f.name: stat.S_IMODE(f.stat().st_mode) for f in env_dir.iterdir()}
-        assert set(files) == {"KAOS_STEP_CONTEXT", "LAKEFS_BEARER_TOKEN", "MLFLOW_TRACKING_TOKEN"} or \
-            set(files) >= {"KAOS_STEP_CONTEXT", "LAKEFS_BEARER_TOKEN"}, files
+        assert set(files) >= {"KAOS_STEP_CONTEXT"} and "LAKEFS_BEARER_TOKEN" not in files, files
         assert set(files.values()) == {0o600}
-        assert (env_dir / "LAKEFS_BEARER_TOKEN").read_text() == WALLET
+        assert (env_dir / "MLFLOW_TRACKING_TOKEN").read_text() == WALLET
+        key_dir = site.scratch / "kaos-tmp" / "key-5001"          # the key is in its own folder, never among the variables
+        assert stat.S_IMODE(os.stat(str(key_dir)).st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(str(key_dir / "lakefs-key.json")).st_mode) == 0o600
     finally:
         os.killpg(p.pid, signal.SIGTERM)
         site.kill_step()
@@ -967,7 +983,7 @@ def test_the_held_bearers_are_redacted_in_hex_and_with_json_escaped_slashes():
     spellings = [binascii.hexlify(held.encode()).decode(), binascii.hexlify(held.encode()).decode().upper(),
                  held.replace("/", "\\/"), b64.replace("/", "\\/"), b64]
     text = "".join("[%s]\n" % sp for sp in spellings)
-    out = _node_redact(text, env={"LAKEFS_BEARER_TOKEN": held})
+    out = _node_redact(text, env={"MLFLOW_TRACKING_TOKEN": held})
     for sp in spellings:
         assert sp not in out, sp
     assert out.count("[redacted]") == len(spellings)

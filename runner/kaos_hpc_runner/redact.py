@@ -6,7 +6,7 @@ programs, so it must stay Python 3.6 and standard library only), and in the runn
 line of step output through it before it is printed to the platform's log stream.
 
 What is redacted (by SHAPE or by exact value, never by "the line has the word key/token in it"):
-  * the exact values of the credentials the job itself holds (the data/MLflow bearer, the registry token) and their
+  * the exact values of the credentials the job itself holds (the tracker's token, the registry token, the app's data store key from its file) and their
     base64 and URL-encoded forms: no guessing needed;
   * Bearer / Basic values of 16+ characters, the value after `Authorization:`, `Proxy-Authorization:`, `X-...-Key/Token/Secret:`,
     `Api-Key:`, a `Cookie:` header;
@@ -38,7 +38,18 @@ import urllib.parse
 REDACTED = '[redacted]'
 MIN_LITERAL = 8       # a held value shorter than this is not a credential, and would blot out ordinary text
 # The variables of the job script that hold credentials; their exact values are looked for in the output.
-HELD_ENV = ('LAKEFS_BEARER_TOKEN', 'MLFLOW_TRACKING_TOKEN', 'REG_TOKEN', 'APPTAINER_DOCKER_PASSWORD')
+HELD_ENV = ('MLFLOW_TRACKING_TOKEN', 'REG_TOKEN', 'APPTAINER_DOCKER_PASSWORD')
+# The app's data store key is in a file (LAKEFS_KEY_FILE), not in a variable: its secret, its id and the pair a Basic header holds.
+KEY_FILE_ENV = 'LAKEFS_KEY_FILE'
+
+
+def key_file_values(path):
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return (d['secret_access_key'], d['access_key_id'], d['access_key_id'] + ':' + d['secret_access_key'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ()
 
 # a quoted value up to its closing quote (it may hold spaces), else one word
 _VALUE = r'(?!\[redacted)(?:(?<=")[^"\\]{1,2000}|(?<=\')[^\'\\]{1,2000}|[^\s"\'\\,;&|}\])]{1,2000})'
@@ -176,7 +187,7 @@ class Redactor:
 
 def main():
     """stdin to stdout, as the job script uses it; the held values come from this process's environment."""
-    red = Redactor(os.environ.get(n) for n in HELD_ENV)
+    red = Redactor([os.environ.get(n) for n in HELD_ENV] + list(key_file_values(os.environ.get(KEY_FILE_ENV, ''))))
     src, dst = sys.stdin.buffer, sys.stdout.buffer
     for raw in src:
         body = raw.rstrip(b'\r\n')

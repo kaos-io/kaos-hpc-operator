@@ -101,7 +101,7 @@ def _handback(tmp_path, lakefs, write=None, **extra):
     out.mkdir(parents=True, exist_ok=True)
     if write is not None:
         (out / "kaos-result.json").write_bytes(write)
-    env = dict(os.environ, LAKEFS_ENDPOINT=lakefs.url, LAKEFS_BEARER_TOKEN="wallet", KAOS_OUTPUTS_REPO="outputs-yolo",
+    env = dict(os.environ, LAKEFS_ENDPOINT=lakefs.url, LAKEFS_KEY_FILE=helpers.write_key_file(tmp_path / "key"), KAOS_OUTPUTS_REPO="outputs-yolo",
                WF_UID=WF, STEP_NAME=STEP, KAOS_JOB_ID="5001", KAOS_WORK=str(tmp_path / "work"), KAOS_HANDBACK_RETRY_SLEEP="0")
     env.update(extra)
     env = {k: v for k, v in env.items() if v is not None}
@@ -150,7 +150,7 @@ def test_a_requeued_job_replaces_what_its_earlier_run_handed_back(tmp_path, lake
     ("a link", "is not a regular file"),
     ("unreadable", "cannot be read"),
     ("far too large", "a result may cost 8 KiB"),
-    ("no token", "the job has no LAKEFS_BEARER_TOKEN"),
+    ("no key file", "the job has no LAKEFS_KEY_FILE"),
     ("no repository", "the job has no KAOS_OUTPUTS_REPO"),
 ])
 def test_a_hand_back_that_fails_ends_non_zero_and_says_why(tmp_path, lakefs, case, said):
@@ -171,8 +171,8 @@ def test_a_hand_back_that_fails_ends_non_zero_and_says_why(tmp_path, lakefs, cas
             pytest.skip("running as a user that reads every file")
     elif case == "far too large":
         write = b"x" * (64 * 1024 + 1)
-    elif case == "no token":
-        extra, write = {"LAKEFS_BEARER_TOKEN": None}, b"{}"
+    elif case == "no key file":
+        extra, write = {"LAKEFS_KEY_FILE": None}, b"{}"
     elif case == "no repository":
         extra, write = {"KAOS_OUTPUTS_REPO": None}, b"{}"
     p = _handback(tmp_path, lakefs, write=write, **extra)
@@ -297,8 +297,9 @@ class Site:
         self.cfg.check_job()
         monkeypatch.setattr(runmod.wallet, "fetch_workdir", lambda image, token: "")
         self.runner = runmod.Runner(self.cfg, slurm=object(), stager=object(), reporter=object(), logs=object(),
-                                    mint=lambda: "wallet")
+                                    mint=lambda: "wallet", keys=helpers.FakeKeys())
         self.shared, self.does, self.drop = shared, does, drop
+        self.place = True                     # False: the staging tool never placed the app's key on the site
         self.saw = tmp_path / "saw.json"
 
     def resident(self, inp, files, marker=True):
@@ -316,15 +317,22 @@ class Site:
         self.runner.staged[inp["name"]] = str(d / "data")
         return d
 
+    def place_key(self, jid):
+        """What the staging tool's `key` verb does on the site: the app's key in the job's own folder, 0700 / 0600."""
+        helpers.write_key_file(self.scratch / "kaos-tmp" / ("key-" + jid), self.runner.key)
+        self.lakefs.auth = self.runner.key.auth()          # the data store knows the pair the runner obtained
+
     def run(self, jid="5001", result_text=None):
         self.runner.prepare_handback()
+        if self.place:
+            self.place_key(jid)
         batch, env, commits, limit = self.runner.site_job("", "")
         self.batch, self.env = batch, env
         node = dict(e.split("=", 1) for e in env)
         node.update(PATH=str(self.tmp / "bin") + os.pathsep + os.environ["PATH"], SLURM_JOB_ID=jid, HOME=str(self.home),
                     FAKE_ROOT=str(self.tmp / "rootfs"), SAW=str(self.saw), STEP_DOES=self.does,
                     STEP_RESULT=result_text or helpers.fixture("result-model.wire"), KAOS_HANDBACK_RETRY_SLEEP="0",
-                    KAOS_COMMENT_RETRY_SLEEP="0")
+                    KAOS_COMMENT_RETRY_SLEEP="0", KAOS_KEY_WAIT_S="2")
         if self.shared:
             node["KAOS_IN_STEP"] = "1"        # on a shared node the host runs each step's script as a job step
         script = self.tmp / "job.sh"
@@ -440,7 +448,6 @@ def test_a_result_left_by_an_earlier_run_under_the_same_job_id_is_never_handed_b
 @pytest.mark.parametrize("case, said", [
     ("lakeFS refuses the upload", "result hand-back: lakeFS did not take the step's result"),
     ("the result file is a folder", "result hand-back: the result file"),
-    ("the job has no token", "result hand-back: the job has no LAKEFS_BEARER_TOKEN"),
     ("the job has no hand-back program", "result hand-back: the job has no hand-back program"),
 ])
 def test_a_hand_back_that_fails_fails_the_job_243_and_the_log_says_why(tmp_path, lakefs, monkeypatch, shared, case, said):
@@ -449,8 +456,6 @@ def test_a_hand_back_that_fails_fails_the_job_243_and_the_log_says_why(tmp_path,
         lakefs.fail_uploads = 99
     elif case == "the result file is a folder":
         does = "folder"      # the step itself makes it (the script clears a result FILE left behind before the step)
-    elif case == "the job has no token":
-        drop = ("LAKEFS_BEARER_TOKEN",)
     else:
         drop = ("HANDBACK_B64",)
     site = Site(tmp_path, lakefs, shared, helpers.fixture("context-one-upstream.wire"), does=does, drop=drop, monkeypatch=monkeypatch)
@@ -458,6 +463,17 @@ def test_a_hand_back_that_fails_fails_the_job_243_and_the_log_says_why(tmp_path,
     assert said in site.out
     assert _handed(lakefs) == {}, "nothing was handed back in its place"
     assert (site.scratch / "kaos-work" / "5001").exists(), "a failed job keeps its work folder"
+
+
+@MODES
+def test_a_job_whose_key_never_came_ends_246_without_starting_the_step(tmp_path, lakefs, monkeypatch, shared):
+    """AC-14 B: the job never starts a step, a stage-in or a hand-back without the app's key; it says why."""
+    site = Site(tmp_path, lakefs, shared, helpers.fixture("context-one-upstream.wire"), monkeypatch=monkeypatch)
+    site.place = False
+    assert site.run() == 246, site.out
+    assert "the app's data store key was not placed on the site" in site.out
+    assert not site.saw.exists(), "the step never started"
+    assert _handed(lakefs) == {}
 
 
 @MODES

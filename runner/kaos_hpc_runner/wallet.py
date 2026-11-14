@@ -1,4 +1,5 @@
-"""The data-plane wallet: a short-lived Zitadel bearer minted from the mounted machine key.
+"""The tracker token: a short-lived Zitadel bearer minted from the mounted machine key (the data store has its own
+identity, identity.py; this token never goes to it).
 
 Same JWT-profile recipe as the seeded mlflow_zitadel_auth module (assertion aud = https://{domain};
 the project-audience scope is what makes the token acceptable to mlflow-oidc-auth AND carries the
@@ -94,9 +95,27 @@ def jwt_rs256(claims, pem, kid):
     return head + '.' + body + '.' + _b64(rs256(pem, signing))
 
 
+_FALLBACK_SAID = False
+
+
+def mint_tracker(env=None):
+    """The tracker's token (MLFLOW_TRACKING_TOKEN), minted from the project's second, non-admin machine user (Secret
+    mlflow-hpc). The data store never gets this token (its identity is the app's own key, identity.py). Without that
+    Secret the project's one machine key is used for the tracker as before, and the runner log says so once."""
+    global _FALLBACK_SAID
+    env = os.environ if env is None else env
+    hpc = env.get('ZITADEL_HPC_KEY_FILE') or settings.HPC_KEY_FILE
+    if os.path.exists(hpc):
+        return mint_wallet(env, hpc)
+    if not _FALLBACK_SAID:
+        _FALLBACK_SAID = True
+        print('tracker: the project has no machine user for jobs (Secret mlflow-hpc is absent): the tracker token is minted '
+              'from the project\'s machine key', flush=True)
+    return mint_wallet(env, env.get('ZITADEL_MACHINE_KEY_FILE') or settings.MACHINE_KEY_FILE)
+
+
 def mint_wallet(env=None, keyfile=settings.MACHINE_KEY_FILE):
     env = os.environ if env is None else env
-    keyfile = env.get('ZITADEL_MACHINE_KEY_FILE') or keyfile
     domain = env.get('ZITADEL_DOMAIN') or ''
     if not keyfile or not os.path.exists(keyfile) or not domain:
         print('wallet: machine key / domain absent, data-plane env omitted', flush=True)

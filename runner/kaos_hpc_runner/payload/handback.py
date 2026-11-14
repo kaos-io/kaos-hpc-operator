@@ -10,7 +10,7 @@
 # Any failure ends this program with a line "result hand-back: <cause>" and a non-zero exit; the job script
 # then ends the job 243 (ResultNotHandedBack). Nothing here reports success on failure (PRD kaos#1911 CON-04).
 # Runs under the node's system python3 (3.6, stdlib only).
-import json, os, stat, sys, time, urllib.error, urllib.parse, urllib.request
+import base64, json, os, stat, sys, time, urllib.error, urllib.parse, urllib.request
 
 MAX_BYTES = 64 * 1024   # a result may cost 8 KiB; a file far above that is not handed back at all
 
@@ -20,12 +20,22 @@ def die(why):
     sys.exit(1)
 
 
-missing = [k for k in ('LAKEFS_ENDPOINT', 'LAKEFS_BEARER_TOKEN', 'KAOS_OUTPUTS_REPO', 'WF_UID', 'STEP_NAME', 'KAOS_JOB_ID',
+missing = [k for k in ('LAKEFS_ENDPOINT', 'LAKEFS_KEY_FILE', 'KAOS_OUTPUTS_REPO', 'WF_UID', 'STEP_NAME', 'KAOS_JOB_ID',
                        'KAOS_WORK') if not os.environ.get(k)]
 if missing:
     die('the job has no %s, so the step\'s result cannot be handed back' % ', '.join(missing))
 base = os.environ['LAKEFS_ENDPOINT'].rstrip('/') + '/api/v1/repositories/' + urllib.parse.quote(os.environ['KAOS_OUTPUTS_REPO'], safe='')
-H = {'Authorization': 'Bearer ' + os.environ['LAKEFS_BEARER_TOKEN']}
+KEY_FILE = os.environ['LAKEFS_KEY_FILE']
+
+
+def auth():
+    # The app's key pair, read from the key file at every call (the platform replaces the file before the key ends).
+    try:
+        d = json.load(open(KEY_FILE))
+        pair = d['access_key_id'] + ':' + d['secret_access_key']
+    except (OSError, ValueError, KeyError, TypeError):
+        die('the key file %s has no access key (it is missing or unreadable)' % KEY_FILE)
+    return {'Authorization': 'Basic ' + base64.b64encode(pair.encode()).decode()}
 branch = 'hpc-%s-%s' % (os.environ['WF_UID'], os.environ['STEP_NAME'])
 prefix = 'hpc-outputs/%s/%s/%s/' % (os.environ['WF_UID'], os.environ['STEP_NAME'], os.environ['KAOS_JOB_ID'])
 path = os.path.join(os.environ['KAOS_WORK'], 'output', 'kaos-result.json')
@@ -67,7 +77,7 @@ def call(req, ok=()):
 call(urllib.request.Request(
     base + '/branches', method='POST',
     data=json.dumps({'name': branch, 'source': 'main'}).encode(),
-    headers=dict(H, **{'Content-Type': 'application/json'})), ok=(409,))   # 409: the branch is there already
+    headers=dict(auth(), **{'Content-Type': 'application/json'})), ok=(409,))   # 409: the branch is there already
 # A random boundary that is not in the file: a server ends the part at the first delimiter line it meets, so a
 # result holding "\r\n--<boundary>" would be cut there and a valid prefix taken for the whole.
 while True:
@@ -78,10 +88,10 @@ body = (b'--' + boundary + b'\r\nContent-Disposition: form-data; name="content";
         b'Content-Type: application/octet-stream\r\n\r\n' + data + b'\r\n--' + boundary + b'--\r\n')
 call(urllib.request.Request(
     base + '/branches/%s/objects?%s' % (branch, urllib.parse.urlencode({'path': prefix + name})), data=body, method='POST',
-    headers=dict(H, **{'Content-Type': 'multipart/form-data; boundary=' + boundary.decode()})))
+    headers=dict(auth(), **{'Content-Type': 'multipart/form-data; boundary=' + boundary.decode()})))
 # A requeued job runs again under the same site job id: what its earlier run left must not stand beside this.
 call(urllib.request.Request(
     base + '/branches/%s/objects?%s' % (branch, urllib.parse.urlencode({'path': prefix + other})), method='DELETE',
-    headers=H), ok=(404,))
+    headers=auth()), ok=(404,))
 print('result hand-back: %s' % ('the step wrote no result' if name.endswith('.absent')
                                  else 'kaos-result.json, %d bytes' % len(data)), flush=True)

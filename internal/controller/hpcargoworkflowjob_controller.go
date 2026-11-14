@@ -475,7 +475,8 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 // refusedBeforeStaging is true for the reasons the runner ends an attempt with before it stages or submits anything.
 func refusedBeforeStaging(reason string) bool {
 	switch reason {
-	case hpcv1alpha1.ReasonStagingMismatch, hpcv1alpha1.ReasonReservedName, hpcv1alpha1.ReasonSharedDatasetUnavailable:
+	case hpcv1alpha1.ReasonStagingMismatch, hpcv1alpha1.ReasonReservedName, hpcv1alpha1.ReasonSharedDatasetUnavailable,
+		hpcv1alpha1.ReasonAppIdentityUnavailable:
 		return true
 	}
 	return false
@@ -490,6 +491,7 @@ var failedExitReasons = map[int32]string{
 	hpcv1alpha1.ExitCodeStagingMismatch:          hpcv1alpha1.ReasonStagingMismatch,
 	hpcv1alpha1.ExitCodeReservedName:             hpcv1alpha1.ReasonReservedName,
 	hpcv1alpha1.ExitCodeSharedDatasetUnavailable: hpcv1alpha1.ReasonSharedDatasetUnavailable,
+	hpcv1alpha1.ExitCodeAppIdentityUnavailable:   hpcv1alpha1.ReasonAppIdentityUnavailable,
 	hpcv1alpha1.ExitCodeResultNotHandedBack:      hpcv1alpha1.ReasonResultNotHandedBack,
 	hpcv1alpha1.ExitCodeInvalidResult:            hpcv1alpha1.ReasonInvalidResult,
 	hpcv1alpha1.ExitCodeSubmitLimit:              hpcv1alpha1.ReasonSubmitLimit,

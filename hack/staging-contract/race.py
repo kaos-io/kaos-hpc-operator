@@ -48,6 +48,9 @@ httpd = socketserver.ThreadingTCPServer(('127.0.0.1', 0), H)
 httpd.daemon_threads = True
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
 tmp = tempfile.mkdtemp(prefix='race-')
+_KEY = os.path.join(tmp, 'lakefs-key.json')   # the app's key file, as the site's staging tool places it
+with open(_KEY, 'w') as _f:
+    json.dump({'access_key_id': 'KAOSXA', 'secret_access_key': 'secret', 'expiration': '2099-01-01T00:00:00Z'}, _f)
 atexit.register(shutil.rmtree, tmp, True)
 scr = os.path.join(tmp, 'scr')
 dest = os.path.join(scr, 'data-cache', 'ds', COMMIT)
@@ -58,7 +61,7 @@ for rel, body in YOLO.items():
 open(os.path.join(dest, '.complete'), 'w').close()
 old = time.time() - 20 * 86400
 os.utime(os.path.join(dest, '.complete'), (old, old))
-env = dict(os.environ, LAKEFS_ENDPOINT='http://127.0.0.1:%d' % httpd.server_address[1], LAKEFS_BEARER_TOKEN='w',
+env = dict(os.environ, LAKEFS_ENDPOINT='http://127.0.0.1:%d' % httpd.server_address[1], LAKEFS_KEY_FILE=_KEY,
            DATASET_REPO='ds', DATASET_COMMIT=COMMIT, DATASET_CACHE=os.path.join(scr, 'data-cache'),
            DATASET_DIRFILE=os.path.join(tmp, 'dirfile'), SLURM_JOB_ID='9')
 lines = [l for l in jobscript.batch_lines('-', scr) if l.startswith('find $SCR/data-cache')]

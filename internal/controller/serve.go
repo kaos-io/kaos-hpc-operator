@@ -321,6 +321,9 @@ func (r *HPCArgoWorkflowJobReconciler) createRunnerJob(ctx context.Context, job 
 	if r.RunnerImage == "" {
 		return fmt.Errorf("serve-mode job %s/%s needs a runner image: start the controller with --runner-image", job.Namespace, job.Name)
 	}
+	if err := r.ensureAppIdentityAccess(ctx, job, site); err != nil {
+		return err
+	}
 	rj, err := runnerjob.Build(runnerjob.Config{Image: r.RunnerImage, Scheduling: r.RunnerScheduling, SiteWaitMax: r.siteOutageMax()}, job, site, attempt)
 	if err != nil {
 		return fmt.Errorf("building the runner Job: %w", err)

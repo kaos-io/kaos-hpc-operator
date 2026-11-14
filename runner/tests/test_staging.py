@@ -39,7 +39,7 @@ class _LakeFS:
 class _Stager:
     """Stand-in for the login-node stager: canned version and status, records stage calls."""
 
-    def __init__(self, status, stage_rcs=(0,), key=True, version=(0, 3), status_rc=0):
+    def __init__(self, status, stage_rcs=(0,), key=True, version=(0, 4), status_rc=0):
         self.status, self.stage_rcs, self.calls, self.key = status, list(stage_rcs), [], key
         self.version, self.status_rc = version, status_rc
         # What ssh printed for the last call. Exit 2 from `version` with the tool's own usage error is a tool from
@@ -57,7 +57,7 @@ class _Stager:
             return rc, ([{"event": "version", "contract": contract}] if rc == 0 else [])
         if words[0] == "status":
             if self.status_rc:
-                return self.status_rc, [{"event": "contract", "contract": 4, "got": 3}]
+                return self.status_rc, [{"event": "contract", "contract": 5, "got": 4}]
             return 0, [dict(self.status, event="status", path="/scr/kaos/p/datasets/ds/" + COMMIT)]
         rc = self.stage_rcs.pop(0)
         return rc, ([{"event": "done", "path": "/scr/kaos/p/datasets/ds/" + COMMIT}] if rc == 0 else [])
@@ -76,7 +76,7 @@ def _twin(monkeypatch, lakefs, stager, ref="latest", **env):
 
 
 def _stage(cfg, stager, wallet="wallet-jwt"):
-    return staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: wallet)
+    return staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key)
 
 
 def _listings(lakefs):
@@ -97,7 +97,7 @@ def test_first_copy_streams_every_dataset_object(monkeypatch):
     words, records = _stage_call(stager)
     assert "--base" not in words
     assert words[words.index("--need-bytes") + 1] == 113 and words[words.index("--need-files") + 1] == 3
-    assert records[0] == {"op": "auth", "authorization": "Bearer wallet-jwt"}
+    assert records[0] == {"op": "auth", "authorization": helpers.app_auth()}
     fetched = {r["path"]: r for r in records if r["op"] == "fetch"}
     assert set(fetched) == {"data.yaml", "images/a.jpg", "README.md"}, "every object of the commit"
     assert fetched["images/a.jpg"]["url"] == (
@@ -116,7 +116,7 @@ def test_a_tree_without_data_yaml_images_or_labels_is_streamed_whole(monkeypatch
     stager = _Stager({"ready": False, "base": None})
     cfg = _twin(monkeypatch, _LakeFS(NOT_YOLO), stager)
     info = {}
-    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", info=info).endswith(COMMIT)
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key, info=info).endswith(COMMIT)
     words, records = _stage_call(stager)
     assert {r["path"]: r["size"] for r in records if r["op"] == "fetch"} == NOT_YOLO
     assert records[-1] == {"op": "end", "files": 5, "bytes": 345, "ref": "main", "prefix": ""}, \
@@ -261,7 +261,7 @@ def test_a_folder_marker_is_skipped_not_refused(monkeypatch):
     stager = _Stager({"ready": False, "base": None})
     cfg = _twin(monkeypatch, _LakeFS({"docs/": 0, "docs/a.txt": 4, "empty/": 0}), stager)
     info = {}
-    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", info=info)
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key, info=info)
     words, records = _stage_call(stager)
     assert [r["path"] for r in records if r["op"] == "fetch"] == ["docs/a.txt"]
     assert records[-1]["files"] == 1 and words[words.index("--need-files") + 1] == 1 and info["files"] == 1
@@ -307,7 +307,7 @@ def test_the_runner_asks_the_staging_tool_for_its_contract_and_sends_its_own(mon
     calls = [w for w, _ in stager.calls]
     assert [w[0] for w in calls] == ["version", "status", "stage"]
     for w in calls[1:]:
-        assert w[w.index("--contract") + 1] == staging.CONTRACT == 3
+        assert w[w.index("--contract") + 1] == staging.CONTRACT == 4
 
 
 @pytest.mark.parametrize("version", [
@@ -400,7 +400,7 @@ def test_a_staging_tool_replaced_between_two_calls_stops_the_run_too(monkeypatch
     cfg = _twin(monkeypatch, _LakeFS(NOT_YOLO), stager)
     with pytest.raises(staging.StagingMismatch) as e:
         _stage(cfg, stager)
-    assert "3" in str(e.value) and [w[0] for w, _ in stager.calls] == ["version", "status"]
+    assert "5" in str(e.value) and [w[0] for w, _ in stager.calls] == ["version", "status"]
     stager = _Stager({"ready": False, "base": None}, stage_rcs=[78, 0])
     cfg = _twin(monkeypatch, _LakeFS(NOT_YOLO), stager)
     with pytest.raises(staging.StagingMismatch):
@@ -476,7 +476,7 @@ def test_a_stager_killed_mid_copy_is_resumed_by_the_next_attempt_with_the_whole_
     stager = _Stager({"ready": False, "base": None}, stage_rcs=[255, 0])
     cfg = _twin(monkeypatch, lakefs, stager)
     info = {}
-    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", info=info).endswith(COMMIT)
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key, info=info).endswith(COMMIT)
     stages = [(w, r) for w, r in stager.calls if w[0] == "stage"]
     assert len(stages) == 2, "the killed copy is retried"
     assert stages[0][1] == stages[1][1] and stages[0][1][-1] == {"op": "end", "files": 3, "bytes": 34, "ref": "main",
@@ -491,7 +491,7 @@ def test_a_stager_that_keeps_dying_never_hands_the_job_a_half_copy(monkeypatch):
     monkeypatch.setattr(staging.time, "time", lambda: clock[0])
     monkeypatch.setattr(staging.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
     info = {}
-    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", info=info) == "" and info == {}, \
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key, info=info) == "" and info == {}, \
         "no path (the job stages in-job and says so) and no staging record"
 
 
@@ -501,10 +501,17 @@ def test_without_the_staging_key_the_job_stages_in_job(monkeypatch):
     assert _stage(cfg, stager) == "" and stager.calls == []
 
 
-def test_without_a_wallet_the_job_stages_in_job(monkeypatch):
+def test_an_app_without_an_identity_does_not_stage_in_job(monkeypatch):
+    """AC-14 D: there is no stage-in without the app's key and no fallback to another credential: the error goes up."""
+    from kaos_hpc_runner import identity
     stager = _Stager({"ready": True})
     cfg = _twin(monkeypatch, _LakeFS({}), stager)
-    assert _stage(cfg, stager, wallet="") == "" and stager.calls == []
+
+    def no_key():
+        raise identity.AppIdentityUnavailable("the app yolo has no identity")
+    with pytest.raises(identity.AppIdentityUnavailable):
+        staging.stage_dataset(cfg, cfg.inputs[0], stager, no_key)
+    assert stager.calls == []
 
 
 def test_a_failed_feed_ends_the_stream_without_an_end_record(monkeypatch, tmp_path):
@@ -618,7 +625,7 @@ def test_concurrent_calls_start_one_master(monkeypatch, tmp_path):
 
 def _stage_info(cfg, stager):
     info = {}
-    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", info=info)
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key, info=info)
     return info
 
 
@@ -675,7 +682,7 @@ def test_nothing_is_recorded_when_the_job_stages_in_job(monkeypatch):
     stager = _Stager({"ready": True}, key=False)
     cfg = _twin(monkeypatch, _LakeFS({}), stager)
     info = {}
-    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "w", info=info) == "" and info == {}
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key, info=info) == "" and info == {}
 
 
 def test_the_record_holds_no_path_and_no_site_identity(monkeypatch):

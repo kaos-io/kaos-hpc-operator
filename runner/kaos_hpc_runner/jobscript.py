@@ -19,9 +19,10 @@ mode separates two of them from each other (see docs/job-environment.md).
 from .settings import CONTEXT_ENV
 
 # What the step container receives, and nothing else (Apptainer --cleanenv; see "How a value reaches the step").
-#  - the step context, the data store's endpoint and bearer, the MLflow endpoint and bearer: kaos-lib reads these
-#    from the ENVIRONMENT only (lakefs.py LAKEFS_BEARER_TOKEN, mlflow.py MLFLOW_TRACKING_TOKEN), there is no
-#    *_FILE form of either, so these two credentials are in the container's environment and nowhere else;
+#  - the step context, the data store's endpoint, the MLflow endpoint and bearer: kaos-lib reads the tracker's bearer from
+#    the ENVIRONMENT only (mlflow.py MLFLOW_TRACKING_TOKEN), so that one credential is in the container's environment and
+#    nowhere else. The data store has NO credential in the environment: the app's own key is a FILE (KEY_MOUNT), set by
+#    the script itself as APPTAINERENV_LAKEFS_KEY_FILE, which the platform replaces before the key ends;
 #  - KAOS_LIB_SUPPORT (the one variable a job's spec.env may hand over);
 #  - the GPU selection and the slot's share of the node (kaos_lib.runtime reads KUBECORE_SLOT_*);
 #  - SLURM_JOB_ID, SLURM_STEP_ID, KAOS_STEP_GPUS: the slot manager finds a step's processes (memory use, GPU
@@ -37,7 +38,7 @@ PASS_ENV = ('http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'no_proxy'
             'SLURM_JOB_NODELIST', 'SLURM_TMPDIR',
             'OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'LANG', 'LC_ALL', 'TZ', 'PYTHONUNBUFFERED', 'XDG_CACHE_HOME',
             'NVIDIA_DRIVER_CAPABILITIES', 'GPU_DEVICE_ORDINAL')
-STEP_ENV = (CONTEXT_ENV, 'LAKEFS_ENDPOINT', 'LAKEFS_BEARER_TOKEN', 'MLFLOW_TRACKING_URI', 'MLFLOW_TRACKING_TOKEN',
+STEP_ENV = (CONTEXT_ENV, 'LAKEFS_ENDPOINT', 'MLFLOW_TRACKING_URI', 'MLFLOW_TRACKING_TOKEN',
             'KAOS_LIB_SUPPORT', 'CUDA_VISIBLE_DEVICES', 'NVIDIA_VISIBLE_DEVICES', 'KUBECORE_SLOT_GPUS',
             'KUBECORE_SLOT_CPUS', 'KUBECORE_SLOT_MEM_GIB', 'KUBECORE_SLOT_SHARED', 'KAOS_STEP_GPUS',
             'SLURM_JOB_ID', 'SLURM_STEP_ID', 'SLURM_CPUS_ON_NODE') + PASS_ENV
@@ -46,15 +47,20 @@ STEP_ENV = (CONTEXT_ENV, 'LAKEFS_ENDPOINT', 'LAKEFS_BEARER_TOKEN', 'MLFLOW_TRACK
 # shell unless --no-eval is given: `$(...)`, backticks, `$VAR` and backslashes in a value are run or changed; --no-eval
 # exists since 1.1.0, and --env-file values are evaluated the same way). The script does not depend on either flag or on
 # the site's Apptainer version:
-#  - these four values always travel as files, byte for byte: the context (run parameters, any character), the two
-#    bearers, and spec.env's KAOS_LIB_SUPPORT;
+#  - these three values always travel as files, byte for byte: the context (run parameters, any character), the
+#    tracker's bearer, and spec.env's KAOS_LIB_SUPPORT;
 #  - any other value travels as APPTAINERENV_<name> ONLY when it is made of characters that evaluation leaves as they are
 #    (PLAIN_CHARS); one that is not travels as a file too;
 #  - a file holds one value, written with printf %s in a private folder (0700, file 0600) bound read-only at /kaos/env;
 #    a small loader in the container's own shell reads each file and exports the value before the step command runs.
-FILE_ENV = (CONTEXT_ENV, 'LAKEFS_BEARER_TOKEN', 'MLFLOW_TRACKING_TOKEN', 'KAOS_LIB_SUPPORT')
+FILE_ENV = (CONTEXT_ENV, 'MLFLOW_TRACKING_TOKEN', 'KAOS_LIB_SUPPORT')
 PLAIN_CHARS = ']A-Za-z0-9_.,:/+=@%[-'      # as a bash `[!...]` set; the `]` is first and the `-` last on purpose
 ENV_MOUNT = '/kaos/env'
+# The app's key file for the data store: a folder of its own (NOT the folder above: its loader exports every file there as a
+# variable), written by the runner through the staging tool, 0700/0600, replaced atomically before the key ends. Bound
+# read-only; the step finds the file by LAKEFS_KEY_FILE.
+KEY_MOUNT = '/kaos/key'
+KEY_FILE_NAME = 'lakefs-key.json'
 # POSIX sh, run by the image's /bin/sh. `$(cat f; printf x)` keeps trailing newlines, which `$(cat f)` would drop.
 LOADER = ('for f in ' + ENV_MOUNT + '/*; do [ -f "$f" ] || continue; v=$(cat "$f"; printf x); export "${f##*/}=${v%x}"; done;'
           ' unset f v;')
@@ -78,7 +84,7 @@ REDACT_HELPER = [
 # are configured as hidden"); the states that mean finished are filtered out here, so a suspended, requeued or otherwise
 # unusual live job keeps its folders. An empty answer is believed only when KAOS_SWEEP_SELF names a job that must be in it
 # (a caller that is itself a job; set but empty = do nothing) or the caller says KAOS_SWEEP_ALLOW_EMPTY=1 after its own
-# queue check. Only folders named exactly host-<digits> / in-<digits> / env-<digits> directly under <root>/kaos-priv and
+# queue check. Only folders named exactly host-<digits> / in-<digits> / env-<digits> / key-<digits> directly under <root>/kaos-priv and
 # <root>/kaos-tmp that belong to the caller and are older than KAOS_SWEEP_MIN_AGE_MIN (default 10) are removed; a link is
 # never followed; an empty or root path does nothing.
 SWEEP_HELPER = [
@@ -92,7 +98,7 @@ SWEEP_HELPER = [
     '|DEADLINE|OUT_OF_MEMORY)$/ {print $1}\')',
     '  if [ -n "${KAOS_SWEEP_SELF:-}" ]; then printf "%s\n" "$live" | grep -qx "$KAOS_SWEEP_SELF" || return 0;',
     '  elif [ -z "$live" ] && [ "${KAOS_SWEEP_ALLOW_EMPTY:-0}" != 1 ]; then return 0; fi',
-    '  for kind in kaos-priv/host kaos-tmp/in kaos-tmp/env; do',
+    '  for kind in kaos-priv/host kaos-tmp/in kaos-tmp/env kaos-tmp/key; do',
     '    [ -d "$root/${kind%/*}" ] && [ ! -L "$root/${kind%/*}" ] || continue',
     '    find "$root/${kind%/*}" -mindepth 1 -maxdepth 1 -type d -name "${kind#*/}-[0-9]*" -user "$USER"'
     ' -mmin +"${KAOS_SWEEP_MIN_AGE_MIN:-10}" 2>/dev/null | while read -r d; do',
@@ -202,7 +208,8 @@ def batch_lines(scope, scratch):
         # The job's private folder, only a shared-node host makes one. It is removed on every way out of this
         # script: the end, fail(), a signal (Slurm's TERM at cancel or at the time limit).
         'kaos_cleanup(){ [ -n "$KAOS_PRIV" ] && rm -rf "$KAOS_PRIV"; [ -n "$KAOS_IN_ROOT" ] && rm -rf "$KAOS_IN_ROOT";'
-        ' [ -n "$KAOS_ENV_DIR" ] && rm -rf "$KAOS_ENV_DIR"; return 0; }',
+        ' [ -n "$KAOS_ENV_DIR" ] && rm -rf "$KAOS_ENV_DIR";'
+        ' [ -n "$KAOS_KEY_DIR" ] && rm -rf "$KAOS_KEY_DIR"; return 0; }',
         'trap kaos_cleanup EXIT',
         # TERM/HUP/INT end the script with 143 whatever it was doing (a host job's Slurm exit code after a cancel or
         # the time limit is therefore always 143): the runner never reads a host job's exit code, it reads the step's
@@ -263,6 +270,15 @@ def batch_lines(scope, scratch):
         # a folder of this job; each copy is bound onto its folder there, whichever way it was staged.
         # KAOS_INPUTS holds one word per input: name|repository|commit|resident path|owner (the data/ folder of the
         # copy staged from the login node, whose markers are beside it).
+        # The app's key for the data store: a file the runner places through the staging tool (and replaces before the key
+        # ends). The job never starts a step, a stage-in or a hand-back without it, and a job whose key never came ends 246
+        # saying so. The file is in the job's own folder and is never copied into this script, its environment or its log.
+        'KAOS_KEY_DIR=$SCR/kaos-tmp/key-$KAOS_JOB_ID; export LAKEFS_KEY_FILE=$KAOS_KEY_DIR/' + KEY_FILE_NAME,
+        'KAOS_KEY_WAIT=0; until [ -s "$LAKEFS_KEY_FILE" ]; do',
+        '  if [ $KAOS_KEY_WAIT -ge ${KAOS_KEY_WAIT_S:-600} ]; then',
+        '    echo "the app\'s data store key was not placed on the site within ${KAOS_KEY_WAIT_S:-600} s: the job cannot read or '
+        'write the app\'s data. Run the step again"; fail 246; fi',
+        '  sleep 2; KAOS_KEY_WAIT=$((KAOS_KEY_WAIT + 2)); done',
         'BIND=""; KAOS_IN_ROOT=$SCR/kaos-tmp/in-$KAOS_JOB_ID; rm -rf "$KAOS_IN_ROOT"',
         'for KAOS_IN in $KAOS_INPUTS; do',
         '  IFS="|" read -r IN_NAME IN_REPO IN_COMMIT IN_STAGED IN_OWNER <<< "$KAOS_IN"',
@@ -276,7 +292,7 @@ def batch_lines(scope, scratch):
         # silently missing data would surface as a cryptic training error hours later. Only for the project's own
         # dataset (no owner): the job reaches only its own project's data store, where a repository of the same
         # name is another dataset. The runner never submits a job whose shared dataset is not staged.
-        '  elif [ -z "$IN_OWNER" ] && [ -n "$LAKEFS_BEARER_TOKEN" ] && [ -n "$LAKEFS_ENDPOINT" ] &&'
+        '  elif [ -z "$IN_OWNER" ] && [ -n "$LAKEFS_ENDPOINT" ] &&'
         ' [ -n "$STAGEIN_B64" ] && command -v python3 >/dev/null; then',
         '    [ -n "$IN_STAGED" ] && echo "input $IN_NAME: WARNING staged copy $IN_STAGED'
         ' not ready - downloading in-job on GPU time"',
@@ -463,7 +479,7 @@ def batch_lines(scope, scratch):
         # becomes the step's apptainer, so no other process of the job inherits them. A value that cannot be written
         # ends the step with 233: a step never starts without its context.
         'KAOS_ENV_DIR=$SCR/kaos-tmp/env-$KAOS_JOB_ID; rm -rf "$KAOS_ENV_DIR"; mkdir -m 700 "$KAOS_ENV_DIR" || fail 233',
-        'BIND="$BIND -B $KAOS_ENV_DIR:' + ENV_MOUNT + ':ro"',
+        'BIND="$BIND -B $KAOS_ENV_DIR:' + ENV_MOUNT + ':ro -B $KAOS_KEY_DIR:' + KEY_MOUNT + ':ro"',
         'KAOS_STEP_ENV="' + ' '.join(STEP_ENV) + '"',
         'KAOS_FILE_ENV="' + ' '.join(FILE_ENV) + '"',
         "KAOS_LOADER='" + LOADER + "'",
@@ -478,6 +494,7 @@ def batch_lines(scope, scratch):
         '    export SLURM_NTASKS=1; [ -n "$KAOS_STEP_GPUS" ] && export SLURM_JOB_GPUS=$KAOS_STEP_GPUS'
         ' SLURM_GPUS_ON_NODE=$(echo "$KAOS_STEP_GPUS" | tr "," "\\n" | grep -c .);',
         '  fi;',
+        '  export APPTAINERENV_LAKEFS_KEY_FILE=' + KEY_MOUNT + '/' + KEY_FILE_NAME + ';',
         '  for KAOS_V in $KAOS_STEP_ENV; do [ -n "${!KAOS_V+x}" ] || continue; KAOS_A=APPTAINERENV_$KAOS_V;',
         '    [ -z "${!KAOS_A+x}" ] || continue;',
         '    case " $KAOS_FILE_ENV " in *" $KAOS_V "*) KAOS_F=1;; *) case "${!KAOS_V}" in *[!' + PLAIN_CHARS + ']*) KAOS_F=1;;'
