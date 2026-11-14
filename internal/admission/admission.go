@@ -8,6 +8,7 @@ import (
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 	"github.com/kaos-io/kaos-hpc-operator/internal/ledger"
+	"github.com/kaos-io/kaos-hpc-operator/internal/timelimit"
 )
 
 // Decision is the outcome for one job.
@@ -62,8 +63,14 @@ func DecideFor(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, l
 	if m := site.Spec.Limits.MaxWallTimeMinutes; m > 0 && m < limit {
 		limit = m
 	}
+	// One run's access to its data and tracking is shorter than most sites' longest lane (F-40): the run is
+	// bounded by whichever ends first, and the message says which.
+	byAccess := timelimit.TokenCoverMinutes < limit
+	if byAccess {
+		limit = timelimit.TokenCoverMinutes
+	}
 	if spec.WallTimeMinutes > limit {
-		if d, refused := refuseTooLong(job, limit); refused {
+		if d, refused := refuseTooLong(job, limit, byAccess); refused {
 			return d
 		}
 	}
@@ -114,32 +121,49 @@ func refuse(reason, format string, a ...any) Decision {
 	return Decision{Phase: hpcv1alpha1.PhaseRefused, Reason: reason, Message: fmt.Sprintf(format, a...)}
 }
 
-// refuseTooLong judges a declared limit above the longest lane (PRD-HPC-1461 D-67, D-74). A step that
-// is not resumable (declared, or verified, and not opted out) is refused with the numbers and the two
-// fixes. A resumable one runs as continuations of at most the lane maximum each, so it is refused only
-// when it needs more runs than the continuation cap allows. refused is false when the step may run; the
-// controller then caps each attempt at the lane maximum (placementFor).
-func refuseTooLong(job *hpcv1alpha1.HPCArgoWorkflowJob, laneMax int32) (Decision, bool) {
+// refuseTooLong judges a declared limit above the longest run (PRD-HPC-1461 D-67, D-74; PRD kaos#1911 F-40): the
+// longest lane, or how long one run's access to its data and tracking lasts (byAccess). A step that is not
+// resumable (declared, or verified, and not opted out) is refused with the numbers and the two fixes. A resumable
+// one runs as continuations of at most that long each, so it is refused only when it needs more runs than the
+// continuation cap allows. refused is false when the step may run; the controller then caps each attempt at the
+// longest run (placementFor).
+func refuseTooLong(job *hpcv1alpha1.HPCArgoWorkflowJob, laneMax int32, byAccess bool) (Decision, bool) {
 	declared := job.Spec.WallTimeMinutes
 	if laneMax <= 0 {
 		return refuse(hpcv1alpha1.ReasonWallTimeOverLimit,
 			"wall time %d min is above the limit of %d min", declared, laneMax), true
 	}
+	step := "this step "
+	if job.Spec.StepName != "" {
+		step = "step " + job.Spec.StepName + " "
+	}
 	res := job.EffectiveResumable()
 	if res == nil {
+		if byAccess {
+			return refuse(hpcv1alpha1.ReasonTooLongNotResumable,
+				"%sasks for %s, but a run keeps its access to its data and to tracking for %s at most, and it is not resumable, "+
+					"so it would lose that access partway through and fail late. Shorten its time limit (`walltime=` in the pipeline, "+
+					"or `<step>-walltime` on the run form) to %d minutes (%s) or less, or make it resumable "+
+					"(`resumable=True` with `checkpoint_every=`) so it continues automatically in runs of up to %s",
+				step, timelimit.Hours(declared), timelimit.Hours(laneMax), laneMax, timelimit.Hours(laneMax), timelimit.Hours(laneMax)), true
+		}
 		return refuse(hpcv1alpha1.ReasonTooLongNotResumable,
-			"this step asks for %s but the longest run this site allows is %s, and it is not resumable, so it would be "+
+			"%sasks for %s but the longest run this site allows is %s, and it is not resumable, so it would be "+
 				"cut at %s. Make it resumable (write framework checkpoints into KAOS_CHECKPOINT_DIR, resumable=True) "+
 				"so it continues automatically in runs of up to %s, or set its time limit on the run form (`<step>-walltime`) to %d minutes or less",
-			Words(declared), Words(laneMax), Words(laneMax), Words(laneMax), laneMax), true
+			step, Words(declared), Words(laneMax), Words(laneMax), Words(laneMax), laneMax), true
 	}
 	runs := int64(res.MaxContinuations) + 1
 	total := int64(laneMax) * runs
 	if int64(declared) > total {
+		what := "the longest run this site allows"
+		if byAccess {
+			what = "the longest a run keeps its access to its data and to tracking"
+		}
 		return refuse(hpcv1alpha1.ReasonTooLongBeyondContinuations,
-			"this step asks for %s; as a resumable step it runs in runs of up to %s and at most %d continuations "+
+			"%sasks for %s; as a resumable step it runs in runs of up to %s, %s, and at most %d continuations "+
 				"(%d runs, %d min in all). Shorten its time limit on the run form (`<step>-walltime`) to %d minutes or less, or raise maxContinuations",
-			Words(declared), Words(laneMax), res.MaxContinuations, runs, total, total), true
+			step, Words(declared), Words(laneMax), what, res.MaxContinuations, runs, total, total), true
 	}
 	return Decision{}, false
 }

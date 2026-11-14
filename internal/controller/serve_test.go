@@ -862,7 +862,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		timeout(j, 1, 240)
 		_, got := reconcileOnce(j)
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonWallTimeReached), "the machine-read code is unchanged")
-		want := "This step ran its full 4 h time limit and was stopped. Set a longer limit for it on the run form (`<step>-walltime`, up to 48 h on this site) " +
+		want := "This step ran its full 4 h time limit and was stopped. Set a longer limit for it on the run form (`<step>-walltime`, up to 690 min on this site) " +
 			"or make it resumable so it continues automatically from a checkpoint."
 		Expect(got.Status.Message).To(Equal(want))
 		Expect(<-rec.Events).To(Equal("Warning WallTimeReached " + want))
