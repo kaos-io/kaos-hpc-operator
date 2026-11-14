@@ -69,8 +69,8 @@ initContainers:
     limits:
       memory: 512Mi
   securityContext:
-    runAsUser: 65532
-    runAsGroup: 65532
+    runAsUser: 0
+    runAsGroup: 0
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
     capabilities:
@@ -127,13 +127,15 @@ sidecars:
     limits:
       memory: 512Mi
   securityContext:
-    runAsUser: 65532
-    runAsGroup: 65532
+    runAsUser: 0
+    runAsGroup: 0
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
     capabilities:
       drop:
       - ALL
+      add:
+      - DAC_OVERRIDE
   volumeMounts:
   - name: kaos-checkpoint
     mountPath: /kaos/checkpoint

@@ -206,15 +206,31 @@ class LakeFS:
 
 # ------------------------------------------------------------------------------------ the folder
 
-def scan(folder):
-    """[(relative path, size, mtime_ns)] of the regular files under folder, sorted."""
+def scan(folder, blocked=None):
+    """[(relative path, size, mtime_ns)] of the regular files under folder, sorted. A file or folder this
+    process cannot read is left out and, when `blocked` is a list, its relative path is added to it."""
     found = []
-    for base, _dirs, files in os.walk(folder):
+
+    def refuse(path):
+        if blocked is not None:
+            blocked.append(os.path.relpath(path, folder))
+
+    def walk_error(exc):
+        refuse(exc.filename or folder)
+
+    for base, _dirs, files in os.walk(folder, onerror=walk_error):
         for name in files:
             full = os.path.join(base, name)
             if os.path.islink(full):
                 continue
-            st = os.stat(full)
+            try:
+                st = os.stat(full)
+            except OSError:
+                refuse(full)
+                continue
+            if not os.access(full, os.R_OK):
+                refuse(full)
+                continue
             found.append((os.path.relpath(full, folder), st.st_size, st.st_mtime_ns))
     return sorted(found)
 
@@ -341,7 +357,15 @@ def copy_once(api, last_signature):
     cfg, started = api.cfg, time.time()
     archive = os.path.join(cfg.stage, "copy.tar")
     try:
-        if not os.path.isdir(cfg.folder) or scan(cfg.folder) == last_signature:
+        if not os.path.isdir(cfg.folder):
+            return 0, last_signature
+        blocked = []
+        current = scan(cfg.folder, blocked)
+        if blocked:
+            say("the checkpoint folder holds %d entries the checkpoint copy helper cannot read (%s); "
+                "no checkpoint copy was saved" % (len(blocked), ", ".join(sorted(blocked)[:5])))
+            return 0, last_signature
+        if current == last_signature:
             return 0, last_signature     # nothing new since the last copy
         files = pack(cfg.folder, archive)
         if not files:

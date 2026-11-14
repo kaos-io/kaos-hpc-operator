@@ -118,9 +118,18 @@ def test_should_key_the_copies_by_workflow_and_step_in_the_outputs_repository(tp
 def test_should_lock_down_the_helper_and_give_it_small_requests(tpls):
     for c in tpls["train"]["initContainers"] + tpls["train"]["sidecars"]:
         assert c["securityContext"]["readOnlyRootFilesystem"] is True
-        assert c["securityContext"]["capabilities"] == {"drop": ["ALL"]}
+        assert c["securityContext"]["allowPrivilegeEscalation"] is False
         assert "nvidia.com/gpu" not in str(c["resources"])
         assert c["resources"]["requests"] == {"cpu": "10m", "memory": "64Mi"}
+
+
+def test_should_let_the_copy_sidecar_read_files_the_step_made_private(tpls):
+    init, = tpls["train"]["initContainers"]
+    side, = tpls["train"]["sidecars"]
+    for c in (init, side):
+        assert (c["securityContext"]["runAsUser"], c["securityContext"]["runAsGroup"]) == (0, 0)
+    assert init["securityContext"]["capabilities"] == {"drop": ["ALL"]}
+    assert side["securityContext"]["capabilities"] == {"drop": ["ALL"], "add": ["DAC_OVERRIDE"]}
 
 
 def test_should_not_embed_the_helper_source_in_any_step(tpls):
