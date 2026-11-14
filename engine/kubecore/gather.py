@@ -20,6 +20,7 @@ import json
 import os
 import sys
 
+from kubecore.failure import failed
 from kubecore.step_contract import MATRIX_ENTRY_CAP, MATRIX_STATUS, SENTINEL, cost, wire
 
 STEP_ENV = "KAOS_GATHER_STEP"
@@ -133,7 +134,7 @@ def main(argv=None):
         with open(RESULT_FILE, "w", encoding="ascii") as f:
             f.write(text)
     except GatherError as exc:
-        print(f"kaos-gather FAILED: {exc}", file=sys.stderr, flush=True)
+        failed("kaos-gather", exc)
         return 1
     ok = len(document.get("items", [])) if document["status"] == MATRIX_STATUS else 0
     print(f"kaos-gather: step '{step}': {ok} item(s) gathered." if ok else f"kaos-gather: step '{step}' did not run.",
