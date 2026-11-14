@@ -62,6 +62,35 @@ def test_should_save_one_archive_and_a_manifest_when_the_folder_has_files(world)
     assert signature and took >= 0
 
 
+def test_should_report_and_not_skip_entries_the_helper_cannot_read(world, capsys, monkeypatch):
+    write(world, "weights/last.pt", b"epoch1")
+    write(world, "state.json", b"{}")
+    real = os.access
+    monkeypatch.setattr(os, "access", lambda p, m: False if str(p).endswith("state.json") else real(p, m))
+    took, signature = h.copy_once(world.api, None)
+    err = capsys.readouterr().err
+    assert "state.json" in err and "checkpoint copy helper cannot read" in err
+    assert objects(world) == [] and signature is None
+    monkeypatch.undo()
+    h.copy_once(world.api, signature)
+    assert len(objects(world)) == 2
+
+
+def test_should_list_a_folder_it_cannot_enter_as_blocked(tmp_path, monkeypatch):
+    (tmp_path / "private").mkdir()
+    (tmp_path / "private" / "a").write_bytes(b"x")
+    real = os.scandir
+
+    def deny(path):
+        if str(path).endswith("private"):
+            raise PermissionError(13, "denied", str(path))
+        return real(path)
+    monkeypatch.setattr(os, "scandir", deny)
+    blocked = []
+    assert h.scan(str(tmp_path), blocked) == []
+    assert blocked == ["private"]
+
+
 def test_should_not_save_again_when_nothing_changed(world):
     write(world, "last.pt", b"a")
     _, signature = h.copy_once(world.api, None)

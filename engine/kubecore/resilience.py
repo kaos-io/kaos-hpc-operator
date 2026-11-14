@@ -224,6 +224,14 @@ def helper_env(step: dict, ctx: dict, every_field: str) -> list:
     ]
 
 
+def helper_capabilities(mode: str) -> dict:
+    """The step may run as any user and write files only it can read (mode 0600, folders 0700). The copy
+    sidecar runs as root with DAC_OVERRIDE (admitted by the baseline Pod Security level, unlike
+    DAC_READ_SEARCH) so it can read them. The restore init container writes into the emptyDir (0777) as
+    root and chmods only what it extracted itself, so it needs no capability."""
+    return {"drop": ["ALL"], "add": ["DAC_OVERRIDE"]} if mode == "watch" else {"drop": ["ALL"]}
+
+
 def helper_container(name: str, mode: str, step: dict, ctx: dict, every_field: str) -> dict:
     """One helper container (init or sidecar): small requests, locked down, never the step's GPU."""
     return {
@@ -231,8 +239,8 @@ def helper_container(name: str, mode: str, step: dict, ctx: dict, every_field: s
         "command": ["python3", "%s/%s" % (HELPER_MOUNT, HELPER_FILE), mode],
         "env": helper_env(step, ctx, every_field),
         "resources": {"requests": {"cpu": "10m", "memory": "64Mi"}, "limits": {"memory": "512Mi"}},
-        "securityContext": {"runAsUser": 65532, "runAsGroup": 65532, "allowPrivilegeEscalation": False,
-                            "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}},
+        "securityContext": {"runAsUser": 0, "runAsGroup": 0, "allowPrivilegeEscalation": False,
+                            "readOnlyRootFilesystem": True, "capabilities": helper_capabilities(mode)},
         "volumeMounts": [{"name": CHECKPOINT_VOLUME, "mountPath": CHECKPOINT_MOUNT},
                          {"name": STAGE_VOLUME, "mountPath": STAGE_MOUNT},
                          {"name": HELPER_VOLUME, "mountPath": HELPER_MOUNT, "readOnly": True}],
