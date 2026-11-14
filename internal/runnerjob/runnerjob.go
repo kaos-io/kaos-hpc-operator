@@ -57,8 +57,12 @@ const (
 	// Wall-time arithmetic of the Job deadline: queue allowance and teardown margin, in minutes.
 	queueAllowanceMinutes = 480
 	teardownMarginMinutes = 30
-	backoffLimit          = 4
-	ttlSeconds            = 3600
+	// stagingAllowanceMinutes is added once for a job that has datasets to stage: the longest the runner goes on
+	// staging one (STAGE_MAX_BUDGET_S in runner/kaos_hpc_runner/staging.py), so a healthy copy is never ended by the
+	// Job's deadline. The follower's deadline carries the same number (engine/kubecore/meluxina.py).
+	stagingAllowanceMinutes = 72 * 60
+	backoffLimit            = 4
+	ttlSeconds              = 3600
 	// graceSeconds is the time the runner has to cancel the site job on SIGTERM.
 	graceSeconds = 60
 	runnerUID    = 65532
@@ -235,6 +239,9 @@ func Build(cfg Config, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HP
 		wall *= 2
 	}
 	deadline := (wall+queueAllowanceMinutes+teardownMarginMinutes)*60 + int64(cfg.SiteWaitMax/time.Second)
+	if len(job.Spec.Inputs) > 0 {
+		deadline += stagingAllowanceMinutes * 60
+	}
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: site.Namespace, Labels: labels,

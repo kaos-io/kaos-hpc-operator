@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 from kubecore import authoring, enhance  # noqa: E402
 from kubecore.run_settings import DEFAULT_WALLTIME  # noqa: E402
 from helpers import evaluate, valid  # noqa: E402
-from kubecore.meluxina import DEFAULT_TIME_LIMIT_MINUTES  # noqa: E402
+from kubecore.meluxina import DEFAULT_TIME_LIMIT_MINUTES, STAGING_ALLOWANCE_MINUTES  # noqa: E402
 
 BASE = yaml.safe_load((ROOT / "kubecore" / "local-dev" / "pipeline-context.yaml").read_text())
 
@@ -68,7 +68,7 @@ def test_the_form_value_is_the_limit_of_the_job_on_the_hpc_twin(walltime):
     wft = _enhanced(walltime=walltime)
     twin = _arguments(wft, "one-hpc")
     assert evaluate(twin["time-limit"], {"one": {"walltime": 45}}) == 45
-    assert evaluate(twin["deadline-seconds"], {"one": {"walltime": 45}}) == 6 * (45 + 480) * 60
+    assert evaluate(twin["deadline-seconds"], {"one": {"walltime": 45}}) == (6 * (45 + 480) + STAGING_ALLOWANCE_MINUTES) * 60
 
 
 @pytest.mark.parametrize("gpu", [False, True])
@@ -246,7 +246,7 @@ def test_the_time_limit_is_per_run_of_the_step_because_it_is_the_deadline_of_eac
     wft = _enhanced(kind="train", produces=[authoring.model("m")], resumable=True, walltime="2h")
     assert _template(wft, "one")["activeDeadlineSeconds"] == "{{inputs.parameters.deadline}}"
     assert evaluate(_arguments(wft, "one-hpc")["deadline-seconds"], {"one": {"walltime": 120}}) == \
-        (1 + 5) * (120 + 480) * 60
+        ((1 + 5) * (120 + 480) + STAGING_ALLOWANCE_MINUTES) * 60
 
 
 def test_a_walltime_on_the_form_not_longer_than_the_save_lead_of_a_resumable_step_is_refused():

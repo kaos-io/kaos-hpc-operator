@@ -633,7 +633,7 @@ def test_the_dataset_staging_record_is_reported_from_the_first_report_on(rig):
     rig.make(slurm)
     rec = {"repo": "ds", "commit": "c2" * 6, "kind": "delta", "files": 3, "bytes": 1234, "seconds": 12}
     rig.monkeypatch.setattr(runmod.staging, "stage_dataset",
-                            lambda cfg, inp, st, mint, info=None: info.update(rec) or "/scr/kaos/p/datasets/ds/c2")
+                            lambda cfg, inp, st, mint, info=None, **kw: info.update(rec) or "/scr/kaos/p/datasets/ds/c2")
     rig.runner.run()
     runs = [c[2]["status"]["run"] for c in rig.kube.patches() if "run" in c[2]["status"]]
     assert runs[0]["state"] == "PENDING" and runs[0]["staged"] == [rec] and runs[-1]["staged"] == [rec]
@@ -1553,3 +1553,19 @@ def test_a_host_job_ended_by_term_is_judged_by_its_comment_not_by_its_exit_code(
         first = terminal_reports(rig)[0]
         want = ("COMPLETED", 0) if comment == HOST_DONE else ("FAILED", 1)
         assert (first["state"], first["exitCode"]) == want, "%s with job exit %s: %s" % (comment, job_rc, first)
+
+
+def test_a_dataset_the_site_could_not_stage_and_the_job_must_not_download_ends_the_attempt_dataset_not_staged(rig, capsys):
+    """No site job, one terminal report (FAILED, exit 246, the dataset and its size); not a fallback."""
+    slurm = FakeSlurm()
+    rig.make(slurm)
+
+    def refused(cfg, inp, stager, mint, **kw):
+        raise staging_mod.DatasetNotStaged("dataset d@c is 2.5 TB and the site could not stage it in time")
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", refused)
+    assert rig.runner.run() == 0
+    assert slurm.submitted == []
+    run = rig.kube.run
+    assert run["state"] == "FAILED" and run["exitCode"] == 246 and run["terminal"] is True
+    assert "2.5 TB" in run["message"] and not run.get("siteJobID")
+    assert "DatasetNotStaged" in capsys.readouterr().out
