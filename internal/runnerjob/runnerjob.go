@@ -123,20 +123,14 @@ func BuildCancel(cfg Config, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alp
 // ValidateContract refuses a job that cannot run on the step contract (docs/step-contract.md, section 8),
 // with the reason to give. No context: the job was created by a follower from before the contract, or stored
 // before the definition changed and read back without the fields that were removed; running it would run the
-// step without its context and its data (PRD kaos#1911 T-04). An input with an owner: a dataset another
-// project shares cannot be staged on an HPC site yet.
+// step without its context and its data (PRD kaos#1911 T-04). An input with an owner is not refused here: whether
+// the owner still shares the dataset is known to the owner's data store alone, so the runner asks it before it
+// stages or submits anything (SharedDatasetUnavailable).
 func ValidateContract(spec *hpcv1alpha1.HPCArgoWorkflowJobSpec) (string, error) {
 	if spec.Context == "" {
 		return hpcv1alpha1.ReasonNoContext, fmt.Errorf("the job carries no step context (spec.context): it was created " +
 			"before the platform update that changed how a step is given its inputs. Nothing was booked or submitted. " +
 			"Run the pipeline again")
-	}
-	for _, in := range spec.Inputs {
-		if in.Owner != "" {
-			return hpcv1alpha1.ReasonSharedInput, fmt.Errorf("input %s is the dataset %s shared by project %s: a dataset of "+
-				"another project cannot be read on HPC yet. Nothing was booked or submitted. Run this step on a cluster "+
-				"class, or copy the dataset into this project", in.Name, in.Repo, in.Owner)
-		}
 	}
 	return "", nil
 }
@@ -332,16 +326,18 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 	if spec.Sharing != nil && site.Spec.Sharing {
 		sharing, scope = "1", spec.Sharing.Scope
 	}
-	// What the runner stages: name, repository and commit of every input, in the job's order.
+	// What the runner stages: name, repository, commit and, for a dataset another project shares, its owner, of
+	// every input, in the job's order.
 	type input struct {
 		Name   string `json:"name"`
 		Repo   string `json:"repo"`
 		Commit string `json:"commit"`
 		Ref    string `json:"ref,omitempty"`
+		Owner  string `json:"owner,omitempty"`
 	}
 	ins := make([]input, 0, len(spec.Inputs))
 	for _, in := range spec.Inputs {
-		ins = append(ins, input{in.Name, in.Repo, in.Commit, in.Ref})
+		ins = append(ins, input{in.Name, in.Repo, in.Commit, in.Ref, in.Owner})
 	}
 	inputs, err := json.Marshal(ins)
 	if err != nil {

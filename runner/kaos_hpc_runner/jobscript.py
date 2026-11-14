@@ -258,14 +258,14 @@ def batch_lines(scope, scratch):
         # The step's inputs (spec.inputs), each a whole dataset commit, presented to the step under one root,
         # $KAOS_STAGED_ROOT (/kaos/inputs in the container, read-only): the folder <input>/ holds the dataset's
         # files and nothing else (both kinds of copy keep them under <copy>/data/, beside the files of the platform,
-        # and that folder is what is bound), and beside it the record <input>.kaos-ready ({"repo","commit","full":true}) says which repository
+        # and that folder is what is bound), and beside it the record <input>.kaos-ready ({"repo","commit","owner","full":true}) says which repository
         # and commit it is and that it is the whole tree. kaos-lib finds an input by that record. The root is
         # a folder of this job; each copy is bound onto its folder there, whichever way it was staged.
-        # KAOS_INPUTS holds one word per input: name|repository|commit|resident path (the data/ folder of the
+        # KAOS_INPUTS holds one word per input: name|repository|commit|resident path|owner (the data/ folder of the
         # copy staged from the login node, whose markers are beside it).
         'BIND=""; KAOS_IN_ROOT=$SCR/kaos-tmp/in-$KAOS_JOB_ID; rm -rf "$KAOS_IN_ROOT"',
         'for KAOS_IN in $KAOS_INPUTS; do',
-        '  IFS="|" read -r IN_NAME IN_REPO IN_COMMIT IN_STAGED <<< "$KAOS_IN"',
+        '  IFS="|" read -r IN_NAME IN_REPO IN_COMMIT IN_STAGED IN_OWNER <<< "$KAOS_IN"',
         '  IN_DIR=""',
         # PRD-1541 F-06: the copy staged from a login node, when ready. The
         # marker is written last, so its presence means complete.
@@ -273,8 +273,10 @@ def batch_lines(scope, scratch):
         '    IN_DIR=$IN_STAGED; touch "${IN_STAGED%/*}/.kaos-used" 2>/dev/null',
         '    echo "input $IN_NAME: resident copy $IN_DIR"',
         # F-04 stage-in, the kept fallback: the job downloads the commit itself. Fails LOUDLY (exit 232):
-        # silently missing data would surface as a cryptic training error hours later.
-        '  elif [ -n "$LAKEFS_BEARER_TOKEN" ] && [ -n "$LAKEFS_ENDPOINT" ] &&'
+        # silently missing data would surface as a cryptic training error hours later. Only for the project's own
+        # dataset (no owner): the job reaches only its own project's data store, where a repository of the same
+        # name is another dataset. The runner never submits a job whose shared dataset is not staged.
+        '  elif [ -z "$IN_OWNER" ] && [ -n "$LAKEFS_BEARER_TOKEN" ] && [ -n "$LAKEFS_ENDPOINT" ] &&'
         ' [ -n "$STAGEIN_B64" ] && command -v python3 >/dev/null; then',
         '    [ -n "$IN_STAGED" ] && echo "input $IN_NAME: WARNING staged copy $IN_STAGED'
         ' not ready - downloading in-job on GPU time"',
@@ -290,7 +292,9 @@ def batch_lines(scope, scratch):
         '  fi',
         # Only now, for a copy that is whole: the folder it is bound onto, and its record beside it.
         '  mkdir -p "$KAOS_IN_ROOT/$IN_NAME" || fail 232',
-        '  printf \'{"repo":"%s","commit":"%s","full":true}\' "$IN_REPO" "$IN_COMMIT" > "$KAOS_IN_ROOT/$IN_NAME.kaos-ready" || fail 232',
+        '  IN_OWNER_JSON=null; [ -n "$IN_OWNER" ] && IN_OWNER_JSON="\\"$IN_OWNER\\""',
+        '  printf \'{"repo":"%s","commit":"%s","owner":%s,"full":true}\' "$IN_REPO" "$IN_COMMIT" "$IN_OWNER_JSON"'
+        ' > "$KAOS_IN_ROOT/$IN_NAME.kaos-ready" || fail 232',
         '  BIND="$BIND -B $IN_DIR:/kaos/inputs/$IN_NAME:ro"',
         'done',
         # The step's variables do NOT ride the host environment: see "How a value reaches the step" (STEP_ENV).
