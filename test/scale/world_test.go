@@ -272,7 +272,10 @@ func (w *world) createJobs(p *project, specs []jobSpec) {
 			defer func() { <-sem }()
 			j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.envNS, Annotations: map[string]string{}},
 				Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: s.class, Image: "reg.example/app:v1", WallTimeMinutes: s.wallMinutes,
-					Command: []string{"python", "train.py"}, StepName: cmpOr(s.stepName, "step-"+name)}}
+					Command: []string{"python", "train.py"}, StepName: cmpOr(s.stepName, "step-"+name),
+					// A served job names the Workflow it belongs to (the controller refuses one that does not). The scale
+					// cluster has no Argo API, so the controller has no Workflow to hold the app against.
+					Workflow: &hpcv1alpha1.WorkflowRef{Name: "wf-" + name, UID: "wf-uid-" + name}}}
 			if s.run != "" {
 				j.Annotations[annRunMinutes] = s.run
 			}

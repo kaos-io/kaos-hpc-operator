@@ -17,6 +17,7 @@ limitations under the License.
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -37,6 +38,11 @@ const (
 	e2eEnvNS      = "e2e-train"
 	e2eHPCNS      = "e2e-ml"
 	e2eJobName    = "e2e-job"
+	e2eApp        = "e2e-app"
+	// e2eStrangerJob is a job of an app the platform never deployed to the project: no service account, no grant.
+	e2eStrangerJob = "e2e-stranger-job"
+	e2eStrangerApp = "e2e-stranger"
+	e2eStrangerWF  = "e2e-stranger-wf-uid"
 )
 
 // fakeSlurmManifest runs the fake Slurm site (test/fakeslurmd) behind a Service.
@@ -133,6 +139,30 @@ spec:
   limits: {maxConcurrentJobs: 2}
 `
 
+// appGrantManifest is what the platform renders for a deployed app (the app's composition): its workflow service account
+// in the environment namespace, and the Role and RoleBinding that let the runner's service account (in the site's
+// namespace) create a token for that one service account and no other. The runner exchanges that token at the data store.
+const appGrantManifest = `
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: ` + e2eApp + `-workflow, namespace: ` + e2eEnvNS + `}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: ` + e2eApp + `-workflow-hpc-token, namespace: ` + e2eEnvNS + `}
+rules:
+- apiGroups: [""]
+  resources: [serviceaccounts/token]
+  resourceNames: [` + e2eApp + `-workflow]
+  verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ` + e2eApp + `-workflow-hpc-token, namespace: ` + e2eEnvNS + `}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: ` + e2eApp + `-workflow-hpc-token}
+subjects: [{kind: ServiceAccount, name: hpc-runner, namespace: ` + e2eHPCNS + `}]
+`
+
 // jobManifest is one served job: spec.stepName makes the controller run it through a runner Job.
 const jobManifest = `
 apiVersion: hpc.kaos.io/v1alpha1
@@ -152,6 +182,25 @@ spec:
   workflow: {name: e2e-wf, uid: e2e-wf-uid}
 `
 
+// strangerJobManifest is a served job of an app that has no grant: the platform never deployed it to the project.
+const strangerJobManifest = `
+apiVersion: hpc.kaos.io/v1alpha1
+kind: HPCArgoWorkflowJob
+metadata: {name: ` + e2eStrangerJob + `, namespace: ` + e2eEnvNS + `}
+spec:
+  class: hpc-cpu
+  image: registry.invalid/app:v1
+  command: [python, -m, app.entry]
+  wallTimeMinutes: 15
+  stepName: e2e-step
+  app: ` + e2eStrangerApp + `
+  context: '` + strangerContext + `'
+  workflow: {name: e2e-stranger-wf, uid: ` + e2eStrangerWF + `}
+`
+
+const strangerContext = `{"version":1,"run":"e2e-stranger-wf","app":"e2e-stranger","project":"e2e","step":"e2e-step","kind":"train",` +
+	`"experiment":"e2e","params":{},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[],"upstream":{}}`
+
 // e2eContext is the step context of the standalone job (docs/step-contract.md, section 3).
 const e2eContext = `{"version":1,"run":"e2e-wf","app":"e2e-app","project":"e2e","step":"e2e-step","kind":"train",` +
 	`"experiment":"e2e","params":{},"ledger":{"version":2,"reads":[],"writes":[]},"produces":[],"upstream":{}}`
@@ -163,6 +212,24 @@ func kubectlGet(jsonpath string, args ...string) string {
 		return ""
 	}
 	return strings.TrimSpace(out)
+}
+
+// fakeSiteGet reads one of the fake site's inspection endpoints from inside the controller's container (same DNS and trust
+// as the runner's own calls).
+func fakeSiteGet(path string, out any) {
+	probe := "import urllib.request as u;r=u.Request('https://" + fakeSlurmHost + path + "'," +
+		"headers={'X-SLURM-USER-TOKEN':'" + fakeSlurmTok + "'});print(u.urlopen(r,timeout=10).read().decode())"
+	body, err := utils.Run(execCommand("kubectl", "exec", "-n", namespace, "deploy/"+release+"-controller-manager", "--",
+		"python3", "-c", probe))
+	Expect(err).NotTo(HaveOccurred())
+	Expect(json.Unmarshal([]byte(strings.TrimSpace(body)), out)).To(Succeed(), body)
+}
+
+// submission is what the fake site recorded of one accepted submission.
+type submission struct {
+	Name   string            `json:"name"`
+	Env    map[string]string `json:"env"`
+	Script string            `json:"script"`
 }
 
 // standaloneSpecs declares the AC-41 specs: no KAOS in the cluster, a job run to Succeeded.
@@ -196,12 +263,16 @@ func standaloneSpecs() {
 		out, err = kubectlApply(projectManifest)
 		Expect(err).NotTo(HaveOccurred(), out)
 
-		By("giving the runner a machine key to mint its data-plane token with")
+		By("giving the runner the project's HPC identity for the experiment tracker (Secret mlflow-hpc)")
 		key, err := machineKeyJSON()
 		Expect(err).NotTo(HaveOccurred())
-		_, err = utils.Run(execCommand("kubectl", "create", "secret", "generic", "mlflow-svc", "-n", e2eHPCNS,
+		_, err = utils.Run(execCommand("kubectl", "create", "secret", "generic", "mlflow-hpc", "-n", e2eHPCNS,
 			"--from-literal=ZITADEL_MACHINE_KEY="+key))
 		Expect(err).NotTo(HaveOccurred())
+
+		By("rendering what the platform renders for the deployed app: its workflow service account and the runner's grant to it")
+		out, err = kubectlApply(appGrantManifest)
+		Expect(err).NotTo(HaveOccurred(), out)
 
 		By("creating the HPCArgoWorkflowJob")
 		out, err = kubectlApply(jobManifest)
@@ -235,6 +306,74 @@ func standaloneSpecs() {
 		booked := kubectlGet("{.status.bookedNodeMinutes}", "hpcsite", "site", "-n", e2eHPCNS)
 		Expect(booked).To(SatisfyAny(BeEmpty(), Equal("0")),
 			"nothing stays booked once the job has settled")
+
+		By("checking that the data store was asked as the app: a token of its workflow service account, for kaos-lake")
+		var exchanges []struct {
+			Subject  string   `json:"subject"`
+			Audience []string `json:"audience"`
+			Granted  bool     `json:"granted"`
+		}
+		fakeSiteGet("/fake/v1/exchanges", &exchanges)
+		Expect(exchanges).NotTo(BeEmpty(), "the runner exchanged a token for the app's key")
+		for _, e := range exchanges {
+			Expect(e.Subject).To(Equal("system:serviceaccount:" + e2eEnvNS + ":" + e2eApp + "-workflow"))
+			Expect(e.Audience).To(ConsistOf("kaos-lake"))
+			Expect(e.Granted).To(BeTrue())
+		}
+
+		By("checking that what reached the site holds the key file's place and no data-store credential")
+		var subs []submission
+		fakeSiteGet("/fake/v1/submissions", &subs)
+		var sent *submission
+		for i := range subs {
+			if strings.Contains(subs[i].Env["WF_UID"], "e2e-wf-uid") {
+				sent = &subs[i]
+			}
+		}
+		Expect(sent).NotTo(BeNil(), "the job was submitted to the site")
+		Expect(sent.Script).To(ContainSubstring("LAKEFS_KEY_FILE"), "the job script reads the app's key from a file")
+		Expect(sent.Script).To(ContainSubstring("/kaos/key"))
+		Expect(sent.Env).To(HaveKey("LAKEFS_ENDPOINT"))
+		for k, v := range sent.Env {
+			Expect(k).NotTo(MatchRegexp(`(?i)LAKEFS_(ACCESS|SECRET|TOKEN|KEY_ID|AUTH)`), "no data-store credential in the environment")
+			Expect(v).NotTo(HavePrefix("eyJ"), "%s holds a bearer token", k)
+		}
+		Expect(sent.Env["LAKEFS_KEY_FILE"]).To(BeEmpty(), "the key file's path is set by the job script, never in the environment")
+		for _, key := range []string{"fake-app-secret-key", "AKIAFAKEAPPKEY"} {
+			Expect(sent.Script).NotTo(ContainSubstring(key), "the app's key is never in the job script")
+			for k, v := range sent.Env {
+				Expect(v).NotTo(ContainSubstring(key), "the app's key is in %s", k)
+			}
+		}
+	})
+
+	It("should refuse a job whose app has no identity, and send nothing to the site", func() {
+		By("creating a job of an app that was never deployed to the project")
+		out, err := kubectlApply(strangerJobManifest)
+		Expect(err).NotTo(HaveOccurred(), out)
+
+		By("waiting for it to end Failed, AppIdentityUnavailable")
+		Eventually(func() string {
+			return kubectlGet("{.status.phase}/{.status.reason}", "hpcargoworkflowjob", e2eStrangerJob, "-n", e2eEnvNS)
+		}, "3m", "3s").Should(Equal("Failed/AppIdentityUnavailable"), func() string {
+			return diagnostics()
+		})
+		msg := kubectlGet("{.status.message}", "hpcargoworkflowjob", e2eStrangerJob, "-n", e2eEnvNS)
+		Expect(msg).To(ContainSubstring(e2eStrangerApp))
+		Expect(msg).To(ContainSubstring("Nothing was staged and nothing was submitted to the site"))
+
+		By("checking that nothing of it reached the site, and the data store was never asked for it")
+		var subs []submission
+		fakeSiteGet("/fake/v1/submissions", &subs)
+		for _, s := range subs {
+			Expect(s.Env["WF_UID"]).NotTo(ContainSubstring(e2eStrangerWF))
+		}
+		var exchanges []struct{ Subject string }
+		fakeSiteGet("/fake/v1/exchanges", &exchanges)
+		for _, e := range exchanges {
+			Expect(e.Subject).NotTo(ContainSubstring(e2eStrangerApp))
+		}
+		Expect(kubectlGet("{.status.bookedNodeMinutes}", "hpcsite", "site", "-n", e2eHPCNS)).To(SatisfyAny(BeEmpty(), Equal("0")))
 	})
 }
 
