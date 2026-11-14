@@ -15,7 +15,7 @@ platform to `<scratch>/kaos/<project>`; the runner reads it from `HPC_SCRATCH` a
   kaos/                                SHARED parent: mode 3770 (setgid + sticky), group = the site project's group
     <project-A>/                       0700, owned by project A's site user  = SCR of A's jobs
       kaos-work/<job>/ (output/ ckpt/)   the job's work folder
-      kaos-tmp/  in-<job> env-<job> idle-<job>   inputs, step variables, idle marker
+      kaos-tmp/  in-<job> env-<job> key-<job> reg-<job> idle-<job>   inputs, step variables, the app's key, the registry token, idle marker
       kaos-priv/host-<job>/              a shared-node host's private script copy (holds the job's credentials)
       kaos-claims/                       the slot manager's locks (node sharing)
       kaos-ckpt/<workflow uid>/<step>/   checkpoint copies
@@ -114,7 +114,23 @@ function; an empty tag before a digest (`host/app:@sha256:...`) is refused every
 The registry token is minted for Artifact Registry only. It is presented to a host that is exactly
 `<one label>-docker.pkg.dev` (`settings.registry_token_host`; the script applies the same rule to the host it cuts from
 the reference, not to a pattern over the whole reference). Any other host is pulled from anonymously, and the token is not
-put in the job at all. The script unsets it (and Apptainer's copy of it) as soon as the image exists.
+put in the job at all.
+
+## Where the credentials are during a job
+| credential | how it reaches the job | where it is on the site |
+|---|---|---|
+| registry token (1 h) | the runner hands it to the staging tool on the tool's standard input (verb `registry`, contract 5) right after the submit | a Docker-config file `$SCR/kaos-tmp/reg-<job>/auth.json` (folder 0700, file 0600, written to a temporary name and renamed), read by the pull alone (`apptainer pull --authfile <path>`: a path on the command line, nothing secret), never bound into the step. NOT in the job's environment, the script, the job name or comment, `scontrol show job`, the script the scheduler stored, or the job's output |
+| the app's data store key | the staging tool's `key` verb | `$SCR/kaos-tmp/key-<job>/lakefs-key.json` (see "The data store key") |
+| the tracker's bearer (`MLFLOW_TRACKING_TOKEN`) | the job's environment (a shared node's script carries it as an `export` line) | the one credential still in the environment: kaos-lib reads it from the environment only; the step gets it as a file of the variables folder (above) |
+
+The registry file: the job script checks the folder and the file before it reads them, as it does for the key (the job's
+user's own, no link, no group or other bits on the folder; otherwise the pull is not given the file, the job says so and ends
+231, which the runner answers like an expired token), waits for the file only when a pull is needed (`KAOS_REG_WAIT_S`,
+default 120 s; after it the pull is anonymous), and removes the folder as soon as the image is there, in its exit trap
+(end, failure, cancel) and, for a job killed without a trap, in the sweep of the next job (`reg-<digits>`, below). The runner
+asks the tool to place it once per site job, only for a host the token may be presented to; a replacement job gets a fresh
+token in its own folder. Tests: `runner/tests/test_registry_token_file.py` (the scan helper `runner/tests/secretscan.py` is
+reusable by any test that renders a job).
 
 ## What the step container receives
 `apptainer exec --cleanenv`: the container sees `jobscript.STEP_ENV` (when the job has the variable) and nothing of the
@@ -137,7 +153,7 @@ job's environment.
 
 Not passed, on purpose: `HOME` (Apptainer gives the container its own `HOME`, the site user's home folder, bound in; the
 host's value would only repeat it), `USER`, `PATH` (the image's own), `LD_LIBRARY_PATH` and `LD_PRELOAD` (they would point
-the image's loader at host libraries; `--nv` binds the driver's), the registry token, the checkpoint/hand-back/stage-in
+the image's loader at host libraries; `--nv` binds the driver's), the registry token (it is not in the job at all), the checkpoint/hand-back/stage-in
 programs, the idle watchdog, the job's own settings and every other variable.
 
 On a shared node the step is not given the host job's Slurm figures (srun hands every step the host job's variables).
@@ -199,10 +215,10 @@ prove a 100 KB context holding `$HOME $(...)`, backticks, `\` and `"` arrives by
 * A failed job keeps its work folder; it holds no credential file. It is private to the site user (0700): only that
   account, which the platform's staging tool uses, can read it.
 * A job killed without a trap (SIGKILL, node loss) leaves `kaos-priv/host-<job>` (the bearer), `kaos-tmp/in-<job>`,
-  `kaos-tmp/env-<job>` and `kaos-tmp/key-<job>`. Every job script starts with `kaos_sweep "$SCR"` (`jobscript.SWEEP_HELPER`, self-contained shell):
+  `kaos-tmp/env-<job>`, `kaos-tmp/key-<job>` and `kaos-tmp/reg-<job>` (the registry token). Every job script starts with `kaos_sweep "$SCR"` (`jobscript.SWEEP_HELPER`, self-contained shell):
   it removes those whose Slurm job is no longer queued or running. It asks `squeue -u $USER`; when squeue cannot answer, or
   its answer lacks the asking job itself, it removes nothing. Only folders named exactly `host-<digits>`, `in-<digits>`,
-  `env-<digits>` and `key-<digits>` directly under `<root>/kaos-priv` and `<root>/kaos-tmp`, owned by the caller, older than
+  `env-<digits>`, `key-<digits>` and `reg-<digits>` directly under `<root>/kaos-priv` and `<root>/kaos-tmp`, owned by the caller, older than
   `KAOS_SWEEP_MIN_AGE_MIN` (10) minutes; a link is never followed; an empty, relative or missing root does nothing. Any
   other caller (a cleanup workflow, the login-node staging tool) can run the same function: define it from
   `SWEEP_HELPER`, call `kaos_sweep <project scratch root>`.

@@ -230,27 +230,35 @@ def test_the_batch_script_restores_lmod_before_the_module_load():
 # ------------------------------------------------ GCP token for GAR hosts only (live job 5140432)
 
 def _pull(tmp_path, ref, token):
+    """What the pull is pointed at: the auth file the staging tool placed (holding `token`), or none."""
     lines = _lines()
     start = lines.index('if [ ! -f "$SIF" ]; then')
     block = lines[start:lines.index('fi', start) + 1]
+    defs = next(i for i, l in enumerate(lines) if l.startswith('KAOS_REG_DIR='))
+    defs_end = next(i for i, l in enumerate(lines) if l.startswith('BIND=""; KAOS_IN_ROOT'))
     scr = tmp_path / 'scratch'
     (scr / 'sif-cache').mkdir(parents=True)
+    reg = scr / 'kaos-tmp' / 'reg-1'
+    if token:
+        reg.mkdir(parents=True, mode=0o700)
+        (reg / 'auth.json').write_text(token)
     _fake(tmp_path / 'bin', 'apptainer',
-          'echo "user=$APPTAINER_DOCKER_USERNAME pass=$APPTAINER_DOCKER_PASSWORD" > "$SCR/cred"\nprintf sif > "$2"\n')
+          'shift; A=; [ "$1" = --authfile ] && { A=$(cat "$2"); shift 2; }\necho "pass=$A" > "$SCR/cred"\nprintf sif > "$1"\n')
     env = {k: v for k, v in os.environ.items() if not k.startswith('APPTAINER')}
     env.update(PATH=str(tmp_path / 'bin') + os.pathsep + os.environ['PATH'], SCR=str(scr),
-               SIF=str(scr / 'sif-cache' / 'k.sif'), IMAGE_REF=ref, SLURM_JOB_ID='1', REG_TOKEN=token)
-    script = 'fail(){ exit "$1"; }\n' + '\n'.join(block)
+               SIF=str(scr / 'sif-cache' / 'k.sif'), IMAGE_REF=ref, SLURM_JOB_ID='1', KAOS_JOB_ID='1',
+               **({'KAOS_REG_AUTH': '1'} if token else {}))
+    script = 'fail(){ exit "$1"; }\n' + '\n'.join(lines[defs:defs_end] + block)
     assert subprocess.run([BASH, '-c', script], env=env).returncode == 0
     return (scr / 'cred').read_text().strip()
 
 
 @pytest.mark.parametrize('ref, token, want', [
-    ('europe-docker.pkg.dev/proj/repo/app@sha256:ab', 'tok', 'user=oauth2accesstoken pass=tok'),
-    ('us-docker.pkg.dev/proj/repo/app:v1', 'tok', 'user=oauth2accesstoken pass=tok'),
-    ('zot.example/proj/app:v0.0.0', 'tok', 'user= pass='),            # Zot: a token turns anonymous OK into 401
-    ('docker.pkg.dev.evil.example/app:v1', 'tok', 'user= pass='),     # only a real GAR host name
-    ('europe-docker.pkg.dev/proj/repo/app:v1', '', 'user= pass='),    # no token: nothing to present
+    ('europe-docker.pkg.dev/proj/repo/app@sha256:ab', 'tok', 'pass=tok'),
+    ('us-docker.pkg.dev/proj/repo/app:v1', 'tok', 'pass=tok'),
+    ('zot.example/proj/app:v0.0.0', 'tok', 'pass='),            # Zot: a token turns anonymous OK into 401
+    ('docker.pkg.dev.evil.example/app:v1', 'tok', 'pass='),     # only a real GAR host name
+    ('europe-docker.pkg.dev/proj/repo/app:v1', '', 'pass='),    # no token: nothing to present
 ])
 def test_the_gcp_token_goes_to_gar_hosts_only__live_job_5140432(tmp_path, ref, token, want):
     assert _pull(tmp_path, ref, token) == want

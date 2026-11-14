@@ -196,7 +196,16 @@ def test_an_upload_that_blips_is_tried_again(tmp_path, lakefs):
 # mapped under it, and so is `/kaos/env` in the command (the container's own absolute path of the variable folder).
 APPTAINER = r'''#!/bin/bash
 case "$1" in
-  pull|build) : > "$2"; exit 0 ;;
+  pull|build)
+    # A pull may be given --authfile <path>; FAKE_PULL_LOG names a file that records what the pull was given (the auth
+    # file's path and content, its whole environment); FAKE_PULL_SLEEP makes the pull wait (to cancel a job in it).
+    cmd=$1; shift; AUTHFILE=
+    while [ "${1#--}" != "$1" ]; do [ "$1" = --authfile ] && AUTHFILE=$2; shift 2; done
+    if [ "$cmd" = pull ] && [ -n "$FAKE_PULL_LOG" ]; then
+      { printf 'authfile=%s\n' "$AUTHFILE"; [ -n "$AUTHFILE" ] && [ -r "$AUTHFILE" ] && printf 'content=%s\n' "$(cat "$AUTHFILE")"; env; } > "$FAKE_PULL_LOG"
+    fi
+    [ -n "$FAKE_PULL_SLEEP" ] && { : > "$FAKE_PULL_SLEEP"; sleep 60; }
+    : > "$1"; exit 0 ;;
   exec) shift ;;
   *) exit 0 ;;
 esac

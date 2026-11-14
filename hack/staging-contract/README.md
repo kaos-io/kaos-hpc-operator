@@ -5,8 +5,8 @@ repository in `images/meluxina-tokenmint/stager/`) ship separately. Each reposit
 scripts run both sides together on a fake site. Nothing here is imported by a test: run them by hand after a
 change to dataset staging on either side, against a checkout of the other.
 
-The staging tool must speak staging contract 4 (it has the `key` verb that places the app's data store key file on the
-site); a tool of contract 3 makes every case stop with the contract mismatch. The `key` verb refuses a job that is not live
+The staging tool must speak staging contract 5 (it has the `key` verb that places the app's data store key file on the
+site, and the `registry` verb that places the registry token's auth file); a tool of contract 4 or 3 makes every case stop with the contract mismatch. The `key` verb refuses a job that is not live
 (pending, running or otherwise not in the queue) and a key folder that the tool's user does not own, so the runner may ask for
 a key only while the site job is live, and never for a folder someone else made.
 

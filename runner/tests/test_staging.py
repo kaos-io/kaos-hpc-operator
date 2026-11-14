@@ -307,7 +307,7 @@ def test_the_runner_asks_the_staging_tool_for_its_contract_and_sends_its_own(mon
     calls = [w for w, _ in stager.calls]
     assert [w[0] for w in calls] == ["version", "status", "stage"]
     for w in calls[1:]:
-        assert w[w.index("--contract") + 1] == staging.CONTRACT == 4
+        assert w[w.index("--contract") + 1] == staging.CONTRACT == 5
 
 
 @pytest.mark.parametrize("version", [

@@ -142,6 +142,7 @@ class Runner:
         self.key, self.key_before = None, None   # the app's key; the one before it (a step may still print it)
         self.key_for, self.key_next = None, 0.0   # the app's key; the site job its file was last written for; when to write again
         self.key_noted = False        # a failed key refresh is written into status.run.message; cleared when one lands
+        self.reg, self.reg_for = '', None   # the registry token of the current submit; the site job its file was placed for
         self.logs = logs or LogStreamer(cfg, self.stager, self.reporter, secrets=self.held_secrets)
         self._mint = mint or (lambda: wallet.mint_tracker(cfg.env))      # the tracker's token only
         self._keys = keys or (lambda: identity.app_key(self.reporter.kube, cfg))
@@ -261,7 +262,8 @@ class Runner:
         """The site job of this attempt as it is submitted: (job script, Slurm environment, dataset leases, job
         time limit in minutes). The step's inputs and its context are in the environment for a job alone on its
         node, and in the script (export lines) for a shared node, where a host can read a waiting job's script
-        but never its environment. reg: the registry token; image_staged: the staged image tar ('' = none)."""
+        but never its environment. reg: the registry token (it is NOT put in the job: keep_registry hands it to the staging
+        tool, which writes it into a file on the site); image_staged: the staged image tar ('' = none)."""
         cfg = self.cfg
         hpc = cfg.hpc_class()
         ident = cfg.identity()
@@ -272,9 +274,10 @@ class Runner:
             raise ValueError('the step image %r cannot be used: %s' % (cfg.image, problem))
         if not registry_token_host(cfg.image.partition('/')[0]):
             reg = ''
+        self.reg = reg
         batch = '\n'.join(jobscript.batch_lines(cfg.scope if cfg.sharing else '-', ident['scratch']))
         env = ['PATH=/usr/bin:/bin:/usr/local/bin', 'HOME=' + ident['home'],
-               'USER=' + ident['user'], 'IMAGE_REF=' + cfg.image, 'REG_TOKEN=' + reg,
+               'USER=' + ident['user'], 'IMAGE_REF=' + cfg.image,
                'HPC_GPUS=' + str(hpc.get('gpus') or 0),
                'STEP_CMD=' + cfg.command, 'STEP_WORKDIR=' + wallet.fetch_workdir(cfg.image, reg),
                'WF_UID=' + cfg.wf_uid, 'STEP_NAME=' + cfg.step,
@@ -286,6 +289,8 @@ class Runner:
                'KAOS_ATTEMPT=%d' % cfg.attempt,
                # The step context, exactly as the job carries it: the one value the step receives.
                CONTEXT_ENV + '=' + cfg.context]
+        if reg:
+            env.append('KAOS_REG_AUTH=1')     # a registry auth file will be placed for this job (never its content)
         if cfg.resumable_lead:
             env.append('KAOS_RESUMABLE=1')
             # AC-73: a host reads a waiting guest's lead from its script (a step on a shared node is signalled
@@ -439,8 +444,26 @@ class Runner:
     def held_secrets(self):
         """What the log stream must never print: the tracker's token and the app's key, and the key before it (the
         key file is replaced while a step runs; the step may still hold what it read earlier)."""
-        return ((self.wallet,) + (self.key.secrets() if self.key else ())
+        return ((self.wallet, self.reg) + (self.key.secrets() if self.key else ())
                 + (self.key_before.secrets() if self.key_before else ()))
+
+    def keep_registry(self):
+        """The registry token's file for the current site job, on the site (the staging tool's `registry` verb: folder 0700, file
+        0600, a Docker config the image pull reads with --authfile). Written once per site job, the token on the tool's
+        standard input only; the job removes it as soon as the image is there and its exit trap and the sweep remove what
+        a killed job left. A round that fails is logged without the token and asked again at the next poll."""
+        if not self.jid or not self.reg or self.reg_for == self.jid:
+            return
+        try:
+            rc, ev = self.stager(['registry', '--contract', staging.CONTRACT, '--job', self.jid],
+                                 iter([{'host': self.cfg.image.partition('/')[0], 'token': self.reg}]), quiet=True)
+            staging.refused(rc, ev)
+            if rc != 0 or not any(e.get('event') == 'registry' for e in ev):
+                raise RuntimeError('the staging tool answered %s' % rc)
+        except Exception as e:
+            print('registry token: not placed for site job %s (%s): asking again at the next poll' % (self.jid, e), flush=True)
+            return
+        self.reg_for = self.jid
 
     def keep_key(self):
         """The app's key file for the current site job, on the site (the staging tool's `key` verb: folder 0700, file
@@ -450,6 +473,7 @@ class Runner:
         the old key stays in the file until a new one lands."""
         if not self.jid:
             return
+        self.keep_registry()
         now = self.clock()
         new_job = self.key_for != self.jid
         if not new_job and now < self.key_next:

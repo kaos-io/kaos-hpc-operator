@@ -88,31 +88,38 @@ def test_the_token_goes_only_to_an_artifact_registry_region_host(host, ok):
 
 
 def _pull_with_token(tmp_path, ref):
-    """The image block of the script, a fake Apptainer that writes the credentials it was given. Returns the
-    password the pull was made with, or None for an anonymous pull."""
+    """The registry part of the script (the file's checks, the image block), a fake Apptainer that records the auth file
+    it was pointed at. The token is in the file the staging tool places (here, the bare value). Returns (the content of
+    the file the pull was given, or "none" for an anonymous pull; the reference pulled; whether the folder is still there)."""
     lines = jobscript.batch_lines("-", "/scr")
     start = lines.index('if [ ! -f "$SIF" ]; then')
-    end = next(i for i, ln in enumerate(lines) if ln.startswith("unset REG_TOKEN"))
+    end = next(i for i, ln in enumerate(lines) if ln.startswith('rm -rf "$KAOS_REG_DIR"'))
+    defs = next(i for i, ln in enumerate(lines) if ln.startswith("KAOS_REG_DIR="))
+    defs_end = next(i for i, ln in enumerate(lines) if ln.startswith('BIND=""; KAOS_IN_ROOT'))
     scr = tmp_path / "scr"
     (scr / "sif-cache").mkdir(parents=True)
+    reg = scr / "kaos-tmp" / "reg-1"
+    reg.mkdir(parents=True, mode=0o700)
+    (reg / "auth.json").write_text(REGISTRY)
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    (bindir / "apptainer").write_text('#!/bin/bash\nif [ "$1" = pull ]; then '
-                                      'printf "%s" "${APPTAINER_DOCKER_PASSWORD-none}" > "$SCR/pw"; '
-                                      'printf "%s" "$3" > "$SCR/ref"; printf sif > "$2"; fi\n')
+    (bindir / "apptainer").write_text('#!/bin/bash\nif [ "$1" = pull ]; then shift; A=none; '
+                                      '[ "$1" = --authfile ] && { A=$(cat "$2"); shift 2; }; '
+                                      'printf "%s" "$A" > "$SCR/pw"; printf "%s" "$2" > "$SCR/ref"; printf sif > "$1"; fi\n')
     (bindir / "apptainer").chmod(0o755)
-    script = "\n".join(['fail(){ exit "$1"; }', 'kaos_sif_label(){ :; }'] + lines[start:end + 1]
-                       + ['printf "%s:%s" "${REG_TOKEN-unset}" "${APPTAINER_DOCKER_PASSWORD-unset}" > "$SCR/after"'])
+    script = "\n".join(['fail(){ exit "$1"; }', 'kaos_sif_label(){ :; }', 'KAOS_JOB_ID=1']
+                        + lines[defs:defs_end] + lines[start:end + 1]
+                        + ['[ -e "$KAOS_REG_DIR" ] && echo there > "$SCR/after" || echo gone > "$SCR/after"'])
     env = dict(os.environ, SCR=str(scr), SIF=str(scr / "sif-cache" / "k.sif"), IMAGE_REF=ref, SLURM_JOB_ID="1",
-               REG_TOKEN=REGISTRY, STEP_NAME="s", PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+               KAOS_REG_AUTH="1", STEP_NAME="s", PATH=str(bindir) + os.pathsep + os.environ["PATH"])
     assert subprocess.run(["bash", "-c", script], env=env, stdout=subprocess.PIPE).returncode == 0
     return (scr / "pw").read_text(), (scr / "ref").read_text(), (scr / "after").read_text()
 
 
 def test_the_script_presents_the_token_to_an_artifact_registry_host(tmp_path):
     pw, ref, after = _pull_with_token(tmp_path, GAR)
-    assert pw == REGISTRY and ref == "docker://" + GAR
-    assert after == "unset:unset", "the token is gone from the script's environment as soon as the image is there"
+    assert pw == REGISTRY and ref == "docker://" + GAR, "the pull was given the file"
+    assert after == "gone", "the file is gone as soon as the image is there"
 
 
 @pytest.mark.parametrize("ref", [
@@ -127,7 +134,7 @@ def test_the_script_presents_the_token_to_an_artifact_registry_host(tmp_path):
 def test_the_script_never_presents_the_token_to_another_host(tmp_path, ref):
     pw, pulled, after = _pull_with_token(tmp_path, ref)
     assert pw == "none", "an anonymous pull"
-    assert after == "unset:unset"
+    assert after == "gone"
 
 
 def test_the_reference_is_quoted_where_it_is_used(tmp_path):
@@ -167,7 +174,8 @@ def test_the_registry_token_is_not_put_in_the_job_for_a_host_that_may_not_have_i
             _, env, _, _ = r.site_job(REGISTRY, "")
         finally:
             runmod.wallet.fetch_workdir = old
-        assert ("REG_TOKEN=" + REGISTRY in env) is has
+        assert not any(REGISTRY in e for e in env), "never in the job's environment"
+        assert ("KAOS_REG_AUTH=1" in env) is has
 
 
 # ---------------------------------------------------------------- 2/3. the node: step environment, files, modes
@@ -205,6 +213,7 @@ class HSite(tsc.Site):
         super().__init__(tmp_path, lakefs, shared, context or helpers.fixture("context-one-upstream.wire"), inputs=inputs,
                          does=does, monkeypatch=monkeypatch)
         self.cfg_image = image
+        self.reg_placed = True       # the staging tool placed the registry auth file (False: it did not, yet)
         self.cfg.image = image
         self.runner._mint = lambda: WALLET
         self.runner._keys = lambda: identity.Key("KAOSXHARD", KEY_SECRET, 1e12, "2099-01-01T00:00:00Z")
@@ -217,6 +226,8 @@ class HSite(tsc.Site):
         self.runner.prepare_handback()
         self.place_key(jid)
         batch, env, _, _ = self.runner.site_job(REGISTRY, "")
+        if self.reg_placed:
+            helpers.write_registry_file(self.scratch / "kaos-tmp" / ("reg-" + jid), self.cfg.image.partition("/")[0], REGISTRY)
         self.batch, self.env = batch, env
         node = dict(e.split("=", 1) for e in env)
         node.update(PATH=str(self.tmp / "bin") + os.pathsep + os.environ["PATH"], SLURM_JOB_ID=jid, HOME=str(self.home),

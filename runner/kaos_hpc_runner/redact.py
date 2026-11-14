@@ -38,7 +38,7 @@ import urllib.parse
 REDACTED = '[redacted]'
 MIN_LITERAL = 8       # a held value shorter than this is not a credential, and would blot out ordinary text
 # The variables of the job script that hold credentials; their exact values are looked for in the output.
-HELD_ENV = ('MLFLOW_TRACKING_TOKEN', 'REG_TOKEN', 'APPTAINER_DOCKER_PASSWORD')
+HELD_ENV = ('MLFLOW_TRACKING_TOKEN',)
 # The app's data store key is in a file (LAKEFS_KEY_FILE), not in a variable: its secret, its id and the pair a Basic header holds.
 KEY_FILE_ENV = 'LAKEFS_KEY_FILE'
 

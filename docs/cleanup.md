@@ -48,7 +48,7 @@ the project's `hpc-cleanup` form and its suspended schedule call it over the sta
 removes it today and what `clean` adds is in that repository, `docs/mlops/hpc-cleanup.md`. This repository's part is
 what the job script and the runner write, all under the platform project's own root on scratch
 (`<scratch>/kaos/<project>`, the job script's `SCR`; the layout and who owns what are in `docs/job-environment.md`):
-`kaos-work/<job>`, `kaos-tmp/in-<job>`, `kaos-tmp/idle-<job>`,
+`kaos-work/<job>`, `kaos-tmp/in-<job>`, `kaos-tmp/reg-<job>`, `kaos-tmp/idle-<job>`,
 `kaos-priv/host-<job>`, `kaos-ckpt/<workflow uid>/<step>/<seq>.tar` and the `kaos-ckpt-lease=` / `kaos-commit=` /
 `kaos-image=` words of the job comment, which are what `clean` reads to leave a queued or running job alone. Changing
 one of those names or words changes what `clean` can match: the stager's name patterns and tests name them.

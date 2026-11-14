@@ -146,3 +146,17 @@ def write_key_file(folder, key=None):
     with os.fdopen(fd, "w") as f:
         json.dump((key or app_key()).record(), f)
     return path
+
+
+def write_registry_file(folder, host, token):
+    """The registry auth file as the site's staging tool places it: a folder 0700, the file 0600, a Docker config."""
+    import base64
+    import os
+    folder = str(folder)
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    path = os.path.join(folder, "auth.json")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    auth = base64.b64encode(("oauth2accesstoken:" + token).encode()).decode()
+    with os.fdopen(fd, "w") as f:
+        json.dump({"auths": {host: {"auth": auth}}}, f)
+    return path

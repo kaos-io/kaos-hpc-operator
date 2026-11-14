@@ -9,8 +9,9 @@ build (D-62).
 `batch_lines()` returns the script lines; they are joined with newlines by the caller.
 
 PRD kaos#1911 hardening: every script and file the job writes is private to the site user (umask 077, folders 0700);
-the step runs with `--cleanenv` and receives only STEP_ENV (below); the registry token is presented only to a host
-parsed out of the reference and is unset once the image is there; the job's private folder (the script copy a
+the step runs with `--cleanenv` and receives only STEP_ENV (below); the registry token is never in the job's environment or
+script: it is a file the platform's staging tool places (REG_DIR), read by the pull alone, presented only to a host parsed
+out of the reference, and removed as soon as the image is there; the job's private folder (the script copy a
 shared-node host keeps) is removed on every way out of the script; the failure tail copied into the job comment is
 redacted first. One limit stays: jobs of one project run as ONE site user, and the site sees one user, so no folder
 mode separates two of them from each other (see docs/job-environment.md).
@@ -31,7 +32,8 @@ from .settings import CONTEXT_ENV
 # KAOS_STAGED_ROOT, KAOS_CHECKPOINT_DIR and KAOS_RESUME_PATH are set by the script itself as APPTAINERENV_*.
 # NOT passed, on purpose: HOME (Apptainer gives the container its own HOME, the user's home folder, bound in), USER,
 # PATH (the image's own), LD_LIBRARY_PATH (it would point the image's loader at host libraries; --nv binds the driver's),
-# and every secret of the job script (the registry token, the stage-in/hand-back programs, the job's settings).
+# and every secret of the job script (the stage-in/hand-back programs, the job's settings). The registry token is not in
+# the job at all: it is a file (REG_DIR) that only the image pull reads.
 PASS_ENV = ('http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'no_proxy', 'NO_PROXY',
             'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
             'SLURM_CPUS_PER_TASK', 'SLURM_GPUS_ON_NODE', 'SLURM_JOB_GPUS', 'SLURM_NTASKS', 'SLURM_MEM_PER_NODE',
@@ -61,6 +63,10 @@ ENV_MOUNT = '/kaos/env'
 # read-only; the step finds the file by LAKEFS_KEY_FILE.
 KEY_MOUNT = '/kaos/key'
 KEY_FILE_NAME = 'lakefs-key.json'
+# The registry's auth file for the image pull (a Docker config), placed by the staging tool's `registry` verb in a folder of its
+# own beside the key folder (0700/0600), read by `apptainer pull --authfile`, and removed as soon as the image is there. Never
+# bound into the step. The job knows only that one is coming (KAOS_REG_AUTH=1), never its content.
+REG_FILE_NAME = 'auth.json'
 # POSIX sh, run by the image's /bin/sh. `$(cat f; printf x)` keeps trailing newlines, which `$(cat f)` would drop.
 LOADER = ('for f in ' + ENV_MOUNT + '/*; do [ -f "$f" ] || continue; v=$(cat "$f"; printf x); export "${f##*/}=${v%x}"; done;'
           ' unset f v;')
@@ -84,7 +90,7 @@ REDACT_HELPER = [
 # are configured as hidden"); the states that mean finished are filtered out here, so a suspended, requeued or otherwise
 # unusual live job keeps its folders. An empty answer is believed only when KAOS_SWEEP_SELF names a job that must be in it
 # (a caller that is itself a job; set but empty = do nothing) or the caller says KAOS_SWEEP_ALLOW_EMPTY=1 after its own
-# queue check. Only folders named exactly host-<digits> / in-<digits> / env-<digits> / key-<digits> directly under <root>/kaos-priv and
+# queue check. Only folders named exactly host-<digits> / in-<digits> / env-<digits> / key-<digits> / reg-<digits> directly under <root>/kaos-priv and
 # <root>/kaos-tmp that belong to the caller and are older than KAOS_SWEEP_MIN_AGE_MIN (default 10) are removed; a link is
 # never followed; an empty or root path does nothing.
 SWEEP_HELPER = [
@@ -98,7 +104,7 @@ SWEEP_HELPER = [
     '|DEADLINE|OUT_OF_MEMORY)$/ {print $1}\')',
     '  if [ -n "${KAOS_SWEEP_SELF:-}" ]; then printf "%s\n" "$live" | grep -qx "$KAOS_SWEEP_SELF" || return 0;',
     '  elif [ -z "$live" ] && [ "${KAOS_SWEEP_ALLOW_EMPTY:-0}" != 1 ]; then return 0; fi',
-    '  for kind in kaos-priv/host kaos-tmp/in kaos-tmp/env kaos-tmp/key; do',
+    '  for kind in kaos-priv/host kaos-tmp/in kaos-tmp/env kaos-tmp/key kaos-tmp/reg; do',
     '    [ -d "$root/${kind%/*}" ] && [ ! -L "$root/${kind%/*}" ] || continue',
     '    find "$root/${kind%/*}" -mindepth 1 -maxdepth 1 -type d -name "${kind#*/}-[0-9]*" -user "$USER"'
     ' -mmin +"${KAOS_SWEEP_MIN_AGE_MIN:-10}" 2>/dev/null | while read -r d; do',
@@ -209,7 +215,7 @@ def batch_lines(scope, scratch):
         # script: the end, fail(), a signal (Slurm's TERM at cancel or at the time limit).
         'kaos_cleanup(){ [ -n "$KAOS_PRIV" ] && rm -rf "$KAOS_PRIV"; [ -n "$KAOS_IN_ROOT" ] && rm -rf "$KAOS_IN_ROOT";'
         ' [ -n "$KAOS_ENV_DIR" ] && rm -rf "$KAOS_ENV_DIR";'
-        ' [ -n "$KAOS_KEY_DIR" ] && rm -rf "$KAOS_KEY_DIR"; return 0; }',
+        ' [ -n "$KAOS_KEY_DIR" ] && rm -rf "$KAOS_KEY_DIR"; [ -n "$KAOS_REG_DIR" ] && rm -rf "$KAOS_REG_DIR"; return 0; }',
         'trap kaos_cleanup EXIT',
         # TERM/HUP/INT end the script with 143 whatever it was doing (a host job's Slurm exit code after a cancel or
         # the time limit is therefore always 143): the runner never reads a host job's exit code, it reads the step's
@@ -293,6 +299,17 @@ def batch_lines(scope, scratch):
         '    echo "the app\'s data store key was not placed on the site within ${KAOS_KEY_WAIT_S:-600} s: the job cannot read or '
         'write the app\'s data. Run the step again"; fail 247; fi',
         '  sleep 2; KAOS_KEY_WAIT=$((KAOS_KEY_WAIT + 2)); done',
+        # The registry's auth file (see REG_FILE_NAME): checked like the key folder before it is read, waited for only when a pull
+        # needs it, and removed as soon as the pull is over (and by the exit trap and the sweep, whatever way the job ends).
+        'KAOS_REG_DIR=$SCR/kaos-tmp/reg-$KAOS_JOB_ID; KAOS_REG_FILE=$KAOS_REG_DIR/' + REG_FILE_NAME,
+        'kaos_reg_check(){ local bad="";',
+        '  if [ -e "$KAOS_REG_DIR" ] || [ -L "$KAOS_REG_DIR" ]; then',
+        '    { [ -O "$KAOS_REG_DIR" ] && [ ! -L "$KAOS_REG_DIR" ] && [ -z "$(find "$KAOS_REG_DIR" -maxdepth 0 -perm /077 2>/dev/null)" ]; } ||'
+        ' bad="the registry credentials folder is not the job user\'s own private folder (or is a link)"; fi',
+        '  if [ -z "$bad" ] && { [ -e "$KAOS_REG_FILE" ] || [ -L "$KAOS_REG_FILE" ]; }; then',
+        '    { [ -O "$KAOS_REG_FILE" ] && [ -f "$KAOS_REG_FILE" ] && [ ! -L "$KAOS_REG_FILE" ]; } ||'
+        ' bad="the registry credentials file is not the job user\'s own (or is a link)"; fi',
+        '  [ -z "$bad" ] || { echo "$bad: the registry credentials are not read"; return 1; }; }',
         'BIND=""; KAOS_IN_ROOT=$SCR/kaos-tmp/in-$KAOS_JOB_ID; rm -rf "$KAOS_IN_ROOT"',
         'for KAOS_IN in $KAOS_INPUTS; do',
         '  IFS="|" read -r IN_NAME IN_REPO IN_COMMIT IN_STAGED IN_OWNER <<< "$KAOS_IN"',
@@ -388,17 +405,24 @@ def batch_lines(scope, scratch):
         # 5140432 vs the anonymous F-01 pull that worked on the same repo).
         # The token goes only to Artifact Registry: the HOST of the reference (its text up to the first slash, never
         # a glob over the whole reference) must be <one label>-docker.pkg.dev. Anything else pulls anonymously.
-        '    KAOS_REG_HOST=${IMAGE_REF%%/*}; KAOS_REG_LABEL=${KAOS_REG_HOST%-docker.pkg.dev}',
-        '    if [ -n "$REG_TOKEN" ] && [ "$KAOS_REG_LABEL" != "$KAOS_REG_HOST" ]; then',
-        '      case "$KAOS_REG_LABEL" in ""|-*|*-|*[!a-z0-9-]*) ;; *)'
-        ' export APPTAINER_DOCKER_USERNAME=oauth2accesstoken APPTAINER_DOCKER_PASSWORD="$REG_TOKEN";; esac',
+        # The token is a FILE (REG_FILE_NAME): the pull is given its path (--authfile), nothing secret is in a variable or
+        # on a command line. The runner places the file right after the submit; a job that starts first waits for it
+        # (KAOS_REG_WAIT_S, 120), and a file that never comes means an anonymous pull (which the runner answers, after a
+        # long queue wait, as it answers an expired token: a fresh job with fresh credentials, bounded).
+        '    KAOS_REG_HOST=${IMAGE_REF%%/*}; KAOS_REG_LABEL=${KAOS_REG_HOST%-docker.pkg.dev}; KAOS_PULL_AUTH=()',
+        '    if [ "$KAOS_REG_AUTH" = 1 ] && [ "$KAOS_REG_LABEL" != "$KAOS_REG_HOST" ]; then',
+        '      case "$KAOS_REG_LABEL" in ""|-*|*-|*[!a-z0-9-]*) ;; *)',
+        '        KAOS_REG_WAIT=0; until kaos_reg_check || fail 231; [ -s "$KAOS_REG_FILE" ] || [ $KAOS_REG_WAIT -ge ${KAOS_REG_WAIT_S:-120} ]; do',
+        '          sleep 2; KAOS_REG_WAIT=$((KAOS_REG_WAIT + 2)); done',
+        '        if [ -s "$KAOS_REG_FILE" ]; then KAOS_PULL_AUTH=(--authfile "$KAOS_REG_FILE")',
+        '        else echo "the registry credentials were not placed on the site within ${KAOS_REG_WAIT_S:-120} s: the image is pulled without them"; fi;; esac',
         '    fi',
-        '    apptainer pull "$SIF_TMP" "docker://$IMAGE_REF" || { rm -f "$SIF_TMP"; fail 231; }',
+        '    apptainer pull "${KAOS_PULL_AUTH[@]}" "$SIF_TMP" "docker://$IMAGE_REF" || { rm -f "$SIF_TMP"; fail 231; }',
         '    mv -n "$SIF_TMP" "$SIF"; kaos_sif_label; rm -f "$SIF_TMP"',
         '  fi',
         'fi',
-        # The registry token has done its work (or never will): it is gone from this script's environment.
-        'unset REG_TOKEN APPTAINER_DOCKER_USERNAME APPTAINER_DOCKER_PASSWORD',
+        # The registry token has done its work (or never will): its file is gone, here, not only when the job ends.
+        'rm -rf "$KAOS_REG_DIR"; unset KAOS_PULL_AUTH',
         # PRD-HPC-1461 AC-65: whatever way the SIF came to exist (built here, built by another job first,
         # already cached) the staged tar is useless now, so it goes in every case, not only after this
         # job's own build (live 2026-11-10: tars of jobs that found the SIF cached piled up).

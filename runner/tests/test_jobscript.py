@@ -293,7 +293,7 @@ def _run_job(tmp_path, staged, build_ok=True, pull_ok=True, preexisting_sif=Fals
         sif.write_text("cached")
     script = "\n".join(['fail(){ echo "$1" > "$SCR/failed"; exit "$1"; }'] + lines[start:end + 1])
     env = dict(os.environ, SCR=str(scr), SIF=str(sif), IMAGE_REF="europe-docker.pkg.dev/p/app@sha256:ab",
-               SLURM_JOB_ID="1", REG_TOKEN="expired", PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+               SLURM_JOB_ID="1", PATH=str(bindir) + os.pathsep + os.environ["PATH"])
     if staged is not None:
         env["IMAGE_STAGED"] = str(tar)
     rc = subprocess.run(["bash", "-c", script], env=env, stdout=subprocess.PIPE).returncode

@@ -65,7 +65,7 @@ STAGE_FALLBACK_MAX_BYTES = 50 * 10 ** 9   # above this a job never downloads the
 STAGE_NOTE_EVERY_S = 10 * 60         # how often the job's status says how far the copy is
 TOKEN_MIN_LEFT_S = 3600              # a data token with less left than this is not used for another attempt
 EX_RETRY, EX_NOSPACE, EX_USAGE, EX_CONTRACT = 75, 76, 2, 78
-CONTRACT = 4   # 4 = the whole tree of the commit under <copy>/data/, a dataset another project shares filed as repo@owner, and the `key` verb (the app's key file for a job); the tool's CONTRACT is the same number
+CONTRACT = 5   # 5 = 4 and the `registry` verb (the registry token's auth file for a job); 4 = the whole tree of the commit under <copy>/data/, a dataset another project shares filed as repo@owner, and the `key` verb (the app's key file for a job); the tool's CONTRACT is the same number
 
 
 class InsufficientQuota(Exception):
