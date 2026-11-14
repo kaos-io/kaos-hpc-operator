@@ -272,9 +272,16 @@ class Site:
 
     def __init__(self, tmp_path, lakefs, shared, context, inputs=(), does="result", monkeypatch=None, drop=()):
         self.tmp, self.lakefs = tmp_path, lakefs
-        self.scratch, self.home, bindir = tmp_path / "scratch", tmp_path / "home", tmp_path / "bin"
-        for d in (self.scratch, self.home, bindir):
+        # The site project's scratch holds the shared folder kaos/ (3770, as the site owner sets it up); the job's scratch
+        # root, SCR, is the project's own folder in it (PRD kaos#1911).
+        self.site_scratch, self.home, bindir = tmp_path / "scratch", tmp_path / "home", tmp_path / "bin"
+        self.scratch = self.site_scratch / "kaos" / "p1"
+        for d in (self.site_scratch, self.home, bindir):
             d.mkdir()
+        (self.site_scratch / "kaos").mkdir()
+        (self.site_scratch / "kaos").chmod(0o3770)
+        self.scratch.mkdir()
+        self.scratch.chmod(0o700)          # as the connection's set-up leaves the project's root
         (bindir / "apptainer").write_text(APPTAINER)
         for tool in ("squeue", "scontrol"):
             (bindir / tool).write_text("#!/bin/bash\nexit 0\n")
@@ -297,7 +304,7 @@ class Site:
     def resident(self, inp, files, marker=True):
         """A copy the site's staging tool made from a login node, with the record it writes. The dataset's files
         are under data/, the record and the lease note beside it, and the path the runner is given is data/."""
-        d = self.scratch / "kaos" / "p1" / "datasets" / inp["repo"] / inp["commit"]
+        d = self.scratch / "datasets" / inp["repo"] / inp["commit"]
         (d / "data").mkdir(parents=True, exist_ok=True)
         for rel, body in files.items():
             (d / "data" / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -478,7 +485,7 @@ def test_a_copy_of_the_older_layout_is_served_by_neither_path(tmp_path, lakefs, 
     to the job by the path an older staging tool reported (the folder itself, its markers inside); the in-job
     copy is complete by an empty marker. The job serves neither: the step sees the commit's files, no others."""
     site = Site(tmp_path, lakefs, shared, helpers.fixture("context-one-upstream.wire"), inputs=TWO_INPUTS, monkeypatch=monkeypatch)
-    old = site.scratch / "kaos" / "p1" / "datasets" / "dataset-labels" / LABELS
+    old = site.scratch / "datasets" / "dataset-labels" / LABELS
     old.mkdir(parents=True)
     (old / "stale-a.csv").write_bytes(b"stale")
     (old / ".kaos-ready").write_text(json.dumps({"repo": "dataset-labels", "commit": LABELS, "full": True}))
