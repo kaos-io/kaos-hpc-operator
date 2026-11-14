@@ -26,6 +26,8 @@ import json
 import os
 import sys
 
+from kubecore.failure import failed
+
 PLAN_ENV = "KAOS_PROMOTE_PLAN"
 PROMOTED = "kaos.promoted"     # on the merge commit: the full id of the sealed version it promoted (kaos_lib.writer)
 MAIN = "main"
@@ -164,10 +166,10 @@ def main(argv=None):
             client = None
         done = promote(plan, run, client)
     except PromoteError as exc:
-        print(f"kaos-promote FAILED: {exc}", file=sys.stderr, flush=True)
+        failed("kaos-promote", exc)
         return 1
     except Exception as exc:  # noqa: BLE001 - the lake or the network: nothing has been merged yet, or promote() said what was
-        print(f"kaos-promote FAILED: {exc}. Run the task again.", file=sys.stderr, flush=True)
+        failed("kaos-promote", f"{exc}. Run the task again.")
         return 1
     print(f"kaos-promote: {len(done)} dataset(s) promoted.", flush=True)
     return 0

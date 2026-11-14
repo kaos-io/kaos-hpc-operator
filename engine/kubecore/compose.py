@@ -74,6 +74,7 @@ import yaml
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from omegaconf.nodes import BooleanNode, EnumNode, FloatNode, IntegerNode, StringNode
 
+from kubecore.failure import failed
 from kubecore import derive_tree, rerun
 from kubecore.run_settings import (
     checkpoint_field,
@@ -847,7 +848,7 @@ def main(argv=None) -> None:
         message = str(exc)
         if exc.__cause__ is not None:  # e.g. enum ValidationError inside Hydra's wrapper
             message += f"\n  cause: {exc.__cause__}"
-        print(f"compose-and-validate FAILED: {message}", file=sys.stderr)
+        failed("compose-and-validate", message)
         sys.exit(1)
 
     if args.output:
