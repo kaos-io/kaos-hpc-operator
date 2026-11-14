@@ -117,6 +117,20 @@ var _ = Describe("HPC invalid image", func() {
 		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(0))))
 	})
 
+	It("should_end_a_job_whose_large_dataset_was_not_staged_as_failed_dataset_not_staged_and_settle_nothing", func() {
+		j := reconcileOnce(newJob("not-staged", "zot.example/proj/app:v1"))
+		orig := j.DeepCopy()
+		code := hpcv1alpha1.ExitCodeDatasetNotStaged
+		j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, State: "FAILED", ExitCode: &code, Terminal: true,
+			Message: "dataset dataset-raw@c0ffee is 2.5 TB and the site could not stage it in time"}
+		Expect(k8sClient.Status().Patch(ctx, j, client.MergeFrom(orig))).To(Succeed())
+		got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonDatasetNotStaged))
+		Expect(got.Status.Message).To(ContainSubstring("2.5 TB"))
+		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(0))))
+	})
+
 	It("should_end_a_job_the_runner_found_invalid_as_failed_invalid_image_and_settle_nothing", func() {
 		j := reconcileOnce(newJob("runner-found", "zot.example/proj/app:v1"))
 		orig := j.DeepCopy()

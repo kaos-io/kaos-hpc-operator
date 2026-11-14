@@ -65,6 +65,7 @@ The job script and the runner reserve these codes; the controller turns them int
 | 243 | job script, or runner | the step ended well but its result could not be handed back: the job could not read or upload the result file (job script); the runner could not fetch it, nothing arrived, or the run has no way to hand a result back, in which case nothing is submitted (runner, reported FAILED) | `ResultNotHandedBack` |
 | 244 | runner | the result file the job handed back is not a result of the step contract (reported FAILED) | `InvalidResult` |
 | 245 | runner | a dataset another project shares cannot be read: not shared with this project (any more), the owner unknown or without a public address, or the site could not stage it; the job never downloads it itself (reported FAILED, nothing staged, no site job) | `SharedDatasetUnavailable` |
+| 246 | runner | an own dataset above 50 GB was not staged in the time allowed for its size and the job must not download it (reported FAILED, nothing submitted) | `DatasetNotStaged` |
 
 ## What the step gets and hands back (the step contract)
 

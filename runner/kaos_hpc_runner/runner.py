@@ -34,7 +34,7 @@ from .sharing import inputs_in_script
 from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_site_down, lane_refusal,
                     share_state, site_time, submit_limit_refusal)
 from .settings import (CHECKPOINT_EXIT, CONTEXT_ENV, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT,
-                       INVALID_IMAGE_EXIT, INVALID_RESULT_EXIT, OFFER_S, ROLE_POLL_S, RESERVED_NAME_EXIT,
+                       INVALID_IMAGE_EXIT, INVALID_RESULT_EXIT, OFFER_S, ROLE_POLL_S, RESERVED_NAME_EXIT, DATASET_NOT_STAGED_EXIT,
                        SHARED_DATASET_UNAVAILABLE_EXIT,
                        RESULT_NOT_HANDED_BACK_EXIT, STAGING_MISMATCH_EXIT, SUBMIT_LIMIT_EXIT, Settings, image_problem,
                        registry_token_host)
@@ -163,10 +163,16 @@ class Runner:
             self.stage_tried = True
             cfg.check_job()
             self.prepare_handback()
+            staging_began = time.time()
             for inp in cfg.inputs:
                 info = {}
-                self.staged[inp['name']] = staging.stage_dataset(cfg, inp, self.stager, self._mint, info=info)
+                # note: how far a long copy is; deadline: 72 hours in total for all inputs, from the first one's start
+                self.staged[inp['name']] = staging.stage_dataset(cfg, inp, self.stager, self._mint, info=info,
+                                                                 note=self.reporter.pending_reason,
+                                                                 deadline=staging_began + staging.STAGE_MAX_BUDGET_S)
                 self.reporter.note_staging(info)    # carried by every later report; the follower prints it
+            if time.time() - staging_began > 3600:
+                self.renew_wallet()   # the job's token was minted before a long staging began: it would reach the site job near its end
         reg = ''
         try:
             r = urllib.request.Request(
@@ -428,6 +434,14 @@ class Runner:
         self.reported = None
         self.hosted = None
 
+    def renew_wallet(self):
+        """A new token after a long staging. When it cannot be minted, the old one is kept only while it has
+        staging.TOKEN_MIN_LEFT_S left: a job submitted with a token about to end could not hand its result back."""
+        w = staging.renewed_wallet(self._mint, self.wallet)
+        if not w:
+            self.fail_handback('no data-plane token could be minted for this job')
+        self.wallet, self.wallet_exp = w, wallet.wallet_exp(w)
+
     def fresh_wallet(self):
         """The wallet minted at submit lives 12 h; a long job ends after that. Outputs and the
         checkpoint check need a valid one, so a wallet about to expire is minted again."""
@@ -655,6 +669,8 @@ class Runner:
             return self.end_before_staging('StagingMismatch', STAGING_MISMATCH_EXIT, e)
         except staging.ReservedName as e:
             return self.end_before_staging('ReservedName', RESERVED_NAME_EXIT, e)
+        except staging.DatasetNotStaged as e:
+            return self.end_before_staging('DatasetNotStaged', DATASET_NOT_STAGED_EXIT, e)
         except staging.SharedDatasetUnavailable as e:
             return self.end_before_staging('SharedDatasetUnavailable', SHARED_DATASET_UNAVAILABLE_EXIT, e)
         if adopted:

@@ -82,6 +82,11 @@ const (
 	// submits anything; its message names the dataset and the owner. Terminal: ask the owner to share it, then run
 	// the pipeline again.
 	ReasonSharedDatasetUnavailable = "SharedDatasetUnavailable"
+	// ReasonDatasetNotStaged: an own dataset in spec.inputs is above 50 GB and the site could not stage it in the
+	// time the runner allows for its size (4 hours at least, 72 at most), and a job never downloads a dataset that
+	// large itself on GPU time. The runner reports it with ExitCodeDatasetNotStaged before it submits anything; its
+	// message names the dataset and its size. Terminal: run the step again, the copy continues where it stopped.
+	ReasonDatasetNotStaged = "DatasetNotStaged"
 	// ReasonResultNotHandedBack: the step ended well, but no result of it reached status.result: the step wrote
 	// none, the job could not read or upload the result file, or the runner could not fetch it (PRD kaos#1911
 	// CON-04). Also when the run has no way to hand a result back at all (no data-plane token,
@@ -148,6 +153,9 @@ const (
 	// ExitCodeSharedDatasetUnavailable is the exit code the runner reports (state FAILED, no site job) when a
 	// dataset another project shares cannot be read for the step.
 	ExitCodeSharedDatasetUnavailable = int32(245)
+	// ExitCodeDatasetNotStaged is the exit code the runner reports (state FAILED, no site job) when a dataset too
+	// large for the job to download was not staged in time.
+	ExitCodeDatasetNotStaged = int32(246)
 	// ExitCodeResultNotHandedBack is the exit code of a job whose step ended well but whose result could not be
 	// handed back: the job script exits with it when it cannot read or upload the result file, and the runner
 	// reports it (state FAILED) when it cannot fetch what the job uploaded, or before it submits anything when
@@ -490,7 +498,7 @@ type RunStatus struct {
 	// reserve: 210 (no Apptainer), 231 (image pull), 232 (staging), 233 (batch script), 234 (no verified
 	// checkpoint to restore), 235 (checkpoint copy or job comment failed), 236 (Idle), 237 (InsufficientQuota),
 	// 238 (SubmitLimit), 239 (InvalidImage), 240 (GPUViolation), 241 (StagingMismatch), 242 (ReservedName),
-	// 243 (ResultNotHandedBack), 244 (InvalidResult), 245 (SharedDatasetUnavailable).
+	// 243 (ResultNotHandedBack), 244 (InvalidResult), 245 (SharedDatasetUnavailable), 246 (DatasetNotStaged).
 	// +optional
 	ExitCode *int32 `json:"exitCode,omitempty"`
 	// StartTime and EndTime as the site reports them.

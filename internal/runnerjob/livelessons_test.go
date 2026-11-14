@@ -49,7 +49,7 @@ func TestShouldMountTheStagerKeyReadOnlyWithMode0400WhetherOrNotItExists(t *test
 // deadline, so the lesson is that every attempt gets the full allowance (never a remainder of the first) and
 // that the Job names differ, so the later Job never inherits the earlier one's clock.
 func TestShouldGiveEveryContinuationAttemptTheFullDeadlineOfItsOwn(t *testing.T) {
-	const want = (120 + 480 + 30) * 60
+	const want = (120 + 480 + 30 + stagingAllowanceMinutes) * 60
 	job, site := fixtures()
 	seen := map[string]bool{}
 	for attempt := int32(1); attempt <= 4; attempt++ {
@@ -80,7 +80,23 @@ func TestShouldExtendEachContinuationDeadlineByTheOutageBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := *rj.Spec.ActiveDeadlineSeconds, int64((120+480+30)*60+2*3600); got != want {
+	if got, want := *rj.Spec.ActiveDeadlineSeconds, int64((120+480+30+stagingAllowanceMinutes)*60+2*3600); got != want {
 		t.Errorf("deadline %d, want %d", got, want)
+	}
+}
+
+func TestShouldAllowAJobWithDatasetsToStageTheLongestStagingOnTopOfItsDeadline(t *testing.T) {
+	job, site := fixtures()
+	with, err := Build(Config{Image: "kaos/op:1"}, job, site, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.Spec.Inputs = nil
+	without, err := Build(Config{Image: "kaos/op:1"}, job, site, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *with.Spec.ActiveDeadlineSeconds - *without.Spec.ActiveDeadlineSeconds; got != 72*3600 {
+		t.Errorf("a job with datasets gets %d s more than one without, want the 72 hours the runner may stage for", got)
 	}
 }

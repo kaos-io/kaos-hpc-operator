@@ -633,7 +633,7 @@ def test_the_dataset_staging_record_is_reported_from_the_first_report_on(rig):
     rig.make(slurm)
     rec = {"repo": "ds", "commit": "c2" * 6, "kind": "delta", "files": 3, "bytes": 1234, "seconds": 12}
     rig.monkeypatch.setattr(runmod.staging, "stage_dataset",
-                            lambda cfg, inp, st, mint, info=None: info.update(rec) or "/scr/kaos/p/datasets/ds/c2")
+                            lambda cfg, inp, st, mint, info=None, **kw: info.update(rec) or "/scr/kaos/p/datasets/ds/c2")
     rig.runner.run()
     runs = [c[2]["status"]["run"] for c in rig.kube.patches() if "run" in c[2]["status"]]
     assert runs[0]["state"] == "PENDING" and runs[0]["staged"] == [rec] and runs[-1]["staged"] == [rec]
@@ -1585,3 +1585,79 @@ def test_a_host_job_ended_by_term_is_judged_by_its_comment_not_by_its_exit_code(
         first = terminal_reports(rig)[0]
         want = ("COMPLETED", 0) if comment == HOST_DONE else ("FAILED", 1)
         assert (first["state"], first["exitCode"]) == want, "%s with job exit %s: %s" % (comment, job_rc, first)
+
+
+def test_a_dataset_the_site_could_not_stage_and_the_job_must_not_download_ends_the_attempt_dataset_not_staged(rig, capsys):
+    """No site job, one terminal report (FAILED, exit 246, the dataset and its size); not a fallback."""
+    slurm = FakeSlurm()
+    rig.make(slurm)
+
+    def refused(cfg, inp, stager, mint, **kw):
+        raise staging_mod.DatasetNotStaged("dataset d@c is 2.5 TB and the site could not stage it in time")
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", refused)
+    assert rig.runner.run() == 0
+    assert slurm.submitted == []
+    run = rig.kube.run
+    assert run["state"] == "FAILED" and run["exitCode"] == 246 and run["terminal"] is True
+    assert "2.5 TB" in run["message"] and not run.get("siteJobID")
+    assert "DatasetNotStaged" in capsys.readouterr().out
+
+
+def _jwt_ending(exp):
+    import base64
+    seg = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).rstrip(b"=").decode()
+    return "h.%s.s" % seg
+
+
+def _long_staging(rig, monkeypatch, token_left_after):
+    """A job whose staging took two hours; the token minted before it has token_left_after seconds left then, and
+    the next mint fails."""
+    clock = [1_000_000.0]
+    monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
+    old = _jwt_ending(clock[0] + 2 * 3600 + token_left_after)
+    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm)
+    mints = []
+
+    def mint():
+        mints.append(1)
+        return old if len(mints) == 1 else ""
+    rig.runner._mint = mint
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset",
+                            lambda *a, **kw: clock.__setitem__(0, clock[0] + 2 * 3600) or "/scr/ds")
+    return slurm, old
+
+
+def test_a_token_about_to_end_after_a_long_staging_that_cannot_be_minted_again_fails_the_attempt(rig, monkeypatch, capsys):
+    slurm, _ = _long_staging(rig, monkeypatch, token_left_after=600)
+    with pytest.raises(SystemExit) as e:
+        rig.runner.run()
+    assert e.value.code == 0
+    assert slurm.submitted == []
+    run = rig.kube.run
+    assert run["state"] == "FAILED" and run["exitCode"] == 243 and run["terminal"] is True
+    assert "no data-plane token could be minted for this job" in run["message"]
+    assert "ResultNotHandedBack" in capsys.readouterr().out
+
+
+def test_the_old_token_with_enough_life_left_after_a_long_staging_is_kept_when_it_cannot_be_minted_again(rig, monkeypatch):
+    slurm, old = _long_staging(rig, monkeypatch, token_left_after=3 * 3600)
+    rig.runner.run()
+    assert len(slurm.submitted) == 1 and rig.runner.wallet == old
+
+
+def test_every_input_of_a_job_is_staged_against_one_72_hour_clock_started_at_the_first(rig, monkeypatch):
+    clock = [1_000_000.0]
+    monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
+    rig.make(FakeSlurm({"5001": [acc("COMPLETED")]}),
+             HPC_INPUTS=json.dumps([{"name": "a", "repo": "dataset-a", "commit": "2" * 64},
+                                    {"name": "b", "repo": "dataset-b", "commit": "3" * 64}]))
+    seen = []
+
+    def stage(cfg, inp, stager, mint, info=None, deadline=None, **kw):
+        seen.append(deadline)
+        clock[0] += 10 * 3600
+        return ""
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", stage)
+    rig.runner.run()
+    assert seen == [1_000_000.0 + 72 * 3600] * 2
