@@ -610,6 +610,20 @@ days with "runs with HPC steps are kept at least 32 days, so the month's HPC spe
 | Run form | `reuse-from-run` and `start-from-step` (section 13) |
 | Files in `outputs-<app>` | `kaos-runs/` (section 13) |
 
+### What a pipeline definition may carry
+
+The render is untrusted, so the enhancer checks the raw template against an allow-list (`engine/kubecore/definition.py`)
+before it adds anything: the fields the authoring module writes and nothing else. A template is one container, one dag or one
+list of steps; a container has an image, a command, arguments, the step's one context variable and requests and limits for cpu,
+memory, disk and GPUs; a task has a name, a template, `depends`, `when` and plain-value arguments; inputs and outputs are
+parameters, and an output reads a file or an expression. Anything else is refused at render with a sentence that names the step,
+the field and the fix: a volume or volume mount, a variable of its own or from a Secret or ConfigMap (`env`, `envFrom`,
+`valueFrom`), an artifact, a node selector, toleration or affinity, a security setting, a host namespace, a sidecar or init
+container, a service-account token, a retry or deadline of its own, a template reference, a `script` or `resource` template,
+a label or annotation that is not one of the platform's own, and the `platform.kubecore.io/image` annotation. Because no
+developer volume or variable survives, a name clash with a platform volume or variable cannot happen: the clash is refused
+before the platform adds its own. The HPC variant is made from the checked template, so it follows the same rule.
+
 ## 10. How the engine assembles the context
 
 This section is for the engine and the follower. It is the form the checks proved on the workflow engine.

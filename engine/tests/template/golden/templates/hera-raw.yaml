@@ -1,0 +1,156 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  annotations:
+    ui.kubecore.io/raw-form: '{"leafOptions":{},"optionDefaults":{},"types":{"dataset":"string","experiment-description":"string","experiment-name":"string","prepare-min_bytes":"integer"},"version":1}'
+  name: ml-pipeline
+spec:
+  arguments:
+    parameters:
+    - description: 'the end of the experiment name, also the folder your results are
+        saved in. If a step logs to MLflow, name the experiment <your app>.<this>
+        (or just <your app>): the project accepts no other name. Letters, digits,
+        - and _ only'
+      name: experiment-name
+      value: baseline
+    - description: optional free text stored with the run
+      name: experiment-description
+      value: ''
+    - description: 'The dataset the step `prepare` reads: dataset-<name>, or dataset-<name>@<version>.
+        pipeline.py names this setting in inputs=["dataset"]. On the run form it is
+        a list of your project''s datasets and their versions; without a version the
+        run reads the newest one. When the run starts the platform fixes the choice
+        to one exact version, and every step reads that same version.'
+      name: dataset
+      value: dataset-default
+    - description: the step `prepare` keeps the files of at least this size; smaller
+        ones are dropped
+      name: prepare-min_bytes
+      value: '1'
+    - description: Extra settings for this run, as YAML. They replace the values above.
+      name: config
+      value: ''
+  entrypoint: main
+  templates:
+  - container:
+      args:
+      - experiment.name={{workflow.parameters.experiment-name}}
+      - experiment.description={{workflow.parameters.experiment-description}}
+      - dataset={{workflow.parameters.dataset}}
+      - prepare.min_bytes={{workflow.parameters.prepare-min_bytes}}
+      - --render-defaults
+      - '{"experiment.name":"baseline","experiment.description":"","dataset":"dataset-default","prepare.min_bytes":"1"}'
+      - --advanced
+      - '{{workflow.parameters.config}}'
+      - --require=prepare
+      - --run
+      - '{{workflow.name}}'
+      - --run-uid
+      - '{{workflow.uid}}'
+      - --steps
+      - '[{"name":"prepare","kind":"transform","reads":["prepare"],"inputs":["dataset"],"needs":[],"produces":[{"name":"clean","type":"dataset"}]},{"name":"hello-world","kind":"evaluate","reads":[],"inputs":[],"needs":["prepare"],"produces":[{"name":"report","type":"artifact"}]}]'
+      - --context-dir
+      - /work/context
+      - --ledger-output
+      - /work/kaos-ledger.json
+      - --reused-dir
+      - /work/reused
+      command:
+      - python
+      - -I
+      - -m
+      - kaos_engine.compose
+      image: platform-managed
+    metadata:
+      labels:
+        platform.kubecore.io/step: compose-and-validate
+        platform.kubecore.io/step-kind: control
+    name: compose-and-validate
+    outputs:
+      parameters:
+      - name: kaos-ledger
+        valueFrom:
+          path: /work/kaos-ledger.json
+      - name: kaos-context-prepare
+        valueFrom:
+          path: /work/context/prepare.json
+      - name: kaos-context-hello-world
+        valueFrom:
+          path: /work/context/hello-world.json
+      - name: kaos-reused-prepare
+        valueFrom:
+          path: /work/reused/prepare.json
+      - name: kaos-reused-hello-world
+        valueFrom:
+          path: /work/reused/hello-world.json
+  - container:
+      command:
+      - python
+      - -m
+      - app.entry
+      env:
+      - name: KAOS_STEP_CONTEXT
+        value: '{{inputs.parameters.kaos-context}}'
+      image: platform-managed
+    inputs:
+      parameters:
+      - name: kaos-context
+    metadata:
+      labels:
+        platform.kubecore.io/produces-dataset: 'true'
+        platform.kubecore.io/step: prepare
+        platform.kubecore.io/step-kind: transform
+    name: prepare
+    outputs:
+      parameters:
+      - name: kaos-result
+        valueFrom:
+          path: /work/output/kaos-result.json
+  - container:
+      command:
+      - python
+      - -m
+      - app.entry
+      env:
+      - name: KAOS_STEP_CONTEXT
+        value: '{{inputs.parameters.kaos-context}}'
+      image: platform-managed
+    inputs:
+      parameters:
+      - name: kaos-context
+    metadata:
+      labels:
+        platform.kubecore.io/step: hello-world
+        platform.kubecore.io/step-kind: evaluate
+    name: hello-world
+    outputs:
+      parameters:
+      - name: kaos-result
+        valueFrom:
+          path: /work/output/kaos-result.json
+  - dag:
+      tasks:
+      - name: compose-and-validate
+        template: compose-and-validate
+      - arguments:
+          parameters:
+          - name: kaos-context
+            value: '{{=sprig.trimSuffix("}", tasks["compose-and-validate"].outputs.parameters["kaos-context-prepare"])
+              + ",\"upstream\":{" + "}" + "}"}}'
+        depends: compose-and-validate
+        name: prepare
+        template: prepare
+        when: '{{=workflow.parameters[''start-from-step''] in ['''', ''prepare'']}}'
+      - arguments:
+          parameters:
+          - name: kaos-context
+            value: '{{=sprig.trimSuffix("}", tasks["compose-and-validate"].outputs.parameters["kaos-context-hello-world"])
+              + ",\"upstream\":{\"prepare\":" + sprig.default(sprig.default("{\"version\":1,\"status\":\"absent\"}",
+              tasks["compose-and-validate"].outputs.parameters["kaos-reused-prepare"]),
+              tasks["prepare"].outputs.parameters["kaos-result"]) + "}" + "}"}}'
+        depends: compose-and-validate && prepare
+        name: hello-world
+        template: hello-world
+        when: '{{=workflow.parameters[''start-from-step''] in ['''', ''hello-world'',
+          ''prepare'']}}'
+    name: main

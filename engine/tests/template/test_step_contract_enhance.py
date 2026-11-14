@@ -98,7 +98,7 @@ def test_a_step_whose_rendered_definition_is_over_the_limit_fails_the_render_nam
         authoring.step("train", kind="evaluate")
     raw = yaml.safe_load(p.wt.to_yaml())
     step = next(t for t in raw["spec"]["templates"] if t["name"] == "train")
-    step["container"]["env"].append({"name": "BIG", "value": "x" * TEMPLATE_CAP})
+    step["container"]["args"] = list(step["container"].get("args") or []) + ["x" * TEMPLATE_CAP]
     with pytest.raises(enhance.EnhanceError) as exc:
         enhance.enhance(raw, _context())
     message = str(exc.value)

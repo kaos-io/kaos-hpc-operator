@@ -104,7 +104,8 @@ def test_a_days_value_that_is_not_a_whole_number_from_1_to_3650_is_refused(bad):
         spec_of(dict(CONTEXT, runRetentionDays=bad))
 
 
-def test_what_the_pipeline_author_already_set_is_kept():
-    spec = spec_of(author={"ttlStrategy": {"secondsAfterCompletion": 60}, "podGC": {"strategy": "OnPodCompletion"}})
-    assert spec["ttlStrategy"] == {"secondsAfterCompletion": 60}
-    assert spec["podGC"] == {"strategy": "OnPodCompletion"}
+def test_what_the_pipeline_author_sets_is_refused():
+    """The cluster expires a run by the platform's rule only: the definition carries neither field (T-20)."""
+    for field in ("ttlStrategy", "podGC"):
+        with pytest.raises(enhance.EnhanceError, match=f"'spec.{field}'"):
+            spec_of(author={field: {"strategy": "OnPodCompletion"}})

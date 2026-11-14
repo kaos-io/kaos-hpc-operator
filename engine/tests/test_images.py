@@ -4,6 +4,7 @@ import copy
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from kubecore import enhance
@@ -92,7 +93,9 @@ def test_a_step_with_the_source_annotation_reads_that_key_of_the_record():
     assert got["image-train"]["valueFrom"]["configMapKeyRef"]["key"] == "other-key"
 
 
-def test_a_verbatim_image_annotation_reads_no_record_and_gets_no_argument():
+def test_a_verbatim_image_annotation_is_refused():
+    """A step runs the image CI built. The annotation that named any image (the app's identity and secrets would run it)
+    is no longer part of what a definition may carry (T-20, T-15)."""
     from kubecore import authoring
     ctx = copy.deepcopy(CTX)
     ctx["hpc"]["enabled"] = False
@@ -102,11 +105,8 @@ def test_a_verbatim_image_annotation_reads_no_record_and_gets_no_argument():
     for t in wft["spec"]["templates"]:
         if t["name"] == "train":
             t.setdefault("metadata", {}).setdefault("annotations", {})["platform.kubecore.io/image"] = "busybox:1.36"
-    templates, tasks = parts(enhance.enhance(wft, ctx))
-    assert templates["train"]["container"]["image"] == "busybox:1.36"
-    assert "image" not in params(templates["train"])
-    assert "image-train" not in params(templates["compose-and-validate"])
-    assert not [p for p in tasks["train"]["arguments"]["parameters"] if p["name"] == "image"]
+    with pytest.raises(enhance.EnhanceError, match="step 'train' carries 'metadata.annotations.platform.kubecore.io/image'"):
+        enhance.enhance(wft, ctx)
 
 
 def test_the_hpc_variant_gets_the_same_string_as_the_step():

@@ -6,6 +6,7 @@ A raw WorkflowTemplate from the untrusted render may carry any label or annotati
 import copy
 import runpy
 
+import pytest
 import yaml
 
 from kubecore import enhance
@@ -48,6 +49,16 @@ def _forge(wft):
     return wft
 
 
+def _forge_reserved_only(wft):
+    """What the render may leave on the template: platform keys, which the trusted step removes and replaces."""
+    wft = _forge(wft)
+    wft["metadata"].pop("namespace")
+    wft["metadata"]["labels"] = {k: v for k, v in wft["metadata"]["labels"].items() if k.startswith((UI, PLATFORM))}
+    wft["metadata"]["annotations"] = {k: v for k, v in wft["metadata"]["annotations"].items() if k.startswith((UI, PLATFORM))}
+    del wft["spec"]["workflowMetadata"]
+    return wft
+
+
 def _no_reserved(mapping):
     return [k for k in (mapping or {}) if k.startswith((UI, PLATFORM))]
 
@@ -70,7 +81,7 @@ def test_strip_without_raw_form_returns_none():
 
 
 def test_forged_values_never_survive_enhance():
-    wft = enhance.enhance(_forge(_raw()), copy.deepcopy(CTX))
+    wft = enhance.enhance(_forge_reserved_only(_raw()), copy.deepcopy(CTX))
     meta = wft["metadata"]
     assert meta["namespace"] == CTX["namespace"]
     assert meta["labels"][PLATFORM + "project"] == CTX["project"]
@@ -81,10 +92,14 @@ def test_forged_values_never_survive_enhance():
     for key in (PLATFORM + "engine-version", PLATFORM + "source-commit", UI + "run-form", RAW_FORM_ANNOTATION,
                 PLATFORM + "unknown-key", UI + "other"):
         assert key not in meta["labels"] and key not in meta["annotations"]
-    assert meta["labels"]["keep.example.com/label"] == "kept"
-    wm = wft["spec"].get("workflowMetadata") or {}
-    assert _no_reserved(wm.get("labels")) == [] and _no_reserved(wm.get("annotations")) == []
     assert "victim" not in yaml.safe_dump(wft)
+
+
+def test_a_forged_namespace_other_labels_and_workflow_metadata_are_refused():
+    """The allow-list (T-20) goes further than removing the platform's keys: a pipeline's own labels, namespace and
+    spec.workflowMetadata are not part of the contract."""
+    with pytest.raises(enhance.EnhanceError, match="carries 'metadata.namespace'"):
+        enhance.enhance(_forge(_raw()), copy.deepcopy(CTX))
 
 
 def test_enhance_metadata_assigns_over_preset_values():
@@ -104,8 +119,10 @@ def test_labels_from_keys_under_the_platform_prefixes_are_removed():
         UI + "run-form": {"expression": "'x'"},
         "keep.example.com/from": {"expression": "workflow.name"},
     }
-    out = enhance.enhance(wft, copy.deepcopy(CTX))
-    assert out["spec"]["workflowMetadata"]["labelsFrom"] == {"keep.example.com/from": {"expression": "workflow.name"}}
+    enhance.strip_render_metadata(wft)
+    assert wft["spec"]["workflowMetadata"]["labelsFrom"] == {"keep.example.com/from": {"expression": "workflow.name"}}
+    with pytest.raises(enhance.EnhanceError, match="carries 'spec.workflowMetadata'"):
+        enhance.enhance(wft, copy.deepcopy(CTX))
 
 
 def test_strip_render_metadata_leaves_a_template_without_labels_from_alone():

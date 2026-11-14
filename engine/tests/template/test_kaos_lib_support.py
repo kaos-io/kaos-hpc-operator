@@ -5,10 +5,11 @@ every step, and on the MeluXina twin, which forwards it to the Slurm job.
 """
 import json
 
+import pytest
 import yaml
 from test_datasets_as_repos import CTX_PATH, _raw
 
-from kubecore.enhance import enhance
+from kubecore.enhance import EnhanceError, enhance
 
 SUPPORT = {"version": "0.4.0", "supported": ">=0.3", "deprecated": [{"range": "<0.3", "unsupported_after": "2027-01-01"}]}
 
@@ -50,8 +51,10 @@ def test_the_meluxina_twin_carries_it_to_the_controller():
     assert json.loads(_env(enhance(_raw(), _ctx(SUPPORT)), "hpc-follower")["KAOS_LIB_SUPPORT"]) == SUPPORT
 
 
-def test_a_developer_set_value_wins():
+def test_a_developer_value_for_it_is_refused():
+    """The definition cannot shadow a platform variable (T-20): it carries no variable of its own."""
     raw = _raw()
     step = next(t for t in raw["spec"]["templates"] if t["name"] == "model-training")
     step["container"]["env"] = [{"name": "KAOS_LIB_SUPPORT", "value": "{}"}]
-    assert _env(enhance(raw, _ctx(SUPPORT)), "model-training")["KAOS_LIB_SUPPORT"] == "{}"
+    with pytest.raises(EnhanceError, match="container.env"):
+        enhance(raw, _ctx(SUPPORT))

@@ -9,6 +9,7 @@ import runpy
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]  # engine/
@@ -120,20 +121,14 @@ def test_duplicate_configmap_names_collapsed():
         assert t["container"]["envFrom"] == [{"configMapRef": {"name": "cm-dup", "optional": True}}]
 
 
-def test_developer_envfrom_kept():
+def test_developer_envfrom_is_refused():
+    """The pipeline definition may not read a ConfigMap or Secret as variables (T-20): only the platform's connections do."""
     raw = _raw()
-    mine = [{"configMapRef": {"name": "mine"}}, {"configMapRef": {"name": "cm-features"}}]
     for t in raw["spec"]["templates"]:
         if "container" in t:
-            t["container"]["envFrom"] = copy.deepcopy(mine)
-    out = _enhanced(_ctx(CONNS), raw)
-    want = [
-        {"configMapRef": {"name": "mine"}},
-        {"configMapRef": {"name": "cm-features"}},
-        {"configMapRef": {"name": "cm-inference", "optional": True}},
-    ]
-    users = _users(out)
-    assert users and all(t["container"]["envFrom"] == want for t in users)
+            t["container"]["envFrom"] = [{"configMapRef": {"name": "mine"}}]
+    with pytest.raises(enhance.EnhanceError, match="container.envFrom"):
+        _enhanced(_ctx(CONNS), raw)
 
 
 def test_no_connections_identical():
@@ -149,11 +144,11 @@ def test_envfrom_no_yaml_aliases():
     assert "&id" not in out and "*id" not in out
 
 
-def test_null_or_non_list_envfrom_treated_as_absent():
+def test_null_or_non_list_envfrom_is_refused():
     for bad in (None, "oops", {"configMapRef": {"name": "x"}}):
         raw = _raw()
         for t in raw["spec"]["templates"]:
             if "container" in t:
                 t["container"]["envFrom"] = copy.deepcopy(bad)
-        users = _users(_enhanced(_ctx(CONNS), raw))
-        assert users and all(t["container"]["envFrom"] == WANT for t in users), bad
+        with pytest.raises(enhance.EnhanceError, match="container.envFrom"):
+            _enhanced(_ctx(CONNS), raw)

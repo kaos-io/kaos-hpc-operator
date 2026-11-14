@@ -73,15 +73,15 @@ def test_should_not_retry_the_steps_own_failure(tpls):
         assert not re.search(".*(%s).*" % msgs, own), own
 
 
-def test_should_keep_a_retry_strategy_the_developer_set():
+def test_should_refuse_a_retry_strategy_the_developer_set():
     def build():
         authoring.step("s", kind="evaluate")
     with authoring.pipeline("t") as p:
         build()
     raw = yaml.safe_load(p.wt.to_yaml())
     next(t for t in raw["spec"]["templates"] if t["name"] == "s")["retryStrategy"] = {"limit": "5"}
-    wf = enhance.enhance(raw, CONTEXT)
-    assert next(t for t in wf["spec"]["templates"] if t["name"] == "s")["retryStrategy"] == {"limit": "5"}
+    with pytest.raises(enhance.EnhanceError, match="step 's' carries 'retryStrategy'"):
+        enhance.enhance(raw, CONTEXT)
 
 
 def test_should_give_every_step_the_folder_env_and_an_empty_dir(tpls):
@@ -210,18 +210,15 @@ def test_should_keep_retry_and_folder_but_skip_copies_and_say_so_without_a_platf
     assert "no checkpoints.helperImage" in capsys.readouterr().err
 
 
-def test_should_skip_the_helper_for_fan_out_and_shared_templates():
-    def build():
-        authoring.step("a", kind="evaluate", gpu=True)
+def test_should_refuse_a_fan_out_the_definition_declares_itself():
+    """A pipeline that fans a task out with its own withItems is outside the contract: matrix= is the way."""
     with authoring.pipeline("t") as p:
-        build()
+        authoring.step("a", kind="evaluate", gpu=True)
     raw = yaml.safe_load(p.wt.to_yaml())
     main = next(t for t in raw["spec"]["templates"] if t["name"] == "main")
-    task = next(t for t in main["dag"]["tasks"] if t["name"] == "a")
-    task["withItems"] = [1, 2]
-    wf = enhance.enhance(raw, CONTEXT)
-    a = next(t for t in wf["spec"]["templates"] if t["name"] == "a")
-    assert "sidecars" not in a and "retryStrategy" in a and "KAOS_CHECKPOINT_DIR" in env_of(a)
+    next(t for t in main["dag"]["tasks"] if t["name"] == "a")["withItems"] = [1, 2]
+    with pytest.raises(enhance.EnhanceError, match="task 'a' carries 'withItems'"):
+        enhance.enhance(raw, CONTEXT)
 
 
 def test_should_skip_the_helper_when_lakefs_injection_is_off():
@@ -236,14 +233,14 @@ def test_should_skip_the_helper_when_lakefs_injection_is_off():
     assert "sidecars" not in a
 
 
-def test_should_keep_the_developers_own_checkpoint_folder():
+def test_should_refuse_the_developers_own_checkpoint_folder():
     with authoring.pipeline("t") as p:
         authoring.step("a", kind="evaluate", gpu=True)
     raw = yaml.safe_load(p.wt.to_yaml())
     tpl = next(t for t in raw["spec"]["templates"] if t["name"] == "a")
     tpl["container"]["env"] = [{"name": "KAOS_CHECKPOINT_DIR", "value": "/mine"}]
-    a = next(t for t in enhance.enhance(raw, CONTEXT)["spec"]["templates"] if t["name"] == "a")
-    assert env_of(a)["KAOS_CHECKPOINT_DIR"]["value"] == "/mine" and "sidecars" not in a
+    with pytest.raises(enhance.EnhanceError, match="container.env"):
+        enhance.enhance(raw, CONTEXT)
 
 
 @pytest.mark.parametrize("bad", ["soon", 0, "0m", True, "10 min"])

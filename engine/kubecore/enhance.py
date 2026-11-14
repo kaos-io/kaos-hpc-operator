@@ -10,13 +10,13 @@ enhance_class_sizing), per-step compute-class dropdowns ({step}-class, matching 
 live render-wft, listing the pool's compute classes), and the read-only
 pipeline-info form parameter.
 
-Golden rule: only fill ABSENT keys. If a developer already set a field (a
-nodeSelector, an env var, a memory request) we leave it alone. The one
+Golden rule: only fill ABSENT keys, of the fields a render may carry at all: definition.py
+(refuse_outside_contract) refuses every other field first, so a developer's volume, variable or
+nodeSelector never reaches this file. The one
 deliberate exception is `image`: the platform always overwrites it, because the
 image running in a pipeline step is a supply-chain concern (Zot registry,
 scanned, versioned) that a developer's local placeholder must never leak into
-(see CON-18 / Zot registry). The `platform.kubecore.io/image` annotation is the
-sanctioned escape hatch for unbuilt utility images.
+(see CON-18 / Zot registry). No annotation names an image any more.
 
 Compute model (matches the live in-cluster WorkflowTemplate): each step gets a
 `{step}-class` submit-form parameter defaulting to the pool's cpu/gpu tier
@@ -40,8 +40,6 @@ release-gate rule):
                                       data-source env/secret wiring
   platform.kubecore.io/source         images-ConfigMap key differs
                                       from step name (shared image)
-  platform.kubecore.io/image          use this image verbatim, skip
-                                      the ConfigMap indirection
   platform.kubecore.io/shm            /dev/shm emptyDir sizeLimit (e.g. "4Gi")
   platform.kubecore.io/workspace      per-run RWO PVC at /workspace (e.g. "50Gi")
   platform.kubecore.io/hpc            the default of the step's time limit (authoring:
@@ -77,6 +75,7 @@ from pathlib import Path
 
 import yaml
 
+from kubecore.definition import DefinitionError, refuse_outside_contract
 from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
 from kubecore.meluxina import (
@@ -134,7 +133,7 @@ from kubecore.step_contract import (
 )
 
 ANNOTATION_PREFIX = "platform.kubecore.io/"
-KNOWN_ANNOTATIONS = {"compute-class", "inject", "source", "image", "shm", "workspace", "hpc", "hpc-resumable",
+KNOWN_ANNOTATIONS = {"compute-class", "inject", "source", "shm", "workspace", "hpc", "hpc-resumable",
                      "checkpoint-every", "idle-timeout"}
 WORKSPACE_MOUNT = "/workspace"
 # Mount path for the Zitadel machine-key secret backing MLflow bearer auth
@@ -1250,17 +1249,13 @@ def enhance_images(spec: dict, ctx: dict, steps: list) -> None:
       go to compose as KAOS_STEP_IMAGES (compose refuses a step that was never built: kubecore/compose.py
       check_step_images) and compose writes them as its output `kaos-images`.
     - Every step (and its HPC variant) is given its image by its DAG task, from that output (step_contract.image_of): one
-      reading of the record for the whole run, the same string on the cluster and on HPC.
-
-    A step with a `platform.kubecore.io/image` annotation keeps that verbatim image and reads no record."""
+      reading of the record for the whole run, the same string on the cluster and on HPC."""
     cm = images_configmap(ctx)
     compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
     images = {}
     for step in steps:
         annots = platform_annotations(step)
-        if "image" in annots:
-            step["container"]["image"] = annots["image"]      # the sanctioned escape hatch: a verbatim utility image
-        elif step is compose:
+        if step is compose:
             step["container"]["image"] = IMAGE_INPUT
             step.setdefault("inputs", {}).setdefault("parameters", []).append(
                 _record_input(IMAGE_RECORD_PARAM, cm, annots.get("source", COMPOSE_STEP)))
@@ -1575,6 +1570,10 @@ def enhance(wft: dict, ctx: dict, form_data: "dict | None" = None) -> dict:
     (step -> class), rendered (the raw parameter names), rank (form_rank of the result) and raw (the render's own
     raw-form text, author data)."""
     refuse_client_identity(wft)  # before the platform adds its own account and patches
+    try:
+        refuse_outside_contract(wft)  # the allow-list: nothing the contract does not document reaches a pod
+    except DefinitionError as e:
+        raise EnhanceError(str(e)) from None
     raw_form = strip_render_metadata(wft)  # the render's ui.* and platform.* keys never survive
     rendered = [p["name"] for p in wft["spec"]["arguments"]["parameters"]] if form_data is not None else []
     enhance_metadata(wft, ctx)
