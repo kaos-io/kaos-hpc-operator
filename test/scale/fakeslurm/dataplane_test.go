@@ -47,7 +47,7 @@ func TestTheDataPlaneServesWhatAJobThatEndedWellHandedBack(t *testing.T) {
 		return reply.JobID
 	}
 	object := func(id int, name string) (int, string) {
-		return do(http.MethodGet, fmt.Sprintf("/lakefs/api/v1/repositories/outputs-a/branches/hpc-wf-s/objects?path=hpc-outputs/wf/s/%d/%s",
+		return do(http.MethodGet, fmt.Sprintf("/lakefs/api/v1/repositories/outputs-a/refs/hpc-wf-s/objects?path=hpc-outputs/wf/s/%d/%s",
 			id, name), basicKey, nil)
 	}
 	context := func(handback string) string {
@@ -89,7 +89,7 @@ func TestTheDataPlaneServesWhatAJobThatEndedWellHandedBack(t *testing.T) {
 			}
 		}
 	}
-	if code, _ := do(http.MethodGet, "/lakefs/api/v1/repositories/outputs-a/branches/hpc-wf-s/objects?path=hpc-outputs/wf/s/1/kaos-result.json",
+	if code, _ := do(http.MethodGet, "/lakefs/api/v1/repositories/outputs-a/refs/hpc-wf-s/objects?path=hpc-outputs/wf/s/1/kaos-result.json",
 		"Bearer "+Wallet, nil); code != http.StatusUnauthorized {
 		t.Errorf("a call that is not the app's key (the tracker's wallet) must be refused, got %d", code)
 	}

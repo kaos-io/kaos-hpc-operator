@@ -204,7 +204,7 @@ An HPC step runs on the same contract as a cluster step ([docs/step-contract.md]
 **The result's way back.** When the step exits 0 the job script uploads the result file, unread, to
 `hpc-outputs/<workflow uid>/<step>/<site job id>/kaos-result.json` on the hand-off branch `hpc-<workflow uid>-<step>` of
 the app's outputs repository (`outputs-<app>`), or the object `kaos-result.absent` when the step wrote no file (so
-that "the step wrote none" is told apart from "nothing arrived"). The runner fetches it, checks it (`version` 1, `status` `ok`, `values`, `reads`, `writes`, at most 8 KiB by cost), writes it
+that "the step wrote none" is told apart from "nothing arrived"). The runner reads it from the branch as a ref (`refs/<branch>/objects`, which lakeFS serves before any commit; `branches/<branch>/objects` takes writes only), checks it (`version` 1, `status` `ok`, `values`, `reads`, `writes`, at most 8 KiB by cost), writes it
 again in wire form and deletes the branch. Every way this can go wrong fails the job with a sentence naming the cause:
 `ResultNotHandedBack` (the file cannot be read or uploaded, job exit 243; nothing arrived; lakeFS cannot be asked) or
 `InvalidResult` (exit 244). A step that did not exit 0 hands nothing back and publishes nothing. A step that exits 0

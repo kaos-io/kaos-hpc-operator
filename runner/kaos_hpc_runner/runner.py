@@ -557,10 +557,12 @@ class Runner:
 
     # ------------------------------------------------------------------ outputs and checkpoints
 
-    def handoff(self, method, path):
-        """One call on the hand-off branch of the app's outputs repository (payload/handback.py writes there)."""
-        base = '%s/api/v1/repositories/%s/branches/hpc-%s-%s' % (
-            self.cfg.lakefs_url, urllib.parse.quote(self.cfg.outputs_repo, safe=''), self.cfg.wf_uid, self.cfg.step)
+    def handoff(self, method, path, kind='branches'):
+        """One call on the hand-off branch of the app's outputs repository (payload/handback.py writes there).
+        lakeFS reads an object under refs/<branch>/ (what the job staged on the branch is read there before any
+        commit); branches/<branch>/objects takes writes only, a GET there never finds the result."""
+        base = '%s/api/v1/repositories/%s/%s/hpc-%s-%s' % (
+            self.cfg.lakefs_url, urllib.parse.quote(self.cfg.outputs_repo, safe=''), kind, self.cfg.wf_uid, self.cfg.step)
         return urllib.request.urlopen(urllib.request.Request(
             base + path, method=method, headers={'Authorization': self.current_key().auth()}), timeout=60).read()
 
@@ -571,7 +573,7 @@ class Runner:
         err = None
         for n in range(RESULT_FETCH_TRIES):
             try:
-                return self.handoff('GET', '/objects?' + q)
+                return self.handoff('GET', '/objects?' + q, 'refs')
             except urllib.error.HTTPError as e:
                 if e.code == 404:
                     return None
