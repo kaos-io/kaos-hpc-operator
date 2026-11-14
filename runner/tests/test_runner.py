@@ -1569,3 +1569,63 @@ def test_a_dataset_the_site_could_not_stage_and_the_job_must_not_download_ends_t
     assert run["state"] == "FAILED" and run["exitCode"] == 246 and run["terminal"] is True
     assert "2.5 TB" in run["message"] and not run.get("siteJobID")
     assert "DatasetNotStaged" in capsys.readouterr().out
+
+
+def _jwt_ending(exp):
+    import base64
+    seg = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).rstrip(b"=").decode()
+    return "h.%s.s" % seg
+
+
+def _long_staging(rig, monkeypatch, token_left_after):
+    """A job whose staging took two hours; the token minted before it has token_left_after seconds left then, and
+    the next mint fails."""
+    clock = [1_000_000.0]
+    monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
+    old = _jwt_ending(clock[0] + 2 * 3600 + token_left_after)
+    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm)
+    mints = []
+
+    def mint():
+        mints.append(1)
+        return old if len(mints) == 1 else ""
+    rig.runner._mint = mint
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset",
+                            lambda *a, **kw: clock.__setitem__(0, clock[0] + 2 * 3600) or "/scr/ds")
+    return slurm, old
+
+
+def test_a_token_about_to_end_after_a_long_staging_that_cannot_be_minted_again_fails_the_attempt(rig, monkeypatch, capsys):
+    slurm, _ = _long_staging(rig, monkeypatch, token_left_after=600)
+    with pytest.raises(SystemExit) as e:
+        rig.runner.run()
+    assert e.value.code == 0
+    assert slurm.submitted == []
+    run = rig.kube.run
+    assert run["state"] == "FAILED" and run["exitCode"] == 243 and run["terminal"] is True
+    assert "no data-plane token could be minted for this job" in run["message"]
+    assert "ResultNotHandedBack" in capsys.readouterr().out
+
+
+def test_the_old_token_with_enough_life_left_after_a_long_staging_is_kept_when_it_cannot_be_minted_again(rig, monkeypatch):
+    slurm, old = _long_staging(rig, monkeypatch, token_left_after=3 * 3600)
+    rig.runner.run()
+    assert len(slurm.submitted) == 1 and rig.runner.wallet == old
+
+
+def test_every_input_of_a_job_is_staged_against_one_72_hour_clock_started_at_the_first(rig, monkeypatch):
+    clock = [1_000_000.0]
+    monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
+    rig.make(FakeSlurm({"5001": [acc("COMPLETED")]}),
+             HPC_INPUTS=json.dumps([{"name": "a", "repo": "dataset-a", "commit": "2" * 64},
+                                    {"name": "b", "repo": "dataset-b", "commit": "3" * 64}]))
+    seen = []
+
+    def stage(cfg, inp, stager, mint, info=None, deadline=None, **kw):
+        seen.append(deadline)
+        clock[0] += 10 * 3600
+        return ""
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", stage)
+    rig.runner.run()
+    assert seen == [1_000_000.0 + 72 * 3600] * 2

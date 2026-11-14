@@ -161,7 +161,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(rj.Labels).To(HaveKeyWithValue(runnerjob.LabelAttempt, "1"))
 		Expect(*rj.Spec.BackoffLimit).To(Equal(int32(4)))
 		// A sharing host's runner follows its Slurm job up to twice the step's limit (D-26), + the 30-minute site wait.
-		Expect(*rj.Spec.ActiveDeadlineSeconds).To(Equal(int64((2*60+480+30)*60 + 30*60)))
+		Expect(*rj.Spec.ActiveDeadlineSeconds).To(Equal(int64((2*60+480+30+72*60)*60 + 30*60)))
 		pod := rj.Spec.Template.Spec
 		Expect(pod.ServiceAccountName).To(Equal("hpc-runner"))
 		Expect(pod.NodeSelector).To(HaveKeyWithValue("pool", "system"))

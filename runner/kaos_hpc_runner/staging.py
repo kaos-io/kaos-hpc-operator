@@ -53,8 +53,8 @@ import urllib.request
 from . import settings, wallet as walletmod
 
 # How long staging goes on asking again (new attempts) before the job stages in-job: stage_budget(bytes). A new attempt
-# resumes the copy file by file. The same 72 hours is the allowance of the runner Job's deadline (internal/runnerjob)
-# and of the follower's (engine/kubecore/meluxina.py): change the three together.
+# resumes the copy file by file. The same 72 hours, in total for all inputs of a step, is the allowance of the runner
+# Job's deadline (internal/runnerjob) and of the follower's (engine/kubecore/meluxina.py): change the three together.
 STAGE_MIN_BUDGET_S = 4 * 3600
 STAGE_MAX_BUDGET_S = 72 * 3600
 STAGE_UNKNOWN_BUDGET_S = 12 * 3600   # the size could not be read from the data store
@@ -575,7 +575,7 @@ def ssh_present():
     return shutil.which('ssh') is not None
 
 
-def stage_dataset(cfg, inp, stager, mint_wallet, info=None, note=None):
+def stage_dataset(cfg, inp, stager, mint_wallet, info=None, note=None, deadline=None):
     """The resident path of one input's pinned commit, or '' (the job then stages it in-job). inp is one entry
     of cfg.inputs (spec.inputs): its repository, label and commit; nothing is resolved here. Three failures
     are not a fallback:
@@ -587,8 +587,9 @@ def stage_dataset(cfg, inp, stager, mint_wallet, info=None, note=None):
     info (a dict), when given, receives the staging record (staging_record) once the copy is resident; it stays
     empty when the job stages in-job. note(text), when given, is called every STAGE_NOTE_EVERY_S while a copy goes on
     (text says how far it is), and with None when staging is over. The time staging goes on asking again is
-    stage_budget(size of the copy); an own dataset above STAGE_FALLBACK_MAX_BYTES that the site did not stage is
-    DatasetNotStaged, not an in-job download."""
+    stage_budget(size of the copy) and never past deadline (epoch seconds, when given: the runner passes the start of
+    its first dataset's staging + STAGE_MAX_BUDGET_S, so 72 hours is the total for all inputs of a step); an own
+    dataset above STAGE_FALLBACK_MAX_BYTES that the site did not stage is DatasetNotStaged, not an in-job download."""
     repo, ref, commit = inp['repo'], inp['ref'], inp['commit']
     owner = inp.get('owner') or ''
     key = dataset_key(repo, owner)
@@ -627,44 +628,46 @@ def stage_dataset(cfg, inp, stager, mint_wallet, info=None, note=None):
         if note:
             note(text)
     stager.progress = progress
-    while True:
-        attempt += 1
-        try:
-            if attempt > 1:
-                wallet = renewed_wallet(mint_wallet, wallet)    # never the token of an earlier attempt that is near its end
-                if not wallet:
-                    raise RuntimeError('no data-plane token could be minted')
-            source = owner_store(lakefs, wallet, owner, repo, commit) if owner else lakefs
-            path, retry = stage_once(stager, repo, ref, commit, source, wallet, info, key, plan)
-        except (InsufficientQuota, StagingMismatch, ReservedName, SharedDatasetUnavailable):
-            raise
-        except ToolAbsent as e:
-            if absent_since is None:
-                absent_since = time.time()      # the 20 minutes count from the first "absent", not from the start
-            if time.time() - absent_since > TOOL_WAIT_S:
-                raise StagingMismatch(absent_message(e))
-            print('stage: the staging tool is not installed or cannot be run (exit %s) - asking again' % e,
-                  flush=True)
-            path, retry = '', True
-        except Exception as e:
-            print('stage: attempt', attempt, 'failed:', e, flush=True)
-            path, retry = '', True
-        size = plan.get('bytes')
-        if size is None and attempt == 1 and not path and retry:
-            size = refuse_names(api, repo, commit, wallet)    # the stager did not get as far as listing the copy: size the commit
-        if size is not None and not sized:
-            sized, budget = True, stage_budget(size)
-            print('stage: dataset %s is %s; staging may go on for %.1f hours' % (key, human_bytes(size), budget / 3600),
-                  flush=True)
-        elif size is None and attempt == 1 and not path and retry:
-            print('stage: the size of dataset %s could not be read; staging may go on for %.1f hours'
-                  % (key, budget / 3600), flush=True)
-        if path or not retry or time.time() > began + budget:
-            break
-        time.sleep(min(60 * attempt, 600))
-    stager.progress = None
-    if note and posted[0]:
-        note(None)
+    try:
+        while True:
+            attempt += 1
+            try:
+                if attempt > 1:
+                    wallet = renewed_wallet(mint_wallet, wallet)    # never the token of an earlier attempt that is near its end
+                    if not wallet:
+                        raise RuntimeError('no data-plane token could be minted')
+                source = owner_store(lakefs, wallet, owner, repo, commit) if owner else lakefs
+                path, retry = stage_once(stager, repo, ref, commit, source, wallet, info, key, plan)
+            except (InsufficientQuota, StagingMismatch, ReservedName, SharedDatasetUnavailable):
+                raise
+            except ToolAbsent as e:
+                if absent_since is None:
+                    absent_since = time.time()      # the 20 minutes count from the first "absent", not from the start
+                if time.time() - absent_since > TOOL_WAIT_S:
+                    raise StagingMismatch(absent_message(e))
+                print('stage: the staging tool is not installed or cannot be run (exit %s) - asking again' % e,
+                      flush=True)
+                path, retry = '', True
+            except Exception as e:
+                print('stage: attempt', attempt, 'failed:', e, flush=True)
+                path, retry = '', True
+            size = plan.get('bytes')
+            if size is None and attempt == 1 and not path and retry:
+                size = refuse_names(api, repo, commit, wallet)    # the stager did not get as far as listing the copy: size the commit
+            if size is not None and not sized:
+                sized, budget = True, stage_budget(size)
+                print('stage: dataset %s is %s; staging may go on for %.1f hours' % (key, human_bytes(size), budget / 3600),
+                      flush=True)
+            elif size is None and attempt == 1 and not path and retry:
+                print('stage: the size of dataset %s could not be read; staging may go on for %.1f hours'
+                      % (key, budget / 3600), flush=True)
+            if path or not retry or time.time() > min(began + budget, deadline or float('inf')):
+                break
+            time.sleep(min(60 * attempt, 600))
+    finally:      # also when a refusal is raised mid-copy: the "staging dataset..." note must not stay
+        stager.progress = None
+        if note and posted[0]:
+            note(None)
     if path and info and info.get('kind') != 'cached':
         info['seconds'] = int(time.time() - began)    # the whole staging, including resumed attempts
     if not path and owner:

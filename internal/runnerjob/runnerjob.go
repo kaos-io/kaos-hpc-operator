@@ -58,7 +58,7 @@ const (
 	queueAllowanceMinutes = 480
 	teardownMarginMinutes = 30
 	// stagingAllowanceMinutes is added once for a job that has datasets to stage: the longest the runner goes on
-	// staging one (STAGE_MAX_BUDGET_S in runner/kaos_hpc_runner/staging.py), so a healthy copy is never ended by the
+	// staging: 72 hours in total for all inputs of a step (STAGE_MAX_BUDGET_S in runner/kaos_hpc_runner/staging.py), so a healthy copy is never ended by the
 	// Job's deadline. The follower's deadline carries the same number (engine/kubecore/meluxina.py).
 	stagingAllowanceMinutes = 72 * 60
 	backoffLimit            = 4

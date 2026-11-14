@@ -166,8 +166,10 @@ class Runner:
             staging_began = time.time()
             for inp in cfg.inputs:
                 info = {}
+                # note: how far a long copy is; deadline: 72 hours in total for all inputs, from the first one's start
                 self.staged[inp['name']] = staging.stage_dataset(cfg, inp, self.stager, self._mint, info=info,
-                                                                 note=self.reporter.pending_reason)   # how far a long copy is
+                                                                 note=self.reporter.pending_reason,
+                                                                 deadline=staging_began + staging.STAGE_MAX_BUDGET_S)
                 self.reporter.note_staging(info)    # carried by every later report; the follower prints it
             if time.time() - staging_began > 3600:
                 self.renew_wallet()   # the job's token was minted before a long staging began: it would reach the site job near its end
@@ -433,9 +435,12 @@ class Runner:
         self.hosted = None
 
     def renew_wallet(self):
-        w = self._mint()
-        if w:
-            self.wallet, self.wallet_exp = w, wallet.wallet_exp(w)
+        """A new token after a long staging. When it cannot be minted, the old one is kept only while it has
+        staging.TOKEN_MIN_LEFT_S left: a job submitted with a token about to end could not hand its result back."""
+        w = staging.renewed_wallet(self._mint, self.wallet)
+        if not w:
+            self.fail_handback('no data-plane token could be minted for this job')
+        self.wallet, self.wallet_exp = w, wallet.wallet_exp(w)
 
     def fresh_wallet(self):
         """The wallet minted at submit lives 12 h; a long job ends after that. Outputs and the

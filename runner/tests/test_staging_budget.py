@@ -218,3 +218,60 @@ def test_no_note_is_made_when_nothing_was_copied(monkeypatch):
     notes = []
     staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", note=notes.append)
     assert notes == []
+
+
+# ---------------------------------------------------------------- 72 hours in total for all inputs of a step
+
+def test_two_large_datasets_share_one_72_hour_clock_and_the_second_gets_what_is_left(monkeypatch):
+    clock = Clock(monkeypatch)
+    start = clock.now
+    deadline = start + staging.STAGE_MAX_BUDGET_S
+    cfg, stager = _big(monkeypatch, 5 * TB, [75] * 2000)     # 5 TB: a budget of 55.6 h of its own
+    with pytest.raises(staging.DatasetNotStaged):
+        staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", deadline=deadline)
+    spent = clock.now - start
+    assert 55 * H < spent < 56 * H + 600, "the first dataset used its own size-based budget"
+    with pytest.raises(staging.DatasetNotStaged):
+        staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", deadline=deadline)
+    assert clock.now - start <= 72 * H + 600, "the second stopped at the clock of the whole step, not 55.6 h later"
+    assert clock.now - start > 71 * H, "and it used what was left"
+
+
+def test_a_dataset_with_a_small_budget_is_not_stretched_by_the_step_clock(monkeypatch):
+    clock = Clock(monkeypatch)
+    cfg, stager = _big(monkeypatch, 10 * GB, [75] * 500)
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt",
+                                 deadline=clock.now + 72 * H) == ""
+    assert clock.slept <= 4 * H + 600
+
+
+def test_a_refusal_raised_mid_copy_clears_the_progress_note(monkeypatch):
+    Clock(monkeypatch)
+    stager = _Stager({"ready": False, "base": None})
+    cfg = _twin(monkeypatch, _LakeFS({"a": 1}), stager)
+
+    def refused_mid_copy(stg, repo, ref, commit, source, wallet, info, key, plan):
+        plan.update(files=4, bytes=10 * GB)
+        stg.progress({"event": "progress", "phase": "fetch", "files": 1, "bytes": GB, "skipped": 0})
+        raise staging.InsufficientQuota("no room")
+    monkeypatch.setattr(staging, "stage_once", refused_mid_copy)
+    notes = []
+    with pytest.raises(staging.InsufficientQuota):
+        staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", note=notes.append)
+    assert len(notes) == 2 and notes[0].startswith("staging dataset") and notes[1] is None
+    assert stager.progress is None
+
+
+def test_the_three_72_hour_allowances_are_one_number():
+    """The runner's budget, the runner Job's deadline (Go) and the follower's deadline (engine) are changed together."""
+    import pathlib
+    import re
+    root = pathlib.Path(__file__).resolve().parents[2]
+    engine = re.search(r"^STAGING_ALLOWANCE_MINUTES\s*=\s*(\d+)\s*\*\s*(\d+)\s*$",
+                       (root / "engine/kubecore/meluxina.py").read_text(), re.M)
+    runnerjob = re.search(r"^\s*stagingAllowanceMinutes\s*=\s*(\d+)\s*\*\s*(\d+)\s*$",
+                          (root / "internal/runnerjob/runnerjob.go").read_text(), re.M)
+    assert engine and runnerjob
+    want = staging.STAGE_MAX_BUDGET_S // 60
+    assert int(engine[1]) * int(engine[2]) == want
+    assert int(runnerjob[1]) * int(runnerjob[2]) == want

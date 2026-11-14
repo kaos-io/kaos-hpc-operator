@@ -57,9 +57,11 @@ DEFAULT_TIME_LIMIT_MINUTES = 240
 # first, on_term leaves a RUNNING job to finish unobserved — so the deadline
 # must comfortably exceed queue + prep + time limit.
 QUEUE_ALLOWANCE_MINUTES = 480
-# The longest the HPC runner goes on staging one dataset to the site (STAGE_MAX_BUDGET_S in the runner,
-# stagingAllowanceMinutes of the runner Job's deadline), counted once: a staging that is making progress is never
-# cut by this deadline.
+# The longest the HPC runner goes on staging the inputs of a step to the site: 72 hours in total for all inputs of a
+# step (STAGE_MAX_BUDGET_S in the runner, stagingAllowanceMinutes of the runner Job's deadline), counted once: a
+# staging that is making progress is never cut by this deadline. It is added for every HPC twin, with or without
+# inputs, because the inputs are only known at run time; it only matters for a hung follower, since a twin whose
+# job ends is done long before the deadline.
 STAGING_ALLOWANCE_MINUTES = 72 * 60
 # PRD-HPC-1461 D-44: a step that saves on the stop signal continues in a new job,
 # at most this many times (MAX_CONTINUATIONS in the waiter). Each job may queue,
