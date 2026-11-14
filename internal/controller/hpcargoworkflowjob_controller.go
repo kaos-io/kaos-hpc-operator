@@ -408,8 +408,7 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		}
 	}
 
-	if reason == hpcv1alpha1.ReasonStagingMismatch || reason == hpcv1alpha1.ReasonReservedName ||
-		reason == hpcv1alpha1.ReasonSharedDatasetUnavailable {
+	if refusedBeforeStaging(reason) {
 		msg = strings.TrimSpace(run.Message)
 		if msg == "" {
 			msg = "staging was refused before it began; nothing was staged or submitted to the site"
@@ -471,6 +470,15 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		r.Recorder.Event(job, corev1.EventTypeWarning, hpcv1alpha1.ReasonWallTimeReached, msg)
 	}
 	return next, nil
+}
+
+// refusedBeforeStaging is true for the reasons the runner ends an attempt with before it stages or submits anything.
+func refusedBeforeStaging(reason string) bool {
+	switch reason {
+	case hpcv1alpha1.ReasonStagingMismatch, hpcv1alpha1.ReasonReservedName, hpcv1alpha1.ReasonSharedDatasetUnavailable:
+		return true
+	}
+	return false
 }
 
 // failedExitReasons are the exit codes the job script and the runner reserve for an attempt that FAILED, each
