@@ -132,7 +132,18 @@ def test_an_owner_without_a_public_address_cannot_be_read_from_a_site(monkeypatc
     cfg.inputs = [entry]
     with pytest.raises(staging.SharedDatasetUnavailable) as e:
         _stage(cfg, _Stager())
-    assert "no public address" in str(e.value)
+    assert "no public https address" in str(e.value)
+
+
+def test_an_owner_with_a_plain_http_address_never_receives_the_token(monkeypatch):
+    peers = {"project": "mine", "peers": [
+        {"project": "owner", "endpoint": "http://lakefs.owner.svc:8000", "url": "http://owner.lakefs.example"}]}
+    net = _Net(peers=peers)
+    cfg = _cfg(monkeypatch, net)
+    with pytest.raises(staging.SharedDatasetUnavailable) as e:
+        _stage(cfg, _Stager())
+    assert "no public https address" in str(e.value)
+    assert [u for u, _ in net.seen] == [OWN + "/kaos/v1/peers"]
 
 
 def test_a_shared_dataset_is_never_downloaded_by_the_job_itself(monkeypatch):

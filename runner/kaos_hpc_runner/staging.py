@@ -410,8 +410,8 @@ def owner_store(own_url, wallet, owner, repo, commit):
     if found is None:
         raise _unavailable(repo, owner, '%s is not a project of this organisation that the data store knows' % owner)
     url = (found.get('url') or '').rstrip('/')
-    if not url.startswith(('https://', 'http://')):
-        raise _unavailable(repo, owner, 'project %s\'s data store has no public address, so it cannot be read from a site' % owner)
+    if not url.startswith(('https://', 'http://127.0.0.1:', 'http://localhost:')):   # the bearer never travels in clear
+        raise _unavailable(repo, owner, 'project %s\'s data store has no public https address, so it cannot be read from a site' % owner)
     get('%s/api/v1/repositories/%s/refs/%s/objects/ls?amount=1' % (url, urllib.parse.quote(repo, safe=''), commit),
         'project %s\'s data store does not share it with this project (HTTP %%s): it was not approved, or the share was withdrawn' % owner)
     return url
