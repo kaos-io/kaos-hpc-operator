@@ -35,6 +35,7 @@ from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone
                     share_state, site_time, submit_limit_refusal)
 from .settings import (CHECKPOINT_EXIT, CONTEXT_ENV, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT,
                        INVALID_IMAGE_EXIT, INVALID_RESULT_EXIT, OFFER_S, ROLE_POLL_S, RESERVED_NAME_EXIT,
+                       SHARED_DATASET_UNAVAILABLE_EXIT,
                        RESULT_NOT_HANDED_BACK_EXIT, STAGING_MISMATCH_EXIT, SUBMIT_LIMIT_EXIT, Settings, image_problem,
                        registry_token_host)
 
@@ -256,8 +257,9 @@ class Runner:
                'HPC_GPUS=' + str(hpc.get('gpus') or 0),
                'STEP_CMD=' + cfg.command, 'STEP_WORKDIR=' + wallet.fetch_workdir(cfg.image, reg),
                'WF_UID=' + cfg.wf_uid, 'STEP_NAME=' + cfg.step,
-               # The step's inputs, one word each: name|repository|commit|resident path ('' = stage in the job).
-               'KAOS_INPUTS=' + ' '.join('|'.join((i['name'], i['repo'], i['commit'], self.staged.get(i['name']) or ''))
+               # The step's inputs, one word each: name|repository|commit|resident path ('' = stage in the job)|owner
+               # ('' = the project's own dataset; a dataset another project shares is never staged in the job).
+               'KAOS_INPUTS=' + ' '.join('|'.join((i['name'], i['repo'], i['commit'], self.staged.get(i['name']) or '', i['owner']))
                                          for i in cfg.inputs),
                'IMAGE_STAGED=' + image_staged,
                'KAOS_ATTEMPT=%d' % cfg.attempt,
@@ -653,6 +655,8 @@ class Runner:
             return self.end_before_staging('StagingMismatch', STAGING_MISMATCH_EXIT, e)
         except staging.ReservedName as e:
             return self.end_before_staging('ReservedName', RESERVED_NAME_EXIT, e)
+        except staging.SharedDatasetUnavailable as e:
+            return self.end_before_staging('SharedDatasetUnavailable', SHARED_DATASET_UNAVAILABLE_EXIT, e)
         if adopted:
             print('adopting existing job', jid, flush=True)
         self.jid = jid
@@ -692,7 +696,8 @@ class Runner:
     def end_before_staging(self, reason, code, err):
         """Staging was refused before it began (PRD kaos#1911 F-04): the site's staging tool speaks another staging
         contract than this runner (StagingMismatch, exit code 241), or the dataset holds an object whose name is
-        reserved for the platform (ReservedName, exit code 242). Nothing was staged and no site job was submitted.
+        reserved for the platform (ReservedName, exit code 242), or a dataset another project shares cannot be read
+        (SharedDatasetUnavailable, exit code 245). Nothing was staged and no site job was submitted.
         The one terminal report says so (FAILED, a plain message); the controller ends the job with the reason and
         settles nothing."""
         msg = str(err)

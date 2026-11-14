@@ -553,6 +553,17 @@ stored before the definition changed has none (check 5).
 `spec.inputs[]` is filled by the follower from the context and from nothing else: every entry of
 `ledger.reads`, and every `dataset` entry of `upstream.*.writes`. It resolves no version.
 
+An entry with an `owner` is a dataset another project shares. The runner stages it from the owner's data store into
+the reading project's own folder on the site: one copy per reading project, filed under the owner as well, so two projects
+that each have a repository of one name never meet. Its address comes from the project's own data store (the owner's public
+one: a site is outside the platform network) and the only credential used is the project's own short-lived token, which the
+owner's data store accepts for exactly what the owner shares with the project. The job never downloads a shared dataset
+itself. The step finds the copy by its record `<input>.kaos-ready`, which names the owner as well as the repository and the
+commit; a copy of the project's own repository of the same name is never taken for it. When the owner does not share the
+dataset (never approved, or the share was withdrawn), is unknown or cannot be reached from a site, or the site could not
+stage it, the runner ends the job `Failed/SharedDatasetUnavailable` before it stages or submits anything, with a message
+naming the dataset and the owner and saying to ask the owner to share it (`docs/reasons.md`).
+
 Removed: `spec.dataset`, `spec.datasetRef`, `spec.outputs` and `status.outputs`.
 
 **Handing the result back.** The step writes `/work/output/kaos-result.json` in the job. Before each attempt

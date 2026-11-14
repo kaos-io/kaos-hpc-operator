@@ -103,6 +103,20 @@ var _ = Describe("HPC invalid image", func() {
 		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(0))))
 	})
 
+	It("should_end_a_job_whose_shared_dataset_is_not_shared_as_failed_shared_dataset_unavailable_and_settle_nothing", func() {
+		j := reconcileOnce(newJob("not-shared", "zot.example/proj/app:v1"))
+		orig := j.DeepCopy()
+		code := hpcv1alpha1.ExitCodeSharedDatasetUnavailable
+		j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, State: "FAILED", ExitCode: &code, Terminal: true,
+			Message: "dataset dataset-raw is shared by project other, and project other's data store does not share it with this project"}
+		Expect(k8sClient.Status().Patch(ctx, j, client.MergeFrom(orig))).To(Succeed())
+		got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonSharedDatasetUnavailable))
+		Expect(got.Status.Message).To(ContainSubstring("project other"))
+		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(0))))
+	})
+
 	It("should_end_a_job_the_runner_found_invalid_as_failed_invalid_image_and_settle_nothing", func() {
 		j := reconcileOnce(newJob("runner-found", "zot.example/proj/app:v1"))
 		orig := j.DeepCopy()

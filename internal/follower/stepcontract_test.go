@@ -147,13 +147,13 @@ func read1(name, repo, owner, commit string) string {
 	return `{"name":"` + name + `","repo":"` + repo + `","owner":` + owner + `,"ref":"latest","commit":"` + commit + `"}`
 }
 
-// A shared dataset (a read with an owner) reaches the follower inside the context. It cannot be staged on an
-// HPC site yet: the step fails saying what to do instead, and no job is created.
-func TestASharedDatasetIsRefusedWithWhatToDoInstead(t *testing.T) {
+// A shared dataset (a read with an owner) reaches the follower inside the context and becomes an input that
+// names its owner: the runner stages it from the owner's data store.
+func TestASharedDatasetIsAnInputWithItsOwner(t *testing.T) {
 	commit := strings.Repeat("c2", 32)
-	_, err := ConfigFromEnv(podEnv(map[string]string{"KAOS_STEP_CONTEXT": contextWith(read1("raw", "dataset-raw", `"other"`, commit), "")}))
-	if err == nil || !strings.Contains(err.Error(), "shared by project other") || !strings.Contains(err.Error(), "cannot be read on HPC yet") {
-		t.Fatalf("got %v", err)
+	cfg := withContext(t, contextWith(read1("raw", "dataset-raw", `"other"`, commit), ""))
+	if len(cfg.Inputs) != 1 || cfg.Inputs[0].Owner != "other" || cfg.Inputs[0].Repo != "dataset-raw" {
+		t.Fatalf("a shared dataset is an input with its owner: %+v", cfg.Inputs)
 	}
 	if cfg := withContext(t, contextWith(read1("raw", "dataset-raw", "null", commit), "")); len(cfg.Inputs) != 1 || cfg.Inputs[0].Owner != "" {
 		t.Fatalf("an own dataset (owner null) is an input without an owner: %+v", cfg.Inputs)

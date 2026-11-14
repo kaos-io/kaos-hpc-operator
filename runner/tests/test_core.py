@@ -143,7 +143,7 @@ def test_the_inputs_are_the_pinned_commits_and_nothing_is_resolved():
     cfg = helpers.settings()
     assert cfg.inputs == [], "reading the settings judges nothing"
     cfg.check_job()
-    assert cfg.inputs == [{"name": "dataset", "repo": "dataset-default", "commit": commit, "ref": "main"}], \
+    assert cfg.inputs == [{"name": "dataset", "repo": "dataset-default", "commit": commit, "owner": "", "ref": "main"}], \
         "latest is filed under main on the site, as before"
     two = helpers.settings(HPC_INPUTS=json.dumps([
         {"name": "labels", "repo": "dataset-labels", "ref": "v3", "commit": "2" * 64},

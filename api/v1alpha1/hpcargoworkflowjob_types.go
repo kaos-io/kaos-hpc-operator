@@ -75,9 +75,13 @@ const (
 	// fields that were removed. Refused before anything is booked; a job that was already booked ends Failed
 	// with this reason instead of starting, or publishing, without its data. Terminal: run the pipeline again.
 	ReasonNoContext = "NoContext"
-	// ReasonSharedInput: an entry of spec.inputs names an owner, a dataset another project shares. Such a dataset
-	// cannot be staged on an HPC site yet. Refused before anything is booked.
-	ReasonSharedInput = "SharedInput"
+	// ReasonSharedDatasetUnavailable: an entry of spec.inputs names an owner, a dataset another project shares, and
+	// it cannot be read for the step: the owner does not share it with this project (never approved, or withdrawn),
+	// the owner is not known or cannot be reached from a site, or the site could not stage it (a job never downloads
+	// a shared dataset itself). The runner reports it with ExitCodeSharedDatasetUnavailable before it stages or
+	// submits anything; its message names the dataset and the owner. Terminal: ask the owner to share it, then run
+	// the pipeline again.
+	ReasonSharedDatasetUnavailable = "SharedDatasetUnavailable"
 	// ReasonResultNotHandedBack: the step ended well, but no result of it reached status.result: the step wrote
 	// none, the job could not read or upload the result file, or the runner could not fetch it (PRD kaos#1911
 	// CON-04). Also when the run has no way to hand a result back at all (no data-plane token,
@@ -141,6 +145,9 @@ const (
 	// ExitCodeReservedName is the exit code the runner reports (state FAILED, no site job) when the dataset
 	// holds an object whose name is reserved for the platform or whose path could leave the dataset's folder.
 	ExitCodeReservedName = int32(242)
+	// ExitCodeSharedDatasetUnavailable is the exit code the runner reports (state FAILED, no site job) when a
+	// dataset another project shares cannot be read for the step.
+	ExitCodeSharedDatasetUnavailable = int32(245)
 	// ExitCodeResultNotHandedBack is the exit code of a job whose step ended well but whose result could not be
 	// handed back: the job script exits with it when it cannot read or upload the result file, and the runner
 	// reports it (state FAILED) when it cannot fetch what the job uploaded, or before it submits anything when
@@ -344,8 +351,9 @@ type StepInput struct {
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`
 	// +optional
 	Ref string `json:"ref,omitempty"`
-	// Owner is the project that shares the dataset with this one. Absent: the project's own dataset. A job
-	// with an owner is refused: a dataset of another project cannot be staged on an HPC site yet.
+	// Owner is the project that shares the dataset with this one. Absent: the project's own dataset. The runner
+	// stages a shared dataset from the owner's data store into this project's own folder on the site (one copy per
+	// reading project) and the job never downloads it itself.
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`
 	// +optional
@@ -482,7 +490,7 @@ type RunStatus struct {
 	// reserve: 210 (no Apptainer), 231 (image pull), 232 (staging), 233 (batch script), 234 (no verified
 	// checkpoint to restore), 235 (checkpoint copy or job comment failed), 236 (Idle), 237 (InsufficientQuota),
 	// 238 (SubmitLimit), 239 (InvalidImage), 240 (GPUViolation), 241 (StagingMismatch), 242 (ReservedName),
-	// 243 (ResultNotHandedBack), 244 (InvalidResult).
+	// 243 (ResultNotHandedBack), 244 (InvalidResult), 245 (SharedDatasetUnavailable).
 	// +optional
 	ExitCode *int32 `json:"exitCode,omitempty"`
 	// StartTime and EndTime as the site reports them.
