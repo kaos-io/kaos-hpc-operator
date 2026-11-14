@@ -178,3 +178,57 @@ func TestAppOfIsTheLastSegmentOfTheImageRepository(t *testing.T) {
 		}
 	}
 }
+
+func TestTokenCoverIsTheLifeLessTheMargin(t *testing.T) {
+	if TokenLifeMinutes != 720 || TokenCoverMinutes != 690 {
+		t.Fatalf("life %d, cover %d", TokenLifeMinutes, TokenCoverMinutes)
+	}
+}
+
+func TestCapsMaxIncludesWhatOneRunsAccessCovers(t *testing.T) {
+	if got := (Caps{Spec: 60, Class: 2880, Site: 1440, Token: TokenCoverMinutes}).Max(); got != TokenCoverMinutes {
+		t.Fatalf("got %d, want the access cover", got)
+	}
+	if got := (Caps{Spec: 60, Class: 300, Token: TokenCoverMinutes}).Max(); got != 300 {
+		t.Fatalf("got %d, want the lane's 300", got)
+	}
+}
+
+func TestSegment(t *testing.T) {
+	const run = TokenCoverMinutes
+	cases := []struct {
+		name                   string
+		declared, perRun, used int32
+		limit                  int32
+		spent                  bool
+	}{
+		{"should_run_a_limit_shorter_than_one_run_as_declared", 400, run, 0, 400, false},
+		{"should_not_count_down_a_limit_that_fits_one_run", 400, run, 800, 400, false},
+		{"should_run_a_limit_equal_to_one_run_as_declared", run, run, 0, run, false},
+		{"should_cut_a_limit_of_several_runs_at_one_run_first", 3 * run, run, 0, run, false},
+		{"should_cut_the_second_run_at_one_run", 3 * run, run, run, run, false},
+		{"should_cut_the_third_run_at_one_run", 3 * run, run, 2 * run, run, false},
+		{"should_give_the_last_run_what_is_left", 3*run - 120, run, 2 * run, run - 120, false},
+		{"should_count_runs_that_ended_early", 3 * run, run, 100, run, false},
+		{"should_give_a_short_remainder_after_early_ends", 2*run + 30, run, 2*run + 10, 20, false},
+		{"should_be_spent_when_the_whole_limit_is_used", 3 * run, run, 3 * run, 0, true},
+		{"should_be_spent_when_more_than_the_limit_is_used", 3 * run, run, 3*run + 5, 0, true},
+		{"should_not_cut_when_no_run_maximum_is_known", 5000, 0, 100, 5000, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			limit, spent := Segment(c.declared, c.perRun, c.used)
+			if limit != c.limit || spent != c.spent {
+				t.Fatalf("Segment(%d, %d, %d) = %d, %v; want %d, %v", c.declared, c.perRun, c.used, limit, spent, c.limit, c.spent)
+			}
+		})
+	}
+}
+
+func TestHours(t *testing.T) {
+	for in, want := range map[int32]string{690: "11.5 h", 720: "12 h", 60: "1 h", 100: "1.7 h"} {
+		if got := Hours(in); got != want {
+			t.Errorf("Hours(%d) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -710,14 +710,14 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 	})
 
 	It("fails a decision made on a stale copy of the job instead of applying it (optimistic lock)", func() {
-		newSite(10, nil)
+		site := newSite(10, nil)
 		j := newResumable(envNS, 60, 5)
 		reconcileJob(j)
 		end85(j, 1, 50, "c1")
 		stale := &hpcv1alpha1.HPCArgoWorkflowJob{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), stale)).To(Succeed())
 		reconcileJob(j) // the real decision: continuing, attempt 2
-		_, err := r.endAttempt(ctx, stale, nil)
+		_, err := r.endAttempt(ctx, stale, site)
 		Expect(err).To(HaveOccurred(), "the stale write must conflict")
 		got := &hpcv1alpha1.HPCArgoWorkflowJob{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), got)).To(Succeed())

@@ -6,6 +6,7 @@ import (
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
 	"github.com/kaos-io/kaos-hpc-operator/internal/resume"
+	"github.com/kaos-io/kaos-hpc-operator/internal/timelimit"
 )
 
 // Recovery from interrupted attempts (PRD-HPC-1461 D-74, D-75).
@@ -23,12 +24,14 @@ type attemptEnd struct {
 	reason string
 	msg    string
 	next   bool
+	// spent: the step's runs together used the whole declared time limit (see segmentsSpent).
+	spent bool
 }
 
 // recoverAttempt decides what follows an ended attempt from its phase/reason as outcome() set them. It
 // updates the job status in memory (counters, resume info, evidence); the caller patches it.
 func (r *HPCArgoWorkflowJobReconciler) recoverAttempt(job *hpcv1alpha1.HPCArgoWorkflowJob, run *hpcv1alpha1.RunStatus,
-	attempt int32, v attemptEnd) attemptEnd {
+	caps timelimit.Caps, attempt int32, v attemptEnd) attemptEnd {
 	end := resume.Classify(run.State, run.ExitCode)
 	hasNew := run.CheckpointRef != ""
 	cur := resume.MarkOf(run.Checkpoint)
@@ -41,6 +44,11 @@ func (r *HPCArgoWorkflowJobReconciler) recoverAttempt(job *hpcv1alpha1.HPCArgoWo
 	optOut := job.Spec.ResumableOptOut
 	switch {
 	case !end.Recoverable():
+		return v
+	case segmentsSpent(job, caps):
+		v.phase, v.reason, v.spent = hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonWallTimeReached, true
+		v.msg += "; the step's runs used its whole time limit of " + timelimit.FormatMinutes(job.Spec.WallTimeMinutes) +
+			" (" + strconv.Itoa(int(attempt)) + " runs)"
 		return v
 	case hasNew && !optOut:
 		return continueFrom(job, run, attempt, end, cur, v)

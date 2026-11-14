@@ -1,10 +1,12 @@
 package controller
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
+	"github.com/kaos-io/kaos-hpc-operator/internal/timelimit"
 )
 
 func TestRunTime(t *testing.T) {
@@ -133,5 +135,77 @@ func TestHeldQOS(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// A resumable step longer than one run's data access runs as segments that each end inside it, and together stay
+// within the declared limit (PRD kaos#1911 F-40, issue 2212).
+func TestSegmentsOfAResumableStepLongerThanTheDataAccess(t *testing.T) {
+	const run = timelimit.TokenCoverMinutes
+	site := &hpcv1alpha1.HPCSite{Spec: hpcv1alpha1.HPCSiteSpec{Limits: hpcv1alpha1.Limits{MaxWallTimeMinutes: 2880}}}
+	job := func(declared int32, ran ...int64) *hpcv1alpha1.HPCArgoWorkflowJob {
+		j := &hpcv1alpha1.HPCArgoWorkflowJob{Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{WallTimeMinutes: declared}}
+		for i, m := range ran {
+			j.Status.Attempts = append(j.Status.Attempts, hpcv1alpha1.AttemptRecord{Attempt: int32(i + 1), SettledNodeMinutes: m})
+		}
+		return j
+	}
+	limitOf := func(j *hpcv1alpha1.HPCArgoWorkflowJob) int32 {
+		p := &hpcv1alpha1.Placement{TimeLimitMinutes: j.Spec.WallTimeMinutes, Source: hpcv1alpha1.PlacementDeclared}
+		return capAtLaneMax(p, capsOf(j, site), usedMinutes(j)).TimeLimitMinutes
+	}
+	cases := []struct {
+		name  string
+		job   *hpcv1alpha1.HPCArgoWorkflowJob
+		limit int32
+		spent bool
+	}{
+		{"should_not_cut_a_limit_shorter_than_the_access", job(400), 400, false},
+		{"should_not_cut_a_limit_equal_to_the_access", job(run), run, false},
+		{"should_cut_the_first_run_of_three_at_the_access", job(3 * run), run, false},
+		{"should_cut_the_second_run_at_the_access", job(3*run, run), run, false},
+		{"should_count_a_run_that_ended_early_at_its_checkpoint", job(3*run, 600, 650), run, false},
+		{"should_give_the_last_run_what_is_left", job(3*run-100, run, run), run - 100, false},
+		{"should_be_spent_when_the_runs_used_the_whole_limit", job(2*run, run, run), 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := limitOf(c.job); c.limit != 0 && got != c.limit {
+				t.Errorf("limit %d, want %d", got, c.limit)
+			}
+			if got := segmentsSpent(c.job, capsOf(c.job, site)); got != c.spent {
+				t.Errorf("spent %v, want %v", got, c.spent)
+			}
+		})
+	}
+}
+
+// When the runs of a cut step used the whole declared limit, an end with a checkpoint does not start another run.
+func TestARunEndingWithTheDeclaredLimitUsedUpIsNotContinued(t *testing.T) {
+	const run = timelimit.TokenCoverMinutes
+	r := &HPCArgoWorkflowJobReconciler{}
+	site := &hpcv1alpha1.HPCSite{}
+	mk := func(used ...int64) *hpcv1alpha1.HPCArgoWorkflowJob {
+		j := &hpcv1alpha1.HPCArgoWorkflowJob{Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{WallTimeMinutes: 2 * run, StepName: "train",
+			Resumable: &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: 5}}}
+		for i, m := range used {
+			j.Status.Attempts = append(j.Status.Attempts, hpcv1alpha1.AttemptRecord{Attempt: int32(i + 1), SettledNodeMinutes: m})
+		}
+		return j
+	}
+	timedOut := &hpcv1alpha1.RunStatus{State: "TIMEOUT", CheckpointRef: "c1"}
+
+	v := r.recoverAttempt(mk(run, run), timedOut, capsOf(mk(), site), 2, attemptEnd{phase: hpcv1alpha1.PhaseFailed, reason: hpcv1alpha1.ReasonWallTimeReached})
+	if v.next || !v.spent || v.phase != hpcv1alpha1.PhaseFailed || v.reason != hpcv1alpha1.ReasonWallTimeReached {
+		t.Fatalf("a spent step must end WallTimeReached, got %+v", v)
+	}
+	if !strings.Contains(v.msg, "used its whole time limit of 23 h (2 runs)") {
+		t.Errorf("message %q", v.msg)
+	}
+
+	j := mk(run)
+	v = r.recoverAttempt(j, timedOut, capsOf(j, site), 1, attemptEnd{phase: hpcv1alpha1.PhaseFailed, reason: hpcv1alpha1.ReasonWallTimeReached})
+	if !v.next || v.spent || j.Status.Attempt != 2 {
+		t.Fatalf("a step with time left continues, got %+v attempt %d", v, j.Status.Attempt)
 	}
 }

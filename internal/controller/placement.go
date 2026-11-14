@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,7 +25,7 @@ import (
 
 // capsOf are the bounds of a job's time limit on a site.
 func capsOf(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite) timelimit.Caps {
-	c := timelimit.Caps{Spec: job.Spec.WallTimeMinutes, Site: site.Spec.Limits.MaxWallTimeMinutes}
+	c := timelimit.Caps{Spec: job.Spec.WallTimeMinutes, Site: site.Spec.Limits.MaxWallTimeMinutes, Token: timelimit.TokenCoverMinutes}
 	if class, ok := admission.ClassOf(site, job.Spec.Class); ok {
 		c.Class = class.MaxWallTimeMinutes
 	}
@@ -40,17 +41,37 @@ func (r *HPCArgoWorkflowJobReconciler) placementFor(ctx context.Context, job *hp
 	if err != nil {
 		return nil, err
 	}
-	return capAtLaneMax(p, capsOf(job, site)), nil
+	return capAtLaneMax(p, capsOf(job, site), usedMinutes(job)), nil
 }
 
-// capAtLaneMax runs a resumable step whose declared limit is above the longest lane as continuations
-// of at most that lane's maximum (D-67, D-74). Admission refuses a step that is not resumable, so only
-// a resumable step reaches a booking with a limit above the maximum.
-func capAtLaneMax(p *hpcv1alpha1.Placement, caps timelimit.Caps) *hpcv1alpha1.Placement {
+// capAtLaneMax runs a resumable step whose declared limit is above the longest run (the lane's maximum, or what
+// a run's data access covers) as continuations of at most that long each (D-67, D-74; PRD kaos#1911 F-40), each
+// submitted as a new site job with its own fresh access. The continuations together stay within the declared
+// limit: a run is never given more than what the earlier runs (used minutes) left of it (timelimit.Segment).
+// Admission refuses a step that is not resumable, so only a resumable step reaches a booking with a limit above
+// the maximum.
+func capAtLaneMax(p *hpcv1alpha1.Placement, caps timelimit.Caps, used int64) *hpcv1alpha1.Placement {
 	if m := caps.Max(); m > 0 && p.TimeLimitMinutes > m {
-		p.TimeLimitMinutes = m
+		p.TimeLimitMinutes, _ = timelimit.Segment(p.TimeLimitMinutes, m, int32(min(used, math.MaxInt32)))
 	}
 	return p
+}
+
+// usedMinutes is the time the job's earlier attempts ran (their settled node-minutes; a job runs on one node).
+// A guest on a shared node settles to zero, so its runs are not counted.
+func usedMinutes(job *hpcv1alpha1.HPCArgoWorkflowJob) int64 {
+	var total int64
+	for _, a := range job.Status.Attempts {
+		total += a.SettledNodeMinutes
+	}
+	return total
+}
+
+// segmentsSpent: the step is cut into runs (its declared limit is above the longest run) and the runs so far
+// used the whole declared limit, so no further run is started.
+func segmentsSpent(job *hpcv1alpha1.HPCArgoWorkflowJob, caps timelimit.Caps) bool {
+	_, spent := timelimit.Segment(job.Spec.WallTimeMinutes, caps.Max(), int32(min(usedMinutes(job), math.MaxInt32)))
+	return spent
 }
 
 // placementUncapped is placementFor before the lane maximum is applied.

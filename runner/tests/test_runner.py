@@ -652,13 +652,45 @@ def test_a_queued_job_is_replaced_before_its_wallet_expires(rig, monkeypatch):
     assert slurm.cancelled == ["5001"] and len(slurm.submitted) == 2 and rig.kube.run["siteJobID"] == "5002"
 
 
+def test_a_queued_job_is_replaced_as_soon_as_its_wallet_cannot_cover_the_step(rig, monkeypatch):
+    """PRD kaos#1911 F-40: a job that starts with less wallet than its time limit loses access to its data and
+    to tracking partway through. A queued job is replaced while a fresh wallet can still cover the whole limit."""
+    slurm = FakeSlurm({"5001": [acc("PENDING")], "5002": [acc("COMPLETED")]})
+    rig.make(slurm, SLURM_TIME_LIMIT="240")
+    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 1000.0)
+    monkeypatch.setattr(runmod.time, "time", lambda: 1000.0 - 4 * 3600 - 200)      # 4 h 3 min 20 s left: less than limit + slack
+    rig.runner.run()
+    assert slurm.cancelled == ["5001"] and rig.kube.run["siteJobID"] == "5002"
+
+
+def test_a_queued_job_whose_wallet_covers_the_step_is_left_in_the_queue(rig, monkeypatch):
+    slurm = FakeSlurm({"5001": [acc("PENDING"), acc("COMPLETED")]})
+    rig.make(slurm, SLURM_TIME_LIMIT="240")
+    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 1000.0)
+    monkeypatch.setattr(runmod.time, "time", lambda: 1000.0 - 4 * 3600 - 400)      # more than limit + slack left
+    rig.runner.run()
+    assert slurm.cancelled == [] and len(slurm.submitted) == 1
+
+
+def test_the_longest_step_the_controller_allows_is_replaced_only_after_a_short_wait(rig, monkeypatch):
+    """The controller allows a step of life - 30 min (690 min); a wallet of 12 h leaves it a 30 min queue window, less
+    the slack, before it is replaced - never at once."""
+    slurm = FakeSlurm({"5001": [acc("PENDING"), acc("COMPLETED")]})
+    rig.make(slurm, SLURM_TIME_LIMIT="690")
+    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 1000.0 + 12 * 3600)
+    monkeypatch.setattr(runmod.time, "time", lambda: 1000.0 + 60)                  # a minute after the wallet was minted
+    rig.runner.run()
+    assert slurm.cancelled == [] and len(slurm.submitted) == 1
+
+
 def test_the_replacement_of_a_queued_job_is_reported_with_both_ids_and_the_queued_seconds(rig, monkeypatch):
     """AC-35: the queue place lost to a token refresh is recorded in status.run, not only in the log."""
     slurm = FakeSlurm({"5001": [acc("PENDING")], "5002": [acc("COMPLETED")]})
     rig.make(slurm)
     clock = [100.0]
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 100.0 + 4 * 3600)
+    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 100.0 + 8 * 3600)
     monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
+    rig.runner.cfg.time_limit = 240
     rig.runner.sleep = lambda s: clock.__setitem__(0, clock[0] + 3600)   # every poll of the queued job takes an hour
     rig.runner.run()
     assert slurm.cancelled == ["5001"] and rig.kube.run["siteJobID"] == "5002"

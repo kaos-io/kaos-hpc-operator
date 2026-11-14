@@ -134,7 +134,7 @@ func TestDecideForBooksTheEffectiveWallTime(t *testing.T) {
 		t.Fatalf("got %s, want TooLongNotResumable", d.Reason)
 	}
 	// A cap that does not fit the share fits once learned down.
-	d = DecideFor(job("meluxina-gpu", 700, 1), s, led(s, 0, 0, 0), 30)
+	d = DecideFor(job("meluxina-gpu", 600, 1), s, led(s, 0, 0, 0), 30)
 	if d.Phase != hpcv1alpha1.PhaseAdmitted {
 		t.Fatalf("got %s, want Admitted", d.Phase)
 	}
