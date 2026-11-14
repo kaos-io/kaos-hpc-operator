@@ -97,6 +97,13 @@ func (r *HPCArgoWorkflowJobReconciler) serveGate(ctx context.Context, job *hpcv1
 			// Nothing is booked and no runner starts: no site job, no node time, for a reference no credential fixes.
 			return ctrl.Result{}, true, r.setPhase(ctx, job, hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonInvalidImage, err.Error(), nil)
 		}
+		if err := r.checkApp(ctx, job); err != nil {
+			// The job names an app that is not the one its Workflow belongs to: nothing is booked and no runner starts.
+			if r.Recorder != nil {
+				r.Recorder.Event(job, corev1.EventTypeWarning, hpcv1alpha1.ReasonAppIdentityUnavailable, err.Error())
+			}
+			return ctrl.Result{}, true, r.setPhase(ctx, job, hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonAppIdentityUnavailable, err.Error(), nil)
+		}
 	}
 	if !has {
 		if err := r.setFinalizer(ctx, job, true); err != nil {
@@ -152,6 +159,52 @@ func (r *HPCArgoWorkflowJobReconciler) workflowCancelCause(ctx context.Context, 
 		return "the Workflow ended (" + phase + ") while the step had not", nil
 	}
 	return "", nil
+}
+
+// workflowAppLabel is the label of a pipeline's WorkflowTemplate (and so of the Workflows made from it) that names the
+// app; the template itself is named <app>-pipeline.
+const workflowAppLabel = "platform.kubecore.io/app"
+
+// checkApp holds spec.app against the app of the Workflow that owns the job (PRD kaos#1911, AC-14). The follower that
+// creates the job is one service account for every app of the project, so the API server cannot tell whose job it is;
+// the Workflow can: it is made from the app's own WorkflowTemplate, whose label and name (<app>-pipeline) give the app.
+// A job that names another app would read and write that app's data. Without a Workflow reference (a standalone
+// install) or without the Argo API there is nothing to compare with.
+func (r *HPCArgoWorkflowJobReconciler) checkApp(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob) error {
+	app := job.Spec.App
+	if app == "" {
+		return fmt.Errorf("the job names no app, so it has no identity for its data. Nothing was staged and nothing was submitted to the site")
+	}
+	ref := job.Spec.Workflow
+	if ref == nil {
+		return nil
+	}
+	wf := &unstructured.Unstructured{}
+	wf.SetGroupVersionKind(workflowGVK)
+	switch err := r.Get(ctx, types.NamespacedName{Namespace: job.Namespace, Name: ref.Name}, wf); {
+	case apierrors.IsNotFound(err), meta.IsNoMatchError(err):
+		return nil // workflowCancelCause has said or will say what that means
+	case err != nil:
+		return fmt.Errorf("reading the owning Workflow: %w", err)
+	}
+	var trusted []string
+	if v := wf.GetLabels()[workflowAppLabel]; v != "" {
+		trusted = append(trusted, v)
+	}
+	if name, _, _ := unstructured.NestedString(wf.Object, "spec", "workflowTemplateRef", "name"); strings.HasSuffix(name, "-pipeline") {
+		trusted = append(trusted, strings.TrimSuffix(name, "-pipeline"))
+	}
+	if len(trusted) == 0 {
+		return fmt.Errorf("the Workflow %s names no app (no %s label, no <app>-pipeline template), so the job's app %s cannot be confirmed. "+
+			"Nothing was staged and nothing was submitted to the site", ref.Name, workflowAppLabel, app)
+	}
+	for _, t := range trusted {
+		if t != app {
+			return fmt.Errorf("the job names the app %s, but its Workflow %s belongs to the app %s. Nothing was staged and nothing was "+
+				"submitted to the site", app, ref.Name, t)
+		}
+	}
+	return nil
 }
 
 // cancel stops a serve-mode job: it deletes the runner Job in the foreground (its SIGTERM handler
@@ -320,9 +373,6 @@ func (r *HPCArgoWorkflowJobReconciler) createRunnerJob(ctx context.Context, job 
 	site *hpcv1alpha1.HPCSite, attempt int32) error {
 	if r.RunnerImage == "" {
 		return fmt.Errorf("serve-mode job %s/%s needs a runner image: start the controller with --runner-image", job.Namespace, job.Name)
-	}
-	if err := r.ensureAppIdentityAccess(ctx, job, site); err != nil {
-		return err
 	}
 	rj, err := runnerjob.Build(runnerjob.Config{Image: r.RunnerImage, Scheduling: r.RunnerScheduling, SiteWaitMax: r.siteOutageMax()}, job, site, attempt)
 	if err != nil {

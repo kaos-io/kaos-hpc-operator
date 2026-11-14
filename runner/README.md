@@ -40,7 +40,7 @@ Env (controller): `HPC_JOB_NAMESPACE`, `HPC_JOB_NAME`, `KAOS_ATTEMPT`, `KAOS_RES
 (`HPC_MAX_SUBMIT_JOBS`), optional `HPC_SITE_WAIT_MAX_S` (how long an unreachable site is waited for, default 1800; the controller's `--site-outage-max`), `HPC_LOGIN_HOST` (`host:port`, default login.lxp.lu:8822), `SLURM_TOKEN` (fallback),
 and the ConfigMap: `ZITADEL_DOMAIN`, `ZITADEL_MLFLOW_PROJECT_ID`, `MLFLOW_EXTERNAL_URL`, `LAKEFS_EXTERNAL_URL`.
 Files: `/etc/meluxina-jwt/token`, `/etc/meluxina-staging/{id_ed25519,known_hosts}`,
-`/etc/mlflow-hpc/ZITADEL_MACHINE_KEY` (or `ZITADEL_HPC_KEY_FILE`; the tracker token is minted from it, and from `/etc/mlflow-svc/ZITADEL_MACHINE_KEY` / `ZITADEL_MACHINE_KEY_FILE` when it is absent, said once in the log), the pod ServiceAccount token (it asks for the app's token).
+`/etc/mlflow-hpc/ZITADEL_MACHINE_KEY` (or `ZITADEL_HPC_KEY_FILE`; the tracker token is minted from it; when it is absent the job is refused before staging, `AppIdentityUnavailable`, and no other key is used), the pod ServiceAccount token (it asks for the app's token).
 
 ## Exit codes
 
@@ -66,7 +66,7 @@ The job script and the runner reserve these codes; the controller turns them int
 | 243 | job script, or runner | the step ended well but its result could not be handed back: the job could not read or upload the result file (job script); the runner could not fetch it, nothing arrived, or the run has no way to hand a result back, in which case nothing is submitted (runner, reported FAILED) | `ResultNotHandedBack` |
 | 244 | runner | the result file the job handed back is not a result of the step contract (reported FAILED) | `InvalidResult` |
 | 245 | runner | a dataset another project shares cannot be read: not shared with this project (any more), the owner unknown or without a public address, or the site could not stage it; the job never downloads it itself (reported FAILED, nothing staged, no site job) | `SharedDatasetUnavailable` |
-| 246 | runner, or job script | the app has no identity in the data store (no `<app>-workflow` service account, not declared there, or nobody answered): reported FAILED before anything is staged; the job script ends 246 when the app's key never reached the site | `AppIdentityUnavailable` |
+| 247 | runner, or job script | the app has no identity in the data store (no `<app>-workflow` service account, not declared there, or nobody answered): reported FAILED before anything is staged; the job script ends 247 when the app's key never reached the site | `AppIdentityUnavailable` |
 
 ## What the step gets and hands back (the step contract)
 
@@ -113,7 +113,7 @@ writes it again in wire form, and sends it as `status.result` in the same patch 
 branch. The record that the step wrote no result, neither object there, or lakeFS not answering: the attempt is
 reported FAILED with exit 243, each with its own sentence. Not a result: FAILED with exit 244. The sentence is in `status.run.message` and becomes the job's message. A run that could never hand a
 result back (no tracking token, no lakeFS endpoint, no app) is reported FAILED 243 before anything is submitted; an app
-without an identity in the data store is reported FAILED 246 (`AppIdentityUnavailable`).
+without an identity in the data store is reported FAILED 247 (`AppIdentityUnavailable`).
 
 ## The app's identity in the data store
 The job reads and writes the data store as its app, never as the project (`identity.py`): the runner creates a token of
@@ -124,7 +124,7 @@ hand-back) and the job's stage-in and hand-back use that pair (HTTP Basic); the 
 staging tool's `key` verb (folder `$SCR/kaos-tmp/key-<job>` 0700, file 0600, replaced atomically) right after submit and
 then every 25 minutes while the job is queued or running; a refresh that fails is logged, written into `status.run.message`
 and asked again at every poll, and never stops the job. The file is never in the job script, the Slurm environment or the
-job log. The job waits up to 10 minutes for the first file and ends 246 without it. A dataset another project shares is
+job log. The job waits up to 10 minutes for the first file and ends 247 without it. A dataset another project shares is
 staged with the key the app's own data store hands out for the owner (`/kaos/v1/shared-credentials`), over https only.
 
 ## The site job's name, adopt, and a site that does not answer

@@ -15,7 +15,7 @@ import helpers
 import pytest
 from test_runner import FakeSlurm, acc, rig  # noqa: F401  (rig is a fixture)
 
-from kaos_hpc_runner import identity, jobscript, payloads, wallet
+from kaos_hpc_runner import identity, jobscript, payloads, staging, wallet
 from kaos_hpc_runner import runner as runmod
 
 OWN = "https://lakefs.example"
@@ -133,9 +133,27 @@ def test_an_app_without_an_identity_is_refused_before_anything_is_staged(rig, ca
     assert e.value.code == 0, "reported: the pod ends cleanly"
     assert staged == [] and slurm.submitted == [] and slurm.cancelled == []
     run = rig.kube.run
-    assert (run["state"], run["exitCode"], run["terminal"]) == ("FAILED", 246, True) and not run.get("siteJobID")
+    assert (run["state"], run["exitCode"], run["terminal"]) == ("FAILED", 247, True) and not run.get("siteJobID")
     assert "yolo" in run["message"]
     assert "ERROR: AppIdentityUnavailable:" in capsys.readouterr().out
+
+
+def test_a_project_without_its_tracker_identity_is_refused_before_anything_is_staged(rig):
+    staged = []
+    rig.monkeypatch.setattr(runmod.staging, "stage_dataset", lambda *a, **kw: staged.append("dataset") or "")
+    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm)
+    rig.runner._keys = helpers.FakeKeys()
+
+    def absent():
+        raise identity.AppIdentityUnavailable("the project's HPC identity for the experiment tracker is not ready")
+    rig.runner._mint = absent
+    with pytest.raises(SystemExit):
+        rig.runner.run()
+    assert staged == [] and slurm.submitted == []
+    run = rig.kube.run
+    assert (run["state"], run["exitCode"], run["terminal"]) == ("FAILED", 247, True)
+    assert "tracker is not ready" in run["message"]
 
 
 def test_a_data_store_that_blips_is_asked_again_before_the_run_is_refused(rig):
@@ -154,7 +172,7 @@ def test_a_resubmit_of_an_app_without_an_identity_cancels_nothing(rig):
     with pytest.raises(SystemExit):
         rig.runner.resubmit("pull token expired")
     assert slurm.cancelled == [] and slurm.submitted == []
-    assert rig.kube.run["exitCode"] == 246
+    assert rig.kube.run["exitCode"] == 247
 
 
 # ---------------------------------------------------------------- A, B. no bearer for the data store anywhere
@@ -179,13 +197,13 @@ def test_no_variable_the_step_or_a_payload_reads_holds_a_data_store_bearer():
         assert "LAKEFS_BEARER_TOKEN" not in program and "LAKEFS_KEY_FILE" in program
 
 
-def test_the_script_waits_for_the_key_binds_it_read_only_and_ends_246_without_it():
+def test_the_script_waits_for_the_key_binds_it_read_only_and_ends_247_without_it():
     lines = jobscript.batch_lines("-", "/scr")
     text = "\n".join(lines)
     assert "KAOS_KEY_DIR=$SCR/kaos-tmp/key-$KAOS_JOB_ID" in text and "export LAKEFS_KEY_FILE=$KAOS_KEY_DIR/lakefs-key.json" in text
-    assert "fail 246" in text and "-B $KAOS_KEY_DIR:/kaos/key:ro" in text
+    assert "fail 247" in text and "-B $KAOS_KEY_DIR:/kaos/key:ro" in text
     assert "APPTAINERENV_LAKEFS_KEY_FILE=/kaos/key/lakefs-key.json" in text
-    assert text.index("fail 246") < text.index("BIND=\"\"; KAOS_IN_ROOT"), "nothing runs before the key is there"
+    assert text.index("fail 247") < text.index("BIND=\"\"; KAOS_IN_ROOT"), "nothing runs before the key is there"
     assert "rm -rf \"$KAOS_KEY_DIR\"" in text, "the key folder goes with the job"
 
 
@@ -294,15 +312,15 @@ def test_the_tracker_token_is_minted_from_the_second_machine_user_when_it_exists
     assert used == [str(hpc)] and "mlflow-hpc is absent" not in capsys.readouterr().out
 
 
-def test_without_the_second_machine_user_the_old_tracker_token_is_used_and_the_log_says_so_once(tmp_path, monkeypatch, capsys):
+def test_without_the_second_machine_user_the_job_is_refused_and_no_admin_key_is_read(tmp_path, monkeypatch):
     used = []
     monkeypatch.setattr(wallet, "mint_wallet", lambda env=None, keyfile=None: used.append(keyfile) or "old.jwt")
-    monkeypatch.setattr(wallet, "_FALLBACK_SAID", False)
-    env = {"ZITADEL_HPC_KEY_FILE": str(tmp_path / "absent"), "ZITADEL_MACHINE_KEY_FILE": str(tmp_path / "old-key")}
-    assert wallet.mint_tracker(env) == "old.jwt" and wallet.mint_tracker(env) == "old.jwt"
-    assert used == [str(tmp_path / "old-key")] * 2
-    out = capsys.readouterr().out
-    assert out.count("Secret mlflow-hpc is absent") == 1, "said once, not at every mint"
+    admin = tmp_path / "old-key"
+    admin.write_text("{}")
+    env = {"ZITADEL_HPC_KEY_FILE": str(tmp_path / "absent"), "ZITADEL_MACHINE_KEY_FILE": str(admin)}
+    with pytest.raises(identity.AppIdentityUnavailable, match="HPC identity for the experiment tracker is not ready"):
+        wallet.mint_tracker(env)
+    assert used == [], "the project's admin machine key never reaches the job, even when it is mounted"
 
 
 def test_the_tracker_token_is_the_only_token_in_the_job(rig):
@@ -311,3 +329,46 @@ def test_the_tracker_token_is_the_only_token_in_the_job(rig):
     assert rig.runner.run() == 0
     script = slurm.submitted[0]["script"]
     assert "export MLFLOW_TRACKING_TOKEN=wallet.jwt" in script and "LAKEFS_BEARER_TOKEN" not in script
+
+
+# ---------------------------------------------------------------- the staging tool's stderr never shows a credential
+
+class _Proc:
+    """A site tool that fails and says the key it was handed."""
+
+    def __init__(self, err):
+        self.stdin, self.stdout, self.stderr = io.StringIO(), io.StringIO(""), io.StringIO(err)
+        self.stdin.close = lambda: None
+
+    def wait(self):
+        return 1
+
+
+def test_the_stderr_of_a_verb_fed_a_credential_is_redacted_before_it_is_printed(monkeypatch, capsys):
+    secret = "s3cr3t-value-0123456789abcdef"
+    monkeypatch.setattr(staging.subprocess, "Popen", lambda *a, **k: _Proc("key refused: got %s for AKIDEXAMPLE\n" % secret))
+    st = staging.Stager(helpers.settings(), secrets=lambda: (secret,))
+    monkeypatch.setattr(st, "_base", lambda: [])
+    monkeypatch.setattr(st, "_mux_opts", lambda: [])
+    monkeypatch.setattr(st, "_target", lambda: "site")
+    monkeypatch.setattr(st, "_ssh_home", lambda: "/nonexistent")
+    st(["key", "--job", "1"], iter([{"secret_access_key": secret}]), quiet=True)
+    out = capsys.readouterr().out
+    assert "stager stderr:" in out and secret not in out
+
+
+# ---------------------------------------------------------------- a key never travels in clear
+
+@pytest.mark.parametrize("url, ok", [
+    ("https://lakefs.example", True), ("http://127.0.0.1:8000", True), ("http://localhost:8000", True),
+    ("http://127.0.0.1", True), ("http://lakefs.example", False), ("http://127.0.0.1.evil.example", False),
+    ("http://localhost.evil.example:80", False), ("http://127.0.0.1@evil.example", False),
+    ("http://evil.example/http://127.0.0.1:1", False), ("ftp://localhost", False), ("https://", False), ("", False)])
+def test_a_data_store_address_is_https_or_the_loopback_of_the_local_lab(url, ok):
+    from kaos_hpc_runner import settings
+    assert settings.https_or_loopback(url) is ok
+
+
+def test_a_job_whose_data_store_address_is_not_https_does_not_start():
+    with pytest.raises(SystemExit):
+        helpers.settings(LAKEFS_EXTERNAL_URL="http://lakefs.example")

@@ -61,6 +61,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		wf.SetGroupVersionKind(workflowGVK)
 		wf.SetName(fmt.Sprintf("wf-%d", seq))
 		wf.SetNamespace(envNS)
+		wf.SetLabels(map[string]string{"platform.kubecore.io/app": "app"}) // the app of the pipeline's WorkflowTemplate
 		wf.Object["spec"] = map[string]any{"entrypoint": "main"}
 		Expect(k8sClient.Create(ctx, wf)).To(Succeed())
 		return wf
@@ -141,6 +142,15 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 			RunnerScheduling: runnerjob.Scheduling{NodeSelector: map[string]string{"pool": "system"}}}
 	})
 
+	It("refuses, before any runner starts, a job whose app is not the app of its Workflow", func() {
+		j := newServeJob(newWorkflow(), func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.App = "rival" })
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonAppIdentityUnavailable))
+		Expect(got.Status.Message).To(ContainSubstring("rival"))
+		Expect(runnerJob(got, 1)).To(BeNil())
+	})
+
 	It("creates the runner Job in the HPCSite namespace with env built only by the controller", func() {
 		wf := newWorkflow()
 		j := newServeJob(wf, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
@@ -173,7 +183,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		for _, v := range pod.Volumes {
 			volumes = append(volumes, v.Secret.SecretName)
 		}
-		Expect(volumes).To(ConsistOf("meluxina-jwt", "meluxina-staging", "mlflow-svc"))
+		Expect(volumes).To(ConsistOf("meluxina-jwt", "meluxina-staging", "mlflow-hpc"))
 
 		env := envMap(rj)
 		Expect(env).To(HaveKeyWithValue("HPC_JOB_NAMESPACE", envNS))

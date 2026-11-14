@@ -107,7 +107,7 @@ func checkPod(t *testing.T, rj *batchv1.Job) {
 	}
 	if vols["meluxina-jwt"] == nil || *vols["meluxina-jwt"].Optional || *vols["meluxina-jwt"].DefaultMode != 0o400 ||
 		vols["meluxina-staging"] == nil || !*vols["meluxina-staging"].Optional || *vols["meluxina-staging"].DefaultMode != 0o400 ||
-		vols["mlflow-svc"] == nil || *vols["mlflow-svc"].Optional ||
+		vols["mlflow-svc"] != nil ||
 		vols["mlflow-hpc"] == nil || !*vols["mlflow-hpc"].Optional || *vols["mlflow-hpc"].DefaultMode != 0o400 {
 		t.Errorf("volumes %+v", p.Volumes)
 	}
@@ -131,8 +131,7 @@ func TestShouldSetTheRunnerEnvironmentFromSpecAndSite(t *testing.T) {
 		"HPC_SHARING": "1", "HPC_SCOPE": "abcdef12", "KAOS_LIB_SUPPORT": "{}",
 		"HPC_SITE": "meluxina", "HPC_ACCOUNT": "p1", "HPC_USER": "u1", "HPC_SCRATCH": "/project/scratch/p1",
 		"HPC_HOME": "/home/users/u1", "HPC_ENDPOINT": "https://slurm-api.example", "HPC_REST_VERSION": "v0.0.44",
-		"ZITADEL_MACHINE_KEY_FILE": "/etc/mlflow-svc/ZITADEL_MACHINE_KEY",
-		"ZITADEL_HPC_KEY_FILE":     "/etc/mlflow-hpc/ZITADEL_MACHINE_KEY",
+		"ZITADEL_HPC_KEY_FILE": "/etc/mlflow-hpc/ZITADEL_MACHINE_KEY",
 	}
 	for k, v := range want {
 		if m[k] != v {

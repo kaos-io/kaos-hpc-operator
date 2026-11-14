@@ -51,6 +51,7 @@ import urllib.parse
 import urllib.request
 
 from . import identity, settings
+from .redact import Redactor
 
 STAGE_BUDGET_S = 4 * 3600
 EX_RETRY, EX_NOSPACE, EX_USAGE, EX_CONTRACT = 75, 76, 2, 78
@@ -248,8 +249,9 @@ class Stager:
 
     MASTER_PERSIST_S = 300
 
-    def __init__(self, cfg, staging_dir=settings.STAGING_DIR):
+    def __init__(self, cfg, staging_dir=settings.STAGING_DIR, secrets=lambda: ()):
         self.cfg, self.staging_dir = cfg, staging_dir
+        self.secrets = secrets     # the credential values this job holds: what a verb that is fed a credential may print
         self._home = None      # private HOME for ssh (the pod's may not be writable); holds the socket
         self._mux = None       # None: not tried; True: master up; False: multiplexing off for this runner
         self._mux_lock = threading.Lock()   # the log streamer thread and the runner call concurrently
@@ -365,6 +367,10 @@ class Stager:
         err = p.stderr.read().strip()
         self.last_error = err                 # of the last call: tells a missing tool from an older one (stage_once)
         if err:
+            if feed is not None:
+                # A verb that is handed a credential on stdin (the app's key, the registry token, the dataset records)
+                # never has its stderr printed as it is: the held values and the credential shapes are redacted first.
+                err = Redactor(tuple(v for v in self.secrets() if v)).text(err).strip()
             print('stager stderr:', err[-2000:], flush=True)
         if failed is not None:
             raise failed
@@ -412,7 +418,7 @@ def owner_store(own_url, key, owner, repo, commit):
     if found is None:
         raise _unavailable(repo, owner, '%s is not a project of this organisation that the data store knows' % owner)
     url = (found.get('url') or '').rstrip('/')
-    if not url.startswith(('https://', 'http://127.0.0.1:', 'http://localhost:')):   # a key never travels in clear
+    if not settings.https_or_loopback(url):   # a key never travels in clear
         raise _unavailable(repo, owner, 'project %s\'s data store has no public https address, so it cannot be read from a site' % owner)
     try:
         theirs = identity.peer_key(own_url, key, owner)

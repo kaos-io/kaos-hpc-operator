@@ -6,7 +6,9 @@ scripts run both sides together on a fake site. Nothing here is imported by a te
 change to dataset staging on either side, against a checkout of the other.
 
 The staging tool must speak staging contract 4 (it has the `key` verb that places the app's data store key file on the
-site); a tool of contract 3 makes every case stop with the contract mismatch.
+site); a tool of contract 3 makes every case stop with the contract mismatch. The `key` verb refuses a job that is not live
+(pending, running or otherwise not in the queue) and a key folder that the tool's user does not own, so the runner may ask for
+a key only while the site job is live, and never for a folder someone else made.
 
 No cluster, no HPC site, no network: a fake `ssh` runs the staging tool in forced-command mode, a local HTTP
 server stands in for lakeFS, and the staging tool's own test file provides the fake `lfs` and `squeue`.

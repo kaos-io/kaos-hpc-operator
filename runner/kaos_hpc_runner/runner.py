@@ -137,7 +137,7 @@ class Runner:
         self.watch_jid, self.watch_since = None, 0.0     # when this runner began waiting for jid's observation
         self.last_rest, self.last_reason = 0.0, 0.0
         self.slurm = slurm or Slurm(cfg)
-        self.stager = stager or staging.Stager(cfg)
+        self.stager = stager or staging.Stager(cfg, secrets=self.held_secrets)
         self.reporter = reporter or Reporter(cfg)
         self.key, self.key_for, self.key_next = None, None, 0.0   # the app's key; the site job its file was last written for; when to write again
         self.key_noted = False        # a failed key refresh is written into status.run.message; cleared when one lands
@@ -391,9 +391,9 @@ class Runner:
         self.check_handback()
         try:
             self.key = self.new_key()
+            w = self.wallet = self._mint()
         except identity.AppIdentityUnavailable as e:
             self.fail_identity(e)
-        w = self.wallet = self._mint()
         self.wallet_exp = wallet.wallet_exp(w)
         if not w and self.cfg.mlflow_url:
             self.fail_handback('no tracking token could be minted for this job')
@@ -466,7 +466,7 @@ class Runner:
             print('app key: note not written (%s)' % e, flush=True)
 
     def fail_identity(self, err):
-        """The app has no identity in the data store: one terminal report (FAILED, exit 246, reason
+        """The app has no identity in the data store: one terminal report (FAILED, exit 247, reason
         AppIdentityUnavailable) and nothing is submitted to the site."""
         msg = str(err)
         print('ERROR: AppIdentityUnavailable:', msg, flush=True)
@@ -754,7 +754,8 @@ class Runner:
         if adopted:
             print('adopting existing job', jid, flush=True)
         self.jid = jid
-        self.keep_key()
+        if not adopted:
+            self.keep_key()     # an adopted job may have ended: the poll loop places a key once its state is known to be live
         self.logs.attach(self.jid, offset)
         self.logs.start()
         try:
@@ -877,12 +878,14 @@ class Runner:
         while True:
             self.sleep(POLL_S)
             try:
-                self.keep_key()
                 jid = self.jid
                 v = self.view()
                 if v is None:
+                    self.keep_key()     # the state is unknown, the last known one was live
                     continue
                 job, st = v.job, v.st
+                if not any(x in TERMINAL for x in st):
+                    self.keep_key()     # never for a job that has ended: the site tool refuses it, and a key is not asked for
                 print('state:', st, flush=True)
                 share = share_state(comment_of(job))
                 info = checkpoint_info(comment_of(job))

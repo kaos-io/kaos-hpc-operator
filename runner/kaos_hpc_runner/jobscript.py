@@ -218,7 +218,6 @@ def batch_lines(scope, scratch):
         # What a job killed without a trap (SIGKILL, node loss) left behind: the private copy of a host script with
         # the bearer in it, the input and variable folders of jobs that are over. Asks squeue; if it cannot
         # answer, removes nothing. A job's own id must be in the answer or the answer is not trusted.
-        '[ -z "$SLURM_JOB_ID" ] || KAOS_SWEEP_SELF=$SLURM_JOB_ID kaos_sweep "$SCR"',
         # Diagnostics without SSH (live job 5143859: exit 231 with no way to
         # see WHY): on any failure, tail this job's own output file into its
         # job COMMENT — readable over REST from the waiter and by operators.
@@ -229,6 +228,11 @@ def batch_lines(scope, scratch):
         # The project's own root is VERIFIED, never made here (see ROOT_HELPER): a refusal is one plain sentence in the job
         # output, which fail() copies into the job comment. Before anything is created under $SCR.
         'kaos_root "$SCR" || fail 233',
+        # Nothing is read from $SCR/kaos-tmp (the sweep, the key folder, the inputs) before it is known to be the job user's
+        # own real folder: a link or a folder of another user there ends the job, and nothing under it is read.
+        'if [ -e "$SCR/kaos-tmp" ] || [ -L "$SCR/kaos-tmp" ]; then { [ -O "$SCR/kaos-tmp" ] && [ ! -L "$SCR/kaos-tmp" ]; } ||'
+        ' { echo "AppIdentityUnavailable: $SCR/kaos-tmp is not the job user\'s own folder (or is a link): nothing is read from it"; fail 247; }; fi',
+        '[ -z "$SLURM_JOB_ID" ] || KAOS_SWEEP_SELF=$SLURM_JOB_ID kaos_sweep "$SCR"',
         # PRD-1609 F-03: with sharing on, the job's batch step is the host. It runs
         # this same script as one Slurm job step per slot (its own step and taken
         # guests' scripts), each with KAOS_IN_STEP=1 and that step's KAOS_JOB_ID.
@@ -271,13 +275,23 @@ def batch_lines(scope, scratch):
         # KAOS_INPUTS holds one word per input: name|repository|commit|resident path|owner (the data/ folder of the
         # copy staged from the login node, whose markers are beside it).
         # The app's key for the data store: a file the runner places through the staging tool (and replaces before the key
-        # ends). The job never starts a step, a stage-in or a hand-back without it, and a job whose key never came ends 246
+        # ends). The job never starts a step, a stage-in or a hand-back without it, and a job whose key never came ends 247
         # saying so. The file is in the job's own folder and is never copied into this script, its environment or its log.
         'KAOS_KEY_DIR=$SCR/kaos-tmp/key-$KAOS_JOB_ID; export LAKEFS_KEY_FILE=$KAOS_KEY_DIR/' + KEY_FILE_NAME,
-        'KAOS_KEY_WAIT=0; until [ -s "$LAKEFS_KEY_FILE" ]; do',
+        # Before the key is waited for and before every read of it (and before it is bound into the step): the folder and the
+        # file, when they exist, must be the job user's own and not links, and the folder must have no group or other bits.
+        # What is not so ends the job 247 with one line; nothing is read.
+        'kaos_key_check(){ local bad="";',
+        '  if [ -e "$KAOS_KEY_DIR" ] || [ -L "$KAOS_KEY_DIR" ]; then',
+        '    { [ -O "$KAOS_KEY_DIR" ] && [ ! -L "$KAOS_KEY_DIR" ] && [ -z "$(find "$KAOS_KEY_DIR" -maxdepth 0 -perm /077 2>/dev/null)" ]; } ||'
+        ' bad="the key folder is not the job user\'s own private folder (or is a link)"; fi',
+        '  if [ -z "$bad" ] && { [ -e "$LAKEFS_KEY_FILE" ] || [ -L "$LAKEFS_KEY_FILE" ]; }; then',
+        '    { [ -O "$LAKEFS_KEY_FILE" ] && [ ! -L "$LAKEFS_KEY_FILE" ]; } || bad="the key file is not the job user\'s own (or is a link)"; fi',
+        '  [ -z "$bad" ] || { echo "AppIdentityUnavailable: $bad: the app\'s key is not read"; fail 247; }; }',
+        'KAOS_KEY_WAIT=0; until kaos_key_check; [ -s "$LAKEFS_KEY_FILE" ]; do',
         '  if [ $KAOS_KEY_WAIT -ge ${KAOS_KEY_WAIT_S:-600} ]; then',
         '    echo "the app\'s data store key was not placed on the site within ${KAOS_KEY_WAIT_S:-600} s: the job cannot read or '
-        'write the app\'s data. Run the step again"; fail 246; fi',
+        'write the app\'s data. Run the step again"; fail 247; fi',
         '  sleep 2; KAOS_KEY_WAIT=$((KAOS_KEY_WAIT + 2)); done',
         'BIND=""; KAOS_IN_ROOT=$SCR/kaos-tmp/in-$KAOS_JOB_ID; rm -rf "$KAOS_IN_ROOT"',
         'for KAOS_IN in $KAOS_INPUTS; do',
@@ -298,6 +312,7 @@ def batch_lines(scope, scratch):
         ' not ready - downloading in-job on GPU time"',
         '    export DATASET_REPO=$IN_REPO DATASET_COMMIT=$IN_COMMIT DATASET_CACHE=$SCR/data-cache'
         ' DATASET_DIRFILE=$SCR/kaos-tmp/ds-$KAOS_JOB_ID-$IN_NAME.dir',
+        '    kaos_key_check',
         '    printf %s "$STAGEIN_B64" | base64 -d | python3 - || fail 232',
         '    IN_COPY=$(cat "$DATASET_DIRFILE" 2>/dev/null); rm -f "$DATASET_DIRFILE"',
         '    [ -n "$IN_COPY" ] && [ -f "$IN_COPY/.kaos-complete" ] && [ -d "$IN_COPY/data" ] ||'
@@ -479,6 +494,7 @@ def batch_lines(scope, scratch):
         # becomes the step's apptainer, so no other process of the job inherits them. A value that cannot be written
         # ends the step with 233: a step never starts without its context.
         'KAOS_ENV_DIR=$SCR/kaos-tmp/env-$KAOS_JOB_ID; rm -rf "$KAOS_ENV_DIR"; mkdir -m 700 "$KAOS_ENV_DIR" || fail 233',
+        'kaos_key_check',
         'BIND="$BIND -B $KAOS_ENV_DIR:' + ENV_MOUNT + ':ro -B $KAOS_KEY_DIR:' + KEY_MOUNT + ':ro"',
         'KAOS_STEP_ENV="' + ' '.join(STEP_ENV) + '"',
         'KAOS_FILE_ENV="' + ' '.join(FILE_ENV) + '"',

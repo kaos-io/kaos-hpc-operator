@@ -173,8 +173,13 @@ bound read-only at `/kaos/key` (a folder of its own: the loader above exports ev
 `LAKEFS_KEY_FILE` points at the file in the container and in the script's own stage-in and hand-back programs. The key lives
 about an hour and a job up to 12: the runner replaces the file every 25 minutes while the job is queued or running, and the
 library reads it again before it signs a request. The key is never in the job script, the Slurm environment or the job log
-(the runner's log stream redacts it). The job waits up to 10 minutes for the first file and ends 246 without it. The folder
-is removed with the step's other folders; the sweep removes one a killed job left (`key-<digits>`).
+(the runner's log stream redacts it). The job waits up to 10 minutes for the first file and ends 247 without it. The folder
+is removed with the step's other folders; the sweep removes one a killed job left (`key-<digits>`). Before it waits for the
+file and before every read of it (the stage-in, the hand-back, the bind into the step) the script checks that the key folder
+and the file are owned by the job's user and are not symbolic links, and that the folder has no group or other permission
+bits; `$SCR/kaos-tmp` itself is checked the same way before anything is read from it. Otherwise the job ends 247 with one
+line saying which. The runner asks the staging tool to place or refresh the key only while the site job is not in a final
+state. A pending job that is cancelled leaves its key folder until the sweep of a later job of the same user removes it.
 
 The tests (`runner/tests/test_hardening.py`) run the whole script against a fake Apptainer that models the evaluation, and
 prove a 100 KB context holding `$HOME $(...)`, backticks, `\` and `"` arrives byte for byte and runs nothing.

@@ -466,12 +466,47 @@ def test_a_hand_back_that_fails_fails_the_job_243_and_the_log_says_why(tmp_path,
 
 
 @MODES
-def test_a_job_whose_key_never_came_ends_246_without_starting_the_step(tmp_path, lakefs, monkeypatch, shared):
+def test_a_job_whose_key_never_came_ends_247_without_starting_the_step(tmp_path, lakefs, monkeypatch, shared):
     """AC-14 B: the job never starts a step, a stage-in or a hand-back without the app's key; it says why."""
     site = Site(tmp_path, lakefs, shared, helpers.fixture("context-one-upstream.wire"), monkeypatch=monkeypatch)
     site.place = False
-    assert site.run() == 246, site.out
+    assert site.run() == 247, site.out
     assert "the app's data store key was not placed on the site" in site.out
+    assert not site.saw.exists(), "the step never started"
+    assert _handed(lakefs) == {}
+
+
+def _hostile_key_site(tmp_path, lakefs, monkeypatch, shared, how):
+    """A key folder, key file or kaos-tmp that is not the job user's own private one (AC-14 F5)."""
+    site = Site(tmp_path, lakefs, shared, helpers.fixture("context-one-upstream.wire"), monkeypatch=monkeypatch)
+    site.place = False
+    site.runner.prepare_handback()
+    other = tmp_path / "elsewhere"
+    helpers.write_key_file(other)
+    tmp = site.scratch / "kaos-tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    if how == "folder-link":
+        (tmp / "key-5001").symlink_to(other)
+    elif how == "folder-open":
+        helpers.write_key_file(tmp / "key-5001")
+        (tmp / "key-5001").chmod(0o755)
+    elif how == "file-link":
+        (tmp / "key-5001").mkdir(mode=0o700)
+        (tmp / "key-5001" / "lakefs-key.json").symlink_to(other / "lakefs-key.json")
+    elif how == "tmp-link":
+        tmp.rmdir()
+        (site.scratch / "kaos-tmp").symlink_to(other.parent / "elsewhere")
+    return site
+
+
+@MODES
+@pytest.mark.parametrize("how", ["folder-link", "folder-open", "file-link", "tmp-link"])
+def test_a_key_that_is_not_the_job_users_own_private_file_is_never_read(tmp_path, lakefs, monkeypatch, shared, how):
+    """AC-14 F5: a link, or a folder open to group or other, ends the job 247 before the key is waited for or read."""
+    site = _hostile_key_site(tmp_path, lakefs, monkeypatch, shared, how)
+    site.runner.prepare_handback = lambda: None
+    assert site.run() == 247, site.out
+    assert "AppIdentityUnavailable:" in site.out
     assert not site.saw.exists(), "the step never started"
     assert _handed(lakefs) == {}
 
