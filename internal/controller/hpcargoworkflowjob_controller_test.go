@@ -83,6 +83,7 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("job-%d", seq), Namespace: ns},
 			Spec:       hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: wall},
 		}
+		withWorkflow(j)
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		return j
 	}
@@ -110,6 +111,7 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: wall,
 				Resumable: &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: maxCont}},
 		}
+		withWorkflow(j)
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		return j
 	}

@@ -110,6 +110,12 @@ class FakeKeys:
     def __init__(self, expires=1e12, fail=None):
         self.calls, self.expires, self.fail = 0, expires, list(fail or [])
 
+    @staticmethod
+    def auth_of(n):
+        """The Authorization value of the key the n-th call gave."""
+        from kaos_hpc_runner import identity
+        return identity.Key(APP_KEY_ID, APP_KEY_SECRET + str(n), 1e12, "").auth()
+
     def __call__(self):
         from kaos_hpc_runner import identity
         self.calls += 1

@@ -488,7 +488,7 @@ func refusedMessage(run *hpcv1alpha1.RunStatus, msg string) string {
 func refusedBeforeStaging(reason string) bool {
 	switch reason {
 	case hpcv1alpha1.ReasonStagingMismatch, hpcv1alpha1.ReasonReservedName, hpcv1alpha1.ReasonSharedDatasetUnavailable,
-		hpcv1alpha1.ReasonAppIdentityUnavailable:
+		hpcv1alpha1.ReasonDatasetNotStaged, hpcv1alpha1.ReasonAppIdentityUnavailable:
 		return true
 	}
 	return false
@@ -504,6 +504,7 @@ var failedExitReasons = map[int32]string{
 	hpcv1alpha1.ExitCodeReservedName:             hpcv1alpha1.ReasonReservedName,
 	hpcv1alpha1.ExitCodeSharedDatasetUnavailable: hpcv1alpha1.ReasonSharedDatasetUnavailable,
 	hpcv1alpha1.ExitCodeAppIdentityUnavailable:   hpcv1alpha1.ReasonAppIdentityUnavailable,
+	hpcv1alpha1.ExitCodeDatasetNotStaged:         hpcv1alpha1.ReasonDatasetNotStaged,
 	hpcv1alpha1.ExitCodeResultNotHandedBack:      hpcv1alpha1.ReasonResultNotHandedBack,
 	hpcv1alpha1.ExitCodeInvalidResult:            hpcv1alpha1.ReasonInvalidResult,
 	hpcv1alpha1.ExitCodeSubmitLimit:              hpcv1alpha1.ReasonSubmitLimit,

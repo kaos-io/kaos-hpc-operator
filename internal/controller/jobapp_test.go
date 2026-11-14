@@ -2,9 +2,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -47,7 +49,7 @@ func TestAJobOfAnotherAppThanItsWorkflowsIsRefused(t *testing.T) {
 		{"label and template disagree", "yolo", workflowOf(appLabel, "rival-pipeline"), false, "rival"},
 		{"a workflow that names no app", "yolo", workflowOf(nil, ""), false, "names no app"},
 		{"no app at all", "", workflowOf(appLabel, ""), false, "names no app"},
-		{"no workflow (standalone)", "yolo", nil, true, ""},
+		{"no workflow at all", "yolo", nil, true, "names no Workflow"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -61,7 +63,10 @@ func TestAJobOfAnotherAppThanItsWorkflowsIsRefused(t *testing.T) {
 			if !c.noRef {
 				job.Spec.Workflow = &hpcv1alpha1.WorkflowRef{Name: "wf", UID: "u"}
 			}
-			err := r.checkApp(context.Background(), job)
+			err, transient := r.checkApp(context.Background(), job)
+			if transient != nil {
+				t.Fatalf("the Workflow was read, yet: %v", transient)
+			}
 			switch {
 			case c.refuse == "" && err != nil:
 				t.Fatalf("refused: %v", err)
@@ -72,6 +77,7 @@ func TestAJobOfAnotherAppThanItsWorkflowsIsRefused(t *testing.T) {
 	}
 }
 
+// A Workflow that cannot be read now says nothing about the app: no refusal, an error so the job is asked again.
 func TestAWorkflowWithoutTheArgoAPIDoesNotRefuseTheApp(t *testing.T) {
 	noMatch := &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: "argoproj.io", Kind: "Workflow"}, SearchedVersions: []string{"v1alpha1"}}
 	cl := interceptor.NewClient(fake.NewClientBuilder().Build(), interceptor.Funcs{
@@ -81,8 +87,33 @@ func TestAWorkflowWithoutTheArgoAPIDoesNotRefuseTheApp(t *testing.T) {
 	r := &HPCArgoWorkflowJobReconciler{Client: cl, Scheme: runtime.NewScheme()}
 	job := &hpcv1alpha1.HPCArgoWorkflowJob{Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "yolo",
 		Workflow: &hpcv1alpha1.WorkflowRef{Name: "wf", UID: "u"}}}
-	if err := r.checkApp(context.Background(), job); err != nil {
-		t.Fatal(err)
+	if refusal, err := r.checkApp(context.Background(), job); refusal != nil || err != nil {
+		t.Fatalf("refusal %v, error %v", refusal, err)
+	}
+}
+
+func TestAWorkflowThatCannotBeReadNowIsNotARefusalOfTheApp(t *testing.T) {
+	gr := schema.GroupResource{Group: "argoproj.io", Resource: "workflows"}
+	cases := map[string]error{
+		"timeout":   apierrors.NewTimeoutError("slow", 1),
+		"server":    apierrors.NewInternalError(errors.New("boom")),
+		"forbidden": apierrors.NewForbidden(gr, "wf", errors.New("no")),
+		"not found": apierrors.NewNotFound(gr, "wf"), // workflowCancelCause cancels the job for it, before this check
+	}
+	for name, getErr := range cases {
+		t.Run(name, func(t *testing.T) {
+			cl := interceptor.NewClient(fake.NewClientBuilder().Build(), interceptor.Funcs{
+				Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+					return getErr
+				}})
+			r := &HPCArgoWorkflowJobReconciler{Client: cl, Scheme: runtime.NewScheme()}
+			job := &hpcv1alpha1.HPCArgoWorkflowJob{Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "yolo",
+				Workflow: &hpcv1alpha1.WorkflowRef{Name: "wf", UID: "u"}}}
+			refusal, err := r.checkApp(context.Background(), job)
+			if refusal != nil || err == nil {
+				t.Fatalf("want no refusal and an error to ask again, got refusal %v, error %v", refusal, err)
+			}
+		})
 	}
 }
 

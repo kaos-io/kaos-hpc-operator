@@ -13,6 +13,7 @@ Stdlib only; one HTTP call per function, the callers retry.
 import base64
 import datetime
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -62,6 +63,10 @@ def _key_of(body):
     return Key(key_id, secret, epoch(body.get('expiration')), str(body.get('expiration') or ''))
 
 
+# What the cluster accepts as the name of a service account's owner: it goes into the token request's path.
+APP_NAME = re.compile(r'[a-z0-9]([-a-z0-9]*[a-z0-9])?')
+
+
 def service_account(app):
     return app + '-workflow'
 
@@ -69,6 +74,9 @@ def service_account(app):
 def request_token(kube, namespace, app):
     """A token of the app's workflow service account, for the data store only. The runner's own service account may
     create it for this one service account only (the controller binds that, see docs)."""
+    if not APP_NAME.fullmatch(app or ''):
+        raise AppIdentityUnavailable('the app name %r is not a name an app can have, so it has no identity for its data. Nothing was '
+                                     'staged and nothing was submitted to the site' % str(app)[:80])
     sa = service_account(app)
     try:
         out = kube('POST', '/api/v1/namespaces/%s/serviceaccounts/%s/token' % (namespace, sa),

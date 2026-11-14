@@ -10,8 +10,9 @@ whatever the dataset's shape (PRD kaos#1911 F-04). Unchanged files are hard link
 come from the lakeFS API with the app's own key (sent once on stdin, held in memory only; identity.py). Any failure
 returns '' and the job stages in-job as before, saying so (F-06), with three exceptions that end the run
 before anything is submitted: no room in the quota (InsufficientQuota), a staging tool that speaks
-another staging contract (StagingMismatch), and a dataset object whose name is reserved for the
-platform (ReservedName).
+another staging contract (StagingMismatch), a dataset object whose name is reserved for the
+platform (ReservedName), and a dataset above STAGE_FALLBACK_MAX_BYTES that the site could not stage in its budget
+(DatasetNotStaged: the job would download it on GPU time). The budget is stage_budget(bytes of the copy).
 
 A dataset another project shares (AC-44, D-61; the input names an owner) is staged the same way from the OWNER's
 data store: its public address comes from the own data store's peers, the credential is the app's key IN the owner's
@@ -50,10 +51,19 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import identity, settings
+from . import identity, settings, wallet as walletmod
 from .redact import Redactor
 
-STAGE_BUDGET_S = 4 * 3600
+# How long staging goes on asking again (new attempts) before the job stages in-job: stage_budget(bytes). A new attempt
+# resumes the copy file by file. The same 72 hours, in total for all inputs of a step, is the allowance of the runner
+# Job's deadline (internal/runnerjob) and of the follower's (engine/kubecore/meluxina.py): change the three together.
+STAGE_MIN_BUDGET_S = 4 * 3600
+STAGE_MAX_BUDGET_S = 72 * 3600
+STAGE_UNKNOWN_BUDGET_S = 12 * 3600   # the size could not be read from the data store
+STAGE_FLOOR_BPS = 50 * 10 ** 6       # a copy slower than this for hours is not healthy; the budget allows twice the time
+STAGE_FALLBACK_MAX_BYTES = 50 * 10 ** 9   # above this a job never downloads the dataset itself, on GPU time
+STAGE_NOTE_EVERY_S = 10 * 60         # how often the job's status says how far the copy is
+TOKEN_MIN_LEFT_S = 3600              # a data token with less left than this is not used for another attempt
 EX_RETRY, EX_NOSPACE, EX_USAGE, EX_CONTRACT = 75, 76, 2, 78
 CONTRACT = 4   # 4 = the whole tree of the commit under <copy>/data/, a dataset another project shares filed as repo@owner, and the `key` verb (the app's key file for a job); the tool's CONTRACT is the same number
 
@@ -75,6 +85,12 @@ class SharedDatasetUnavailable(Exception):
     the owner is not known or has no public address, or the site could not stage it (a job never downloads a
     shared dataset itself). Nothing is staged and nothing is submitted. The message names the dataset and the owner
     and says what to do, for the job's status and the pipeline log."""
+
+
+class DatasetNotStaged(Exception):
+    """The site could not stage a dataset in its budget, and the dataset is too large for the job to download it
+    itself on GPU time (STAGE_FALLBACK_MAX_BYTES). Nothing is submitted: the run ends DatasetNotStaged. The message
+    names the dataset and its size, for the job's status and the pipeline log."""
 
 
 class ReservedName(Exception):
@@ -155,15 +171,52 @@ class Names:
 
 def refuse_names(api, repo, commit, auth, prefix=''):
     """Raise ReservedName for the first object of the commit (under prefix) that cannot be copied (Names). A
-    listing that cannot be read judges nothing: the stage plan and the in-job stage-in check the names again."""
-    names = Names(repo, commit)
+    listing that cannot be read judges nothing: the stage plan and the in-job stage-in check the names again.
+    Returns the bytes of the objects listed, or None when the listing could not be read."""
+    names, total = Names(repo, commit), 0
     try:
         for o in lakefs_pages(api + '/refs/%s/objects/ls' % commit, auth, {'prefix': prefix}):
-            names.take(o['path'], int(o.get('size_bytes') or 0))
+            size = int(o.get('size_bytes') or 0)
+            names.take(o['path'], size)
+            total += size
     except ReservedName:
         raise
     except Exception as e:
         print('stage: object names not checked (%s)' % e, flush=True)
+        return None
+    return total
+
+
+def stage_budget(nbytes):
+    """The seconds staging may go on asking again for a dataset of nbytes: the time to copy it at STAGE_FLOOR_BPS,
+    twice, and at least STAGE_MIN_BUDGET_S and at most STAGE_MAX_BUDGET_S; STAGE_UNKNOWN_BUDGET_S when the size is
+    not known (None)."""
+    if nbytes is None:
+        return STAGE_UNKNOWN_BUDGET_S
+    return int(min(max(2 * nbytes / STAGE_FLOOR_BPS, STAGE_MIN_BUDGET_S), STAGE_MAX_BUDGET_S))
+
+
+def not_staged_message(repo, commit, nbytes, why):
+    return ('dataset %s@%s is %s and %s. A job downloads a dataset itself only up to %s, because that time is GPU '
+            'time. Nothing was submitted to the site. Run the step again: the copy continues from the files that are '
+            'already on the site (kept for a day).' % (repo, commit[:12], human_bytes(nbytes), why,
+                                                      human_bytes(STAGE_FALLBACK_MAX_BYTES)))
+
+
+def refuse_big_fallback(repo, commit, nbytes, why):
+    """Raise DatasetNotStaged when the job would download a dataset of nbytes (None: not known) itself."""
+    if nbytes is not None and nbytes > STAGE_FALLBACK_MAX_BYTES:
+        raise DatasetNotStaged(not_staged_message(repo, commit, nbytes, why))
+
+
+def renewed_wallet(mint_wallet, old):
+    """The token for the next attempt: minted again, never an old one close to its end. When the mint fails the old
+    one is kept while it has TOKEN_MIN_LEFT_S left (a token whose end is unknown is kept); else ''."""
+    new = mint_wallet()
+    if new:
+        return new
+    exp = walletmod.wallet_exp(old)
+    return '' if exp and exp - time.time() < TOKEN_MIN_LEFT_S else old
 
 
 class ToolAbsent(Exception):
@@ -248,6 +301,7 @@ class Stager:
     cannot be started the runner falls back to one connection per call, as before."""
 
     MASTER_PERSIST_S = 300
+    progress = None     # called with each `progress` event of a fetch (stage_dataset sets it)
 
     def __init__(self, cfg, staging_dir=settings.STAGING_DIR, secrets=lambda: ()):
         self.cfg, self.staging_dir = cfg, staging_dir
@@ -341,6 +395,8 @@ class Stager:
                         print('stager:', line.rstrip(), flush=True)
                     continue
                 events.append(ev)
+                if self.progress and ev.get('event') == 'progress':
+                    self.progress(ev)
                 if not quiet:
                     print('stager:', json.dumps(ev, sort_keys=True), flush=True)
         reader = threading.Thread(target=read, daemon=True)
@@ -466,10 +522,11 @@ def check_tool(stager):
     return rc
 
 
-def stage_once(stager, repo, ref, commit, lakefs, auth, info=None, key=None):
+def stage_once(stager, repo, ref, commit, lakefs, auth, info=None, key=None, plan=None):
     # One staging attempt. Returns (path, retry): the ready path, or '' with
     # whether a later attempt can help. info (a dict) receives the staging record when the copy is ready. repo is the
     # repository in the data store at `lakefs`; key (default repo) is what the copy is filed under on the site.
+    # plan (a dict) receives the bytes and files the copy needs, once they are listed and before it begins.
     key = key or repo
     rc = check_tool(stager)
     if rc != 0:
@@ -501,6 +558,8 @@ def stage_once(stager, repo, ref, commit, lakefs, auth, info=None, key=None):
         need_files += 1
         added += kind == 'added'
     files = (int(st.get('base_files') or 0) if base else 0) + added - removed
+    if plan is not None:
+        plan.update(bytes=need_bytes, files=need_files)
     print('stage: %s@%s %s: %d files to fetch (%.1f MB), %d to delete, %d in the version'
           % (repo, commit[:12], 'delta on ' + base[:12] if base else 'first copy',
              need_files, need_bytes / 1e6, removed, files), flush=True)
@@ -543,7 +602,7 @@ def ssh_present():
     return shutil.which('ssh') is not None
 
 
-def stage_dataset(cfg, inp, stager, app_key, info=None):
+def stage_dataset(cfg, inp, stager, app_key, info=None, note=None, deadline=None):
     """The resident path of one input's pinned commit, or '' (the job then stages it in-job). inp is one entry
     of cfg.inputs (spec.inputs): its repository, label and commit; nothing is resolved here. Three failures
     are not a fallback:
@@ -553,7 +612,11 @@ def stage_dataset(cfg, inp, stager, app_key, info=None):
     owner (a dataset another project shares) is staged from the owner's data store and never in-job: whatever
     would make an own dataset fall back to the job's download ends the run SharedDatasetUnavailable instead.
     info (a dict), when given, receives the staging record (staging_record) once the copy is resident; it stays
-    empty when the job stages in-job."""
+    empty when the job stages in-job. note(text), when given, is called every STAGE_NOTE_EVERY_S while a copy goes on
+    (text says how far it is), and with None when staging is over. The time staging goes on asking again is
+    stage_budget(size of the copy) and never past deadline (epoch seconds, when given: the runner passes the start of
+    its first dataset's staging + STAGE_MAX_BUDGET_S, so 72 hours is the total for all inputs of a step); an own
+    dataset above STAGE_FALLBACK_MAX_BYTES that the site did not stage is DatasetNotStaged, not an in-job download."""
     repo, ref, commit = inp['repo'], inp['ref'], inp['commit']
     owner = inp.get('owner') or ''
     dkey = dataset_key(repo, owner)
@@ -570,36 +633,67 @@ def stage_dataset(cfg, inp, stager, app_key, info=None):
         if owner:
             raise _no_job_download(repo, owner, 'the site\'s staging tool cannot be used (no staging key, or no ssh client)')
         print('stage: skipped (needs the staging key and an ssh client) - the job stages in-job', flush=True)
-        refuse_names(api, repo, commit, auth)     # the in-job copy joins every name to its folder: check them all
+        # the in-job copy joins every name to its folder: check them all
+        refuse_big_fallback(repo, commit, refuse_names(api, repo, commit, auth), 'the site\'s staging tool cannot be used')
         return ''
     began = time.time()
-    deadline, attempt, absent_since = began + STAGE_BUDGET_S, 0, None
-    while True:
-        attempt += 1
-        try:
-            key = app_key()                  # a staging that retries for an hour must not carry a key that ended
-            if owner:
-                source, theirs = owner_store(lakefs, key, owner, repo, commit)
-                source_auth = theirs.auth()
-            else:
-                source, source_auth = lakefs, key.auth()
-            path, retry = stage_once(stager, repo, ref, commit, source, source_auth, info, dkey)
-        except (InsufficientQuota, StagingMismatch, ReservedName, SharedDatasetUnavailable, identity.AppIdentityUnavailable):
-            raise
-        except ToolAbsent as e:
-            if absent_since is None:
-                absent_since = time.time()      # the 20 minutes count from the first "absent", not from the start
-            if time.time() - absent_since > TOOL_WAIT_S:
-                raise StagingMismatch(absent_message(e))
-            print('stage: the staging tool is not installed or cannot be run (exit %s) - asking again' % e,
-                  flush=True)
-            path, retry = '', True
-        except Exception as e:
-            print('stage: attempt', attempt, 'failed:', e, flush=True)
-            path, retry = '', True
-        if path or not retry or time.time() > deadline:
-            break
-        time.sleep(min(60 * attempt, 600))
+    budget, attempt, absent_since, plan, sized, posted = STAGE_UNKNOWN_BUDGET_S, 0, None, {}, False, [0.0]
+
+    def progress(ev):
+        # One line, and one note for the job's status, every STAGE_NOTE_EVERY_S; the stager's own events come every 5 s.
+        if ev.get('phase') != 'fetch' or not plan or time.time() - posted[0] < STAGE_NOTE_EVERY_S:
+            return
+        posted[0] = time.time()
+        text = ('staging dataset %s: %d of %d files, %s of %s fetched in this attempt, staging since %s UTC'
+                % (dkey, int(ev.get('files') or 0) + int(ev.get('skipped') or 0), plan['files'],
+                   human_bytes(ev.get('bytes') or 0), human_bytes(plan['bytes']),
+                   time.strftime('%Y-%m-%d %H:%M', time.gmtime(began))))
+        print('stage:', text, flush=True)
+        if note:
+            note(text)
+    stager.progress = progress
+    try:
+        while True:
+            attempt += 1
+            try:
+                key = app_key()                  # a staging that retries for hours must not carry a key that ended
+                auth = key.auth()
+                if owner:
+                    source, theirs = owner_store(lakefs, key, owner, repo, commit)
+                    source_auth = theirs.auth()
+                else:
+                    source, source_auth = lakefs, auth
+                path, retry = stage_once(stager, repo, ref, commit, source, source_auth, info, dkey, plan)
+            except (InsufficientQuota, StagingMismatch, ReservedName, SharedDatasetUnavailable, identity.AppIdentityUnavailable):
+                raise
+            except ToolAbsent as e:
+                if absent_since is None:
+                    absent_since = time.time()      # the 20 minutes count from the first "absent", not from the start
+                if time.time() - absent_since > TOOL_WAIT_S:
+                    raise StagingMismatch(absent_message(e))
+                print('stage: the staging tool is not installed or cannot be run (exit %s) - asking again' % e,
+                      flush=True)
+                path, retry = '', True
+            except Exception as e:
+                print('stage: attempt', attempt, 'failed:', e, flush=True)
+                path, retry = '', True
+            size = plan.get('bytes')
+            if size is None and attempt == 1 and not path and retry:
+                size = refuse_names(api, repo, commit, auth)    # the stager did not get as far as listing the copy: size the commit
+            if size is not None and not sized:
+                sized, budget = True, stage_budget(size)
+                print('stage: dataset %s is %s; staging may go on for %.1f hours' % (dkey, human_bytes(size), budget / 3600),
+                      flush=True)
+            elif size is None and attempt == 1 and not path and retry:
+                print('stage: the size of dataset %s could not be read; staging may go on for %.1f hours'
+                      % (dkey, budget / 3600), flush=True)
+            if path or not retry or time.time() > min(began + budget, deadline or float('inf')):
+                break
+            time.sleep(min(60 * attempt, 600))
+    finally:      # also when a refusal is raised mid-copy: the "staging dataset..." note must not stay
+        stager.progress = None
+        if note and posted[0]:
+            note(None)
     if path and info and info.get('kind') != 'cached':
         info['seconds'] = int(time.time() - began)    # the whole staging, including resumed attempts
     if not path and owner:
@@ -607,5 +701,7 @@ def stage_dataset(cfg, inp, stager, app_key, info=None):
     if not path:
         print('stage: NOT STAGED - the job will download the dataset in-job on GPU time',
               flush=True)
-        refuse_names(api, repo, commit, auth)     # before it is submitted, as above
+        auth = app_key().auth()      # the listing needs a key that is still good
+        size = [n for n in (refuse_names(api, repo, commit, auth), plan.get('bytes')) if n is not None]   # before it is submitted, as above
+        refuse_big_fallback(repo, commit, max(size) if size else None, 'the site could not stage it in time')
     return path

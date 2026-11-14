@@ -78,7 +78,7 @@ func TestShouldBuildTheRunnerJobFromSpecAndSite(t *testing.T) {
 		rj.Annotations[AnnotationJobName] != "hpc-abc" || rj.Annotations[AnnotationJobNamespace] != "env-ns" {
 		t.Errorf("labels %v annotations %v", rj.Labels, rj.Annotations)
 	}
-	if *rj.Spec.BackoffLimit != 4 || *rj.Spec.TTLSecondsAfterFinished != 3600 || *rj.Spec.ActiveDeadlineSeconds != (120+480+30)*60 {
+	if *rj.Spec.BackoffLimit != 4 || *rj.Spec.TTLSecondsAfterFinished != 3600 || *rj.Spec.ActiveDeadlineSeconds != (120+480+30+stagingAllowanceMinutes)*60 {
 		t.Errorf("limits %d %d %d", *rj.Spec.BackoffLimit, *rj.Spec.TTLSecondsAfterFinished, *rj.Spec.ActiveDeadlineSeconds)
 	}
 	rules := rj.Spec.PodFailurePolicy.Rules
@@ -255,11 +255,11 @@ func TestShouldGiveASharingRunnerTimeToFollowItsHostJobToItsEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := *rj.Spec.ActiveDeadlineSeconds; got != (2*30+480+30)*60 {
+	if got := *rj.Spec.ActiveDeadlineSeconds; got != (2*30+480+30+stagingAllowanceMinutes)*60 {
 		t.Errorf("deadline %d, want twice the step's 30 min for the host job's tail", got)
 	}
 	site.Spec.Sharing = false
-	if rj, _ = Build(Config{Image: "kaos/op:1"}, job, site, 1); *rj.Spec.ActiveDeadlineSeconds != (30+480+30)*60 {
+	if rj, _ = Build(Config{Image: "kaos/op:1"}, job, site, 1); *rj.Spec.ActiveDeadlineSeconds != (30+480+30+stagingAllowanceMinutes)*60 {
 		t.Errorf("deadline %d, want the step's limit when the site does not share nodes", *rj.Spec.ActiveDeadlineSeconds)
 	}
 }
@@ -271,7 +271,7 @@ func TestShouldUseThePlacementLimitForTheEnvAndTheDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := *rj.Spec.ActiveDeadlineSeconds; got != (30+480+30)*60 {
+	if got := *rj.Spec.ActiveDeadlineSeconds; got != (30+480+30+stagingAllowanceMinutes)*60 {
 		t.Errorf("deadline %d, want it computed from the learned 30 min", got)
 	}
 	if got := envOf(t, rj.Spec.Template.Spec.Containers[0].Env)["SLURM_TIME_LIMIT"]; got != "30" {

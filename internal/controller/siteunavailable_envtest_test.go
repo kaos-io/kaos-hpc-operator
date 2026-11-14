@@ -48,6 +48,7 @@ var _ = Describe("HPCArgoWorkflowJob waits for an unreachable site", func() {
 				Command: []string{"python", "train.py"}, StepName: "train",
 				Env: []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: "{}"}}},
 		}
+		withWorkflow(j)
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		return j
 	}

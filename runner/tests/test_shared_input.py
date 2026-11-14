@@ -183,7 +183,7 @@ def test_a_shared_dataset_is_never_downloaded_by_the_job_itself(monkeypatch):
 
 def test_a_shared_dataset_the_site_cannot_stage_in_the_budget_stops_the_run(monkeypatch):
     cfg = _cfg(monkeypatch, _Net())
-    clock = iter([0, 0, 0] + [staging.STAGE_BUDGET_S + 1] * 50)
+    clock = iter([0, 0, 0] + [staging.STAGE_MIN_BUDGET_S + 1] * 50)
     monkeypatch.setattr(staging.time, "time", lambda: next(clock))
     with pytest.raises(staging.SharedDatasetUnavailable) as e:
         _stage(cfg, _Stager(stage_rcs=[75] * 50))

@@ -372,3 +372,40 @@ def test_a_data_store_address_is_https_or_the_loopback_of_the_local_lab(url, ok)
 def test_a_job_whose_data_store_address_is_not_https_does_not_start():
     with pytest.raises(SystemExit):
         helpers.settings(LAKEFS_EXTERNAL_URL="http://lakefs.example")
+
+
+# ---------------------------------------------------------------- the key that was replaced is still hidden
+
+def test_a_line_carrying_the_previous_key_is_redacted_on_the_node_after_the_file_was_replaced(tmp_path):
+    from kaos_hpc_runner.redact import KeyFileValues, Redactor
+    path = helpers.write_key_file(tmp_path / "key", identity.Key("KAOSXONE", "first-secret-value-0001", 1e12, "x"))
+    values = KeyFileValues(path)
+    red = Redactor((), values.values)
+    assert "first-secret-value-0001" not in red.line("old %s" % "first-secret-value-0001")
+    helpers.write_key_file(tmp_path / "key", identity.Key("KAOSXTWO", "second-secret-value-002", 1e12, "x"))
+    os.utime(path, ns=(1, 1))                      # a replacement within the same clock tick still counts
+    shown = red.line("step still holds first-secret-value-0001 and now second-secret-value-002")
+    assert "first-secret-value-0001" not in shown and "second-secret-value-002" not in shown, shown
+    helpers.write_key_file(tmp_path / "key", identity.Key("KAOSXTHR", "third-secret-value-0003", 1e12, "x"))
+    os.utime(path, ns=(2, 2))
+    shown = red.line("second-secret-value-002 third-secret-value-0003")
+    assert "second-secret-value-002" not in shown and "third-secret-value-0003" not in shown, shown
+
+
+def test_a_line_carrying_the_previous_key_is_redacted_in_the_runners_log_stream(rig):
+    r = rig.make(FakeSlurm({}))
+    r.runner.take_key(identity.Key("KAOSXONE", "first-secret-value-0001", 1e12, "x"))
+    r.runner.take_key(identity.Key("KAOSXTWO", "second-secret-value-002", 1e12, "x"))
+    held = r.runner.held_secrets()
+    assert "first-secret-value-0001" in held and "second-secret-value-002" in held
+    from kaos_hpc_runner.redact import Redactor
+    shown = Redactor(tuple(h for h in held if h)).line("first-secret-value-0001 second-secret-value-002")
+    assert "secret-value" not in shown, shown
+
+
+def test_an_app_name_that_is_no_name_never_reaches_the_token_request_path():
+    kube = Kube()
+    for bad in ("../kube-system/sa", "Yolo", "yolo/x", "-yolo", "yolo-", "", "a b"):
+        with pytest.raises(identity.AppIdentityUnavailable):
+            identity.request_token(kube, "ml-proj", bad)
+    assert kube.calls == []

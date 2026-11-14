@@ -34,7 +34,7 @@ from .sharing import inputs_in_script
 from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_site_down, lane_refusal,
                     share_state, site_time, submit_limit_refusal)
 from .settings import (APP_IDENTITY_UNAVAILABLE_EXIT, CHECKPOINT_EXIT, CONTEXT_ENV, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT,
-                       INVALID_IMAGE_EXIT, INVALID_RESULT_EXIT, OFFER_S, ROLE_POLL_S, RESERVED_NAME_EXIT,
+                       INVALID_IMAGE_EXIT, INVALID_RESULT_EXIT, OFFER_S, ROLE_POLL_S, RESERVED_NAME_EXIT, DATASET_NOT_STAGED_EXIT,
                        SHARED_DATASET_UNAVAILABLE_EXIT,
                        RESULT_NOT_HANDED_BACK_EXIT, STAGING_MISMATCH_EXIT, SUBMIT_LIMIT_EXIT, Settings, image_problem,
                        registry_token_host)
@@ -139,7 +139,8 @@ class Runner:
         self.slurm = slurm or Slurm(cfg)
         self.stager = stager or staging.Stager(cfg, secrets=self.held_secrets)
         self.reporter = reporter or Reporter(cfg)
-        self.key, self.key_for, self.key_next = None, None, 0.0   # the app's key; the site job its file was last written for; when to write again
+        self.key, self.key_before = None, None   # the app's key; the one before it (a step may still print it)
+        self.key_for, self.key_next = None, 0.0   # the app's key; the site job its file was last written for; when to write again
         self.key_noted = False        # a failed key refresh is written into status.run.message; cleared when one lands
         self.logs = logs or LogStreamer(cfg, self.stager, self.reporter, secrets=self.held_secrets)
         self._mint = mint or (lambda: wallet.mint_tracker(cfg.env))      # the tracker's token only
@@ -177,10 +178,16 @@ class Runner:
                 staging.check_tool(self.stager)     # the app's key reaches the job through the staging tool: its contract first
             except staging.ToolAbsent:
                 pass                                # the key is placed again at every poll, and said so when it cannot be
+            staging_began = time.time()
             for inp in cfg.inputs:
                 info = {}
-                self.staged[inp['name']] = staging.stage_dataset(cfg, inp, self.stager, self.current_key, info=info)
+                # note: how far a long copy is; deadline: 72 hours in total for all inputs, from the first one's start
+                self.staged[inp['name']] = staging.stage_dataset(cfg, inp, self.stager, self.current_key, info=info,
+                                                                 note=self.reporter.pending_reason,
+                                                                 deadline=staging_began + staging.STAGE_MAX_BUDGET_S)
                 self.reporter.note_staging(info)    # carried by every later report; the follower prints it
+            if time.time() - staging_began > 3600:
+                self.renew_wallet()   # the job's token was minted before a long staging began: it would reach the site job near its end
         reg = ''
         try:
             r = urllib.request.Request(
@@ -390,7 +397,7 @@ class Runner:
         submitted or cancelled."""
         self.check_handback()
         try:
-            self.key = self.new_key()
+            self.take_key(self.new_key())
             w = self.wallet = self._mint()
         except identity.AppIdentityUnavailable as e:
             self.fail_identity(e)
@@ -419,12 +426,21 @@ class Runner:
     def current_key(self):
         """The app's key for a call of the runner's own, one that does not end within KEY_SLACK_S."""
         if not self.key or self.clock() > self.key.expires - KEY_SLACK_S:
-            self.key = self.new_key()
+            self.take_key(self.new_key())
         return self.key
 
+    def take_key(self, key):
+        """The app's key is now `key`; the one it replaces is kept for held_secrets."""
+        if self.key and self.key.secrets() != key.secrets():
+            self.key_before = self.key
+        self.key = key
+        return key
+
     def held_secrets(self):
-        """What the log stream must never print: the tracker's token and the app's key."""
-        return (self.wallet,) + (self.key.secrets() if self.key else ())
+        """What the log stream must never print: the tracker's token and the app's key, and the key before it (the
+        key file is replaced while a step runs; the step may still hold what it read earlier)."""
+        return ((self.wallet,) + (self.key.secrets() if self.key else ())
+                + (self.key_before.secrets() if self.key_before else ()))
 
     def keep_key(self):
         """The app's key file for the current site job, on the site (the staging tool's `key` verb: folder 0700, file
@@ -442,7 +458,7 @@ class Runner:
             if new_job and self.key and self.key.expires - now > KEY_REFRESH_S:
                 key = self.key            # the one prepare_handback obtained a moment ago
             else:
-                key = self.key = self.new_key()
+                key = self.take_key(self.new_key())
             rc, ev = self.stager(['key', '--contract', staging.CONTRACT, '--job', self.jid], iter([key.record()]), quiet=True)
             staging.refused(rc, ev)
             if rc != 0 or not any(e.get('event') == 'key' for e in ev):
@@ -526,6 +542,18 @@ class Runner:
         self.pending_reason = None
         self.reported = None
         self.hosted = None
+
+    def renew_wallet(self):
+        """A new tracker token after a long staging (the one minted before it would reach the site job near its end).
+        When it cannot be minted, the old one is kept only while it has staging.TOKEN_MIN_LEFT_S left: a job submitted
+        with a token about to end could not report to the experiment tracker. A job without a tracker has none to renew.
+        The data store needs no renewal here: the app's key is replaced on the site by keep_key."""
+        if not self.cfg.mlflow_url:
+            return
+        w = staging.renewed_wallet(self._mint, self.wallet)
+        if not w:
+            self.fail_handback('no tracking token could be minted for this job')
+        self.wallet, self.wallet_exp = w, wallet.wallet_exp(w)
 
     # ------------------------------------------------------------------ outputs and checkpoints
 
@@ -747,6 +775,8 @@ class Runner:
             return self.end_before_staging('StagingMismatch', STAGING_MISMATCH_EXIT, e)
         except staging.ReservedName as e:
             return self.end_before_staging('ReservedName', RESERVED_NAME_EXIT, e)
+        except staging.DatasetNotStaged as e:
+            return self.end_before_staging('DatasetNotStaged', DATASET_NOT_STAGED_EXIT, e)
         except staging.SharedDatasetUnavailable as e:
             return self.end_before_staging('SharedDatasetUnavailable', SHARED_DATASET_UNAVAILABLE_EXIT, e)
         except identity.AppIdentityUnavailable as e:

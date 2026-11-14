@@ -173,7 +173,8 @@ bound read-only at `/kaos/key` (a folder of its own: the loader above exports ev
 `LAKEFS_KEY_FILE` points at the file in the container and in the script's own stage-in and hand-back programs. The key lives
 about an hour and a job up to 12: the runner replaces the file every 25 minutes while the job is queued or running, and the
 library reads it again before it signs a request. The key is never in the job script, the Slurm environment or the job log
-(the runner's log stream redacts it). The job waits up to 10 minutes for the first file and ends 247 without it. The folder
+(the runner's log stream redacts it, and the key it replaced: a step may still print the one it read earlier; on the node the
+redaction program reads the file again whenever it changes and keeps the previous values too). The job waits up to 10 minutes for the first file and ends 247 without it. The folder
 is removed with the step's other folders; the sweep removes one a killed job left (`key-<digits>`). Before it waits for the
 file and before every read of it (the stage-in, the hand-back, the bind into the step) the script checks that the key folder
 and the file are owned by the job's user and are not symbolic links, and that the folder has no group or other permission

@@ -74,6 +74,7 @@ var _ = Describe("HPC queue replacements", func() {
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: "qr-job", Namespace: envNS},
 			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "zot.example/proj/app:v1", WallTimeMinutes: 10,
 				StepName: "train", Command: []string{"x"}}}
+		withWorkflow(j)
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		Expect(reconcileOnce(j).Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
 		return j

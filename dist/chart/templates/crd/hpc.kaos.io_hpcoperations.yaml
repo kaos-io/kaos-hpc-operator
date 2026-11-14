@@ -232,7 +232,7 @@ spec:
                       reserve: 210 (no Apptainer), 231 (image pull), 232 (staging), 233 (batch script), 234 (no verified
                       checkpoint to restore), 235 (checkpoint copy or job comment failed), 236 (Idle), 237 (InsufficientQuota),
                       238 (SubmitLimit), 239 (InvalidImage), 240 (GPUViolation), 241 (StagingMismatch), 242 (ReservedName),
-                      243 (ResultNotHandedBack), 244 (InvalidResult), 245 (SharedDatasetUnavailable), 247 (AppIdentityUnavailable).
+                      243 (ResultNotHandedBack), 244 (InvalidResult), 245 (SharedDatasetUnavailable), 246 (DatasetNotStaged), 247 (AppIdentityUnavailable).
                     format: int32
                     type: integer
                   gpuUtilization:

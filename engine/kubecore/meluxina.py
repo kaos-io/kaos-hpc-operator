@@ -57,6 +57,12 @@ DEFAULT_TIME_LIMIT_MINUTES = 240
 # first, on_term leaves a RUNNING job to finish unobserved — so the deadline
 # must comfortably exceed queue + prep + time limit.
 QUEUE_ALLOWANCE_MINUTES = 480
+# The longest the HPC runner goes on staging the inputs of a step to the site: 72 hours in total for all inputs of a
+# step (STAGE_MAX_BUDGET_S in the runner, stagingAllowanceMinutes of the runner Job's deadline), counted once: a
+# staging that is making progress is never cut by this deadline. It is added for every HPC twin, with or without
+# inputs, because the inputs are only known at run time; it only matters for a hung follower, since a twin whose
+# job ends is done long before the deadline.
+STAGING_ALLOWANCE_MINUTES = 72 * 60
 # PRD-HPC-1461 D-44: a step that saves on the stop signal continues in a new job,
 # at most this many times (MAX_CONTINUATIONS in the waiter). Each job may queue,
 # prepare and run again, so the waiter's deadline covers all of them.
@@ -292,7 +298,7 @@ def enhance_matrix_hpc(spec: dict, steps: list, by_tpl: dict, prefix: str) -> li
                 {"name": "step-command", "value": json.dumps(command, separators=(",", ":"))},
                 {"name": "step-kind", "value": ((step.get("metadata") or {}).get("labels") or {}).get(STEP_KIND_LABEL, "")},
                 {"name": "time-limit", "value": "{{=%s}}" % limit},
-                {"name": "deadline-seconds", "value": "{{=%d * (%s + %d) * 60}}" % (jobs, limit, QUEUE_ALLOWANCE_MINUTES)},
+                {"name": "deadline-seconds", "value": "{{=(%d * (%s + %d) + %d) * 60}}" % (jobs, limit, QUEUE_ALLOWANCE_MINUTES, STAGING_ALLOWANCE_MINUTES)},
                 {"name": "resumable-lead", "value": str(lead)},
                 {"name": "resumable", "value": "0" if step_resumable_opt_out(step) else "auto"},
                 {"name": "idle-timeout", "value": step_idle_timeout(step)},
@@ -386,7 +392,7 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
                 {"name": "step-kind", "value": ((step.get("metadata") or {}).get("labels") or {}).get(STEP_KIND_LABEL, "")},
                 # The job's limit is the run form's `<step>-walltime` (compose's output).
                 {"name": "time-limit", "value": "{{=%s}}" % limit},
-                {"name": "deadline-seconds", "value": "{{=%d * (%s + %d) * 60}}" % (jobs, limit, QUEUE_ALLOWANCE_MINUTES)},
+                {"name": "deadline-seconds", "value": "{{=(%d * (%s + %d) + %d) * 60}}" % (jobs, limit, QUEUE_ALLOWANCE_MINUTES, STAGING_ALLOWANCE_MINUTES)},
                 {"name": "resumable-lead", "value": str(lead)},
                 # "0" = resumable=False; "auto" lets the controller discover resumability (D-74)
                 {"name": "resumable", "value": "0" if step_resumable_opt_out(step) else "auto"},

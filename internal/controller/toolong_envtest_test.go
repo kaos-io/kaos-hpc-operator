@@ -41,6 +41,7 @@ var _ = Describe("a step longer than the longest lane", func() {
 		if mod != nil {
 			mod(j)
 		}
+		withWorkflow(j)
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(j)})
 		Expect(err).NotTo(HaveOccurred())

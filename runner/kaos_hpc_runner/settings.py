@@ -38,6 +38,8 @@ STAGING_MISMATCH_EXIT = 241
 # The runner reports it (FAILED, no site job) when the dataset holds an object whose name is reserved for the platform,
 # or whose path could leave the dataset's folder.
 RESERVED_NAME_EXIT = 242
+# The runner reports it (FAILED, no site job) when the site could not stage a dataset too large for the job to download.
+DATASET_NOT_STAGED_EXIT = 246
 # The runner reports it (FAILED, no site job) when a dataset another project shares cannot be read: not shared (any more),
 # the owner unknown or not reachable from a site, or the site could not stage it (a job never downloads it itself).
 SHARED_DATASET_UNAVAILABLE_EXIT = 245
