@@ -1,0 +1,3 @@
+registration:
+  registered_model_name: "pose" # the end of the registered model name: the model is <your app>.<this>, empty = just <your app>. Letters, digits, - and _ only
+  promote_to: "" # empty = no promotion; 'champion' or 'challenger' (a model registry alias on the best.pt version; it is not the dataset `latest` that the run-form choice `promote-<dataset>` moves)

@@ -31,4 +31,4 @@ kaos_pipeline_engine = "kaos_pipeline_engine"
 
 [tool.setuptools.package-data]
 kaos_pipeline_engine = ["*.json"]
-"kaos_pipeline_engine.kubecore" = ["local-dev/*", "README.md"]
+"kaos_pipeline_engine.kubecore" = ["local-dev/*", "README.md", "endings.json"]

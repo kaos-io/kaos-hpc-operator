@@ -112,7 +112,7 @@ func TestEngineGoldenIsAValidFollowerEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the engine's follower template is not a valid follower environment: %v", err)
 	}
-	if cfg.StepName != "train" || cfg.Class != "meluxina-gpu" || cfg.WallTimeMinutes != 90 || cfg.ResumableLead != 10 {
+	if cfg.StepName != "train" || cfg.Class != "meluxina-gpu" || cfg.WallTimeMinutes != 90 || cfg.ResumableLead != 0 {
 		t.Errorf("fields did not come through: %+v", cfg)
 	}
 	if cfg.IdleTimeout == nil || *cfg.IdleTimeout != 40 {

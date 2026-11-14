@@ -1,0 +1,3 @@
+data:
+  sample_size: "" # a whole number: train on this many images (and their labels) per split, to try a run quickly; empty = every image
+  seed: 42 # picks which images sample_size keeps: the same seed keeps the same ones

@@ -1,0 +1,36 @@
+train:
+  # ── core schedule ──
+  epochs: 10 # total training epochs: enough for a first run on the small sample; use 100 or more on your own data
+  batch_size: 16 # images per step; a positive number (the training step rejects -1)
+  image_size: 320 # input resolution in pixels (multiple of 32); the small sample is 160 pixels wide, use 640 on your own data
+  # ── learning rate schedule ──
+  cos_lr: true # cosine learning rate schedule (genuine boolean leaf)
+  lrf: 0.01 # final LR ratio: final_lr = lr * lrf
+  warmup_epochs: 3.0
+  warmup_momentum: 0.8
+  # ── regularization ──
+  dropout: 0.0
+  label_smoothing: 0.0
+  # ── efficiency ──
+  nbs: 64 # nominal batch size for gradient scaling
+  freeze: "" # freeze first N backbone layers; empty = train all
+  amp: true # automatic mixed precision (boolean)
+  close_mosaic: 3 # disable mosaic for last N epochs
+  # ── reproducibility ──
+  seed: 0 # global training RNG seed (separate from data.seed)
+  deterministic: true # cuDNN deterministic mode (boolean)
+  # ── loss gains ──
+  loss:
+    pose: 12.0
+    kobj: 2.0
+    box: 7.5
+    cls: 0.5
+    dfl: 1.5
+  # ── checkpointing ──
+  checkpointing:
+    interval_epochs: 10 # log an intermediate checkpoint to MLflow every N epochs
+  # ── post-training export ──
+  export:
+    enabled: false # boolean
+    formats: "engine" # comma-separated: engine and/or onnx
+    precisions: "fp16" # comma-separated: fp16 and/or int8

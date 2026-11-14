@@ -7,15 +7,19 @@ never touched). Python standard library only; the CI ships this file once per ap
   restore  (init container)  put the newest VERIFIED copy of the step's checkpoint folder back before the
                              step starts, and expire copies of long-dead runs.
   watch    (sidecar)         copy the folder periodically (and when the pod is told to stop) as ONE tar
-                             archive plus a sha256 manifest, keep at most KEEP copies, delete all of them
-                             when the step succeeds.
+                             archive plus a sha256 manifest, keep at most KEEP copies. Copies are kept
+                             when the step succeeds (a retry of its last container still finds them) and
+                             expire by themselves.
 
 Copies live in the app's lakeFS outputs repository, on their own branch that is never merged or
 committed:  <branch>:<KEY>/ckpt-<utc time>-<id>.tar  and  .json  (the manifest, written LAST: a copy
 without a manifest does not exist).
 
-Contract: this helper NEVER fails the step. Every error is logged in plain words and swallowed; the
-init container always exits 0 and the sidecar's exit code is ignored by Argo.
+Contract: the sidecar never fails the step: every error is logged in plain words and swallowed, and its exit
+code is ignored by Argo. The init container exits 0 on the first attempt whatever happens. On a LATER attempt
+it exits 1 (the step does not start, the pod is lost as a machine would be, and the step is run again) when it
+cannot tell what the step's progress was: the store is unreachable, a copy exists but cannot be verified, or the
+folder is not empty. "No copy exists" starts from zero. A copy that may be torn is never uploaded.
 """
 import base64
 import hashlib
@@ -66,6 +70,10 @@ class Config:
         self.stage = env.get("CKPT_STAGE", "/stage")
         self.exit_file = env.get("CKPT_EXIT_FILE", "/var/run/argo/ctr/main/exitcode")
         self.poll = float(env.get("CKPT_POLL_SECONDS", "1"))
+        try:
+            self.attempt = int(env.get("KAOS_ATTEMPT", "1"))
+        except ValueError:
+            self.attempt = 1
 
     def usable(self):
         return all([self.folder, self.endpoint, self.access, self.secret, self.repo, self.key])
@@ -228,6 +236,8 @@ def scan(folder, blocked=None):
             except OSError:
                 refuse(full)
                 continue
+            if name.startswith(".tmp-"):
+                continue     # a file the step is still writing under its temporary name
             if not os.access(full, os.R_OK):
                 refuse(full)
                 continue
@@ -256,7 +266,8 @@ def sha256_of(path):
 
 def pack(folder, archive):
     """Tar the folder into archive; returns the file list when it held no file changed while packing
-    (retried a few times), the last list otherwise, and None when the folder is empty."""
+    (retried a few times), None when the folder is empty, and raises when it never settled: a copy
+    that may be torn is never uploaded."""
     files = None
     for _ in range(SNAPSHOT_TRIES):
         settle(folder)
@@ -269,7 +280,7 @@ def pack(folder, archive):
         if scan(folder) == files:
             return files
         say("files kept changing while packing the checkpoint folder; trying again")
-    return files
+    raise RuntimeError("the checkpoint folder kept changing while it was packed")
 
 
 def unpack(archive, folder):
@@ -307,7 +318,8 @@ def copies(api):
 def restore(api):
     """Restore the newest verified copy into the folder. Returns True when one was restored."""
     cfg = api.cfg
-    for name, manifest in copies(api):
+    found = copies(api)
+    for name, manifest in found:
         archive = os.path.join(cfg.stage, "restore.tar")
         try:
             api.download("%s/%s/%s" % (cfg.root, cfg.key, manifest["archive"]), archive)
@@ -322,6 +334,8 @@ def restore(api):
         finally:
             if os.path.exists(archive):
                 os.unlink(archive)
+    if found:
+        raise RuntimeError("%d checkpoint copies exist but none could be verified" % len(found))
     return False
 
 
@@ -404,19 +418,27 @@ def step_exit_code(cfg):
 
 
 def run_restore(cfg):
+    """Restore the newest verified copy. Returns 0, or 1 when a later attempt cannot be told what its
+    progress was: the store is unreachable, a copy exists but cannot be verified, or the folder is not empty.
+    The step is then not started (the pod fails as a lost machine and is run again), never silently from zero.
+    The first attempt has nothing to restore and never fails here. No copy at all means: start from zero."""
+    later = cfg.attempt > 1
     api = LakeFS(cfg)
     os.makedirs(cfg.folder, exist_ok=True)
     try:
         if not api.ensure_branch():
-            say("the outputs repository is not available; the step starts without a saved checkpoint")
-            return
+            say("the outputs repository is not available; no saved checkpoint can be looked for")
+            return 1 if later else 0
         if os.listdir(cfg.folder):
             say("the checkpoint folder is not empty; nothing restored")
-        elif not restore(api):
+            return 1 if later else 0
+        if not restore(api):
             say("no saved checkpoint for this step: starting from the beginning")
         expire(api)
     except Exception as exc:
-        say("could not look for a saved checkpoint (%s); the step starts without one" % exc)
+        say("could not look for a saved checkpoint (%s)" % exc)
+        return 1 if later else 0
+    return 0
 
 
 def run_watch(cfg):
@@ -449,15 +471,9 @@ def run_watch(cfg):
 
 
 def finish(api, code):
-    """The step has ended: success removes every copy, anything else keeps them."""
-    try:
-        if code == 0:
-            delete_all(api)
-            say("step finished; its checkpoint copies were removed")
-        else:
-            say("step ended with exit code %d; its checkpoint copies are kept" % code)
-    except Exception as exc:
-        say("could not remove the checkpoint copies (%s); they expire by themselves" % exc)
+    """The step has ended: its copies are kept whatever the code (they expire by themselves), so a retry of the
+    container that records the step's success still finds them."""
+    say("step ended with exit code %d; its checkpoint copies are kept" % code)
 
 
 def on_stop(api, stopped_at, signature):
@@ -488,7 +504,9 @@ def main(argv):
         return 0
     os.makedirs(cfg.stage, exist_ok=True)
     try:
-        run_restore(cfg) if mode == "restore" else run_watch(cfg)
+        if mode == "restore":
+            return run_restore(cfg)
+        run_watch(cfg)
     except Exception as exc:     # never fail the step
         say("unexpected problem (%s); the step is not affected" % exc)
     return 0

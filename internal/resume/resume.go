@@ -5,6 +5,9 @@
 package resume
 
 import (
+	_ "embed"
+	"encoding/json"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,7 +31,7 @@ const (
 	EndContinue
 	// EndWallTime: the site killed the job at its time limit.
 	EndWallTime
-	// EndIdle: the idle watchdog ended a hung step.
+	// EndIdle: the idle watchdog ended a hung step. The step's own outcome, never recovered (the same on the cluster).
 	EndIdle
 	// EndNodeFailure: the node failed, or maintenance took it (NODE_FAIL, BOOT_FAIL, REVOKED).
 	EndNodeFailure
@@ -36,23 +39,50 @@ const (
 	EndPreempted
 )
 
+// endingsJSON is the one table of how an attempt ends, shared with the pipeline engine, which reads the same words
+// for a step on the cluster (engine/kubecore/endings.json, the source; engine/tests/test_endings_parity.py and
+// TestEndingsTableIsTheEngines keep the two files equal).
+//
+//go:embed endings.json
+var endingsJSON []byte
+
+var endings struct {
+	Limit struct {
+		SlurmStates []string `json:"slurm_states"`
+		ExitCode    int32    `json:"exit_code"`
+	} `json:"limit"`
+	MachineLost struct {
+		NodeFailure []string `json:"slurm_node_failure"`
+		Preempted   []string `json:"slurm_preempted"`
+	} `json:"machine_lost"`
+	OwnError struct {
+		IdleExitCode int32 `json:"idle_exit_code"`
+	} `json:"own_error"`
+}
+
+func init() {
+	if err := json.Unmarshal(endingsJSON, &endings); err != nil {
+		panic("resume: endings.json: " + err.Error())
+	}
+}
+
 // Classify maps the site's final state and the step's exit code to an End.
 func Classify(state string, exit *int32) End {
 	st := strings.ToUpper(state)
 	switch {
 	case strings.HasPrefix(st, "CANCELLED"):
 		return EndCancelled
-	case exit != nil && *exit == hpcv1alpha1.ExitCodeContinue:
+	case exit != nil && *exit == endings.Limit.ExitCode:
 		return EndContinue
-	case exit != nil && *exit == hpcv1alpha1.ExitCodeIdle && st == "FAILED":
+	case exit != nil && *exit == endings.OwnError.IdleExitCode && st == "FAILED":
 		return EndIdle
 	case st == "COMPLETED" && (exit == nil || *exit == 0):
 		return EndSuccess
-	case st == "TIMEOUT":
+	case slices.Contains(endings.Limit.SlurmStates, st):
 		return EndWallTime
-	case st == "NODE_FAIL" || st == "BOOT_FAIL" || st == "REVOKED":
+	case slices.Contains(endings.MachineLost.NodeFailure, st):
 		return EndNodeFailure
-	case st == "PREEMPTED":
+	case slices.Contains(endings.MachineLost.Preempted, st):
 		return EndPreempted
 	}
 	return EndStepError
@@ -61,9 +91,10 @@ func Classify(state string, exit *int32) End {
 // Infrastructure reports whether the end is not the step's doing: a node or the site took the job away.
 func (e End) Infrastructure() bool { return e == EndNodeFailure || e == EndPreempted }
 
-// Recoverable reports whether a step with a checkpoint continues after this end (D-75 5).
+// Recoverable reports whether a step with a checkpoint continues after this end (D-75 5). The idle watchdog's end
+// is not recovered: a hung step is the step's own, and it is run again by neither executor.
 func (e End) Recoverable() bool {
-	return e == EndContinue || e == EndWallTime || e == EndIdle || e.Infrastructure()
+	return e == EndContinue || e == EndWallTime || e.Infrastructure()
 }
 
 // RerunReason is the status reason of a tier-1 re-run after an infrastructure end.
@@ -151,7 +182,7 @@ func Evidence(resumedFrom *hpcv1alpha1.ResumeInfo, end End, hasNew bool, cur Mar
 	case end == EndSuccess:
 		return &hpcv1alpha1.ResumeEvidence{Verified: true, At: metaTime(now),
 			Reason: "a continuation loaded its checkpoint and ran to completion"}
-	case !hasNew && (end == EndWallTime || end == EndIdle || end == EndContinue):
+	case !hasNew && (end == EndWallTime || end == EndContinue):
 		return &hpcv1alpha1.ResumeEvidence{Verified: false, At: metaTime(now), Reason: hpcv1alpha1.ReasonNoProgress +
 			": the continuation saved no checkpoint before it ended"}
 	}

@@ -38,7 +38,7 @@ is one contract and no older one beside it: a pipeline written for the earlier k
 from kubecore.authoring import artifact, dataset, model, pipeline, step
 
 step(name, *, kind=, reads=, inputs=, needs=, produces=, gpu=, when=, walltime=,
-     resumable=, checkpoint_every=, idle_timeout=)
+     checkpoint_every=, idle_timeout=)
 ```
 
 | Keyword | Rule the engine enforces at render |
@@ -50,7 +50,7 @@ step(name, *, kind=, reads=, inputs=, needs=, produces=, gpu=, when=, walltime=,
 | `needs=` | At most ten steps. A name in `inputs=` and a name a needed step produces must differ; two needed steps must not produce the same name. `inputs=` plus the datasets the needed steps produce: at most 16 |
 | `produces=` | `model("name")`, `artifact("name")`, `dataset("name")`, same name rule. A dataset has one producing step in the pipeline. `dataset(name, of=...)` is refused until that form ships |
 | `when=` | `"<field> == <value>"` or `!=`, joined by `and` / `or` (`and` first, no parentheses). `<field>` must be a field of the run form (a setting's path with dashes); the value is a bare word or number, or quoted. Rendered as `{{=workflow.parameters['<field>'] == '<value>' ...}}` on the task and on its HPC variant. The workflow system's own `{{...}}` form is refused |
-| `walltime=` | `'90m'`, `'12h'` or `'720'`: the step's time limit on the cluster and on an HPC class; the default of the run-form field `<step>-walltime` (`4h` when not declared); on an HPC class a step that is not resumable may ask for 11.5 h at most, compose refuses more |
+| `walltime=` | `'90m'`, `'12h'` or `'720'`: the step's time limit on the cluster and on an HPC class; the default of the run-form field `<step>-walltime` (`4h` when not declared); on an HPC class a step may ask for 11.5 h at most for now, compose refuses more |
 
 Per kind: `ingest`, `publish` and `control` steps are offered no HPC class and get no HPC variant; a `control`
 step takes no `inputs=` and no `produces=`.
@@ -202,7 +202,7 @@ holds a reference that is not in this list:
 | a step that is not pinned to one class | `inputs.parameters.cpu`, `inputs.parameters.mem` | computed by the engine from the class (a lookup table of the pool's classes written at render): a number and a quantity like `7` and `27Gi` |
 | GPU steps | `inputs.parameters.gpus` | `0` or `1`, set by the engine |
 | steps with checkpoint copies, the follower | `workflow.name`, `workflow.uid` | the workflow engine |
-| the follower | `inputs.parameters.step-name`, `image`, `step-command`, `step-kind`, `time-limit`, `deadline-seconds`, `hpc-class`, `resumable-lead`, `resumable`, `idle-timeout` | written by the engine at render, or one of the form fields above |
+| the follower | `inputs.parameters.step-name`, `image`, `step-command`, `step-kind`, `time-limit`, `deadline-seconds`, `hpc-class`, `idle-timeout` | written by the engine at render, or one of the form fields above |
 
 The compose step is the one definition that carries the run's free text: every config leaf of the form is one of
 its arguments, and so is the ADVANCED override (`workflow.parameters.config`). Compose refuses an override above

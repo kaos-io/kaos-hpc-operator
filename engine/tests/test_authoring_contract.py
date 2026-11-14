@@ -96,7 +96,7 @@ def test_any_other_unknown_keyword_lists_the_keywords_that_exist():
     with pytest.raises(TypeError) as exc:
         render(lambda a: a.step("one", kind="evaluate", gpus=1))
     assert str(exc.value) == ("step() got an unexpected keyword argument 'gpus'. The keywords are: name, kind, reads, "
-                              "inputs, needs, produces, gpu, when, walltime, resumable, checkpoint_every, "
+                              "inputs, needs, produces, gpu, when, walltime, checkpoint_every, "
                               "idle_timeout, matrix, matrix_allow_failed.")
 
 

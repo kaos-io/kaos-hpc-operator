@@ -84,18 +84,6 @@
    "doc": "The default time limit of the step, wherever it runs: '90m', '12h' or '720' (minutes). The person who starts the run sets the limit on the run form (<step>-walltime); 4h when not given."
   },
   {
-   "name": "resumable",
-   "required": false,
-   "default": null,
-   "type": [
-    "boolean",
-    "string"
-   ],
-   "pattern": "^[0-9]+[mh]?$",
-   "doc": "True or a lead time ('20m', '1h'): how long before its time limit the step is told to save its checkpoint; False opts out.",
-   "true_means": "10m"
-  },
-  {
    "name": "checkpoint_every",
    "required": false,
    "default": null,
@@ -105,7 +93,7 @@
     "string"
    ],
    "pattern": "^([0-9]+)([mh]?)$",
-   "doc": "The default for how often the platform copies the step's checkpoint folder: minutes ('20m', '1h', 20); False = no copies; unset = the platform default (a resumable step has the field too). The person who starts the run can change it on the run form (<step>-checkpoint-every)."
+   "doc": "The default for how often the platform copies the step's checkpoint folder: minutes ('20m', '1h', 20); False = no copies; unset = the platform default (every step is copied). False is refused for a step with gpu=. The person who starts the run can change it on the run form (<step>-checkpoint-every)."
   },
   {
    "name": "idle_timeout",
@@ -138,7 +126,8 @@
  "removed": {
   "outputs": "outputs= is gone. Declare what the step writes with produces=[...] and hand it on with step.result().",
   "hpc_time_limit": "hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\".",
-  "disk": "disk= is gone. The step gets the disk of the machine class it runs on."
+  "disk": "disk= is gone. The step gets the disk of the machine class it runs on.",
+  "resumable": "delete resumable=; every step can be run again."
  },
  "produced": {
   "model": "a trained model, stored with the run",
@@ -148,7 +137,6 @@
  "old_app_marker": "Create it again from the template.",
  "annotations": {
   "walltime": "platform.kubecore.io/hpc",
-  "resumable": "platform.kubecore.io/hpc-resumable",
   "checkpoint_every": "platform.kubecore.io/checkpoint-every",
   "idle_timeout": "platform.kubecore.io/idle-timeout"
  },

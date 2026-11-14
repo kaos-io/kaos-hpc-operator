@@ -1,0 +1,2 @@
+variant: "yolov8n-pose.pt" # smallest/fastest pose variant
+pretrained_weights: "" # <repository>@<version>/<path> of your own weights (init only); empty = the variant's standard weights

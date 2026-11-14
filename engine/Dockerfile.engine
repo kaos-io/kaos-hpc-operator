@@ -29,6 +29,7 @@ COPY Dockerfile /src/Dockerfile
 COPY docs/step-contract /src/docs/step-contract
 COPY internal/follower/config.go /src/internal/follower/config.go
 COPY internal/timelimit/timelimit.go /src/internal/timelimit/timelimit.go
+COPY internal/resume/endings.json /src/internal/resume/endings.json
 COPY api/v1alpha1/hpcargoworkflowjob_types.go /src/api/v1alpha1/hpcargoworkflowjob_types.go
 WORKDIR /src
 RUN cd engine && ruff check --config ruff.toml . \

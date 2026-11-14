@@ -1,0 +1,43 @@
+{
+  "budget": {
+    "continuations": 5,
+    "restarts": 2
+  },
+  "machine_lost": {
+    "pod_messages": [
+      "imminent node shutdown",
+      "node is shutting down",
+      "node is draining",
+      "The node was low on resource",
+      "The node had condition",
+      "Pod was rejected",
+      "Evicted",
+      "evicted",
+      "pod deleted",
+      "Pod was deleted"
+    ],
+    "slurm_node_failure": [
+      "NODE_FAIL",
+      "BOOT_FAIL",
+      "REVOKED"
+    ],
+    "slurm_preempted": [
+      "PREEMPTED"
+    ]
+  },
+  "limit": {
+    "pod_messages": [
+      "longer than the specified deadline",
+      "exceeded its deadline"
+    ],
+    "slurm_states": [
+      "TIMEOUT"
+    ],
+    "exit_code": 85
+  },
+  "own_error": {
+    "idle_message_prefix": "KaosIdle",
+    "idle_exit_code": 236,
+    "no_result_message": "kaos-result.json"
+  }
+}

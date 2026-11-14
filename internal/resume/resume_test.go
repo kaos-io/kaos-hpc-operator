@@ -1,6 +1,9 @@
 package resume
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
@@ -40,12 +43,12 @@ func TestClassify(t *testing.T) {
 }
 
 func TestRecoverableNeverCoversTheStepsOwnError(t *testing.T) {
-	for _, e := range []End{EndStepError, EndSuccess, EndCancelled} {
+	for _, e := range []End{EndStepError, EndSuccess, EndCancelled, EndIdle} {
 		if e.Recoverable() {
 			t.Errorf("end %v must not be recoverable", e)
 		}
 	}
-	for _, e := range []End{EndContinue, EndWallTime, EndIdle, EndNodeFailure, EndPreempted} {
+	for _, e := range []End{EndContinue, EndWallTime, EndNodeFailure, EndPreempted} {
 		if !e.Recoverable() {
 			t.Errorf("end %v must be recoverable", e)
 		}
@@ -96,7 +99,7 @@ func TestEvidence(t *testing.T) {
 		{"should_verify_when_the_continuation_got_past_its_checkpoint", from, EndWallTime, true, Mark{Values: []int64{4}}, false, true},
 		{"should_fail_with_no_progress_when_the_new_checkpoint_is_not_past", from, EndWallTime, true, Mark{Values: []int64{3}}, false, false},
 		{"should_fail_when_a_wall_time_end_saved_nothing_new", from, EndWallTime, false, Mark{}, false, false},
-		{"should_fail_when_an_idle_end_saved_nothing_new", from, EndIdle, false, Mark{}, false, false},
+		{"should_show_nothing_when_the_idle_watchdog_ended_it", from, EndIdle, false, Mark{}, true, false},
 		{"should_show_nothing_when_the_node_failed_before_any_new_checkpoint", from, EndNodeFailure, false, Mark{}, true, false},
 		{"should_show_nothing_when_the_step_errored", from, EndStepError, false, Mark{}, true, false},
 		{"should_verify_when_the_continuation_completed_though_a_success_leaves_no_new_copy", from, EndSuccess, false, Mark{}, false, true},
@@ -155,5 +158,54 @@ func TestUsageCountsHeldCopiesOnly(t *testing.T) {
 	}
 	if none := Usage(jobs, now, func(*hpcv1alpha1.HPCArgoWorkflowJob) bool { return false }); none.Bytes != 0 {
 		t.Fatalf("other sites' jobs must not count: %+v", none)
+	}
+}
+
+// The engine's copy of the table is the source (engine/kubecore/endings.json); the controller embeds a copy.
+func TestEndingsTableIsTheEngines(t *testing.T) {
+	engine, err := os.ReadFile("../../engine/kubecore/endings.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(engine, endingsJSON) {
+		t.Fatal("internal/resume/endings.json differs from engine/kubecore/endings.json: copy the engine's file over it")
+	}
+	if endings.Limit.ExitCode != hpcv1alpha1.ExitCodeContinue || endings.OwnError.IdleExitCode != hpcv1alpha1.ExitCodeIdle {
+		t.Fatal("the table's exit codes are not the API's")
+	}
+}
+
+// The same cases go to the engine (engine/tests/test_endings_parity.py) and here: both must decide the same.
+func TestClassifyDecidesTheSharedCasesLikeTheEngine(t *testing.T) {
+	raw, err := os.ReadFile("../../engine/tests/data/endings_cases.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Name     string `json:"name"`
+		Decision string `json:"decision"`
+		Slurm    *struct {
+			State string `json:"state"`
+			Exit  *int32 `json:"exit"`
+		} `json:"slurm"`
+	}
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		if c.Slurm == nil {
+			continue
+		}
+		end := Classify(c.Slurm.State, c.Slurm.Exit)
+		got := "own_error"
+		switch {
+		case end.Infrastructure():
+			got = "machine_lost"
+		case end == EndContinue || end == EndWallTime:
+			got = "limit"
+		}
+		if got != c.Decision || (got == "own_error") == end.Recoverable() {
+			t.Errorf("%s: Classify(%s, %v) = %v (%s, recoverable %v), the engine decides %s", c.Name, c.Slurm.State, c.Slurm.Exit, end, got, end.Recoverable(), c.Decision)
+		}
 	}
 }

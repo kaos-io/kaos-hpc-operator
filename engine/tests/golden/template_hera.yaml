@@ -1,0 +1,31 @@
+hello-world:
+  KAOS_ATTEMPT: '{{=asInt(retries) + 1}}'
+  helper:
+  - kaos-ckpt-copy
+  - kaos-ckpt-restore
+  hpc_variant_arguments:
+  - deadline-seconds
+  - hpc-class
+  - idle-timeout
+  - image
+  - kaos-context
+  - step-command
+  - step-kind
+  - step-name
+  - time-limit
+  retry_continues_at_limit: true
+  retry_limit: '7'
+kaos-promote:
+  KAOS_ATTEMPT: '{{=asInt(retries) + 1}}'
+  helper: []
+  hpc_variant_arguments: null
+  retry_continues_at_limit: false
+  retry_limit: '2'
+prepare:
+  KAOS_ATTEMPT: '{{=asInt(retries) + 1}}'
+  helper:
+  - kaos-ckpt-copy
+  - kaos-ckpt-restore
+  hpc_variant_arguments: null
+  retry_continues_at_limit: true
+  retry_limit: '7'

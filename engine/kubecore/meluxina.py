@@ -31,6 +31,7 @@ nothing is submitted.
 import json
 import re
 
+from kubecore.endings import MAX_CONTINUATIONS, POD_LOSS_RETRY
 from kubecore.kaos_lib_support import ENV as KAOS_LIB_SUPPORT_ENV
 from kubecore.kaos_lib_support import support_value
 from kubecore.run_settings import in_fan_template, setting
@@ -66,7 +67,7 @@ STAGING_ALLOWANCE_MINUTES = 72 * 60
 # PRD-HPC-1461 D-44: a step that saves on the stop signal continues in a new job,
 # at most this many times (MAX_CONTINUATIONS in the waiter). Each job may queue,
 # prepare and run again, so the waiter's deadline covers all of them.
-HPC_MAX_CONTINUATIONS = 5
+HPC_MAX_CONTINUATIONS = MAX_CONTINUATIONS
 
 # PRD-HPC-1461 AC-18, D-22: the follower is the only pod that may create an HPCArgoWorkflowJob. It runs
 # as this ServiceAccount (kubecore-operator kubenv renders it in every ml environment namespace and binds
@@ -85,21 +86,6 @@ STEP_KIND_LABEL = "platform.kubecore.io/step-kind"
 # without it fails the step.
 FOLLOWER_RESULT_PATH = "/tmp/outputs/kaos-result.json"
 HPC_ANNOTATION = "platform.kubecore.io/hpc"
-# step(resumable=...): how long before its wall time the step is told to save (D-44 as amended
-# 2026-11-05). Only resumable steps get the signal and continue.
-HPC_RESUMABLE_ANNOTATION = "platform.kubecore.io/hpc-resumable"
-# How the kubelet words a waiter pod lost with its node: Argo marks such a pod
-# Failed (a pod with a status message is never an Error), so OnError alone
-# never retries a Spot preemption or a node-pressure eviction.
-POD_LOSS_MESSAGES = ("imminent node shutdown|node is shutting down|node is draining"
-                     "|The node was low on resource|The node had condition"
-                     "|Pod was rejected|Evicted|evicted|pod deleted|Pod was deleted")
-# A step that ends well without writing its result is an Error of the executor ("no such file ...
-# kaos-result.json"). It is deterministic: the same step ends the same way again, and a re-run would
-# spend the GPU twice. It is not retried; a node lost with the step is.
-NO_RESULT_MESSAGE = "kaos-result.json"
-POD_LOSS_RETRY = ("(lastRetry.status == 'Error' or lastRetry.message matches '.*(%s).*')"
-                  " and not (lastRetry.message contains '%s')" % (POD_LOSS_MESSAGES, NO_RESULT_MESSAGE))
 
 
 def sharing_env(ctx: dict) -> list:
@@ -147,8 +133,6 @@ def follower_template(ctx: dict, tpl: dict, fanned: bool = False) -> dict:
         {"name": "STEP_COMMAND", "value": "{{inputs.parameters.step-command}}"},
         {"name": "SLURM_TIME_LIMIT", "value": "{{inputs.parameters.time-limit}}"},
         {"name": "HPC_CLASS", "value": "{{inputs.parameters.hpc-class}}"},
-        {"name": "HPC_RESUMABLE_LEAD", "value": "{{inputs.parameters.resumable-lead}}"},
-        {"name": "HPC_RESUMABLE", "value": "{{inputs.parameters.resumable}}"},
         # step(idle_timeout=...): minutes, "0" = off, "" = the platform's 20 (D-72); the follower copies it
         # to the job's idleTimeoutMinutes. The same annotation drives the in-cluster idle watchdog.
         {"name": "HPC_IDLE_TIMEOUT_MINUTES", "value": "{{inputs.parameters.idle-timeout}}"},
@@ -201,27 +185,10 @@ def parse_time_limit(value) -> int:
     return minutes * 60 if m.group(2) == "h" else minutes
 
 
-RESUMABLE_OFF = "off"   # step(resumable=False): never continued from a checkpoint
-
-
 def step_idle_timeout(step: dict) -> str:
     """The step's idle_timeout in minutes as text ("0" = off), or "" for the platform default."""
     raw = ((step.get("metadata") or {}).get("annotations") or {}).get("platform.kubecore.io/idle-timeout")
     return str(raw) if raw is not None else ""
-
-
-def step_resumable_opt_out(step: dict) -> bool:
-    """True when the step declared resumable=False (the follower then sets HPC_RESUMABLE=0, which the
-    controller maps to HPCArgoWorkflowJob spec.resumableOptOut)."""
-    raw = ((step.get("metadata") or {}).get("annotations") or {}).get(HPC_RESUMABLE_ANNOTATION)
-    return raw == RESUMABLE_OFF
-
-
-def step_resumable_lead(step: dict) -> int:
-    """Minutes before the wall time a resumable step gets the stop signal; 0 when it is not resumable
-    or opted out."""
-    raw = ((step.get("metadata") or {}).get("annotations") or {}).get(HPC_RESUMABLE_ANNOTATION)
-    return parse_time_limit(raw) if raw not in (None, "", RESUMABLE_OFF) else 0
 
 
 def step_time_limit(step: dict) -> int:
@@ -282,12 +249,8 @@ def enhance_matrix_hpc(spec: dict, steps: list, by_tpl: dict, prefix: str) -> li
         container = step.get("container") or {}
         command = list(container.get("command") or []) + list(container.get("args") or [])
         given = {p["name"]: p["value"] for p in run["arguments"]["parameters"]}
-        minutes = step_time_limit(step)
         limit = in_fan_template(setting(name, "walltime"))
-        lead = step_resumable_lead(step)
-        if lead >= minutes:
-            raise ValueError("step %s: resumable lead %d min is not shorter than its wall time %d min" % (name, lead, minutes))
-        jobs = 1 if step_resumable_opt_out(step) else 1 + HPC_MAX_CONTINUATIONS
+        jobs = 1 + HPC_MAX_CONTINUATIONS
         twin = {
             "name": "run-" + HPC_TWIN_SUFFIX, "template": HPC_TWIN_TEMPLATE, "withParam": run["withParam"],
             "when": "{{=%s%s}}" % ("(%s) && " % own if own else "", gate),
@@ -299,8 +262,6 @@ def enhance_matrix_hpc(spec: dict, steps: list, by_tpl: dict, prefix: str) -> li
                 {"name": "step-kind", "value": ((step.get("metadata") or {}).get("labels") or {}).get(STEP_KIND_LABEL, "")},
                 {"name": "time-limit", "value": "{{=%s}}" % limit},
                 {"name": "deadline-seconds", "value": "{{=(%d * (%s + %d) + %d) * 60}}" % (jobs, limit, QUEUE_ALLOWANCE_MINUTES, STAGING_ALLOWANCE_MINUTES)},
-                {"name": "resumable-lead", "value": str(lead)},
-                {"name": "resumable", "value": "0" if step_resumable_opt_out(step) else "auto"},
                 {"name": "idle-timeout", "value": step_idle_timeout(step)},
                 {"name": "hpc-class", "value": "{{workflow.parameters.%s-class}}" % name},
                 {"name": "node-suffix", "value": "-{{=item.index}}"},
@@ -366,17 +327,10 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
         if context is None:
             raise ValueError("meluxina: task %r passes no %s, so step %r cannot get its HPC variant"
                              % (task["name"], CONTEXT_PARAM, step["name"]))
-        minutes = step_time_limit(step)
         limit = setting(step["name"], "walltime")
-        lead = step_resumable_lead(step)
-        if lead >= minutes:
-            raise ValueError("step %s: resumable lead %d min is not shorter than its wall time %d min"
-                             % (step["name"], lead, minutes))
-        # Resumability is discovered (D-74): the controller may continue ANY step that is not opted out
-        # (resumable=False), up to (1 + HPC_MAX_CONTINUATIONS) jobs, each queuing, preparing and running
-        # again, so the waiter's Argo deadline must cover all of them or Argo would cut a continuing step.
-        # Only an opted-out step runs one job and keeps a one-job deadline.
-        jobs = 1 if step_resumable_opt_out(step) else 1 + HPC_MAX_CONTINUATIONS
+        # Every step may be continued (D-74), up to (1 + HPC_MAX_CONTINUATIONS) jobs, each queuing, preparing and
+        # running again, so the waiter's Argo deadline must cover all of them or Argo would cut a continuing step.
+        jobs = 1 + HPC_MAX_CONTINUATIONS
         if any(t["name"] == task["name"] + "-" + HPC_TWIN_SUFFIX for t in tasks):
             raise ValueError("meluxina: a task named %r already exists, so step %r cannot get its HPC variant"
                              % (task["name"] + "-" + HPC_TWIN_SUFFIX, task["name"]))
@@ -393,9 +347,6 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
                 # The job's limit is the run form's `<step>-walltime` (compose's output).
                 {"name": "time-limit", "value": "{{=%s}}" % limit},
                 {"name": "deadline-seconds", "value": "{{=(%d * (%s + %d) + %d) * 60}}" % (jobs, limit, QUEUE_ALLOWANCE_MINUTES, STAGING_ALLOWANCE_MINUTES)},
-                {"name": "resumable-lead", "value": str(lead)},
-                # "0" = resumable=False; "auto" lets the controller discover resumability (D-74)
-                {"name": "resumable", "value": "0" if step_resumable_opt_out(step) else "auto"},
                 {"name": "idle-timeout", "value": step_idle_timeout(step)},
                 {"name": "hpc-class", "value": "{{workflow.parameters.%s-class}}" % step["name"]},
                 {"name": CONTEXT_PARAM, "value": context},
@@ -466,7 +417,6 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
             {"name": "step-name"}, {"name": "image"}, {"name": "step-command"}, {"name": "step-kind"},
             {"name": "time-limit"}, {"name": "deadline-seconds"},
             {"name": "hpc-class"},
-            {"name": "resumable-lead", "value": "0"}, {"name": "resumable", "value": "auto"},
             {"name": "idle-timeout", "value": ""},
             *([{"name": "node-suffix", "value": ""}, {"name": ITEMS_PARAM, "value": ""}] if matrix_routed else []),
             {"name": CONTEXT_PARAM}]},

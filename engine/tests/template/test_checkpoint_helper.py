@@ -140,11 +140,11 @@ def test_should_restore_nothing_when_there_is_no_copy(world, tmp_path):
     assert h.restore(world.api) is False
 
 
-def test_should_remove_every_copy_when_the_step_succeeds(world):
+def test_should_keep_the_copies_when_the_step_succeeds_so_a_retry_after_its_success_still_finds_them(world):
     write(world, "last.pt", b"a")
     h.copy_once(world.api, None)
     h.finish(world.api, 0)
-    assert objects(world) == []
+    assert len(objects(world)) == 2
 
 
 def test_should_keep_the_copies_when_the_step_fails_by_itself(world):
@@ -154,12 +154,12 @@ def test_should_keep_the_copies_when_the_step_fails_by_itself(world):
     assert len(objects(world)) == 2
 
 
-def test_should_delete_copies_when_the_sidecar_sees_exit_code_zero(world):
+def test_should_keep_copies_when_the_sidecar_sees_exit_code_zero(world):
     write(world, "last.pt", b"a")
     h.copy_once(world.api, None)
     world.exit_file.write_text("0")
     h.run_watch(world.cfg)
-    assert objects(world) == []
+    assert len(objects(world)) == 2
 
 
 def test_should_copy_at_once_when_stopped_before_the_step_ends(world):
@@ -203,13 +203,49 @@ def test_should_start_without_a_checkpoint_when_the_repository_is_missing(world)
     assert os.listdir(world.folder) == []
 
 
-def test_should_not_fail_the_step_when_lakefs_is_down(world, capsys):
+def test_the_first_attempt_never_fails_when_lakefs_is_down(world, capsys):
     world.fake.stop()
-    h.run_restore(world.cfg)
-    assert "starts without" in capsys.readouterr().err
+    assert h.run_restore(world.cfg) == 0
+    assert "could not look for" in capsys.readouterr().err
 
 
-def test_should_do_nothing_when_the_settings_are_incomplete(monkeypatch, tmp_path):
-    for var in ("KAOS_CHECKPOINT_DIR", "LAKEFS_ENDPOINT", "CKPT_REPO"):
-        monkeypatch.delenv(var, raising=False)
-    assert h.main(["helper", "watch"]) == 0
+def test_a_later_attempt_fails_loud_when_lakefs_is_down_and_never_starts_from_zero_silently(world):
+    world.fake.stop()
+    world.cfg.attempt = 2
+    assert h.run_restore(world.cfg) == 1
+
+
+def test_a_later_attempt_with_no_copy_at_all_starts_from_zero(world):
+    world.cfg.attempt = 2
+    assert h.run_restore(world.cfg) == 0
+
+
+def test_a_later_attempt_fails_loud_when_a_copy_exists_but_cannot_be_verified(world):
+    write(world, "last.pt", b"a")
+    h.copy_once(world.api, None)
+    archive = next(o for o in objects(world) if o.endswith(".tar"))
+    world.api.upload_bytes(archive, b"not the archive", world.cfg.stage)
+    (Path(world.cfg.folder) / "last.pt").unlink()
+    world.cfg.attempt = 2
+    assert h.run_restore(world.cfg) == 1
+
+
+def test_a_later_attempt_fails_loud_when_the_folder_is_not_empty(world):
+    write(world, "left.pt", b"a")
+    world.cfg.attempt = 2
+    assert h.run_restore(world.cfg) == 1
+
+
+def test_a_file_still_written_under_its_temporary_name_is_not_copied(world):
+    write(world, ".tmp-last.pt", b"half")
+    write(world, "last.pt", b"whole")
+    assert [p for p, _s, _m in h.scan(world.cfg.folder)] == ["last.pt"]
+
+
+def test_a_folder_that_never_settles_is_never_uploaded(world, monkeypatch):
+    write(world, "last.pt", b"a")
+    monkeypatch.setattr(h, "settle", lambda folder: None)
+    ticks = iter(range(1000))
+    monkeypatch.setattr(h, "scan", lambda folder, blocked=None: [("last.pt", next(ticks), 0)])
+    h.copy_once(world.api, None)
+    assert objects(world) == []

@@ -1030,7 +1030,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		for i, c := range []struct {
 			state string
 			exit  *int32
-		}{{"TIMEOUT", nil}, {"NODE_FAIL", nil}, {"PREEMPTED", nil}, {"FAILED", i32(236)}, {"FAILED", i32(85)}} {
+		}{{"TIMEOUT", nil}, {"NODE_FAIL", nil}, {"PREEMPTED", nil}, {"FAILED", i32(85)}} {
 			j := newServeJob(nil, nil)
 			reconcileOnce(j)
 			ended(j, 1, c.state, c.exit, fmt.Sprintf("scratch://ckpt/%d", i), progress(2, 40))
@@ -1044,11 +1044,19 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		}
 	})
 
-	It("does not continue the step's own error even when a checkpoint exists, nor a step that opted out", func() {
+	It("does not continue the step's own error or the idle watchdog's end even when a checkpoint exists, nor a step that opted out", func() {
 		j := newServeJob(nil, nil)
 		reconcileOnce(j)
 		ended(j, 1, "FAILED", i32(1), "scratch://ckpt/x", progress(1))
 		_, got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Continuations).To(BeZero())
+
+		idle := newServeJob(nil, nil)
+		reconcileOnce(idle)
+		ended(idle, 1, "FAILED", i32(236), "scratch://ckpt/z", progress(1))
+		_, got = reconcileOnce(idle)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonIdle))
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
 		Expect(got.Status.Continuations).To(BeZero())
 

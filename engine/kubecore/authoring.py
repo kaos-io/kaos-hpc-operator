@@ -129,15 +129,12 @@ _REMOVED_KEYWORDS = {
                "step.result().",
     "hpc_time_limit": "hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\".",
     "disk": "disk= is gone. The step gets the disk of the machine class it runs on.",
+    "resumable": "delete resumable=; every step can be run again.",
 }
 
 
-# step(resumable=True) gets the stop signal this long before its time limit.
-DEFAULT_RESUMABLE_LEAD = "10m"
-HPC_RESUMABLE_ANNOTATION = "platform.kubecore.io/hpc-resumable"
 # step(walltime=...): the default of the step's time limit; the run form sets it (read by kubecore/enhance.py and kubecore/meluxina.py).
 WALLTIME_ANNOTATION = "platform.kubecore.io/hpc"
-RESUMABLE_OFF = "off"   # the annotation value of resumable=False
 CHECKPOINT_EVERY_ANNOTATION = "platform.kubecore.io/checkpoint-every"
 _CHECKPOINT_EVERY_RE = re.compile(r"^([0-9]+)([mh]?)$")
 
@@ -344,7 +341,7 @@ def _when_condition(compares, joiners):
 
 
 class Step:
-    def __init__(self, name, kind, reads, inputs, needs, produces, gpu, when, walltime, resumable,
+    def __init__(self, name, kind, reads, inputs, needs, produces, gpu, when, walltime,
                  checkpoint_every, idle_timeout, matrix=None):
         self.matrix = matrix      # {name: [values]}: the step runs once for each combination (see _check_matrix)
         self.name = name
@@ -356,7 +353,6 @@ class Step:
         self.gpu = gpu
         self.when = when
         self.walltime = walltime
-        self.resumable = resumable
         self.checkpoint_every = checkpoint_every
         self.idle_timeout = idle_timeout
 
@@ -486,7 +482,7 @@ def _check_data(name, kind, inputs, needs, produces):
             )
 
 
-def _check_matrix(name, kind, matrix, reads, inputs, produces, needs, resumable, checkpoint_every):
+def _check_matrix(name, kind, matrix, reads, inputs, produces, needs, checkpoint_every):
     """matrix= of a step: {axis: [values]}. The step runs once for each combination of the values; the run form's
     `<step>-matrix` holds the combinations (every one by default). Each refusal names the fix."""
     if not isinstance(matrix, dict) or not matrix:
@@ -536,10 +532,10 @@ def _check_matrix(name, kind, matrix, reads, inputs, produces, needs, resumable,
             f"(inputs= and produces= together; it has {len(inputs) + len(produces)}): up to {MATRIX_MAX_ITEMS} items hand "
             f"back what they read and wrote in one shared result. Read fewer inputs, or join what the step writes."
         )
-    if resumable not in (None, RESUMABLE_OFF) or checkpoint_every not in (None, "off"):
+    if checkpoint_every not in (None, "off"):
         raise AuthoringError(
             f"step {name!r}: a step with matrix= is not continued from a checkpoint yet: its runs would share one "
-            f"checkpoint folder. Remove resumable= and checkpoint_every= (the walltime= limit applies to each run)."
+            f"checkpoint folder. Remove checkpoint_every= (the walltime= limit applies to each run)."
         )
     if any(n.matrix for n in needs):
         raise AuthoringError(
@@ -549,7 +545,7 @@ def _check_matrix(name, kind, matrix, reads, inputs, produces, needs, resumable,
 
 
 def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None, gpu=False,
-         when=None, walltime=None, resumable=None, checkpoint_every=None, idle_timeout=None, matrix=None, matrix_allow_failed=False, **removed) -> Step:
+         when=None, walltime=None, checkpoint_every=None, idle_timeout=None, matrix=None, matrix_allow_failed=False, **removed) -> Step:
     if _current is None:
         raise RuntimeError("step() must be called inside `with pipeline(...):`")
     for keyword in removed:
@@ -602,20 +598,14 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
         )
     if walltime is not None and not minutes(walltime):     # the form would refuse its default: compose's sentence
         raise AuthoringError(f"step {name!r}: {time_problem(walltime_field(name), walltime)}")
-    if resumable is True:
-        resumable = DEFAULT_RESUMABLE_LEAD
-    elif resumable is False:
-        resumable = RESUMABLE_OFF        # resumable=False: never continued from a checkpoint (opt-out)
-    elif resumable is None:
-        resumable = None
-    elif not (isinstance(resumable, str) and _WALLTIME_RE.match(resumable) and int(resumable.rstrip("mh")) != 0):
-        raise AuthoringError(
-            f"step {name!r}: resumable={resumable!r} must be True or a lead time like '20m' or '1h': how long "
-            f"before its time limit the step is told to save its checkpoint (kaos_lib.checkpoint)."
-        )
-    # Any step may declare these, GPU or not: every step can be placed on an HPC class, and a step on a spot
-    # machine is interrupted too. A resumable step gets its checkpoint copies wherever it runs (resilience.py).
+    # Every step can be run again and gets its checkpoint copies wherever it runs (resilience.py). A step with
+    # gpu= must save its progress: the GPU is the most often interrupted resource, so its copies cannot be switched off.
     checkpoint_every = _checkpoint_every_minutes(name, checkpoint_every)
+    if gpu and checkpoint_every == "off":
+        raise AuthoringError(
+            f"step {name!r}: a step with gpu= must save its progress, so checkpoint_every=False is not allowed. "
+            f"Delete checkpoint_every=False, or give how often to copy it, for example checkpoint_every='20m'."
+        )
     idle_timeout = _idle_timeout_minutes(name, idle_timeout)
     parsed_when = _classify_when(name, _parse_when(name, when), needs, _current.steps) if when is not None else None
     if matrix_allow_failed not in (True, False):
@@ -626,10 +616,9 @@ def step(name, *, kind=None, reads=None, inputs=None, needs=None, produces=None,
             f"items failed. Add matrix=, or remove matrix_allow_failed."
         )
     if matrix is not None:
-        _check_matrix(name, kind, matrix, reads, inputs, produces, needs, resumable, checkpoint_every)
-        resumable = RESUMABLE_OFF      # never continued from a checkpoint (the platform would share one folder)
+        _check_matrix(name, kind, matrix, reads, inputs, produces, needs, checkpoint_every)
         matrix = {axis: list(values) for axis, values in matrix.items()}
-    s = Step(name, kind, reads, inputs, needs, produces, gpu, when, walltime, resumable, checkpoint_every,
+    s = Step(name, kind, reads, inputs, needs, produces, gpu, when, walltime, checkpoint_every,
              idle_timeout, matrix)
     s.matrix_allow_failed = bool(matrix_allow_failed)
     s.parsed_when = parsed_when
@@ -763,11 +752,8 @@ class pipeline:
                     resources=Resources(gpus=1) if s.gpu else None,
                     # Read by kubecore/enhance.py (the step's deadline on the cluster) and kubecore/meluxina.py
                     # (the run limit on an HPC class): developer-set; the enhancer defaults it otherwise.
-                    # and, for step(resumable=...), how long before it the step
-                    # is told to save (kaos_lib.checkpoint).
                     annotations={k: v for k, v in (
                         (WALLTIME_ANNOTATION, s.walltime),
-                        (HPC_RESUMABLE_ANNOTATION, s.resumable),
                         (CHECKPOINT_EVERY_ANNOTATION, s.checkpoint_every),
                         (IDLE_TIMEOUT_ANNOTATION, s.idle_timeout)) if v}
                     or None,

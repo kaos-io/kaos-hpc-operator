@@ -313,8 +313,8 @@ Controller flags (chart `controllerManager.container.args`, `runnerImage`, `runn
 - **Continuation:** on exit 85, wall time, node failure, pre-emption or an idle kill, a step that left a copy continues
   from the newest verified one (cap 5, or `spec.resumable.maxContinuations`). A continuation that does not get past its
   checkpoint ends `NoProgress`; one that does (or that runs to completion, which leaves no copy to compare) marks the step key verified (`status.placement.resumable`), after
-  which it keeps its declared limit and gets the wall-time signal. `spec.resumableOptOut` (`resumable=False`) turns
-  continuing off; the follower passes it from `HPC_RESUMABLE=0`.
+  which it keeps its declared limit and gets the wall-time signal. `spec.resumableOptOut` turns
+  continuing off; the engine no longer sends it (PRD kaos#1911 D-64: every step can be run again), so it is only ever set by hand and goes with the controller lane.
 - **Resumable steps share nodes (AC-73, reverses D-44's gate):** a resumable step may host or be a guest on a shared
   node. Slurm's warning signal is the batch job's and never reaches a guest, so the slot manager sends USR1 to each
   resumable step itself, `lead` before the end of the step's own limit or of the host's job, whichever is first
@@ -358,7 +358,7 @@ inside KAOS:
   `HPCSite.status.storage`. The `hpc-runner-config` ConfigMap and the `meluxina-jwt`, `meluxina-staging` and
   `mlflow-hpc` Secrets the runner Jobs mount are provided in the project's HPC namespace by the same integration;
   this operator only reads them.
-- The pipeline template's `step(...)` creates the `HPCArgoWorkflowJob` through the follower; `resumable`, `idle_timeout`
+- The pipeline template's `step(...)` creates the `HPCArgoWorkflowJob` through the follower; `idle_timeout`
   and the Argo `platform.kubecore.io/idle-timeout` annotation are its names for fields and settings documented here.
 - The budget figures of an `HPCSite` come from the project's KAOS configuration or from the site's own accounting
   (`budget.source: site`); that rendering is the integrator's job, and a figure per allocation must be written (see

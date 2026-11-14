@@ -76,7 +76,6 @@ from omegaconf.nodes import BooleanNode, EnumNode, FloatNode, IntegerNode, Strin
 
 from kubecore.failure import failed
 from kubecore import derive_tree, rerun
-from kubecore.meluxina import HPC_MAX_CONTINUATIONS
 from kubecore.run_settings import (
     checkpoint_field,
     DEFAULT_PARALLEL,
@@ -349,30 +348,21 @@ def _hours(value: int) -> str:
     return f"{value / 60:.1f}".removesuffix(".0") + " hours"
 
 
-def run_token_cover(steps: list, settings: dict, chosen: list, hpc: set, leads: list = ()) -> None:
-    """A step on an HPC class keeps its access to its data and to tracking for TOKEN_COVER_MINUTES at most. One that
-    is not resumable and asks for longer would lose that access partway through and fail late, after spending
-    node-hours: refused here, before any step starts. A resumable step is run as segments that each end inside
-    that time (the controller does it), so it may ask for longer, up to HPC_MAX_CONTINUATIONS + 1 runs."""
-    resumable = {step for step, lead in _pairs(list(leads)).items() if int(lead)}
+def run_token_cover(steps: list, settings: dict, chosen: list, hpc: set) -> None:
+    """A step on an HPC class keeps its access to its data and to tracking for TOKEN_COVER_MINUTES at most, and the
+    platform does not yet run a longer step as several runs without being told it saves (the controller refuses it at
+    submit, internal/admission: refuseTooLong): so a longer limit is refused here, before any step starts, after
+    spending nothing. Still the engine's only rule about access life; it goes when the controller cuts every step
+    into runs itself."""
     for step, cls in _pairs(chosen).items():
         wall = settings.get(step, {}).get("walltime", 0)
         if cls not in hpc or wall <= TOKEN_COVER_MINUTES:
             continue
         field, cover = walltime_field(step), _hours(TOKEN_COVER_MINUTES)
-        if step not in resumable:
-            raise ComposeError(
-                f"step '{step}': {field} is {wall} minutes ({_hours(wall)}), but a step keeps its access to its data and to "
-                f"tracking for at most {cover} and this one is not resumable, so it would lose that access partway through "
-                f"and fail late. Shorten the limit ({field} on the run form, or walltime= in pipeline.py) to "
-                f"{TOKEN_COVER_MINUTES} minutes or less, or make the step resumable (resumable=True with checkpoint_every=) "
-                f"so it continues automatically in runs of up to {cover}.")
-        longest = TOKEN_COVER_MINUTES * (HPC_MAX_CONTINUATIONS + 1)
-        if wall > longest:
-            raise ComposeError(
-                f"step '{step}': {field} is {wall} minutes ({_hours(wall)}). As a resumable step it runs in runs of up to "
-                f"{cover} and at most {HPC_MAX_CONTINUATIONS + 1} runs ({HPC_MAX_CONTINUATIONS + 1} runs, {longest} minutes "
-                f"in all). Shorten the limit ({field} on the run form) to {longest} minutes or less.")
+        raise ComposeError(
+            f"step '{step}': {field} is {wall} minutes ({_hours(wall)}), but a step on this class keeps its access to its data "
+            f"and to tracking for at most {cover}, so it would lose that access partway through and fail late. Shorten the "
+            f"limit ({field} on the run form, or walltime= in pipeline.py) to {TOKEN_COVER_MINUTES} minutes or less.")
 
 
 def run_matrix(steps: list, matrices: list, parallels: list) -> dict:
@@ -696,7 +686,7 @@ def _pairs(items: list) -> dict:
     return {key: value for key, _, value in (item.partition("=") for item in items)}
 
 
-def run_settings(steps: list, walltimes: list, checkpoints: list, leads: list = ()) -> dict:
+def run_settings(steps: list, walltimes: list, checkpoints: list) -> dict:
     """What the run form says about each step's time (`<step>-walltime`, `<step>-checkpoint-every`), checked
     here before any step starts: {step: {"walltime": minutes, "checkpoint-every": minutes}} for the steps that
     have such a field. The refusal names the field."""
@@ -710,11 +700,6 @@ def run_settings(steps: list, walltimes: list, checkpoints: list, leads: list = 
             if problem:
                 raise ComposeError(problem)
             settings.setdefault(step, {})[key] = minutes(value)
-    for step, lead in _pairs(list(leads)).items():     # a resumable step is told to save this long before its limit
-        if step in settings and settings[step].get("walltime", 0) <= int(lead):
-            raise ComposeError(f"{walltime_field(step)} is {settings[step]['walltime']} minutes, which is not longer "
-                               f"than the {lead} minutes before its limit that the step is told to save "
-                               f"(resumable= in pipeline.py). Give the step more time.")
     return settings
 
 
@@ -822,8 +807,6 @@ def main(argv=None) -> None:
                         help="The run form's <step>-parallel: how many items of a matrix step run at once (repeatable).")
     parser.add_argument("--promote", action="append", default=[], metavar="DATASET=VALUE",
                         help="The run form's promote-<dataset>, true or false (repeatable).")
-    parser.add_argument("--resumable-lead", action="append", default=[], metavar="STEP=MINUTES",
-                        help="Minutes before its limit that a resumable step is told to save (repeatable).")
     parser.add_argument("--settings-output", default="",
                         help="Where to write the numbers the form gave each step: {step: {walltime, checkpoint-every}}.")
     parser.add_argument("--images-output", default="",
@@ -856,7 +839,7 @@ def main(argv=None) -> None:
             reuse_run, start = args.reuse_from_run.strip(), args.start_from_step.strip()
             if reuse_run or start:
                 rerun.check_fields(steps, reuse_run, start)
-            settings = run_settings(steps, args.walltime, args.checkpoint_every, args.resumable_lead)
+            settings = run_settings(steps, args.walltime, args.checkpoint_every)
             for step, entry in run_matrix(steps, args.matrix, args.parallel).items():
                 settings.setdefault(step, {}).update(entry)
             flags = run_promote(steps, args.promote)   # refuses a value that is not true or false; the final task reads it
@@ -865,7 +848,7 @@ def main(argv=None) -> None:
                         else "false: its version stays sealed and latest does not move")
                 print(f"dataset {name}: {promote_field(name)} is {what}")
             run_classes(steps, args.classes, args.class_offers)
-            run_token_cover(steps, settings, args.classes, {c for c in args.hpc_classes.split(",") if c}, args.resumable_lead)
+            run_token_cover(steps, settings, args.classes, {c for c in args.hpc_classes.split(",") if c})
             claim_run(args.app, args.run, args.run_uid)
             if reuse_run:
                 reuse = rerun.prepare(

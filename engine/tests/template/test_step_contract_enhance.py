@@ -86,7 +86,7 @@ def test_a_step_reads_the_result_of_a_step_that_may_run_on_hpc_from_the_pair():
 
 def test_a_rendered_step_is_far_under_the_size_its_definition_may_have():
     def build():
-        authoring.step("train", kind="train", gpu=True, resumable=True, inputs=["dataset"],
+        authoring.step("train", kind="train", gpu=True, inputs=["dataset"],
                        produces=[authoring.model("model")])
     wft = _enhanced(build)
     sizes = {t["name"]: template_bytes(t) for t in wft["spec"]["templates"] if t["name"] in ("train", "hpc-follower")}
@@ -127,7 +127,7 @@ def _pipeline():
     load = authoring.step("load", kind="ingest", inputs=["dataset"], produces=[authoring.dataset("loaded")])
     prepare = authoring.step("prepare", kind="evaluate", needs=[load],
                              when="experiment-name == yes")
-    authoring.step("train", kind="train", gpu=True, resumable=True, needs=[load, prepare],
+    authoring.step("train", kind="train", gpu=True, needs=[load, prepare],
                    produces=[authoring.model("model")])
     authoring.step("alone", kind="evaluate")
 
@@ -160,8 +160,8 @@ KNOWN_REFERENCES = {
     "inputs.parameters.gpus", "inputs.parameters.cpu", "inputs.parameters.mem", "inputs.parameters.disk",
     "inputs.parameters.step-name", "inputs.parameters.image",
     "inputs.parameters.step-command", "inputs.parameters.step-kind", "inputs.parameters.time-limit",
-    "inputs.parameters.deadline-seconds", "inputs.parameters.hpc-class", "inputs.parameters.resumable-lead",
-    "inputs.parameters.resumable", "inputs.parameters.idle-timeout", "inputs.parameters.deadline",
+    "inputs.parameters.deadline-seconds", "inputs.parameters.hpc-class",
+    "inputs.parameters.idle-timeout", "inputs.parameters.deadline",
     "inputs.parameters.checkpoint-every",
 }
 

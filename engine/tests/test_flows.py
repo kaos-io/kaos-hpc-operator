@@ -296,8 +296,8 @@ def form_of(build, hpc=False):
     return {p["name"]: p for p in wft["spec"]["arguments"]["parameters"]}, wft
 
 
-def test_a_resumable_step_gets_the_checkpoint_field_with_the_engine_default():
-    form, wft = form_of(lambda a: a.step("train", kind="transform", resumable=True, produces=[a.artifact("r")]))
+def test_a_step_with_an_interval_gets_the_checkpoint_field_and_the_cluster_copier_reads_it():
+    form, wft = form_of(lambda a: a.step("train", kind="transform", checkpoint_every="10m", produces=[a.artifact("r")]))
     assert form["train-checkpoint-every"]["value"] == "10m"
     train = next(t for t in wft["spec"]["templates"] if t["name"] == "train")
     env = {e["name"]: e.get("value") for c in train["initContainers"] for e in c["env"]}
@@ -308,18 +308,21 @@ def test_a_resumable_step_gets_the_checkpoint_field_with_the_engine_default():
 
 
 def test_the_step_default_is_the_forms_default_and_wins_over_the_engine_default():
-    form, _ = form_of(lambda a: a.step("train", kind="transform", resumable=True, checkpoint_every="25m",
+    form, _ = form_of(lambda a: a.step("train", kind="transform", checkpoint_every="25m",
                                        produces=[a.artifact("r")]))
     assert form["train-checkpoint-every"]["value"] == "25m"
 
 
-def test_a_step_that_is_neither_resumable_nor_declares_an_interval_has_no_checkpoint_field():
-    form, _ = form_of(lambda a: a.step("train", kind="transform", produces=[a.artifact("r")]))
+def test_a_step_that_declares_no_interval_has_no_checkpoint_field_but_is_still_copied_at_the_default():
+    form, wft = form_of(lambda a: a.step("train", kind="transform", produces=[a.artifact("r")]))
     assert "train-checkpoint-every" not in form
+    train = next(t for t in wft["spec"]["templates"] if t["name"] == "train")
+    env = {e["name"]: e.get("value") for c in train["initContainers"] for e in c["env"]}
+    assert env["CKPT_EVERY_MIN"] == "10"
 
 
-def test_checkpoint_every_false_keeps_the_copies_off_even_for_a_resumable_step():
-    form, wft = form_of(lambda a: a.step("train", kind="transform", resumable=True, checkpoint_every=False,
+def test_checkpoint_every_false_keeps_the_copies_off_for_a_step_without_a_gpu():
+    form, wft = form_of(lambda a: a.step("train", kind="transform", checkpoint_every=False,
                                          produces=[a.artifact("r")]))
     assert "train-checkpoint-every" not in form
     train = next(t for t in wft["spec"]["templates"] if t["name"] == "train")

@@ -1,26 +1,28 @@
 """PRD-HPC-1461 D-76 — the Kubernetes backend of the one resilience contract (platform-owned).
 
+Every step can fail and be run again (PRD kaos#1911 D-64): nothing is declared in `pipeline.py`.
 `enhance_resilience` runs once per developer step and injects, with no client code:
 
-  Tier 1  retryStrategy   a step lost with its node (spot preemption, eviction, node shutdown, deleted
-                          pod) is re-run, at most twice, with backoff. NEVER on the step's own non-zero
-                          exit (same expression as the HPC follower, `meluxina.POD_LOSS_RETRY`).
-                          Safe because step outputs are published only on success.
-                          A step the pool's idle watchdog ended (reason Idle, message "KaosIdle: ...")
-                          is not re-run either: the expression excludes that message.
-  Folder  KAOS_CHECKPOINT_DIR   every step gets the env var and a pod-local emptyDir behind it.
-  Tier 2  persistence     for GPU steps (and any step that sets `checkpoint_every`): an init container
-                          restores the newest verified copy of the folder from lakeFS, a sidecar copies it
-                          periodically and on SIGTERM. The code is `kubecore/checkpoint_helper.py`, shipped
-                          ONCE per app as the ConfigMap `<app>-ckpt-helper` (helper_configmap) that every
-                          helper container mounts read-only. It used to be embedded (compressed) in every
-                          helper container, ~19 KB per step: five GPU steps with their twins pushed the
-                          rendered WorkflowTemplate past the 256 KiB last-applied annotation limit.
+  Retry       one rule for every step (the table in `endings.json`, read through `kubecore.endings`): a step lost
+              with its machine (spot preemption, eviction, node shutdown, deleted pod), one that reached its time
+              limit, and one that asked to be continued (exit 85) are started again, at most MAX_CONTINUATIONS +
+              MAX_RESTARTS times, with backoff. NEVER on the step's own non-zero exit, out of memory, a missing
+              result or the pool's idle watchdog (message "KaosIdle: ..."). Safe because step outputs are
+              published only on success. A step that several tasks or a matrix share one checkpoint folder, so it
+              is started again only when its machine was lost.
+  Folder      KAOS_CHECKPOINT_DIR   every step gets the env var and a pod-local emptyDir behind it.
+  Attempt     KAOS_ATTEMPT          which attempt this is, 1 for the first (the same meaning on every executor).
+  Persistence an init container restores the newest verified copy of the folder from lakeFS, a sidecar copies it
+              periodically and on SIGTERM. The code is `kubecore/checkpoint_helper.py`, shipped
+              ONCE per app as the ConfigMap `<app>-ckpt-helper` (helper_configmap) that every
+              helper container mounts read-only. It used to be embedded (compressed) in every
+              helper container, ~19 KB per step: five GPU steps with their twins pushed the
+              rendered WorkflowTemplate past the 256 KiB last-applied annotation limit.
 
 The helper image comes from the platform registry only (`checkpoints.helperImage`, see helper_image).
 
 Opt-out per step: annotation `platform.kubecore.io/checkpoint-every: "off"` (authoring:
-`checkpoint_every=False`) removes the persistence helper only; the re-run and the folder stay.
+`checkpoint_every=False`, refused for a step with `gpu=`) removes the persistence helper only; the retry and the folder stay.
 
 Where copies live: the app's lakeFS outputs repository `outputs-<app>` (see outputs_repo.py), on branch
 `kaos-checkpoints` (never committed or merged), under `resume/<workflow name>/<step>/`.
@@ -34,7 +36,14 @@ from pathlib import Path
 
 import yaml
 
-from kubecore.meluxina import HPC_MAX_CONTINUATIONS, POD_LOSS_RETRY
+from kubecore.endings import (
+    CONTINUE_EXIT_CODE,
+    DEADLINE_MESSAGES,
+    IDLE_END_PREFIX,
+    MAX_CONTINUATIONS,
+    MAX_RESTARTS,
+    POD_LOSS_RETRY,
+)
 from kubecore.outputs_repo import outputs_repo
 from kubecore.run_settings import add_input, add_task_argument, setting
 
@@ -46,7 +55,9 @@ STAGE_MOUNT = "/stage"
 CHECKPOINT_BRANCH = "kaos-checkpoints"
 CHECKPOINT_ROOT = "resume"
 DEFAULT_EVERY_MINUTES = 10
-RETRY_LIMIT = "2"
+ATTEMPT_ENV = "KAOS_ATTEMPT"
+# Argo counts retries from 0; the step is told 1 for its first attempt, as on an HPC class.
+ATTEMPT_VALUE = "{{=asInt(retries) + 1}}"
 RETRY_BACKOFF = {"duration": "30s", "factor": "2", "maxDuration": "10m"}
 INIT_NAME = "kaos-ckpt-restore"
 SIDECAR_NAME = "kaos-ckpt-copy"
@@ -60,37 +71,33 @@ CHECKPOINT_PARAM_REF = "{{inputs.parameters.%s}}" % CHECKPOINT_PARAM
 EVERY_RE = re.compile(r"^(off|[0-9]+)$")
 
 
-# The pool's idle watchdog ends a step by setting its pod Failed with a status message that starts with
-# this prefix (kaos-hpc-operator internal/idlewatch: MessagePrefix). Argo copies it to the step's message.
-IDLE_END_PREFIX = "KaosIdle"
-# An Idle end is the step's own outcome, never a lost node: whatever else the message says (a pod that
-# was deleted after it, a node-level word), a message that starts with the prefix is not re-run.
+# Machine lost: started again, except a step the idle watchdog ended: whatever else its message says (a pod that
+# was deleted after it, a node-level word), a message that starts with the prefix is not run again.
 RETRY_EXPRESSION = "(%s) and not (lastRetry.message startsWith '%s')" % (POD_LOSS_RETRY, IDLE_END_PREFIX)
+# Every other step also continues when it reached its time limit and when it asked to be continued; each attempt
+# restores the newest copy of its checkpoint folder (the restore init container).
+CONTINUE_EXPRESSION = ("((%s) or lastRetry.exitCode == '%s' or lastRetry.message matches '.*(%s).*')"
+                       " and not (lastRetry.message startsWith '%s')"
+                       % (POD_LOSS_RETRY, CONTINUE_EXIT_CODE, DEADLINE_MESSAGES, IDLE_END_PREFIX))
 
 
-# A step that declares resumable= is also run again when it reaches its time limit (the kubelet's and the
-# workflow engine's words for it) and when it asks to be continued (exit code 85, kaos_lib.checkpoint
-# exit_for_restart): each run restores the newest copy of its checkpoint folder (the restore init container) and
-# has the full time limit again, because the deadline is per pod. At most HPC_MAX_CONTINUATIONS continuations,
-# the number an HPC class allows.
-CONTINUE_EXIT_CODE = "85"
-DEADLINE_MESSAGES = "longer than the specified deadline|exceeded its deadline"
-RESUMABLE_EXPRESSION = ("((%s) or lastRetry.exitCode == '%s' or lastRetry.message matches '.*(%s).*')"
-                        " and not (lastRetry.message startsWith '%s')"
-                        % (POD_LOSS_RETRY, CONTINUE_EXIT_CODE, DEADLINE_MESSAGES, IDLE_END_PREFIX))
+# A step of these kinds acts on the outside world (it publishes, or decides for the run). After it may have started,
+# it is not started again by the platform: a lost machine is retried only when the pod was refused before it ran.
+SIDE_EFFECT_KINDS = ("publish", "control")
+NOT_STARTED_EXPRESSION = "lastRetry.message contains 'Pod was rejected'"
 
 
-def retry_strategy(resumable: bool = False) -> dict:
-    """Tier 1: retry only a step lost with its node, never one that failed by itself or was ended as Idle.
-    A resumable step is also continued at its time limit and when it exits 85."""
-    return {"limit": str(HPC_MAX_CONTINUATIONS) if resumable else RETRY_LIMIT, "retryPolicy": "Always",
-            "expression": RESUMABLE_EXPRESSION if resumable else RETRY_EXPRESSION, "backoff": dict(RETRY_BACKOFF)}
-
-
-# The annotation step(resumable=...) renders (kubecore/authoring.py) and its opt-out value; kubecore/meluxina.py
-# reads the same two for the HPC variant.
-RESUMABLE_ANNOTATION = "platform.kubecore.io/hpc-resumable"
-RESUMABLE_OFF = "off"
+def retry_strategy(shared: bool = False, side_effects: bool = False) -> dict:
+    """The one retry rule. A step that tasks or a matrix share has one checkpoint folder for all of them, so
+    it is started again only when its machine was lost, and only as often as a restart from zero is allowed."""
+    if side_effects:
+        return {"limit": str(MAX_RESTARTS), "retryPolicy": "Always", "expression": NOT_STARTED_EXPRESSION,
+                "backoff": dict(RETRY_BACKOFF)}
+    if shared:
+        return {"limit": str(MAX_RESTARTS), "retryPolicy": "Always", "expression": RETRY_EXPRESSION,
+                "backoff": dict(RETRY_BACKOFF)}
+    return {"limit": str(MAX_CONTINUATIONS + MAX_RESTARTS), "retryPolicy": "Always", "expression": CONTINUE_EXPRESSION,
+            "backoff": dict(RETRY_BACKOFF)}
 
 
 def helper_image(ctx: dict) -> str:
@@ -153,15 +160,10 @@ def every_minutes(annots: dict) -> str:
 
 def every_field_default(annots: dict) -> str:
     """The default of the run form's `<step>-checkpoint-every`, in minutes as text, or '' when the step has no such field. The
-    form has the field for a step that declares `checkpoint_every=` (its value is the default) and for a step that declares
-    `resumable=` (the default is the engine's, DEFAULT_EVERY_MINUTES); `checkpoint_every=False` removes it."""
+    form has the field for a step that declares `checkpoint_every=` (its value is the default); `checkpoint_every=False`
+    removes it. Any other step is copied at the engine's DEFAULT_EVERY_MINUTES."""
     every = every_minutes(annots)
-    if every == "off":
-        return ""
-    if every.isdigit():
-        return every
-    declared = annots.get("hpc-resumable")
-    return str(DEFAULT_EVERY_MINUTES) if declared not in (None, "", RESUMABLE_OFF) else ""
+    return every if every.isdigit() else ""
 
 
 def shared_templates(spec: dict) -> set:
@@ -180,23 +182,18 @@ def shared_templates(spec: dict) -> set:
     return fanned | {n for n, c in uses.items() if c > 1}
 
 
-def wants_helper(step: dict, gpu: bool, every: str, ctx: dict, inject_off: bool, shared: set) -> bool:
+def wants_helper(step: dict, every: str, ctx: dict, inject_off: bool, shared: set) -> bool:
     if every == "off" or inject_off or step["name"] in shared:
         return False
     lakefs = ctx.get("lakefs") or {}
     if not (lakefs.get("endpoint") and lakefs.get("adminSecret") and lakefs.get("adminSecretKeys")):
-        return False
-    # A step that declares resumable= saves and continues: its checkpoints are copied whether it has a GPU or
-    # not (a CPU step on a spot machine or an HPC class is interrupted like any other).
-    declared = ((step.get("metadata") or {}).get("annotations") or {}).get(RESUMABLE_ANNOTATION)
-    if not (gpu or every or declared not in (None, "", RESUMABLE_OFF)):
         return False
     if not helper_image(ctx):
         print("kubecore: step %r: no checkpoints.helperImage in the pipeline context; its checkpoint copies are "
               "off until the platform publishes it (re-run and folder are still injected)" % step["name"],
               file=sys.stderr)
         return False
-    return True    # CPU steps opt in with a checkpoint_every value or resumable=
+    return True
 
 
 def _add_named(items: list, entry: dict) -> None:
@@ -220,6 +217,7 @@ def helper_env(step: dict, ctx: dict, every_field: str) -> list:
         {"name": "CKPT_EVERY_MIN",
          "value": CHECKPOINT_PARAM_REF if every_field else str(DEFAULT_EVERY_MINUTES)},
         {"name": "CKPT_STAGE", "value": STAGE_MOUNT},
+        {"name": ATTEMPT_ENV, "value": ATTEMPT_VALUE},
         {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
     ]
 
@@ -248,9 +246,11 @@ def helper_container(name: str, mode: str, step: dict, ctx: dict, every_field: s
 
 
 def inject_folder(step: dict, helper: bool, ctx: dict) -> bool:
-    """Env var + emptyDir for the folder. Returns False when the developer chose their own folder."""
+    """Env vars (the attempt, the folder) + emptyDir for the folder. Returns False when the developer chose their own folder."""
     container = step["container"]
     env = container.setdefault("env", [])
+    if not any(e.get("name") == ATTEMPT_ENV for e in env):
+        env.append({"name": ATTEMPT_ENV, "value": ATTEMPT_VALUE})
     if any(e.get("name") == CHECKPOINT_ENV for e in env):
         return False
     env.append({"name": CHECKPOINT_ENV, "value": CHECKPOINT_MOUNT})
@@ -265,13 +265,14 @@ def inject_folder(step: dict, helper: bool, ctx: dict) -> bool:
     return True
 
 
-def enhance_resilience(spec: dict, step: dict, ctx: dict, annots: dict, gpu: bool, inject_off: bool,
+def enhance_resilience(spec: dict, step: dict, ctx: dict, annots: dict, inject_off: bool,
                        shared: set) -> None:
     """Apply the Kubernetes backend of the resilience contract to one step template."""
-    declared = annots.get("hpc-resumable")
-    step.setdefault("retryStrategy", retry_strategy(declared not in (None, "", RESUMABLE_OFF)))
+    kind = ((step.get("metadata") or {}).get("labels") or {}).get("platform.kubecore.io/step-kind")
+    side_effects = kind in SIDE_EFFECT_KINDS and step["name"] not in shared
+    step.setdefault("retryStrategy", retry_strategy(step["name"] in shared, side_effects))
     every = every_minutes(annots)
-    helper = wants_helper(step, gpu, every, ctx, inject_off, shared)
+    helper = not side_effects and wants_helper(step, every, ctx, inject_off, shared)
     if not inject_folder(step, helper, ctx) or not helper:
         return
     every_field = every_field_default(annots)

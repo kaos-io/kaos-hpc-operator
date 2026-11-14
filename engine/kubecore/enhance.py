@@ -86,7 +86,6 @@ from kubecore.meluxina import (
     hpc_classes,
     parse_time_limit,
     runs_on_hpc,
-    step_resumable_lead,
 )
 from kubecore.outputs_repo import outputs_repo
 from kubecore.run_settings import (
@@ -134,7 +133,7 @@ from kubecore.step_contract import (
 )
 
 ANNOTATION_PREFIX = "platform.kubecore.io/"
-KNOWN_ANNOTATIONS = {"compute-class", "inject", "source", "image", "shm", "workspace", "hpc", "hpc-resumable",
+KNOWN_ANNOTATIONS = {"compute-class", "inject", "source", "image", "shm", "workspace", "hpc",
                      "checkpoint-every", "idle-timeout"}
 WORKSPACE_MOUNT = "/workspace"
 # Mount path for the Zitadel machine-key secret backing MLflow bearer auth
@@ -816,8 +815,8 @@ def enhance_walltime(spec: dict, step: dict, annots: dict) -> None:
 
 def enhance_run_form(spec: dict, steps: list, offers: dict, ctx: dict) -> None:
     """The run form's own fields: `<step>-walltime` for every step (default: walltime= in code, else 4h),
-    `<step>-checkpoint-every` for a step that declares checkpoint_every= or resumable= (not checkpoint_every=False;
-    default: the value in code, else the engine's for resumable= alone),
+    `<step>-checkpoint-every` for a step that declares checkpoint_every= (not checkpoint_every=False;
+    default: the value in code),
     `promote-<dataset>` for every dataset a step produces, and `reuse-from-run` and `start-from-step`, which start a
     run from a step with the results of an earlier run. Compose gets each value (checks it,
     and writes the numbers as its output `kaos-run-settings`)."""
@@ -848,9 +847,6 @@ def enhance_run_form(spec: dict, steps: list, offers: dict, ctx: dict) -> None:
         field(walltime_field(step_name), declared_walltime(annots),
               f"The longest the step may run, as minutes or hours: {WALLTIME_EXAMPLE}. Default from pipeline.py.",
               "--walltime", step_name)
-        lead = step_resumable_lead(step)
-        if lead:
-            args.extend(["--resumable-lead", f"{step_name}={lead}"])
         every = every_field_default(annots)
         if every:
             field(checkpoint_field(step_name), f"{every}m",
@@ -1612,7 +1608,8 @@ def enhance(wft: dict, ctx: dict, form_data: "dict | None" = None) -> dict:
         # the full gpu-tier picture.
         enhance_gpu_routing(spec, step, ctx, annots)
         enhance_volumes(step, annots, ctx)
-        enhance_resilience(spec, step, ctx, annots, gpu, inject_disabled(annots, "lakefs"), shared)
+        enhance_resilience(spec, step, ctx, annots, inject_disabled(annots, "lakefs"),
+                           shared | {COMPOSE_STEP})   # the platform's own step is never continued
         enhance_connections(step, ctx)
     enhance_images(spec, ctx, steps)
     enhance_workspace_pvc(spec, steps)

@@ -1,11 +1,12 @@
 retryStrategy:
-  limit: '2'
+  limit: '7'
   retryPolicy: Always
-  expression: ((lastRetry.status == 'Error' or lastRetry.message matches '.*(imminent
+  expression: (((lastRetry.status == 'Error' or lastRetry.message matches '.*(imminent
     node shutdown|node is shutting down|node is draining|The node was low on resource|The
     node had condition|Pod was rejected|Evicted|evicted|pod deleted|Pod was deleted).*')
-    and not (lastRetry.message contains 'kaos-result.json')) and not (lastRetry.message
-    startsWith 'KaosIdle')
+    and not (lastRetry.message contains 'kaos-result.json')) or lastRetry.exitCode
+    == '85' or lastRetry.message matches '.*(longer than the specified deadline|exceeded
+    its deadline).*') and not (lastRetry.message startsWith 'KaosIdle')
   backoff:
     duration: 30s
     factor: '2'
@@ -60,6 +61,8 @@ initContainers:
     value: '10'
   - name: CKPT_STAGE
     value: /stage
+  - name: KAOS_ATTEMPT
+    value: '{{=asInt(retries) + 1}}'
   - name: PYTHONDONTWRITEBYTECODE
     value: '1'
   resources:
@@ -118,6 +121,8 @@ sidecars:
     value: '10'
   - name: CKPT_STAGE
     value: /stage
+  - name: KAOS_ATTEMPT
+    value: '{{=asInt(retries) + 1}}'
   - name: PYTHONDONTWRITEBYTECODE
     value: '1'
   resources:

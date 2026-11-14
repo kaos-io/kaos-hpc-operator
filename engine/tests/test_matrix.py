@@ -88,12 +88,9 @@ def test_a_matrix_step_cannot_need_a_matrix_step():
 
 def test_a_matrix_step_is_never_continued_from_a_checkpoint():
     assert "is not continued from a checkpoint yet" in refused(lambda a: a.step(
-        "t", kind="train", matrix={"x": [1]}, resumable=True, produces=[a.model("m")]))
+        "t", kind="train", matrix={"x": [1]}, checkpoint_every="20m", produces=[a.model("m")]))
     assert "is not continued from a checkpoint yet" in refused(lambda a: a.step(
         "t", kind="train", matrix={"x": [1]}, checkpoint_every="20m", produces=[a.model("m")]))
-    wft = render(sweep)
-    annotations = template(wft, "train")["metadata"]["annotations"]
-    assert annotations["platform.kubecore.io/hpc-resumable"] == "off"
 
 
 def test_a_name_must_be_a_settings_name_and_not_a_section_the_step_reads():

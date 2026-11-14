@@ -49,14 +49,10 @@ def _described(authoring) -> dict[str, dict]:
                      "doc": "The default time limit of the step, wherever it runs: '90m', '12h' or '720' (minutes). "
                             "The person who starts the run sets the limit on the run form (<step>-walltime); "
                             "4h when not given."},
-        "resumable": {"type": ["boolean", "string"], "pattern": authoring._WALLTIME_RE.pattern,
-                      "doc": "True or a lead time ('20m', '1h'): how long before its time limit "
-                             "the step is told to save its checkpoint; False opts out.",
-                      "true_means": authoring.DEFAULT_RESUMABLE_LEAD},
         "checkpoint_every": {"type": ["boolean", "integer", "string"], "pattern": authoring._CHECKPOINT_EVERY_RE.pattern,
                              "doc": "The default for how often the platform copies the step's checkpoint folder: "
                                     "minutes ('20m', '1h', 20); False = no copies; unset = the platform default "
-                                    "(a resumable step has the field too). The person who starts the run "
+                                    "(every step is copied). False is refused for a step with gpu=. The person who starts the run "
                                     "can change it on the run form (<step>-checkpoint-every)."},
         "idle_timeout": {"type": ["boolean", "integer", "string"], "pattern": authoring._CHECKPOINT_EVERY_RE.pattern,
                          "doc": "How long a step may show no GPU use and no new log line before it is ended as Idle: "
@@ -101,7 +97,6 @@ def build() -> dict:
         "old_app_marker": OLD_APP_MARKER,
         "annotations": {
             "walltime": authoring.WALLTIME_ANNOTATION,
-            "resumable": authoring.HPC_RESUMABLE_ANNOTATION,
             "checkpoint_every": authoring.CHECKPOINT_EVERY_ANNOTATION,
             "idle_timeout": authoring.IDLE_TIMEOUT_ANNOTATION,
         },

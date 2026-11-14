@@ -1,0 +1,6 @@
+# The dataset this run trains on: <dataset-repo>@<version>. Choose the version on the run form.
+# The default is your project's own default dataset, which holds no images at first: a run on it trains on a small
+# sample that the first step makes (docs/datasets.md). Choose a dataset of your own to train on your images.
+# A dataset is its own repository (dataset-<name>); the version is `latest`, or a tag (v1, v2, ...) that you released on a dataset you uploaded. A dataset a run produced has no tag of that kind.
+# The run pins the exact version when it starts, so every step reads the same data.
+dataset: "dataset-default@latest"

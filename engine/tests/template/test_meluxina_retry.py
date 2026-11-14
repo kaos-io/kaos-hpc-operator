@@ -15,7 +15,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]  # engine/
 sys.path.insert(0, str(ROOT))
 
-from kubecore import enhance, meluxina  # noqa: E402
+from kubecore import endings, enhance  # noqa: E402
 
 CONTEXT = yaml.safe_load((ROOT / "kubecore" / "local-dev" / "pipeline-context.yaml").read_text())
 
@@ -43,14 +43,14 @@ def _twin():
 def _retried(status: str, message: str) -> bool:
     """POD_LOSS_RETRY as Argo evaluates it (Go regexp `matches` is a search
     anchored by the expression's own `.*`)."""
-    lost = status == "Error" or re.search(".*(%s).*" % meluxina.POD_LOSS_MESSAGES, message) is not None
-    return lost and meluxina.NO_RESULT_MESSAGE not in message
+    lost = status == "Error" or re.search(".*(%s).*" % endings.POD_LOSS_MESSAGES, message) is not None
+    return lost and endings.NO_RESULT_MESSAGE not in message
 
 
 def test_twin_retries_always_under_the_pod_loss_expression():
     retry = _twin()["retryStrategy"]
     assert retry["retryPolicy"] == "Always"
-    assert retry["expression"] == meluxina.POD_LOSS_RETRY
+    assert retry["expression"] == endings.POD_LOSS_RETRY
     assert retry["limit"] == "2"
 
 
@@ -74,4 +74,4 @@ def test_a_step_that_ends_well_without_its_result_is_not_retried_but_a_lost_node
     assert _retried("Error", "")
     assert _retried("Error", "some executor error that is not about the result")
     assert _retried("Failed", "Pod was rejected: node shutting down")
-    assert "not (lastRetry.message contains 'kaos-result.json')" in meluxina.POD_LOSS_RETRY
+    assert "not (lastRetry.message contains 'kaos-result.json')" in endings.POD_LOSS_RETRY

@@ -1,0 +1,77 @@
+config-validation:
+  KAOS_ATTEMPT: '{{=asInt(retries) + 1}}'
+  helper: []
+  hpc_variant_arguments: null
+  retry_continues_at_limit: false
+  retry_limit: '2'
+kaos-promote:
+  KAOS_ATTEMPT: '{{=asInt(retries) + 1}}'
+  helper: []
+  hpc_variant_arguments: null
+  retry_continues_at_limit: false
+  retry_limit: '2'
+model-quantization:
+  KAOS_ATTEMPT: '{{=asInt(retries) + 1}}'
+  helper:
+  - kaos-ckpt-copy
+  - kaos-ckpt-restore
+  hpc_variant_arguments:
+  - deadline-seconds
+  - hpc-class
+  - idle-timeout
+  - image
+  - kaos-context
+  - step-command
+  - step-kind
+  - step-name
+  - time-limit
+  retry_continues_at_limit: true
+  retry_limit: '7'
+model-registration:
+  KAOS_ATTEMPT: '{{=asInt(retries) + 1}}'
+  helper: []
+  hpc_variant_arguments: null
+  retry_continues_at_limit: false
+  retry_limit: '2'
+model-training:
+  KAOS_ATTEMPT: '{{=asInt(retries) + 1}}'
+  helper:
+  - kaos-ckpt-copy
+  - kaos-ckpt-restore
+  hpc_variant_arguments:
+  - deadline-seconds
+  - hpc-class
+  - idle-timeout
+  - image
+  - kaos-context
+  - step-command
+  - step-kind
+  - step-name
+  - time-limit
+  retry_continues_at_limit: true
+  retry_limit: '7'
+prepare-data:
+  KAOS_ATTEMPT: '{{=asInt(retries) + 1}}'
+  helper:
+  - kaos-ckpt-copy
+  - kaos-ckpt-restore
+  hpc_variant_arguments: null
+  retry_continues_at_limit: true
+  retry_limit: '7'
+qat-finetune:
+  KAOS_ATTEMPT: '{{=asInt(retries) + 1}}'
+  helper:
+  - kaos-ckpt-copy
+  - kaos-ckpt-restore
+  hpc_variant_arguments:
+  - deadline-seconds
+  - hpc-class
+  - idle-timeout
+  - image
+  - kaos-context
+  - step-command
+  - step-kind
+  - step-name
+  - time-limit
+  retry_continues_at_limit: true
+  retry_limit: '7'

@@ -41,7 +41,7 @@ from their own repositories; their state is in the PRD (kaos#1911), not here.
 
 ```python
 step(name, *, kind, reads=, inputs=, needs=, produces=, gpu=, when=, walltime=,
-     resumable=, checkpoint_every=, idle_timeout=, matrix=, matrix_allow_failed=)
+     checkpoint_every=, idle_timeout=, matrix=, matrix_allow_failed=)
 ```
 
 Everything after `name` is keyword-only.
@@ -56,11 +56,12 @@ Everything after `name` is keyword-only.
 | `produces=` | What the step writes: `model("name")`, `artifact("name")`, `dataset("name")`. A dataset an app produces is the repository `dataset-<app>-<name>`: `dataset("clean")` in the app `hera1` is `dataset-hera1-clean`. The name is per app because every app made from a template declares the same names and a dataset has exactly one producer; two apps of a project never share one. |
 | `gpu=` | Unchanged. |
 | `when=` | A condition in plain words: a name, `==` or `!=`, and a value. The name is a field of the run form, `when="quantization-mode != off"` (a setting's path with dashes, as the run form shows it), or a value a step in `needs=` handed on, `when="evaluate.passed == true"`: `<step>.<value>`, where `<value>` is a keyword of that step's `step.result(...)` (letters, digits and `_`; a step that is not in this step's `needs=` is refused, naming the fix). The value is a bare word or number (`off`, `3`) or a quoted string (`"two words"`). Comparisons join with `and` / `or` (`and` binds tighter; no parentheses, no other operators). The engine writes it as one condition on the step's task and on its HPC variant (after the term every task has for starting a run from a step, section 13), comparing the field's value as text: `quantization-mode != off` becomes `{{=workflow.parameters['quantization-mode'] != 'off'}}` (`and` becomes `&&`, `or` becomes a double bar, in the order written). A step's value is read from the needed step's result (`kaos-result`) through the expression of section 10 item 3. **What is compared, exactly:** a value that is a string is compared with the text as text; a value that is a number or a boolean is compared by its JSON text, as the workflow system's `toJSON` writes it (`1000000` is `1000000`, `1e6` written in `when=` is read as `1000000`, `1.0` is `1`, `1e-5` is `0.00001`, `true` is `true`), never through `string()` (which writes `1e+06` for 1000000, `1.2345678e+07` for 12345678 and `1e-05` for 0.00001). Written in `when=`, a number is read the way JSON writes numbers, so `1e6`, `1000000` and `1000000.0` all match the value 1000000. `evaluate.rows != 1000000` therefore skips the step when `rows` is 1000000. A text that cannot be matched reliably is refused when the pipeline is rendered, naming the fix: a number written another way than JSON writes it (`.5`, `+1`, `01`, `5.`), a `True`/`NULL` that is not lowercase, an integer above 9007199254740992 (a result's number is a double), a number too large to hold, and any control character (a line break, a tab; also refused in `when=` as a whole). **A needed step that was skipped has no value, and the condition is false** for `==` and for `!=` alike (nothing can be said about a value that does not exist): the step that asked is skipped too, and the run goes on. That holds for a step skipped by its own `when=` (the absent sentinel), for one that ended itself with `step.skip()` (result `status: skipped`), on the cluster and on the HPC variant (the pair). A needed step that **ran and finished well but did not set the key** (a typo in the name, a value never set, or `null`) fails the task, naming step and key: `int("<sentence>")` of a sentence is the one failure the expression language lets us word, and the workflow system shows `failed to evaluate expression: invalid operation: int(step 'evaluate' ran but gave no value 'passed' (a typo in the name, or the value was never set with step.result(passed=...)): a when= on a step's value needs the value)` as the task's error. A result whose status is none of `ok`, `skipped` and `absent` is malformed and fails the task too. A needed step that failed never reaches the condition (its `depends`). The expression is `(<status> in ["absent", "skipped"] ? false : (<status> == "ok" ? <comparison> : int("<malformed sentence>")))` (checked on the lab, Argo Workflows v4.0.6: 29 comparisons over 999999, 1000000, 12345678, 3000000000, 0.5, 1.0, 1e-5, true, false, an empty string and a string that looks like a number; and the cases: gate passes, gate hands on false, gate skipped by `step.skip()` and by its own `when=` with `==` and `!=`, key missing, malformed result; the cluster shape and the HPC pair). `kaos-promote` is unaffected (its `depends` accept Skipped; a skipped step's dataset is simply not promoted), and a step that needs a matrix step cannot name its value (section 1). The step is skipped when the condition is false. |
-| `walltime=` | The step's time limit, on any kind: `'90m'`, `'12h'` or `'720'` (minutes). It is the default of the step's run-form field `<step>-walltime` (below). |
+| `walltime=` | The step's time limit, on any kind: `'90m'`, `'12h'` or `'720'` (minutes). It is the default of the step's run-form field `<step>-walltime` (below). On the cluster it is the limit of each attempt; on an HPC class the controller cuts it into attempts that fit. |
 | `matrix=` | `{"lr": [0.01, 0.001], "batch": [16, 32]}`: the step runs once for each combination of the values (section 12). The run form's `<step>-matrix` holds the combinations (every one by default) and `<step>-parallel` how many run at once. At most 32 combinations; the step may not produce a dataset or be `ingest`, `publish` or `control`; it may not need another matrix step. |
 | `matrix_allow_failed=` | `True` on a step with `matrix=`: the step after it runs when some items failed and sees which (section 12). By default one failed item fails the step. |
-| `resumable=`, `idle_timeout=` | Unchanged. |
-| `checkpoint_every=` | How often the step's checkpoint is saved: `'20m'`, `'1h'` or `20` (minutes); `False` for no copies. It is the default of the run-form field `<step>-checkpoint-every`. |
+| `idle_timeout=` | Unchanged. |
+| `resumable=` | Removed. Every step can be run again, so nothing is declared; a pipeline that writes it is refused when it is rendered: `step 'x': delete resumable=; every step can be run again.` |
+| `checkpoint_every=` | How often the step's checkpoint is saved: `'20m'`, `'1h'` or `20` (minutes). It is the default of the run-form field `<step>-checkpoint-every`. `False` means no copies and is refused for a step with `gpu=`: a GPU step must save its progress, so write the interval or leave the keyword out. |
 
 Removed, with no alias: `outputs=` (the result replaces it), `hpc_time_limit=` (`walltime=` replaces it) and
 `disk=`: a step is not told its disk, it gets the disk of the machine its class runs on (the usable disk of that
@@ -107,14 +108,12 @@ longest the step may run, as minutes or hours: 90m, 12h. Default from pipeline.p
 an HPC class it is the job's limit. The platform's own compose step has a fixed limit of 30 minutes and no field.
 On an HPC class a run keeps its access to its data and to tracking for 11.5 hours at most (a step that runs longer
 would lose both partway through and fail late, after spending node-hours). So the form's `<step>-walltime` of a step on an
-HPC class that is not resumable is at most 11.5 hours (690 minutes): compose refuses a longer value before any step
-starts, naming the step, the limit in hours and the two fixes, shorten `walltime=` or make the step resumable
-(`resumable=True` with `checkpoint_every=`). A resumable step may ask for more: it runs as runs that each end inside
-that time, each with fresh access and continuing from its checkpoint, and together they stay within the limit (at most
-six runs: 69 hours). Waiting for a machine does not count: a step that never gets one is bounded by the platform's pending reaper, not by
-this limit. A step that declares `checkpoint_every=` (not `False`) or `resumable=` also has `<step>-checkpoint-every` ("How often
+HPC class is at most 11.5 hours (690 minutes) for now: compose refuses a longer value before any step
+starts, naming the step, the limit in hours and the fix, shorten `walltime=`. This is the one rule about access that
+the engine still holds; it goes when the HPC controller cuts every step into runs by itself, each with fresh access. Waiting for a machine does not count: a step that never gets one is bounded by the platform's pending reaper, not by
+this limit. A step that declares `checkpoint_every=` (not `False`) also has `<step>-checkpoint-every` ("How often
 the 'x' step's checkpoint is saved: minutes or hours, for example 10m or 1h."), default the value in code (10 minutes,
-`resilience.DEFAULT_EVERY_MINUTES`, for a step that declares `resumable=` alone). Both are
+`resilience.DEFAULT_EVERY_MINUTES`, for a step that declares no interval: every step is copied at that default). Both are
 text: minutes (`90`, `90m`) or hours (`12h`), at least one minute; compose refuses any other value before a step
 starts, naming the field: `<step>-walltime is '1d'. Write minutes or hours, for example 90, 90m or 12h: at least
 one minute, at most 30 days, no other unit.` Compose writes the numbers as its output `kaos-run-settings` (`{"<step>": {"walltime":
@@ -125,12 +124,12 @@ A step with a checkpoint interval has the field `checkpoint_every` (minutes, a n
 | | Who sets it | Order, first wins | Default | Read by |
 |---|---|---|---|---|
 | time limit | the run form's `<step>-walltime` | the form value, then `step(walltime=)` | `walltime=`, else `4h` | the cluster deadline; the HPC job's limit (the follower and the runner) |
-| checkpoint interval | the run form's `<step>-checkpoint-every`, a field of a step that declares `checkpoint_every=` or `resumable=` (not `checkpoint_every=False`) | the form value, then `step(checkpoint_every=)`, then the argument of `kaos_lib.checkpoint.register(...)` in code, then the library's adaptive default | `checkpoint_every=`, else 10 minutes for a `resumable=` step | cluster: the helper's `CKPT_EVERY_MIN` (from the form field); HPC: the job's copier (`KAOS_CKPT_EVERY_S`, from `checkpoint_every` of the step context, as the target, with the spacing below); the step: `kaos_lib.checkpoint.tick()` (the same context field) |
+| checkpoint interval | the run form's `<step>-checkpoint-every`, a field of a step that declares `checkpoint_every=` (not `False`) | the form value, then `step(checkpoint_every=)`, then the argument of `kaos_lib.checkpoint.register(...)` in code, then the library's adaptive default | `checkpoint_every=`, else 10 minutes | cluster: the helper's `CKPT_EVERY_MIN` (from the form field); HPC: the job's copier (`KAOS_CKPT_EVERY_S`, from `checkpoint_every` of the step context, as the target, with the spacing below); the step: `kaos_lib.checkpoint.tick()` (the same context field) |
 
 **How the copier uses the interval.** The form value is the TARGET interval between copies, counted from the end of the
 previous copy. On HPC (Slurm) the copier never starts a periodic copy sooner than the larger of the form value and five
 minutes (`MIN_EVERY_S` 300 s), nor sooner than ten times the duration of the previous copy (copying stays under a tenth of the run
-time), and it starts none when the time left before the limit is not more than the resumable lead plus the time the copy
+time), and it starts none when the time left before the limit is not more than the save lead plus the time the copy
 takes, so that no periodic copy is in flight when the wall-time signal asks for the final copy (it writes one plain line,
 `copying every N minutes, not every M: <why>`, when it copies less often than asked, and one when it stops for the limit).
 On the cluster the helper never copies sooner than 60 seconds after the previous copy ended, nor sooner than ten times its
@@ -141,18 +140,25 @@ sentence above: a default the form would refuse (over 30 days, under a minute) c
 means no field and no copies; `register(checkpoint_every=False)` in code turns the library's periodic checkpoints off only
 for a step that has no form value.
 
-**A long job continues instead of starting over.** A step that declares `resumable=` is run again, and continues
-from its newest checkpoint, in each of three cases, on a cluster machine and on an HPC class, at most five times
-after the first run: it reaches its time limit, its machine is lost, or it asks to be restarted (exit code 85,
-`kaos_lib.checkpoint.exit_for_restart`). The time limit applies to each run of the step, not to the sum: on the
-cluster each run is a new pod with the full deadline; on an HPC class each continuation is a new job with the full
-limit, and the follower's own deadline covers the queue and every continuation. The exception is a limit longer than one run
-can be (the longest the site allows, or the 11.5 hours of access above): that limit is then the total, each run gets at most
-the longest run and never more than what the earlier runs left, and the step ends with its limit used up. On the cluster the step is run
-again by the step's retry rule (a step that does not declare `resumable=` is retried only when its machine is lost)
-and restores its checkpoint folder in the init container; on HPC the controller sends the stop signal the declared
-lead (`resumable=`) before the limit and submits the continuation. The form's `<step>-walltime` must be longer than
-that lead: compose refuses a smaller value, naming the field.
+**Every step can fail and be run again.** Nothing is declared for it (`resumable=` is gone). A step is run again, and
+continues from its newest checkpoint if it saved one, on a cluster machine and on an HPC class, by one table
+(`engine/kubecore/endings.json`, read by the engine and by the HPC controller, with a test that feeds the same cases to both):
+
+| The attempt ended because | The platform does |
+|---|---|
+| the machine was lost (a spot machine taken, an eviction, a node failure, a preemption, a deleted pod) | starts it again, continuing from saved progress if there is any, else from zero |
+| it reached the time limit of the attempt, or asked to be continued (exit code 85, `kaos_lib.checkpoint.exit_for_restart`) | starts it again from its newest checkpoint |
+| the step's own error: an exception or a non-zero exit, out of memory, the idle watchdog (`KaosIdle`), a missing result | never starts it again |
+
+The budget is one constant for both: at most 5 continuations and 2 restarts from zero per step. The step is told which
+attempt it is in `KAOS_ATTEMPT`: 1 for the first, on the cluster and on an HPC class. The time limit applies to each
+attempt on the cluster (each is a new pod with the full deadline); on an HPC class each continuation is a new job with
+the follower's deadline covering the queue and every continuation. A step that several tasks or a matrix share has one checkpoint folder,
+so on the cluster it is started again only when its machine was lost, and at most twice. Outputs are published only
+when a step succeeds, so running a step again never publishes twice. The cluster copies every step's checkpoint folder
+(default every 10 minutes) with a helper container; a step that has no lakeFS or no platform image gets the retry
+without the copies. The total of `walltime=` over all attempts is not yet enforced on the cluster (it is per attempt);
+on an HPC class the controller already bounds the sum.
 
 **Classes on the run form.** A step is offered the GPU classes of the cluster only when its code declares
 `gpu=True`. A step with `gpu=True` is offered the GPU and the CPU classes (it can run CPU-only on a CPU class); a step
@@ -765,7 +771,7 @@ writes the checked combinations into `kaos-run-settings`: `{"<step>": {"matrix":
 non-empty lists; a name that is not `[a-z][a-z0-9_]*` or is also a section in `reads=`; a value that is not a number, a
 boolean or short text, or a whole number beyond 2 to the power 53; more than 32 combinations; the kinds `ingest`,
 `publish`, `control`; a dataset in `produces=`; more than 4 things read and written together (`inputs=` plus
-`produces=`), because up to 32 items hand their ledgers back in one shared result; `resumable=` or `checkpoint_every=`;
+`produces=`), because up to 32 items hand their ledgers back in one shared result; `checkpoint_every=`;
 a matrix step that needs a matrix step; a step that needs two matrix steps, or that needs more than 4 steps in all when
 one of them is a matrix step; `matrix_allow_failed=` without `matrix=`; a `when=` that reads `<matrix step>.<value>` (a
 `when=` on a matrix step itself is fine: every item is skipped).
@@ -819,7 +825,7 @@ Workflows v4.0.6, 32 items that read two inputs and write a model, results of 1.
 results (`hack/local-lab`, evidence in the PRD).
 
 **Checkpoints.** A matrix step is never continued from a checkpoint: its runs would share one checkpoint folder.
-`resumable=` and `checkpoint_every=` are refused on it, and the render opts the step out of continuation on HPC. The
+`checkpoint_every=` is refused on it. The
 step's `walltime=` (the form's `<step>-walltime`) is each item's limit.
 
 **How the engine runs it** (the HPC leg is the same, section 8). The step's task `<step>` calls a template

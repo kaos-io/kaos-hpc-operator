@@ -56,7 +56,7 @@ func (r *HPCArgoWorkflowJobReconciler) recoverAttempt(job *hpcv1alpha1.HPCArgoWo
 		return exit85WithoutCheckpoint(optOut, v)
 	case end.Infrastructure():
 		return afterInfrastructureEnd(job, attempt, end, v)
-	case (end == resume.EndWallTime || end == resume.EndIdle) && job.Status.Resume != nil:
+	case end == resume.EndWallTime && job.Status.Resume != nil:
 		v.phase, v.reason = hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonNoProgress
 		v.msg += "; the continuation saved no checkpoint before it ended (" + end.Words() + "), so it did not get past " +
 			progressWords(job.Status.Resume.ProgressValues, "its checkpoint")

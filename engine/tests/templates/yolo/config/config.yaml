@@ -1,0 +1,23 @@
+# The experiment config tree — root defaults list (Hydra).
+#
+# Compute: a step gets the CPU, memory and disk of the machine its class names (you never set it here).
+# Group choices here are the DEFAULTS; each group renders as one
+# dropdown on the submit form (options = the files in the group dir).
+defaults:
+  - _self_
+  # registered schemas (types + enums) — the yaml sections
+  # below merge onto these and are validated at compose time
+  - data_schema
+  - quantization_schema
+  - experiment
+  - dataset
+  - data
+  - model: yolov8n
+  - train
+  - train/optimizer: sgd
+  - train/callbacks: early_stopping
+  - train/qat: default_qat
+  - image_processing: mosaic_default
+  - quantization
+  - registration
+  - logging

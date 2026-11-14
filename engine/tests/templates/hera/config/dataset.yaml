@@ -1,0 +1,5 @@
+# The dataset the step `prepare` reads: dataset-<name>, or dataset-<name>@<version>.
+# pipeline.py names this setting in inputs=["dataset"]. On the run form it is a list of your project's
+# datasets and their versions; without a version the run reads the newest one. When the run starts the
+# platform fixes the choice to one exact version, and every step reads that same version.
+dataset: "dataset-default"
