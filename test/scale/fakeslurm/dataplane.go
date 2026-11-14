@@ -1,11 +1,13 @@
 package fakeslurm
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // The data plane a site job hands its step's result back through, simulated like the jobs themselves. The
@@ -13,7 +15,11 @@ import (
 // hand-back program (runner/kaos_hpc_runner/payload/handback.py) would have left in lakeFS when the job
 // ended, so that the REAL runner fetches, checks and reports it (PRD kaos#1911 F-04):
 //
-//	POST   /oauth/v2/token                                   the identity provider: mints the Wallet
+//	POST   /oauth/v2/token                                   the identity provider: mints the Wallet (the tracker's token)
+//	POST   /lakefs/kaos/v1/credentials                       the data store's key exchange: a service account token of the
+//	                                                         app (audience kaos-lake) for the app's key pair
+//	GET    /fake/v1/submissions, /fake/v1/exchanges          what reached the site (environment and script of each submitted
+//	                                                         job) and what the key exchange was asked: for a test to read
 //	GET    /lakefs/api/v1/repositories/<r>/branches/<b>/objects?path=hpc-outputs/<wf>/<step>/<job id>/<name>
 //	DELETE /lakefs/api/v1/repositories/<r>/branches/<b>      the hand-off branch, when the runner is done
 //	GET    /lakefs/api/v1/repositories/<r>/refs/<c>/objects/ls   an empty listing (no dataset is served)
@@ -21,8 +27,12 @@ import (
 // What a job "handed back" is decided by the run, in the step context the job was submitted with
 // (KAOS_STEP_CONTEXT): params.fake_site.handback, one of the Handback* values. Without it: a result.
 const (
-	// Wallet is the bearer the fake identity provider mints; every lakeFS call must carry it.
+	// Wallet is the bearer the fake identity provider mints for the tracker. The data store never accepts it.
 	Wallet = "fake-site-wallet"
+	// AppKeyID and AppKeySecret are the key pair the data store gives an app; every lakeFS call must carry it (HTTP Basic).
+	AppKeyID, AppKeySecret = "AKIAFAKEAPPKEY", "fake-app-secret-key"
+	// AppKeyLifetime is how long the key the exchange hands out lives.
+	AppKeyLifetime = time.Hour
 	// EnvContext is the step context in the submitted environment.
 	EnvContext = "KAOS_STEP_CONTEXT"
 
@@ -36,6 +46,20 @@ const (
 // dataPlane answers a request to the simulated identity provider or lakeFS; false when the path is neither.
 func (s *Site) dataPlane(w http.ResponseWriter, r *http.Request) bool {
 	p := r.URL.Path
+	switch {
+	case p == "/lakefs/kaos/v1/credentials" && r.Method == http.MethodPost:
+		s.exchange(w, r)
+		return true
+	case p == "/fake/v1/submissions" && r.Method == http.MethodGet:
+		s.submissions(w)
+		return true
+	case p == "/fake/v1/exchanges" && r.Method == http.MethodGet:
+		s.mu.Lock()
+		out := append([]Exchange{}, s.exchanges...)
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, out)
+		return true
+	}
 	if p == "/oauth/v2/token" && r.Method == http.MethodPost {
 		writeJSON(w, http.StatusOK, map[string]any{"access_token": Wallet, "token_type": "Bearer", "expires_in": 43200})
 		return true
@@ -44,8 +68,8 @@ func (s *Site) dataPlane(w http.ResponseWriter, r *http.Request) bool {
 	if !ok {
 		return false
 	}
-	if r.Header.Get("Authorization") != "Bearer "+Wallet {
-		writeErr(w, http.StatusUnauthorized, "no wallet")
+	if r.Header.Get("Authorization") != "Basic "+base64.StdEncoding.EncodeToString([]byte(AppKeyID+":"+AppKeySecret)) {
+		writeErr(w, http.StatusUnauthorized, "not the app's key")
 		return true
 	}
 	parts := strings.Split(rest, "/")
@@ -121,4 +145,66 @@ func (s *Site) handedBack(w http.ResponseWriter, q url.Values) {
 	default:
 		writeErr(w, http.StatusNotFound, "no such object")
 	}
+}
+
+// Exchange is one call of the key exchange as the data store saw it.
+type Exchange struct {
+	Subject  string   `json:"subject"`  // the token's subject, system:serviceaccount:<namespace>:<name>
+	Audience []string `json:"audience"` // the token's audience
+	Granted  bool     `json:"granted"`
+}
+
+// exchange answers the key exchange: it takes a bearer that is a service account token of an app's workflow service account
+// for the audience kaos-lake (its claims are read, not its signature: the fake has no cluster key) and gives the app's key.
+func (s *Site) exchange(w http.ResponseWriter, r *http.Request) {
+	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	parts := strings.Split(token, ".")
+	var claims struct {
+		Sub string          `json:"sub"`
+		Aud json.RawMessage `json:"aud"`
+	}
+	if ok && len(parts) == 3 {
+		if raw, err := base64.RawURLEncoding.DecodeString(parts[1]); err == nil {
+			_ = json.Unmarshal(raw, &claims)
+		}
+	}
+	var aud []string
+	if json.Unmarshal(claims.Aud, &aud) != nil {
+		var one string
+		if json.Unmarshal(claims.Aud, &one) == nil {
+			aud = []string{one}
+		}
+	}
+	sub := strings.Split(claims.Sub, ":") // system:serviceaccount:<namespace>:<app>-workflow
+	granted := len(sub) == 4 && sub[0] == "system" && sub[1] == "serviceaccount" && strings.HasSuffix(sub[3], "-workflow")
+	audOK := false
+	for _, a := range aud {
+		audOK = audOK || a == "kaos-lake"
+	}
+	granted = granted && audOK
+	s.mu.Lock()
+	s.exchanges = append(s.exchanges, Exchange{Subject: claims.Sub, Audience: aud, Granted: granted})
+	s.mu.Unlock()
+	if !granted {
+		writeErr(w, http.StatusUnauthorized, "not a token of an app's workflow service account for kaos-lake")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"access_key_id": AppKeyID, "secret_access_key": AppKeySecret,
+		"expiration": time.Now().Add(AppKeyLifetime).UTC().Format(time.RFC3339)})
+}
+
+// submissions lists what each accepted submission carried: its name, environment and job script.
+func (s *Site) submissions(w http.ResponseWriter) {
+	type sub struct {
+		Name   string            `json:"name"`
+		Env    map[string]string `json:"env"`
+		Script string            `json:"script"`
+	}
+	s.mu.Lock()
+	out := []sub{}
+	for _, j := range s.jobs {
+		out = append(out, sub{j.Name, j.Env, j.Script})
+	}
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, out)
 }

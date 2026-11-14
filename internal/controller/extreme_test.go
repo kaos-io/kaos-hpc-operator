@@ -75,6 +75,7 @@ var _ = Describe("HPCArgoWorkflowJob extreme cases", func() {
 			spec.Env = []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: "{}"}}
 		}
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("x-%d", seq), Namespace: envNS}, Spec: spec}
+		withWorkflow(j)
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		return j
 	}

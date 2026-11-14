@@ -16,11 +16,12 @@ Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /ru
 |---|---|
 | `settings.py` | all inputs, read once from the controller's env; identity, class, the step context and the inputs (`check_job`), sharing, resume |
 | `slurm.py` | slurmrestd/slurmdbd client (token re-read per request), comment/share parsing, `host_gone` |
-| `wallet.py` | Zitadel wallet mint (RS256 in stdlib, no PyJWT), image WORKDIR lookup |
+| `wallet.py` | the tracker's token (Zitadel, RS256 in stdlib, no PyJWT), image WORKDIR lookup |
+| `identity.py` | the app's own identity in the data store: a token of the app's workflow service account (TokenRequest) exchanged for an access key (the app name must be a DNS-1123 label before it reaches the request path); the key of a shared dataset's owner |
 | `staging.py` | `Stager` (ssh to the forced-command stager), dataset staging (every object of the pinned commit, whatever the dataset's shape; `CONTRACT` is the staging contract the runner checks against the staging tool's `version` and sends with every `status` and `stage`; `name_rule` and `Names` refuse, before anything is staged or submitted, the object names that cannot be copied), `staging_record` (one bounded record of `status.run.staged` per input: kind first/delta/cached, files, bytes, seconds; the follower prints one line from each) |
 | `image.py` | registry client, docker-archive streaming, `image_key` (tar name = SIF name = `kaos-image=` lease, always in the job comment), `cleanup_images` (asks the stager's `gc` when an attempt is over; AC-65) |
 | `jobscript.py` | the batch script (+ KAOS_METRIC sampler, tar deletion after SIF build); private files and folders (umask 077), the step's `--cleanenv` allow-list, the registry token only to an Artifact Registry host and unset after the pull, the redacted failure tail, the host's script copy removed on every exit, a sweep of what a killed job left (`kaos_sweep`), the context and bearers handed to the container as files, never through Apptainer's evaluation: `docs/job-environment.md` |
-| `redact.py` | the one credential redaction, run on the node for the failure tail (shipped as `REDACT_B64`, Python 3.6) and by `logs.py` for the live log stream |
+| `redact.py` | the one credential redaction, run on the node for the failure tail (shipped as `REDACT_B64`, Python 3.6) and by `logs.py` for the live log stream; it holds the app's key and the key before it, and reads the key file again when it changes |
 | `payload/` | on-node programs: stagein/handback/ckpt/slots/idlewatch (`payloads.py` loads them). Stage-in keeps a copy as `<copy>/data/` (the dataset's files) with `.kaos-complete` (it holds the word `data`) and `.kaos-parts/` beside it; it believes a cache hit only if the marker names that layout and is still in the folder after it looked for the cleanup's lock; a copy of an older layout (files directly in the folder) is moved aside whole, under the cleanup's lock, and made again |
 | `result.py` | the step's result on its way back: the check (`version` 1, `status` `ok`, `values`, `reads`, `writes`, 8 KiB by cost) and the wire form it is written in |
 | `sharing.py` | PRD-1609 inputs-in-script (the credentials of a waiting guest ride in its script; see `docs/job-environment.md`) |
@@ -39,7 +40,7 @@ Env (controller): `HPC_JOB_NAMESPACE`, `HPC_JOB_NAME`, `KAOS_ATTEMPT`, `KAOS_RES
 (`HPC_MAX_SUBMIT_JOBS`), optional `HPC_SITE_WAIT_MAX_S` (how long an unreachable site is waited for, default 1800; the controller's `--site-outage-max`), `HPC_LOGIN_HOST` (`host:port`, default login.lxp.lu:8822), `SLURM_TOKEN` (fallback),
 and the ConfigMap: `ZITADEL_DOMAIN`, `ZITADEL_MLFLOW_PROJECT_ID`, `MLFLOW_EXTERNAL_URL`, `LAKEFS_EXTERNAL_URL`.
 Files: `/etc/meluxina-jwt/token`, `/etc/meluxina-staging/{id_ed25519,known_hosts}`,
-`/etc/mlflow-svc/ZITADEL_MACHINE_KEY` (or `ZITADEL_MACHINE_KEY_FILE`), the pod ServiceAccount token.
+`/etc/mlflow-hpc/ZITADEL_MACHINE_KEY` (or `ZITADEL_HPC_KEY_FILE`; the tracker token is minted from it; when it is absent the job is refused before staging, `AppIdentityUnavailable`, and no other key is used), the pod ServiceAccount token (it asks for the app's token).
 
 ## Exit codes
 
@@ -66,6 +67,7 @@ The job script and the runner reserve these codes; the controller turns them int
 | 244 | runner | the result file the job handed back is not a result of the step contract (reported FAILED) | `InvalidResult` |
 | 245 | runner | a dataset another project shares cannot be read: not shared with this project (any more), the owner unknown or without a public address, or the site could not stage it; the job never downloads it itself (reported FAILED, nothing staged, no site job) | `SharedDatasetUnavailable` |
 | 246 | runner | an own dataset above 50 GB was not staged in the time allowed for its size and the job must not download it (reported FAILED, nothing submitted) | `DatasetNotStaged` |
+| 247 | runner, or job script | the app has no identity in the data store (no `<app>-workflow` service account, not declared there, or nobody answered): reported FAILED before anything is staged; the job script ends 247 when the app's key never reached the site | `AppIdentityUnavailable` |
 
 ## What the step gets and hands back (the step contract)
 
@@ -111,7 +113,20 @@ The runner (`fetch_result`) then fetches the object for its own site job id (fou
 writes it again in wire form, and sends it as `status.result` in the same patch as the terminal report; it deletes the
 branch. The record that the step wrote no result, neither object there, or lakeFS not answering: the attempt is
 reported FAILED with exit 243, each with its own sentence. Not a result: FAILED with exit 244. The sentence is in `status.run.message` and becomes the job's message. A run that could never hand a
-result back (no data-plane token, no lakeFS endpoint, no app) is reported FAILED 243 before anything is submitted.
+result back (no tracking token, no lakeFS endpoint, no app) is reported FAILED 243 before anything is submitted; an app
+without an identity in the data store is reported FAILED 247 (`AppIdentityUnavailable`).
+
+## The app's identity in the data store
+The job reads and writes the data store as its app, never as the project (`identity.py`): the runner creates a token of
+service account `<app>-workflow` in the job's namespace (audience `kaos-lake`, ten minutes) and exchanges it with
+`POST /kaos/v1/credentials` for an access key pair that lives about an hour. The runner's own calls (staging, the result
+hand-back) and the job's stage-in and hand-back use that pair (HTTP Basic); the step finds it in the JSON file
+`LAKEFS_KEY_FILE` (`access_key_id`, `secret_access_key`, `expiration`). The runner writes the file on the site through the
+staging tool's `key` verb (folder `$SCR/kaos-tmp/key-<job>` 0700, file 0600, replaced atomically) right after submit and
+then every 25 minutes while the job is queued or running; a refresh that fails is logged, written into `status.run.message`
+and asked again at every poll, and never stops the job. The file is never in the job script, the Slurm environment or the
+job log. The job waits up to 10 minutes for the first file and ends 247 without it. A dataset another project shares is
+staged with the key the app's own data store hands out for the owner (`/kaos/v1/shared-credentials`), over https only.
 
 ## The site job's name, adopt, and a site that does not answer
 The site job is named `kaos-[<scope>-]<workflow uid>-<step>-<first 8 of the HPC job id>-a<attempt>`. A job script rewrites

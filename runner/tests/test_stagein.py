@@ -12,6 +12,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import helpers
 import pytest
 from kaos_hpc_runner import payloads
 
@@ -77,7 +78,7 @@ def lakefs():
 
 
 def _run(tmp_path, fake):
-    env = {"LAKEFS_ENDPOINT": fake.url, "LAKEFS_BEARER_TOKEN": "w", "DATASET_REPO": "ds", "DATASET_COMMIT": COMMIT,
+    env = {"LAKEFS_ENDPOINT": fake.url, "LAKEFS_KEY_FILE": helpers.write_key_file(tmp_path / "key"), "DATASET_REPO": "ds", "DATASET_COMMIT": COMMIT,
            "DATASET_CACHE": str(tmp_path / "data-cache"), "DATASET_DIRFILE": str(tmp_path / "dirfile"),
            "SLURM_JOB_ID": "9"}
     return subprocess.run([sys.executable, "-"], input=payloads.STAGEIN, env=env, capture_output=True, text=True)
@@ -359,7 +360,7 @@ def test_a_cleanup_that_holds_the_folder_is_waited_for_and_the_copy_is_made_agai
     fake.downloads.clear()
     lock = pathlib.Path(str(dest) + ".kaos-clean")
     lock.mkdir()
-    env = {"LAKEFS_ENDPOINT": fake.url, "LAKEFS_BEARER_TOKEN": "w", "DATASET_REPO": "ds", "DATASET_COMMIT": COMMIT,
+    env = {"LAKEFS_ENDPOINT": fake.url, "LAKEFS_KEY_FILE": helpers.write_key_file(tmp_path / "key"), "DATASET_REPO": "ds", "DATASET_COMMIT": COMMIT,
            "DATASET_CACHE": str(tmp_path / "data-cache"), "DATASET_DIRFILE": str(tmp_path / "dirfile"),
            "SLURM_JOB_ID": "9"}
     p = subprocess.Popen([sys.executable, "-"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -429,7 +430,7 @@ def test_a_hit_on_a_folder_the_cleanup_moved_after_the_renewal_is_not_a_hit(tmp_
     dest, _ = _stage_in(tmp_path, fake)
     old = time.time() - 20 * 86400
     os.utime(str(dest / ".kaos-complete"), (old, old))
-    env = {"LAKEFS_ENDPOINT": fake.url, "LAKEFS_BEARER_TOKEN": "w", "DATASET_REPO": "ds", "DATASET_COMMIT": COMMIT,
+    env = {"LAKEFS_ENDPOINT": fake.url, "LAKEFS_KEY_FILE": helpers.write_key_file(tmp_path / "key"), "DATASET_REPO": "ds", "DATASET_COMMIT": COMMIT,
            "DATASET_CACHE": str(tmp_path / "data-cache"), "DATASET_DIRFILE": str(tmp_path / "dirfile"),
            "SLURM_JOB_ID": "9"}
     p = subprocess.run([sys.executable, "-"], input=_CLEANUP_MOVES_THE_FOLDER % refilled + payloads.STAGEIN,

@@ -18,6 +18,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import helpers
 import pytest
 
 from kaos_hpc_runner.sharing import inputs_in_script
@@ -49,7 +50,7 @@ class FakeLakeFS:
         self.branches = set()
         self.fail_uploads = 0  # answer this many uploads with 500
         self.truncate = False  # serve object downloads one byte short
-        self.bearer = "wallet"  # the token the fake accepts
+        self.auth = helpers.app_auth()  # the Authorization the fake accepts: the app's key
         srv = self
 
         class H(BaseHTTPRequestHandler):
@@ -70,7 +71,7 @@ class FakeLakeFS:
                 return u.path.split("/")[3:], dict(urllib.parse.parse_qsl(u.query))
 
             def do_POST(self):
-                assert self.headers["Authorization"] == "Bearer " + srv.bearer
+                assert self.headers["Authorization"] == srv.auth
                 parts, q = self._parts()
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 # repositories/<repo>/branches
@@ -107,7 +108,7 @@ class FakeLakeFS:
                 self._send(404, {})
 
             def do_DELETE(self):
-                assert self.headers["Authorization"] == "Bearer " + srv.bearer
+                assert self.headers["Authorization"] == srv.auth
                 parts, q = self._parts()
                 if parts[2] == "branches" and parts[4:] == ["objects"]:
                     return self._send(204 if srv.objects.pop((parts[3], q["path"]), None) is not None else 404, b"")
@@ -119,7 +120,7 @@ class FakeLakeFS:
                 self._send(404, {})
 
             def do_GET(self):
-                assert self.headers["Authorization"] == "Bearer " + srv.bearer
+                assert self.headers["Authorization"] == srv.auth
                 parts, q = self._parts()
                 if parts[2] == "commits":
                     return self._send(200, {"id": parts[3]}) if parts[3] in srv.commits else self._send(404, {})
@@ -155,7 +156,7 @@ def lakefs():
 
 
 def _env(tmp_path, lakefs, **extra):
-    env = dict(os.environ, LAKEFS_ENDPOINT=lakefs.url, LAKEFS_BEARER_TOKEN="wallet", KAOS_OUTPUTS_REPO="outputs-app",
+    env = dict(os.environ, LAKEFS_ENDPOINT=lakefs.url, LAKEFS_KEY_FILE=helpers.write_key_file(tmp_path / "key"), KAOS_OUTPUTS_REPO="outputs-app",
                WF_UID="wf1", STEP_NAME="train", KAOS_ATTEMPT="2",
                KAOS_WORK=str(tmp_path / "work"), KAOS_CKPT_FILE=str(tmp_path / "ckpt.ref"))
     env.update(extra)

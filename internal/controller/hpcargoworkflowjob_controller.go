@@ -409,10 +409,7 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 	}
 
 	if refusedBeforeStaging(reason) {
-		msg = strings.TrimSpace(run.Message)
-		if msg == "" {
-			msg = "staging was refused before it began; nothing was staged or submitted to the site"
-		}
+		msg = refusedMessage(run, strings.TrimSpace(run.Message))
 		if r.Recorder != nil {
 			r.Recorder.Event(job, corev1.EventTypeWarning, reason, msg)
 		}
@@ -472,11 +469,26 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 	return next, nil
 }
 
+// refusedMessage is what a job refused before staging says: the runner's own message, or, without one, what the
+// attempt's state allows. A site job id means the job script itself ended with the reserved code after the site job
+// was submitted (the app's key never reached the site, or the folder it was placed in was not the job user's own): the
+// step never started, but the job was submitted.
+func refusedMessage(run *hpcv1alpha1.RunStatus, msg string) string {
+	switch {
+	case msg != "":
+		return msg
+	case run.SiteJobID != "":
+		return "the job script ended site job " + run.SiteJobID + " with exit code " + strconv.Itoa(int(hpcv1alpha1.ExitCodeAppIdentityUnavailable)) +
+			" before the step started; the app's data store key could not be used on the site. The step did not run"
+	}
+	return "staging was refused before it began; nothing was staged or submitted to the site"
+}
+
 // refusedBeforeStaging is true for the reasons the runner ends an attempt with before it stages or submits anything.
 func refusedBeforeStaging(reason string) bool {
 	switch reason {
 	case hpcv1alpha1.ReasonStagingMismatch, hpcv1alpha1.ReasonReservedName, hpcv1alpha1.ReasonSharedDatasetUnavailable,
-		hpcv1alpha1.ReasonDatasetNotStaged:
+		hpcv1alpha1.ReasonDatasetNotStaged, hpcv1alpha1.ReasonAppIdentityUnavailable:
 		return true
 	}
 	return false
@@ -491,6 +503,7 @@ var failedExitReasons = map[int32]string{
 	hpcv1alpha1.ExitCodeStagingMismatch:          hpcv1alpha1.ReasonStagingMismatch,
 	hpcv1alpha1.ExitCodeReservedName:             hpcv1alpha1.ReasonReservedName,
 	hpcv1alpha1.ExitCodeSharedDatasetUnavailable: hpcv1alpha1.ReasonSharedDatasetUnavailable,
+	hpcv1alpha1.ExitCodeAppIdentityUnavailable:   hpcv1alpha1.ReasonAppIdentityUnavailable,
 	hpcv1alpha1.ExitCodeDatasetNotStaged:         hpcv1alpha1.ReasonDatasetNotStaged,
 	hpcv1alpha1.ExitCodeResultNotHandedBack:      hpcv1alpha1.ReasonResultNotHandedBack,
 	hpcv1alpha1.ExitCodeInvalidResult:            hpcv1alpha1.ReasonInvalidResult,

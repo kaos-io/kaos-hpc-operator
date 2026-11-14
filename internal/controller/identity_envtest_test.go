@@ -57,6 +57,7 @@ var _ = Describe("HPCArgoWorkflowJob site identity", func() {
 	// project's HPCSite namespace.
 	runnerEnv := func(ns, siteNS, name string, seq int) map[string]string {
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}, Spec: spec(seq)}
+		withWorkflow(j)
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(j)})
 		Expect(err).NotTo(HaveOccurred())

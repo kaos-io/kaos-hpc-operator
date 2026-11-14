@@ -96,3 +96,53 @@ class FakeKube:
 
     def patches(self):
         return [c for c in self.calls if c[0] == "PATCH"]
+
+
+# ---------------------------------------------------------------- the app's key in the data store (AC-14)
+
+APP_KEY_ID, APP_KEY_SECRET = "KAOSXAPPKEY1", "app-secret-1"
+
+
+class FakeKeys:
+    """What identity.app_key gives the runner: one key pair of the app per call, a counter in its secret.
+    expires: seconds since the epoch; fail: exceptions or None answered to the next calls."""
+
+    def __init__(self, expires=1e12, fail=None):
+        self.calls, self.expires, self.fail = 0, expires, list(fail or [])
+
+    @staticmethod
+    def auth_of(n):
+        """The Authorization value of the key the n-th call gave."""
+        from kaos_hpc_runner import identity
+        return identity.Key(APP_KEY_ID, APP_KEY_SECRET + str(n), 1e12, "").auth()
+
+    def __call__(self):
+        from kaos_hpc_runner import identity
+        self.calls += 1
+        if self.fail:
+            f = self.fail.pop(0)
+            if f:
+                raise f
+        return identity.Key(APP_KEY_ID, APP_KEY_SECRET + str(self.calls), self.expires, "2099-01-01T00:00:00Z")
+
+
+def app_key():
+    """A fixed key of the app, for the calls that take a key getter."""
+    from kaos_hpc_runner import identity
+    return identity.Key(APP_KEY_ID, APP_KEY_SECRET, 1e12, "2099-01-01T00:00:00Z")
+
+
+def app_auth():
+    return app_key().auth()
+
+
+def write_key_file(folder, key=None):
+    """The key file as the site's staging tool places it: a folder 0700, the file 0600, the record as JSON."""
+    import os
+    folder = str(folder)
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    path = os.path.join(folder, "lakefs-key.json")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump((key or app_key()).record(), f)
+    return path

@@ -162,6 +162,7 @@ type Job struct {
 	ID                                              int
 	Name, User, Account, Partition, QOS, Reserv, Cm string
 	Env                                             map[string]string
+	Script                                          string
 	LimitMin                                        int
 	Attempt                                         string
 
@@ -226,6 +227,7 @@ type Site struct {
 	Srv  *httptest.Server
 
 	mu        sync.Mutex
+	exchanges []Exchange
 	rng       *rand.Rand
 	jobs      map[int]*Job
 	order     []int // submission order, for FIFO start
@@ -620,6 +622,7 @@ type submitBody struct {
 			Number int64 `json:"number"`
 		} `json:"begin_time"`
 	} `json:"job"`
+	Script string `json:"script"`
 }
 
 func (s *Site) submit(w http.ResponseWriter, r *http.Request, user string) {
@@ -643,7 +646,7 @@ func (s *Site) submit(w http.ResponseWriter, r *http.Request, user string) {
 	}
 	now := time.Now()
 	j := &Job{ID: s.nextID, Name: b.Job.Name, User: user, Account: b.Job.Account, Partition: b.Job.Partition,
-		QOS: b.Job.QOS, Reserv: b.Job.Reservation, Cm: b.Job.Comment, Env: env, LimitMin: b.Job.TimeLimit,
+		QOS: b.Job.QOS, Reserv: b.Job.Reservation, Cm: b.Job.Comment, Env: env, Script: b.Script, LimitMin: b.Job.TimeLimit,
 		Attempt: env[EnvAttempt], SubmitAt: now, State: Pending, Reason: "Priority"}
 	s.nextID++
 	j.EligibleAt = now.Add(s.between(s.Opts.QueueMin, s.Opts.QueueMax))

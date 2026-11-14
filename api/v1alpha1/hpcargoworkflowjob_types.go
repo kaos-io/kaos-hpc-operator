@@ -82,6 +82,13 @@ const (
 	// submits anything; its message names the dataset and the owner. Terminal: ask the owner to share it, then run
 	// the pipeline again.
 	ReasonSharedDatasetUnavailable = "SharedDatasetUnavailable"
+	// ReasonAppIdentityUnavailable: the step's app has no identity in the data store, so a job could not read or write
+	// the app's data as the app: the app has no workflow service account in the job's namespace, is not declared in the
+	// data store with that namespace, the runner may not ask for its token, or the data store did not give a key. The
+	// runner reports it with ExitCodeAppIdentityUnavailable before it stages or submits anything (the job script
+	// reports it too when the app's key never reached the site); its message names the app. There is no fallback to
+	// the project's token. Terminal: have the app declared and deployed to the project, then run the pipeline again.
+	ReasonAppIdentityUnavailable = "AppIdentityUnavailable"
 	// ReasonDatasetNotStaged: an own dataset in spec.inputs is above 50 GB and the site could not stage it in the
 	// time the runner allows for its size (4 hours at least, 72 at most), and a job never downloads a dataset that
 	// large itself on GPU time. The runner reports it with ExitCodeDatasetNotStaged before it submits anything; its
@@ -153,6 +160,9 @@ const (
 	// ExitCodeSharedDatasetUnavailable is the exit code the runner reports (state FAILED, no site job) when a
 	// dataset another project shares cannot be read for the step.
 	ExitCodeSharedDatasetUnavailable = int32(245)
+	// ExitCodeAppIdentityUnavailable is the exit code the runner reports (state FAILED, no site job) when the app has
+	// no identity in the data store; the job script exits with it when the app's key never reached the site.
+	ExitCodeAppIdentityUnavailable = int32(247)
 	// ExitCodeDatasetNotStaged is the exit code the runner reports (state FAILED, no site job) when a dataset too
 	// large for the job to download was not staged in time.
 	ExitCodeDatasetNotStaged = int32(246)
@@ -498,7 +508,7 @@ type RunStatus struct {
 	// reserve: 210 (no Apptainer), 231 (image pull), 232 (staging), 233 (batch script), 234 (no verified
 	// checkpoint to restore), 235 (checkpoint copy or job comment failed), 236 (Idle), 237 (InsufficientQuota),
 	// 238 (SubmitLimit), 239 (InvalidImage), 240 (GPUViolation), 241 (StagingMismatch), 242 (ReservedName),
-	// 243 (ResultNotHandedBack), 244 (InvalidResult), 245 (SharedDatasetUnavailable), 246 (DatasetNotStaged).
+	// 243 (ResultNotHandedBack), 244 (InvalidResult), 245 (SharedDatasetUnavailable), 246 (DatasetNotStaged), 247 (AppIdentityUnavailable).
 	// +optional
 	ExitCode *int32 `json:"exitCode,omitempty"`
 	// StartTime and EndTime as the site reports them.

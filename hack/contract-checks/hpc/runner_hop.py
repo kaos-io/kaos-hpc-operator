@@ -24,7 +24,7 @@ import threading
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "runner"))
 
-from kaos_hpc_runner import wallet  # noqa: E402
+from kaos_hpc_runner import identity, wallet  # noqa: E402
 from kaos_hpc_runner.runner import Runner  # noqa: E402
 from kaos_hpc_runner.settings import CONTEXT_ENV, Settings  # noqa: E402
 from kaos_hpc_runner.slurm import Slurm  # noqa: E402
@@ -72,7 +72,7 @@ def one(context, mode, work, lakefs):
     env_in[CONTEXT_ENV] = context
     cfg = Settings(env_in)
     cfg.check_job()
-    runner = Runner(cfg, slurm=object(), stager=object(), reporter=object(), logs=object(), mint=lambda: 'check-wallet')
+    runner = Runner(cfg, slurm=object(), stager=object(), reporter=object(), logs=object(), mint=lambda: 'check-wallet', keys=lambda: identity.Key('KAOSXA', 'secret', 1e12, '2099-01-01T00:00:00Z'))
     runner.prepare_handback()
     batch, env, _, _ = runner.site_job('', '')
     name = cfg.job_site_name + '-' + mode + ('-control' if os.environ.get('CONTRACT_CHECK_DAMAGE') else '')
@@ -82,6 +82,12 @@ def one(context, mode, work, lakefs):
                     'environment': env, 'tasks': 1, 'nodes': '1', 'comment': 'kaos-ckpt-lease=x/y'},
             'script': batch}
     reply = Slurm(cfg).submit(body)
+
+    # The site's staging tool places the app's key in the job's own folder before the step starts.
+    key_dir = scratch / 'kaos-tmp' / ('key-%s' % reply['job_id'])
+    key_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    (key_dir / 'lakefs-key.json').write_text(json.dumps(runner.key.record()))
+    (key_dir / 'lakefs-key.json').chmod(0o600)
 
     # The node: Slurm starts the script with the submitted environment (and its own variables).
     node_env = dict(e.split('=', 1) for e in env)

@@ -6,7 +6,7 @@ programs, so it must stay Python 3.6 and standard library only), and in the runn
 line of step output through it before it is printed to the platform's log stream.
 
 What is redacted (by SHAPE or by exact value, never by "the line has the word key/token in it"):
-  * the exact values of the credentials the job itself holds (the data/MLflow bearer, the registry token) and their
+  * the exact values of the credentials the job itself holds (the tracker's token, the registry token, the app's data store key from its file) and their
     base64 and URL-encoded forms: no guessing needed;
   * Bearer / Basic values of 16+ characters, the value after `Authorization:`, `Proxy-Authorization:`, `X-...-Key/Token/Secret:`,
     `Api-Key:`, a `Cookie:` header;
@@ -38,7 +38,42 @@ import urllib.parse
 REDACTED = '[redacted]'
 MIN_LITERAL = 8       # a held value shorter than this is not a credential, and would blot out ordinary text
 # The variables of the job script that hold credentials; their exact values are looked for in the output.
-HELD_ENV = ('LAKEFS_BEARER_TOKEN', 'MLFLOW_TRACKING_TOKEN', 'REG_TOKEN', 'APPTAINER_DOCKER_PASSWORD')
+HELD_ENV = ('MLFLOW_TRACKING_TOKEN', 'REG_TOKEN', 'APPTAINER_DOCKER_PASSWORD')
+# The app's data store key is in a file (LAKEFS_KEY_FILE), not in a variable: its secret, its id and the pair a Basic header holds.
+KEY_FILE_ENV = 'LAKEFS_KEY_FILE'
+
+
+def key_file_values(path):
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return (d['secret_access_key'], d['access_key_id'], d['access_key_id'] + ':' + d['secret_access_key'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ()
+
+
+class KeyFileValues:
+    """The values of the app's key file, now and the one before. The platform replaces the file before its key ends and
+    the step may still hold (and print) the key it read earlier, so a refresh keeps the previous values as well. The file
+    is looked at again whenever its modification time, size or inode changes (one stat per call)."""
+
+    def __init__(self, path):
+        self.path, self._stamp, self._now, self._before = path, None, (), ()
+        self.values()
+
+    def values(self):
+        try:
+            st = os.stat(self.path)
+            stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            return self._now + self._before
+        if stamp != self._stamp:
+            self._stamp = stamp
+            new = key_file_values(self.path)
+            if new and new != self._now:
+                self._before, self._now = self._now, new
+        return self._now + self._before
+
 
 # a quoted value up to its closing quote (it may hold spaces), else one word
 _VALUE = r'(?!\[redacted)(?:(?<=")[^"\\]{1,2000}|(?<=\')[^\'\\]{1,2000}|[^\s"\'\\,;&|}\])]{1,2000})'
@@ -135,16 +170,29 @@ class Redactor:
     line ends it and is shown, so a marker that has no end never silences the stream. A KAOS_METRIC line is never
     dropped. Limit: a credential split over two lines is not recognised."""
 
-    def __init__(self, held=()):
+    def __init__(self, held=(), source=None):
+        """`source`, when given, is called for every line and returns more held values (the key file, which is replaced
+        while the job runs); the literals are built again when what it returns changes."""
+        self._fixed, self._source, self._held = tuple(held), source, None
+        self._literals = None
+        self._left = 0          # lines of an open private key block that may still be swallowed
+        self._take_held()
+
+    def _take_held(self):
+        held = self._fixed + (tuple(self._source()) if self._source else ())
+        if held == self._held:
+            return
+        self._held = held
         literals = set()
         for v in held:
             if v and len(v) >= MIN_LITERAL:
                 literals |= forms(v)
         self._literals = re.compile('|'.join(re.escape(x) for x in sorted(literals, key=len, reverse=True))) if literals else None
-        self._left = 0          # lines of an open private key block that may still be swallowed
 
     def line(self, text):
         """The line redacted, or None when it is inside a private key block."""
+        if self._source:
+            self._take_held()
         if self._left:
             if _PEM_END.search(text):
                 self._left = 0
@@ -176,7 +224,8 @@ class Redactor:
 
 def main():
     """stdin to stdout, as the job script uses it; the held values come from this process's environment."""
-    red = Redactor(os.environ.get(n) for n in HELD_ENV)
+    key_file = os.environ.get(KEY_FILE_ENV, '')
+    red = Redactor([os.environ.get(n) for n in HELD_ENV], KeyFileValues(key_file).values if key_file else None)
     src, dst = sys.stdin.buffer, sys.stdout.buffer
     for raw in src:
         body = raw.rstrip(b'\r\n')

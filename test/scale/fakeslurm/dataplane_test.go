@@ -2,6 +2,7 @@ package fakeslurm
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 func TestTheDataPlaneServesWhatAJobThatEndedWellHandedBack(t *testing.T) {
 	site := New(Options{Name: "t", Token: "tok", RunMin: 1, RunMax: 1, Dilation: 600, QOS: []QOS{{Name: "default", MaxWallMinutes: 60}}})
 	defer site.Close()
+	basicKey := "Basic " + base64.StdEncoding.EncodeToString([]byte(AppKeyID+":"+AppKeySecret))
 	do := func(method, path, auth string, body []byte) (int, string) {
 		t.Helper()
 		req, _ := http.NewRequest(method, site.URL()+path, bytes.NewReader(body))
@@ -46,7 +48,7 @@ func TestTheDataPlaneServesWhatAJobThatEndedWellHandedBack(t *testing.T) {
 	}
 	object := func(id int, name string) (int, string) {
 		return do(http.MethodGet, fmt.Sprintf("/lakefs/api/v1/repositories/outputs-a/branches/hpc-wf-s/objects?path=hpc-outputs/wf/s/%d/%s",
-			id, name), "Bearer "+Wallet, nil)
+			id, name), basicKey, nil)
 	}
 	context := func(handback string) string {
 		return EnvContext + `={"version":1,"params":{"fake_site":{"handback":"` + handback + `"}},"ledger":{"version":2,` +
@@ -88,10 +90,45 @@ func TestTheDataPlaneServesWhatAJobThatEndedWellHandedBack(t *testing.T) {
 		}
 	}
 	if code, _ := do(http.MethodGet, "/lakefs/api/v1/repositories/outputs-a/branches/hpc-wf-s/objects?path=hpc-outputs/wf/s/1/kaos-result.json",
-		"Bearer other", nil); code != http.StatusUnauthorized {
-		t.Errorf("a call without the wallet must be refused, got %d", code)
+		"Bearer "+Wallet, nil); code != http.StatusUnauthorized {
+		t.Errorf("a call that is not the app's key (the tracker's wallet) must be refused, got %d", code)
 	}
-	if code, _ := do(http.MethodDelete, "/lakefs/api/v1/repositories/outputs-a/branches/hpc-wf-s", "Bearer "+Wallet, nil); code != http.StatusNoContent {
+	if code, _ := do(http.MethodDelete, "/lakefs/api/v1/repositories/outputs-a/branches/hpc-wf-s", basicKey, nil); code != http.StatusNoContent {
 		t.Errorf("the hand-off branch can be deleted, got %d", code)
+	}
+}
+
+// The key exchange answers a service account token of an app's workflow service account for kaos-lake, and nothing else.
+func TestTheKeyExchangeGivesTheAppKeyToItsServiceAccountToken(t *testing.T) {
+	site := New(Options{Name: "t", Token: "tok", QOS: []QOS{{Name: "default", MaxWallMinutes: 60}}})
+	defer site.Close()
+	jwt := func(claims string) string {
+		return "h." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".s"
+	}
+	ask := func(auth string) (int, map[string]any) {
+		req, _ := http.NewRequest(http.MethodPost, site.URL()+"/lakefs/kaos/v1/credentials", strings.NewReader("{}"))
+		req.Header.Set("Authorization", auth)
+		resp, err := site.Srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	code, key := ask("Bearer " + jwt(`{"sub":"system:serviceaccount:p:app-workflow","aud":["kaos-lake"]}`))
+	if code != http.StatusOK || key["access_key_id"] != AppKeyID || key["secret_access_key"] != AppKeySecret {
+		t.Fatalf("the app's token gets its key: %d %v", code, key)
+	}
+	if _, err := time.Parse(time.RFC3339, key["expiration"].(string)); err != nil {
+		t.Errorf("the key has an expiration: %v", key["expiration"])
+	}
+	for name, auth := range map[string]string{"no bearer": "", "the wallet": "Bearer " + Wallet,
+		"another audience":       "Bearer " + jwt(`{"sub":"system:serviceaccount:p:app-workflow","aud":["x"]}`),
+		"not a workflow account": "Bearer " + jwt(`{"sub":"system:serviceaccount:p:default","aud":["kaos-lake"]}`)} {
+		if code, _ := ask(auth); code != http.StatusUnauthorized {
+			t.Errorf("%s: %d, want 401", name, code)
+		}
 	}
 }

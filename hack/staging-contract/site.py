@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(runner_dir, 'tests'))
 sys.path.insert(0, stager_tests)
 import helpers            # noqa: E402
 import test_stager        # noqa: E402  (FAKE_LFS, FAKE_SQUEUE)
-from kaos_hpc_runner import staging   # noqa: E402
+from kaos_hpc_runner import identity, staging   # noqa: E402
 
 REPO = 'dataset-ds'
 C1, C2, C3, C4, C5, C6, C7, C8, C9, CA, CB, CC, CD, CE = ('c%s' % c * 32 for c in '123456789abcde')
@@ -94,6 +94,17 @@ class H(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        # the own data store hands out the app's key in the owner's store (what kaos-lib's peer_key asks for)
+        self.server.log.append((urllib.parse.urlparse(self.path).path, self.headers.get('Authorization')))
+        self.rfile.read(int(self.headers.get('Content-Length') or 0))
+        body = json.dumps({'access_key_id': 'KAOSXOWNER', 'secret_access_key': 'owner-secret',
+                           'expiration': '2099-01-01T00:00:00Z'}).encode()
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *a):
         pass
 
@@ -152,17 +163,17 @@ def stage(commit, owner=''):
         cfg = helpers.settings(HPC_INPUTS=json.dumps([{'name': 'dataset', 'repo': REPO, 'ref': 'main', 'commit': commit,
                                                        'owner': owner}]), LAKEFS_EXTERNAL_URL=url)
         cfg.check_job()
-        path = staging.stage_dataset(cfg, cfg.inputs[0], staging.Stager(cfg, staging_dir=keydir), lambda: 'wallet',
+        path = staging.stage_dataset(cfg, cfg.inputs[0], staging.Stager(cfg, staging_dir=keydir), helpers.app_key,
                                      info=info)
     elif 'inp' in staging.stage_dataset.__code__.co_varnames[:staging.stage_dataset.__code__.co_argcount]:
         cfg = helpers.settings(HPC_INPUTS=json.dumps([{'name': 'dataset', 'repo': REPO, 'ref': 'main', 'commit': commit}]),
                                LAKEFS_EXTERNAL_URL=url)
         cfg.check_job()
-        path = staging.stage_dataset(cfg, cfg.inputs[0], staging.Stager(cfg, staging_dir=keydir), lambda: 'wallet',
+        path = staging.stage_dataset(cfg, cfg.inputs[0], staging.Stager(cfg, staging_dir=keydir), helpers.app_key,
                                      info=info)
     else:                       # a runner from before the step contract (old-runner-new-tool): one dataset in the env
         cfg = helpers.settings(DATASET_REPO=REPO, DATASET_COMMIT=commit, LAKEFS_EXTERNAL_URL=url)
-        path = staging.stage_dataset(cfg, staging.Stager(cfg, staging_dir=keydir), lambda: 'wallet', info=info)
+        path = staging.stage_dataset(cfg, staging.Stager(cfg, staging_dir=keydir), helpers.app_key, info=info)
     return path, info
 
 
@@ -188,11 +199,13 @@ if scenario == 'shared-two-stores':
     path, info = stage(CD, 'owner')
     check('the owner\'s dataset is complete on the site, under the owner', path and tree(path) == TREES[CD]
           and '/datasets/%s@owner/%s/data' % (REPO, CD) in path and info['repo'] == REPO + '@owner')
-    check('the bytes came from the owner\'s data store; the own one was asked for the peers only',
-          {p for p, _ in httpd.log} == {'/kaos/v1/peers'}
+    check('the bytes came from the owner\'s data store; the own one was asked for the peers and for the key there only',
+          {p for p, _ in httpd.log} == {'/kaos/v1/peers', '/kaos/v1/shared-credentials'}
           and any(p.endswith('/objects') for p, _ in owner_httpd.log))
-    check('one credential went anywhere, the project\'s wallet bearer (the staging tool sends it with each fetch)',
-          {a for _, a in httpd.log + owner_httpd.log} == {'Bearer wallet'})
+    check('the app\'s own key went to its own data store only; the owner\'s store saw the key it handed out (the staging '
+          'tool sends it with each fetch)',
+          {a for _, a in httpd.log} == {helpers.app_auth()} and {a for _, a in owner_httpd.log} == {
+              identity.Key('KAOSXOWNER', 'owner-secret', 0, '').auth()})
     path, info = stage(CD, 'owner')
     check('a second run of the project is a cache hit', info['kind'] == 'cached')
     check('the two are two copies side by side, neither over the other', tree(own_path) == TREES[CE]

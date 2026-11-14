@@ -97,6 +97,18 @@ func (r *HPCArgoWorkflowJobReconciler) serveGate(ctx context.Context, job *hpcv1
 			// Nothing is booked and no runner starts: no site job, no node time, for a reference no credential fixes.
 			return ctrl.Result{}, true, r.setPhase(ctx, job, hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonInvalidImage, err.Error(), nil)
 		}
+		refusal, err := r.checkApp(ctx, job)
+		if err != nil {
+			// The Workflow could not be read right now: no verdict either way, so no refusal; asked again with backoff.
+			return ctrl.Result{}, true, fmt.Errorf("reading the owning Workflow: %w", err)
+		}
+		if refusal != nil {
+			// The job names an app that is not the one its Workflow belongs to, or no Workflow: nothing is booked and no runner starts.
+			if r.Recorder != nil {
+				r.Recorder.Event(job, corev1.EventTypeWarning, hpcv1alpha1.ReasonAppIdentityUnavailable, refusal.Error())
+			}
+			return ctrl.Result{}, true, r.setPhase(ctx, job, hpcv1alpha1.PhaseRefused, hpcv1alpha1.ReasonAppIdentityUnavailable, refusal.Error(), nil)
+		}
 	}
 	if !has {
 		if err := r.setFinalizer(ctx, job, true); err != nil {
@@ -152,6 +164,55 @@ func (r *HPCArgoWorkflowJobReconciler) workflowCancelCause(ctx context.Context, 
 		return "the Workflow ended (" + phase + ") while the step had not", nil
 	}
 	return "", nil
+}
+
+// workflowAppLabel is the label of a pipeline's WorkflowTemplate (and so of the Workflows made from it) that names the
+// app; the template itself is named <app>-pipeline.
+const workflowAppLabel = "platform.kubecore.io/app"
+
+// checkApp holds spec.app against the app of the Workflow that owns the job (PRD kaos#1911, AC-14). The follower that
+// creates the job is one service account for every app of the project, so the API server cannot tell whose job it is;
+// the Workflow can: it is made from the app's own WorkflowTemplate, whose label and name (<app>-pipeline) give the app.
+// A job that names another app would read and write that app's data. A serve-mode job that names no Workflow is
+// refused too: there would be nothing to hold its app against. The refusal is the first result: it is returned only
+// for a real mismatch, a Workflow that names no app, or a job that names no app or no Workflow. The second result is
+// an error when the Workflow cannot be read now (timeout, server error, forbidden, not found): that says
+// nothing about the app, so the caller asks again, as for workflowCancelCause, which cancels a Workflow that is gone.
+// A cluster without the Argo API has no Workflow to compare with: the job is not refused for it (a standalone install).
+func (r *HPCArgoWorkflowJobReconciler) checkApp(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob) (refusal error, err error) {
+	app := job.Spec.App
+	if app == "" {
+		return fmt.Errorf("the job names no app, so it has no identity for its data. Nothing was staged and nothing was submitted to the site"), nil
+	}
+	ref := job.Spec.Workflow
+	if ref == nil {
+		return fmt.Errorf("the job names no Workflow, so its app %s cannot be confirmed. Nothing was staged and nothing was submitted to the site", app), nil
+	}
+	wf := &unstructured.Unstructured{}
+	wf.SetGroupVersionKind(workflowGVK)
+	if err := r.Get(ctx, types.NamespacedName{Namespace: job.Namespace, Name: ref.Name}, wf); meta.IsNoMatchError(err) {
+		return nil, nil // no Argo API in this cluster (a standalone install, AC-41): there is no Workflow to compare with, as in workflowCancelCause
+	} else if err != nil {
+		return nil, err
+	}
+	var trusted []string
+	if v := wf.GetLabels()[workflowAppLabel]; v != "" {
+		trusted = append(trusted, v)
+	}
+	if name, _, _ := unstructured.NestedString(wf.Object, "spec", "workflowTemplateRef", "name"); strings.HasSuffix(name, "-pipeline") {
+		trusted = append(trusted, strings.TrimSuffix(name, "-pipeline"))
+	}
+	if len(trusted) == 0 {
+		return fmt.Errorf("the Workflow %s names no app (no %s label, no <app>-pipeline template), so the job's app %s cannot be confirmed. "+
+			"Nothing was staged and nothing was submitted to the site", ref.Name, workflowAppLabel, app), nil
+	}
+	for _, t := range trusted {
+		if t != app {
+			return fmt.Errorf("the job names the app %s, but its Workflow %s belongs to the app %s. Nothing was staged and nothing was "+
+				"submitted to the site", app, ref.Name, t), nil
+		}
+	}
+	return nil, nil
 }
 
 // cancel stops a serve-mode job: it deletes the runner Job in the foreground (its SIGTERM handler

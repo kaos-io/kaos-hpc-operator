@@ -51,7 +51,9 @@ the job's class. Every `Reason` the operator writes, what it means and what the 
 | `Failed` / `ReservedName` | The dataset version holds an object whose name is reserved for the platform on the site: a file name ending in `.kaos-part` (the staging tool's half-downloaded files). The same reason covers an object whose path could leave the dataset's folder (a `..`, `.` or empty part, a leading `/`, a NUL byte), a name too long for the site, and a file that is also a folder. The runner stops before it stages or submits anything; its message names the object and which of the two it is. Rename or remove it and commit a new version |
 | `Refused` / `NoContext` | The job carries no step context (`spec.context`): it was created by a follower from before the step contract, or stored before the job definition changed (the definition requires the field, so only a stored job can lack it). Nothing is booked. A job that was already booked ends `Failed` / `NoContext` instead of starting an attempt, or reporting success, without its context and data |
 | `Failed` / `SharedDatasetUnavailable` | A dataset another project shares (an entry of `spec.inputs` with an `owner`) cannot be read: the owner does not share it with this project (never approved, or withdrawn), is not known or has no public https address, or the site could not stage it. The runner stops before it stages or submits anything (exit 245, settled 0); its message names the dataset and the owner and says to ask the owner to share it. A job never downloads a shared dataset itself |
-| `Failed` / `DatasetNotStaged` | An own dataset above 50 GB was not staged to the site in the time allowed for its size, and a job never downloads a dataset that large itself on GPU time. The time staging may go on is at least 4 hours, otherwise twice the time to copy the dataset at 50 MB/s, at most 72 hours (12 hours when the size cannot be read), and 72 hours in total for all inputs of a step; a new attempt continues the copy file by file, with a new data token each time. The runner stops before it submits anything; its message names the dataset and its size. Run the step again: the copy continues from the files already on the site (kept for a day). While a copy goes on, `status.run.pendingReason` says how many files and bytes are copied and since when, every 10 minutes. A dataset up to 50 GB the site could not stage is downloaded by the job as before |
+| `Failed` / `DatasetNotStaged` | An own dataset above 50 GB was not staged to the site in the time allowed for its size, and a job never downloads a dataset that large itself on GPU time. The time staging may go on is at least 4 hours, otherwise twice the time to copy the dataset at 50 MB/s, at most 72 hours (12 hours when the size cannot be read), and 72 hours in total for all inputs of a step; a new attempt continues the copy file by file, with the app's key asked for again each time. The runner stops before it submits anything; its message names the dataset and its size. Run the step again: the copy continues from the files already on the site (kept for a day). While a copy goes on, `status.run.pendingReason` says how many files and bytes are copied and since when, every 10 minutes. A dataset up to 50 GB the site could not stage is downloaded by the job as before |
+| `Refused` / `AppIdentityUnavailable` | The job names no app, names no Workflow (a served job always names the Workflow that owns it), or its app is not the app of that Workflow (the Workflow's `platform.kubecore.io/app` label and `<app>-pipeline` template name the app), or the Workflow names none. Nothing is booked and no runner starts. A Workflow that cannot be read right now (timeout, server error, forbidden) is no reason to refuse: the controller asks again; one that is gone cancels the job as before |
+| `Failed` / `AppIdentityUnavailable` | The step's app has no identity in the data store: no workflow service account `<app>-workflow` in the job's namespace, the data store does not know the app (not declared with its namespace), or neither answered. The runner stops before it stages or submits anything (exit 247, settled 0); its message names the app. A job never falls back to the project's token for the data store |
 | `Failed` / `ResultNotHandedBack` | The step ended well, but its result could not be brought from the site to `status.result`: the job could not read or upload the result file (job exit 243), the runner could not fetch it, or the run has no way to hand a result back (no data-plane token, lakeFS endpoint or app), in which case nothing is submitted. Never a success with an empty result |
 | `Failed` / `InvalidResult` | The result file reached the runner but is not a result of the step contract (not a JSON object, not version 1 with status `ok` and `values`, `reads`, `writes`, or over 8 KiB by cost). Runner exit 244 |
 | `Refused` / `TooLongNotResumable` | The declared limit is above the longest run the class or site allows (2 days on MeluXina `default`), or above 11.5 hours, how long one run keeps its access to its data and tracking (`timelimit.TokenCoverMinutes`), and the step is not resumable (declared or verified, D-74), so it would be cut. The message gives the declared limit, the maximum and the two fixes: make it resumable or shorten it. Never cut silently |
@@ -178,7 +180,14 @@ The runner's environment is built **only by the controller**: from the spec (`IM
 (`HPC_ACCOUNT`, `HPC_USER`, `HPC_SCRATCH`, `HPC_HOME`, `HPC_CLASSES_JSON`, `HPC_ENDPOINT`), and
 from the operator-rendered ConfigMap `hpc-runner-config` (`envFrom`). The CRD (CEL) and the
 controller both refuse any other `spec.env` name. Secrets `meluxina-jwt`, `meluxina-staging` and
-`mlflow-svc` are mounted from the HPC namespace.
+`mlflow-hpc` (the project's non-admin machine user for the experiment tracker) are mounted from the HPC namespace. The
+project's admin machine key (`mlflow-svc`) is not mounted into a runner pod.
+
+### Security: whose job it is (PRD kaos#1911 AC-14)
+
+The job object is created by the platform's follower, which runs as the shared account `hpc-submitter`. Admission on the
+cluster lets only the platform's follower template use that account. The controller additionally refuses a job whose
+`spec.app` differs from the app of the Workflow it names, or that names no Workflow, before anything is booked or started.
 
 ### The step contract on HPC (PRD kaos#1911)
 
@@ -257,6 +266,7 @@ RBAC roles shipped by the chart (bound per namespace by whoever integrates the o
 |---|---|---|
 | `hpcargoworkflowjob-submitter-role` | pipeline service accounts (follower) | `hpcargoworkflowjobs`: create, delete, get, list, watch. **No status verbs.** |
 | `hpcargoworkflowjob-runner-role` | `hpc-runner` in each env namespace | `hpcargoworkflowjobs`: get; `/status`: get, patch |
+| Role made by the platform operator's app composition, not by this controller (in the app's namespace) | `hpc-runner` of the project's HPC namespace | `serviceaccounts/token`: create, of `<app>-workflow` only (`resourceNames`). The runner gets the app's identity in the data store with it |
 | `hpcargoworkflowjob-reporter-role` | **phase 0 only**: the in-pod runner's service account, next to the submitter role | `hpcargoworkflowjobs/status`: get, patch |
 | `meluxina-snapshot` (KAOS: the project's snapshot job, created by kubecore-operator; not part of this chart) | the snapshot CronJob's service account in the HPC namespace | `hpcsites/status`: patch, of its own site only (`resourceNames`) |
 
@@ -346,7 +356,7 @@ inside KAOS:
   project's environment and HPC namespaces `hpc.kaos.io/project`; tenants cannot set the label.
 - It binds the chart's `hpcargoworkflowjob-*` roles per namespace and runs the project's snapshot job that writes
   `HPCSite.status.storage`. The `hpc-runner-config` ConfigMap and the `meluxina-jwt`, `meluxina-staging` and
-  `mlflow-svc` Secrets the runner Jobs mount are provided in the project's HPC namespace by the same integration;
+  `mlflow-hpc` Secrets the runner Jobs mount are provided in the project's HPC namespace by the same integration;
   this operator only reads them.
 - The pipeline template's `step(...)` creates the `HPCArgoWorkflowJob` through the follower; `resumable`, `idle_timeout`
   and the Argo `platform.kubecore.io/idle-timeout` annotation are its names for fields and settings documented here.
@@ -402,7 +412,7 @@ supply yourself in a standalone cluster, per project:
 |---|---|---|
 | two namespaces labelled `hpc.kaos.io/project: <name>` | cluster | the job's namespace and the project's HPC namespace |
 | `HPCSite` | HPC namespace, same label | the site (an `https://` slurmrestd endpoint), classes, identity, budget |
-| ServiceAccount `hpc-runner`, ConfigMap `hpc-runner-config`, Secrets `meluxina-jwt` (key `token`) and `mlflow-svc` (key `ZITADEL_MACHINE_KEY`) | HPC namespace | what the runner Job of a served job mounts |
+| ServiceAccount `hpc-runner`, ConfigMap `hpc-runner-config`, Secrets `meluxina-jwt` (key `token`), `mlflow-hpc` (key `ZITADEL_MACHINE_KEY`, the project's non-admin machine user, from which the tracker token is minted; while it is absent every job is refused before staging, `AppIdentityUnavailable`: there is no fallback to the project's admin machine key) | HPC namespace | what the runner Job of a served job mounts |
 | RoleBinding of `hpcargoworkflowjob-runner-role` to `hpc-runner` | job namespace | lets the runner read the job and report its site job |
 
 If the site's certificate is not signed by a public CA, put its CA (`*.crt`) in `certs/` before building the

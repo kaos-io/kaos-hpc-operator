@@ -55,6 +55,9 @@ threading.Thread(target=httpd.serve_forever, daemon=True).start()
 ok = True
 for mode in ('moved', 'moved+refill'):
     tmp = tempfile.mkdtemp(prefix='race-hit-')
+    _KEY = os.path.join(tmp, 'lakefs-key.json')   # the app's key file, as the site's staging tool places it
+    with open(_KEY, 'w') as _f:
+        json.dump({'access_key_id': 'KAOSXA', 'secret_access_key': 'secret', 'expiration': '2099-01-01T00:00:00Z'}, _f)
     dest = os.path.join(tmp, 'cache', 'ds', COMMIT)
     for rel, body in TREE.items():
         os.makedirs(os.path.dirname(os.path.join(dest, 'data', rel)), exist_ok=True)
@@ -66,7 +69,7 @@ for mode in ('moved', 'moved+refill'):
     old = time.time() - 20 * 86400
     os.utime(marker, (old, old))
     env = dict(os.environ, RACE_MODE=mode, LAKEFS_ENDPOINT='http://127.0.0.1:%d' % httpd.server_address[1],
-               LAKEFS_BEARER_TOKEN='w', DATASET_REPO='ds', DATASET_COMMIT=COMMIT,
+               LAKEFS_KEY_FILE=_KEY, DATASET_REPO='ds', DATASET_COMMIT=COMMIT,
                DATASET_CACHE=os.path.join(tmp, 'cache'), DATASET_DIRFILE=os.path.join(tmp, 'dirfile'),
                SLURM_JOB_ID='9')
     p = subprocess.run([sys.executable, '-c', HOOK, payload], env=env, stdout=subprocess.PIPE,

@@ -35,8 +35,9 @@ const (
 	SecretJWT = "meluxina-jwt"
 	// SecretStaging holds the stager key.
 	SecretStaging = "meluxina-staging"
-	// SecretMLflow holds the data-plane machine key (key ZITADEL_MACHINE_KEY).
-	SecretMLflow = "mlflow-svc"
+	// SecretHPC holds the project's second, non-admin machine user (key ZITADEL_MACHINE_KEY): the tracker token of a job
+	// is minted from it. Optional at the pod level: without it the runner refuses the job before staging (AppIdentityUnavailable).
+	SecretHPC = "mlflow-hpc"
 
 	// LabelJobUID and LabelAttempt label a runner Job; AnnotationJobName and AnnotationJobNamespace
 	// name the HPCArgoWorkflowJob (names can exceed the 63 characters a label allows).
@@ -49,7 +50,7 @@ const (
 	// Mount paths of the Secrets.
 	MountJWT     = "/etc/meluxina-jwt"
 	MountStaging = "/etc/meluxina-staging"
-	MountMLflow  = "/etc/mlflow-svc"
+	MountHPC     = "/etc/mlflow-hpc"
 
 	// Entrypoint of the runner program inside the image (the runner/ directory).
 	runnerCommand = "/runner/main.py"
@@ -297,13 +298,13 @@ func podSpec(cfg Config, env []corev1.EnvVar) corev1.PodSpec {
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: SecretJWT, MountPath: MountJWT, ReadOnly: true},
 				{Name: SecretStaging, MountPath: MountStaging, ReadOnly: true},
-				{Name: SecretMLflow, MountPath: MountMLflow, ReadOnly: true},
+				{Name: SecretHPC, MountPath: MountHPC, ReadOnly: true},
 			},
 		}},
 		Volumes: []corev1.Volume{
 			secretVolume(SecretJWT, false), // fail fast: the runner cannot start without a Slurm token
 			secretVolume(SecretStaging, true),
-			secretVolume(SecretMLflow, false),
+			secretVolume(SecretHPC, true),
 		},
 	}
 }
@@ -367,7 +368,7 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 		{"HPC_SCRATCH", site.Spec.Profile.ScratchRoot}, {"HPC_HOME", homeOf(site)},
 		{"HPC_CLASSES_JSON", classes}, {"HPC_ENDPOINT", site.Spec.Profile.Endpoint},
 		{"HPC_REST_VERSION", site.Spec.Profile.RESTVersion},
-		{"ZITADEL_MACHINE_KEY_FILE", MountMLflow + "/ZITADEL_MACHINE_KEY"},
+		{"ZITADEL_HPC_KEY_FILE", MountHPC + "/ZITADEL_MACHINE_KEY"},
 	}
 	if p := job.Status.Placement; p != nil {
 		// The lane the controller chose (PRD-HPC-1461 D-68). Unset: the runner uses the class's QoS.

@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 
 from . import image as imagemod
-from . import jobscript, payloads, result, settings, staging, wallet
+from . import identity, jobscript, payloads, result, settings, staging, wallet
 from .logs import LogStreamer
 from .reporter import Reporter, checkpoint_uri
 
@@ -33,13 +33,20 @@ def checkpoint_every_seconds(context):
 from .sharing import inputs_in_script
 from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_site_down, lane_refusal,
                     share_state, site_time, submit_limit_refusal)
-from .settings import (CHECKPOINT_EXIT, CONTEXT_ENV, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT,
+from .settings import (APP_IDENTITY_UNAVAILABLE_EXIT, CHECKPOINT_EXIT, CONTEXT_ENV, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT,
                        INVALID_IMAGE_EXIT, INVALID_RESULT_EXIT, OFFER_S, ROLE_POLL_S, RESERVED_NAME_EXIT, DATASET_NOT_STAGED_EXIT,
                        SHARED_DATASET_UNAVAILABLE_EXIT,
                        RESULT_NOT_HANDED_BACK_EXIT, STAGING_MISMATCH_EXIT, SUBMIT_LIMIT_EXIT, Settings, image_problem,
                        registry_token_host)
 
 POLL_S = 30
+# The app's key for the data store lives about an hour and a job runs up to 12 h: the runner puts a new key into the job's
+# key file on the site every KEY_REFRESH_S while the job is queued or running (a failed refresh is asked again at every
+# poll). The old key is still good for about half an hour then, so one failed round never ends a job.
+KEY_REFRESH_S = 25 * 60
+KEY_SLACK_S = 300          # a key that ends sooner than this is not used for a call of the runner's own
+KEY_TRIES = 4
+KEY_TRY_WAIT_S = 5
 # --cancel-only (the controller's orphan sweep, PRD AC-08): how long one such runner works before it gives up
 # (the controller starts another), how often it looks, and how long a site that no longer knows the job
 # must say so before that counts as an answer.
@@ -123,17 +130,21 @@ class View:
 
 class Runner:
     def __init__(self, cfg, slurm=None, stager=None, reporter=None, logs=None,
-                 sleep=time.sleep, mint=None, clock=time.time):
+                 sleep=time.sleep, mint=None, clock=time.time, keys=None):
         self.cfg = cfg
         self.sleep = sleep
         self.clock = clock
         self.watch_jid, self.watch_since = None, 0.0     # when this runner began waiting for jid's observation
         self.last_rest, self.last_reason = 0.0, 0.0
         self.slurm = slurm or Slurm(cfg)
-        self.stager = stager or staging.Stager(cfg)
+        self.stager = stager or staging.Stager(cfg, secrets=self.held_secrets)
         self.reporter = reporter or Reporter(cfg)
-        self.logs = logs or LogStreamer(cfg, self.stager, self.reporter, secrets=lambda: (self.wallet,))
-        self._mint = mint or (lambda: wallet.mint_wallet(cfg.env))
+        self.key, self.key_before = None, None   # the app's key; the one before it (a step may still print it)
+        self.key_for, self.key_next = None, 0.0   # the app's key; the site job its file was last written for; when to write again
+        self.key_noted = False        # a failed key refresh is written into status.run.message; cleared when one lands
+        self.logs = logs or LogStreamer(cfg, self.stager, self.reporter, secrets=self.held_secrets)
+        self._mint = mint or (lambda: wallet.mint_tracker(cfg.env))      # the tracker's token only
+        self._keys = keys or (lambda: identity.app_key(self.reporter.kube, cfg))
         self.jid = None
         self.submitted_at = 0.0      # when the current site job was submitted (its queue time starts here)
         self.replacing = None        # the queued job being replaced, noted into the next report
@@ -163,11 +174,15 @@ class Runner:
             self.stage_tried = True
             cfg.check_job()
             self.prepare_handback()
+            try:
+                staging.check_tool(self.stager)     # the app's key reaches the job through the staging tool: its contract first
+            except staging.ToolAbsent:
+                pass                                # the key is placed again at every poll, and said so when it cannot be
             staging_began = time.time()
             for inp in cfg.inputs:
                 info = {}
                 # note: how far a long copy is; deadline: 72 hours in total for all inputs, from the first one's start
-                self.staged[inp['name']] = staging.stage_dataset(cfg, inp, self.stager, self._mint, info=info,
+                self.staged[inp['name']] = staging.stage_dataset(cfg, inp, self.stager, self.current_key, info=info,
                                                                  note=self.reporter.pending_reason,
                                                                  deadline=staging_began + staging.STAGE_MAX_BUDGET_S)
                 self.reporter.note_staging(info)    # carried by every later report; the follower prints it
@@ -293,12 +308,13 @@ class Runner:
             env.append('KAOS_CKPT_EVERY_S=%d' % every)
         if cfg.env.get('KAOS_LIB_SUPPORT'):      # the one variable a job's spec.env may hand to the step
             env.append('KAOS_LIB_SUPPORT=' + cfg.env['KAOS_LIB_SUPPORT'])
-        w = self.wallet      # minted by prepare_handback, before anything was staged or cancelled
-        # Public endpoints only, short-lived bearer only (T-03). MLflow's client honors MLFLOW_TRACKING_TOKEN
-        # natively; the stage-in, the result hand-back and any in-step lakeFS API calls ride the same bearer.
+        w = self.wallet      # the tracker's token, minted by prepare_handback, before anything was staged or cancelled
+        # Public endpoints only, short-lived credentials only (T-03). MLflow's client honors MLFLOW_TRACKING_TOKEN
+        # natively. The data store gets NO credential from this environment: the job reads the app's key from a file
+        # (jobscript.py KEY_MOUNT) that keep_key writes on the site and replaces before the key ends.
         if cfg.mlflow_url:
             env += ['MLFLOW_TRACKING_URI=' + cfg.mlflow_url, 'MLFLOW_TRACKING_TOKEN=' + w]
-        env += ['LAKEFS_ENDPOINT=' + cfg.lakefs_url, 'LAKEFS_BEARER_TOKEN=' + w,
+        env += ['LAKEFS_ENDPOINT=' + cfg.lakefs_url,
                 'KAOS_OUTPUTS_REPO=' + cfg.outputs_repo,     # for the result hand-back only
                 'STAGEIN_B64=' + payloads.b64(payloads.STAGEIN),
                 'HANDBACK_B64=' + payloads.b64(payloads.HANDBACK)]
@@ -374,14 +390,106 @@ class Runner:
         sys.exit(0)   # reported: the pod ends cleanly, the controller ends the job SubmitLimit
 
     def prepare_handback(self):
-        """Everything the way back needs, found first: the lakeFS endpoint, the app, and the data-plane token (minted
-        here, used by the site job). Before any staging, and before a resubmit cancels the queued job: a run that
-        cannot hand its result back ends the attempt with nothing staged, submitted or cancelled."""
+        """Everything the way back needs, found first: the lakeFS endpoint, the app, the app's key for the data store
+        and the tracker's token (both minted here; the key is placed on the site by keep_key, the token goes in the
+        job's environment). Before any staging, and before a resubmit cancels the queued job: a run that cannot hand
+        its result back, or whose app has no identity in the data store, ends the attempt with nothing staged,
+        submitted or cancelled."""
         self.check_handback()
-        w = self.wallet = self._mint()
+        try:
+            self.take_key(self.new_key())
+            w = self.wallet = self._mint()
+        except identity.AppIdentityUnavailable as e:
+            self.fail_identity(e)
         self.wallet_exp = wallet.wallet_exp(w)
-        if not w:
-            self.fail_handback('no data-plane token could be minted for this job')
+        if not w and self.cfg.mlflow_url:
+            self.fail_handback('no tracking token could be minted for this job')
+
+    def new_key(self):
+        """A fresh key of the app. A data store that does not answer is asked again a few times; it then counts as no
+        identity (the run is refused before anything is staged, the attempt can be run again)."""
+        err = None
+        for n in range(KEY_TRIES):
+            try:
+                return self._keys()
+            except identity.AppIdentityUnavailable:
+                raise
+            except Exception as e:
+                err = e
+                print('app key: not obtained (%s)%s' % (e, ', asking again' if n < KEY_TRIES - 1 else ''), flush=True)
+                if n < KEY_TRIES - 1:
+                    self.sleep(KEY_TRY_WAIT_S)
+        raise identity.AppIdentityUnavailable(
+            'the app %s has no identity for its data right now: the data store or the cluster did not answer (%s). '
+            'Nothing was staged and nothing was submitted to the site. Run the step again' % (self.cfg.app, str(err)[:200]))
+
+    def current_key(self):
+        """The app's key for a call of the runner's own, one that does not end within KEY_SLACK_S."""
+        if not self.key or self.clock() > self.key.expires - KEY_SLACK_S:
+            self.take_key(self.new_key())
+        return self.key
+
+    def take_key(self, key):
+        """The app's key is now `key`; the one it replaces is kept for held_secrets."""
+        if self.key and self.key.secrets() != key.secrets():
+            self.key_before = self.key
+        self.key = key
+        return key
+
+    def held_secrets(self):
+        """What the log stream must never print: the tracker's token and the app's key, and the key before it (the
+        key file is replaced while a step runs; the step may still hold what it read earlier)."""
+        return ((self.wallet,) + (self.key.secrets() if self.key else ())
+                + (self.key_before.secrets() if self.key_before else ()))
+
+    def keep_key(self):
+        """The app's key file for the current site job, on the site (the staging tool's `key` verb: folder 0700, file
+        0600, replaced atomically). Written when the job is new and then every KEY_REFRESH_S, from the first poll to
+        the job's end; a job queued for hours gets its key replaced while it waits. A round that fails is logged,
+        written into the job's status (message) and asked again at the next poll; the job is never stopped for it, and
+        the old key stays in the file until a new one lands."""
+        if not self.jid:
+            return
+        now = self.clock()
+        new_job = self.key_for != self.jid
+        if not new_job and now < self.key_next:
+            return
+        try:
+            if new_job and self.key and self.key.expires - now > KEY_REFRESH_S:
+                key = self.key            # the one prepare_handback obtained a moment ago
+            else:
+                key = self.take_key(self.new_key())
+            rc, ev = self.stager(['key', '--contract', staging.CONTRACT, '--job', self.jid], iter([key.record()]), quiet=True)
+            staging.refused(rc, ev)
+            if rc != 0 or not any(e.get('event') == 'key' for e in ev):
+                raise RuntimeError('the staging tool answered %s' % rc)
+        except Exception as e:
+            print('app key: not placed for site job %s (%s): asking again at the next poll' % (self.jid, e), flush=True)
+            self.note_key('the app\'s data store key could not be renewed on the site (%s); trying again' % str(e)[:200])
+            return
+        self.key_for, self.key_next = self.jid, now + KEY_REFRESH_S
+        print('app key: placed for site job %s, replaced again in %d min' % (self.jid, KEY_REFRESH_S // 60), flush=True)
+        self.note_key(None)
+
+    def note_key(self, text):
+        """status.run.message while a key refresh fails; cleared when one lands. The next report writes the run whole."""
+        if text is None and not self.key_noted:
+            return
+        try:
+            self.reporter.patch({'run': {'message': text}})
+            self.key_noted = text is not None
+        except Exception as e:
+            print('app key: note not written (%s)' % e, flush=True)
+
+    def fail_identity(self, err):
+        """The app has no identity in the data store: one terminal report (FAILED, exit 247, reason
+        AppIdentityUnavailable) and nothing is submitted to the site."""
+        msg = str(err)
+        print('ERROR: AppIdentityUnavailable:', msg, flush=True)
+        self.write_termination('AppIdentityUnavailable: ' + msg)
+        self.reporter.report(must=True, state='FAILED', exitCode=APP_IDENTITY_UNAVAILABLE_EXIT, terminal=True,
+                             endTime=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), message=msg[:500])
+        sys.exit(0)   # reported: the pod ends cleanly, the controller ends the job AppIdentityUnavailable
 
     def check_handback(self):
         """A step must be able to hand its result back, or it can never end well (PRD kaos#1911 CON-04: fail
@@ -425,30 +533,27 @@ class Runner:
             self.replacing = {'old': str(self.jid), 'reason': queue_lost,
                               'queued': max(0, int(time.time() - self.submitted_at)) if self.submitted_at else 0}
         self.cfg.check_job()             # before the cancel: a job that cannot be replaced is not cancelled for it
-        self.prepare_handback()          # likewise: no token, no cancel
+        self.prepare_handback()          # likewise: no identity, no token, no cancel
         self.logs.finish()               # what the old job wrote, before its offset is replaced
         self.slurm.cancel(self.jid)
         self.jid = self.submit()
+        self.keep_key()
         self.logs.attach(self.jid, 0)
         self.pending_reason = None
         self.reported = None
         self.hosted = None
 
     def renew_wallet(self):
-        """A new token after a long staging. When it cannot be minted, the old one is kept only while it has
-        staging.TOKEN_MIN_LEFT_S left: a job submitted with a token about to end could not hand its result back."""
+        """A new tracker token after a long staging (the one minted before it would reach the site job near its end).
+        When it cannot be minted, the old one is kept only while it has staging.TOKEN_MIN_LEFT_S left: a job submitted
+        with a token about to end could not report to the experiment tracker. A job without a tracker has none to renew.
+        The data store needs no renewal here: the app's key is replaced on the site by keep_key."""
+        if not self.cfg.mlflow_url:
+            return
         w = staging.renewed_wallet(self._mint, self.wallet)
         if not w:
-            self.fail_handback('no data-plane token could be minted for this job')
+            self.fail_handback('no tracking token could be minted for this job')
         self.wallet, self.wallet_exp = w, wallet.wallet_exp(w)
-
-    def fresh_wallet(self):
-        """The wallet minted at submit lives 12 h; a long job ends after that. Outputs and the
-        checkpoint check need a valid one, so a wallet about to expire is minted again."""
-        if not self.wallet or time.time() > self.wallet_exp - wallet.REFRESH_SLACK_S:
-            w = self._mint()
-            if w:
-                self.wallet, self.wallet_exp = w, wallet.wallet_exp(w)
 
     # ------------------------------------------------------------------ outputs and checkpoints
 
@@ -457,7 +562,7 @@ class Runner:
         base = '%s/api/v1/repositories/%s/branches/hpc-%s-%s' % (
             self.cfg.lakefs_url, urllib.parse.quote(self.cfg.outputs_repo, safe=''), self.cfg.wf_uid, self.cfg.step)
         return urllib.request.urlopen(urllib.request.Request(
-            base + path, method=method, headers={'Authorization': 'Bearer ' + self.wallet}), timeout=60).read()
+            base + path, method=method, headers={'Authorization': self.current_key().auth()}), timeout=60).read()
 
     def handed_back(self, name):
         """The bytes of one object the job handed back for THIS site job, or None when it is not there. Anything
@@ -485,10 +590,11 @@ class Runner:
         checked and written again here. Raises ResultNotHandedBack when the step wrote no result or nothing
         arrived, InvalidResult when the file is not a result: the job then fails. A step that ended well always
         has a result; nothing stands in for a missing one (PRD kaos#1911 CON-04)."""
-        self.fresh_wallet()
-        if not self.wallet:
-            raise result.ResultNotHandedBack('the step ended well, but no data-plane token could be minted to fetch its '
-                                             'result. No result was published')
+        try:
+            self.current_key()
+        except identity.AppIdentityUnavailable as e:
+            raise result.ResultNotHandedBack('the step ended well, but its result could not be fetched: %s. No result was '
+                                             'published' % e) from None
         raw = self.handed_back('kaos-result.json')
         if raw is not None:
             return result.check(raw)
@@ -673,9 +779,13 @@ class Runner:
             return self.end_before_staging('DatasetNotStaged', DATASET_NOT_STAGED_EXIT, e)
         except staging.SharedDatasetUnavailable as e:
             return self.end_before_staging('SharedDatasetUnavailable', SHARED_DATASET_UNAVAILABLE_EXIT, e)
+        except identity.AppIdentityUnavailable as e:
+            return self.end_before_staging('AppIdentityUnavailable', APP_IDENTITY_UNAVAILABLE_EXIT, e)
         if adopted:
             print('adopting existing job', jid, flush=True)
         self.jid = jid
+        if not adopted:
+            self.keep_key()     # an adopted job may have ended: the poll loop places a key once its state is known to be live
         self.logs.attach(self.jid, offset)
         self.logs.start()
         try:
@@ -801,8 +911,11 @@ class Runner:
                 jid = self.jid
                 v = self.view()
                 if v is None:
+                    self.keep_key()     # the state is unknown, the last known one was live
                     continue
                 job, st = v.job, v.st
+                if not any(x in TERMINAL for x in st):
+                    self.keep_key()     # never for a job that has ended: the site tool refuses it, and a key is not asked for
                 print('state:', st, flush=True)
                 share = share_state(comment_of(job))
                 info = checkpoint_info(comment_of(job))

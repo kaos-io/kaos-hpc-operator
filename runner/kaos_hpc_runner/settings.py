@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import sys
+import urllib.parse
 
 # The site's API when the controller does not name one (MeluXina).
 DEFAULT_ENDPOINT = 'https://slurm-api.lxp.lu'
@@ -19,7 +20,7 @@ DEFAULT_LOGIN = 'login.lxp.lu:8822'
 # Mounted by the controller (contract section 2).
 TOKEN_FILE = '/etc/meluxina-jwt/token'
 STAGING_DIR = '/etc/meluxina-staging'
-MACHINE_KEY_FILE = '/etc/mlflow-svc/ZITADEL_MACHINE_KEY'
+HPC_KEY_FILE = '/etc/mlflow-hpc/ZITADEL_MACHINE_KEY'     # the project's second, non-admin machine user (Secret mlflow-hpc)
 
 # PRD-HPC-1461 D-44: exit 85 = the step saved its checkpoint.
 CHECKPOINT_EXIT = 85
@@ -42,6 +43,9 @@ DATASET_NOT_STAGED_EXIT = 246
 # The runner reports it (FAILED, no site job) when a dataset another project shares cannot be read: not shared (any more),
 # the owner unknown or not reachable from a site, or the site could not stage it (a job never downloads it itself).
 SHARED_DATASET_UNAVAILABLE_EXIT = 245
+# The runner reports it (FAILED, no site job) when the app has no identity in the data store (identity.py); the job script
+# exits with it when the app's key never reached the site.
+APP_IDENTITY_UNAVAILABLE_EXIT = 247
 # The step ended well but its result could not be handed back: the job script exits with it when it cannot read or
 # upload the result file; the runner reports it (FAILED) when it cannot fetch what the job uploaded, or before it
 # submits anything when the run has no way to hand a result back (reason ResultNotHandedBack).
@@ -60,6 +64,20 @@ OFFER_S = 60   # PRD-1609: a sharing job waits this long for a host of its scope
 # offer window. The controller plans it again (and the runner submits it as a host) long before this passes.
 GUEST_HOLD_S = 12 * 3600
 ROLE_POLL_S = 30   # how often a waiting guest reads the controller's plan for it
+
+
+def https_or_loopback(url):
+    """True for an https URL, or for the loopback address the local lab uses (host exactly 127.0.0.1 or localhost, any
+    port, http). Decided by parsing the URL, never by its prefix: `http://127.0.0.1.evil.example` is neither."""
+    try:
+        u = urllib.parse.urlsplit(url or '')
+        host = u.hostname
+        u.port        # a port that is not a number is no URL
+    except ValueError:
+        return False
+    if not host or u.username is not None or u.password is not None:
+        return False
+    return u.scheme == 'https' or (u.scheme == 'http' and host in ('127.0.0.1', 'localhost'))
 
 
 def fail_start(msg, code=2):
@@ -223,10 +241,12 @@ class Settings:
         self.login_port = self.login_port or '22'
         # Operator-rendered data-plane endpoints (hpc-runner-config).
         self.lakefs_url = (g('LAKEFS_EXTERNAL_URL') or '').rstrip('/')
+        if self.lakefs_url and not https_or_loopback(self.lakefs_url):
+            fail_start('LAKEFS_EXTERNAL_URL is not an https address: the app\'s key is never sent in clear')
         self.mlflow_url = g('MLFLOW_EXTERNAL_URL') or ''
         # The app's outputs repository, from the job's app (spec.app): the step's result is handed back through
         # a hand-off branch of it.
-        app = g('KAOS_APP') or ''
+        app = self.app = g('KAOS_APP') or ''
         self.outputs_repo = 'outputs-' + app if re.fullmatch('[a-z0-9]([-a-z0-9]*[a-z0-9])?', app) else ''
 
     def apply_plan(self, placement):

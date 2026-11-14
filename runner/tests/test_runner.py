@@ -108,7 +108,7 @@ class Net:
             name = urllib.parse.unquote(url.split("path=", 1)[1])
             if name.startswith("hpc-outputs/"):
                 assert "/repositories/outputs-yolo/branches/hpc-%s-model-training/objects?" % WF in url, url
-                assert req.get_header("Authorization", "").startswith("Bearer "), "fetched with the wallet"
+                assert req.get_header("Authorization", "").startswith("Basic "), "fetched with the app's key"
                 self.fetched.append(name)
                 if self.fail:
                     raise urllib.error.HTTPError(url, self.fail.pop(0), "x", {}, io.BytesIO(b"{}"))
@@ -138,6 +138,11 @@ class NoStager:
     def __call__(self, words, feed=None, quiet=False):
         if words[0] == "log":
             return 0, [{"event": "log", "offset": 0, "data": ""}]
+        if words[0] == "version":
+            return 0, [{"event": "version", "contract": runmod.staging.CONTRACT}]
+        if words[0] == "key":
+            self.keys = getattr(self, "keys", []) + [list(feed)[0]]
+            return 0, [{"event": "key"}]
         raise AssertionError(words)
 
 
@@ -161,6 +166,7 @@ def rig(monkeypatch):
     def make(slurm, status=None, wallet="wallet.jwt", stager=None, **env):
         cfg = helpers.settings(**env)
         r.cfg, r.slurm = cfg, slurm
+        r.keys = helpers.FakeKeys()
         slurm.cfg = cfg
         r.kube = helpers.FakeKube(cfg, status=status)
         r.reporter = rep.Reporter(cfg, r.kube, sleep=lambda s: None)
@@ -169,7 +175,7 @@ def rig(monkeypatch):
         r.logs = logsmod.LogStreamer(cfg, r.stager, r.reporter, out=r.out.append)
         r.logs.start = lambda: None           # the tests drive the stream by hand
         r.runner = runmod.Runner(cfg, slurm=slurm, stager=r.stager, reporter=r.reporter, logs=r.logs,
-                                 sleep=lambda s: None, mint=lambda: wallet)
+                                 sleep=lambda s: None, mint=lambda: wallet, keys=r.keys)
         r.sigterm = []
         monkeypatch.setattr(runmod.signal, "signal", lambda s, h: r.sigterm.append((s, h)))
         return r
@@ -247,7 +253,7 @@ def test_the_submitted_job_is_the_proven_one(rig):
     assert (env["KAOS_ATTEMPT"], env["KAOS_RESUMABLE"], env["KAOS_RESUME_REF"]) == ("3", "1", CID)
     assert env["KAOS_RESUME_PREFIX"] == "kaos-ckpt/%s/model-training/000002.tar" % WF and env["HPC_GPUS"] == "4"
     assert env["KAOS_PROJID"] == "1" and env["KAOS_CKPT_BUDGET_PCT"] == "10" and "CKPT_B64" in env
-    assert env["MLFLOW_TRACKING_TOKEN"] == "wallet.jwt" and env["LAKEFS_BEARER_TOKEN"] == "wallet.jwt"
+    assert env["MLFLOW_TRACKING_TOKEN"] == "wallet.jwt" and "LAKEFS_BEARER_TOKEN" not in env
     assert env["LAKEFS_ENDPOINT"] == "https://lakefs.example" and env["KAOS_OUTPUTS_REPO"] == "outputs-yolo"
     assert env["KAOS_LIB_SUPPORT"] == '{"a":1}' and "HANDBACK_B64" in env and "STAGEIN_B64" in env
     # The step contract: the one value the step receives, unchanged; the inputs to present; nothing of before.
@@ -266,7 +272,7 @@ def test_the_submitted_job_is_the_proven_one(rig):
 # PRD kaos#1911 CON-04 (fail closed, before GPU). Before: a job without a wallet was submitted without its
 # data-plane environment, ran, and its outputs were silently never staged out.
 @pytest.mark.parametrize("make, said", [
-    (dict(wallet=""), "no data-plane token could be minted"),
+    (dict(wallet=""), "no tracking token could be minted for this job"),
     (dict(LAKEFS_EXTERNAL_URL=None), "no the project's lakeFS endpoint"),
     (dict(KAOS_APP=None), "no the app's outputs repository"),
 ])
@@ -284,7 +290,7 @@ def test_a_run_that_cannot_hand_its_result_back_is_never_submitted(rig, capsys, 
 
 
 @pytest.mark.parametrize("make, said", [
-    (dict(wallet=""), "no data-plane token could be minted"),
+    (dict(wallet=""), "no tracking token could be minted for this job"),
     (dict(LAKEFS_EXTERNAL_URL=None), "no the project's lakeFS endpoint"),
     (dict(KAOS_APP=None), "no the app's outputs repository"),
 ])
@@ -313,7 +319,7 @@ def test_a_resubmit_that_cannot_hand_its_result_back_cancels_nothing(rig):
     assert slurm.cancelled == [] and slurm.submitted == []
     run = rig.kube.run
     assert (run["state"], run["exitCode"], run["terminal"]) == ("FAILED", 243, True)
-    assert "no data-plane token could be minted" in run["message"]
+    assert "no tracking token could be minted for this job" in run["message"]
 
 
 def test_a_resubmit_with_a_token_cancels_the_queued_job_and_submits_the_next(rig):
@@ -408,7 +414,7 @@ def test_a_sharing_gpu_job_is_a_host_with_an_offer_window_and_inputs_in_its_scri
     assert job["name"] == "kaos-a1b2c3d4e5-%s-model-training-01234567-a1" % WF
     assert sub["script"].split("\n")[1] == "# kaos-job v2 scope=a1b2c3d4e5"
     assert [e.split("=")[0] for e in job["environment"]] == ["PATH", "HOME", "USER"], "secrets leave the Slurm environment"
-    assert "export LAKEFS_BEARER_TOKEN=wallet.jwt" in sub["script"] and "export KAOS_SLOTS_B64=" in sub["script"]
+    assert "LAKEFS_BEARER_TOKEN" not in sub["script"] and "wallet.jwt" in sub["script"] and "export KAOS_SLOTS_B64=" in sub["script"]
     assert job["time_limit"] == 480, "twice the step, below the class cap"
     assert job["begin_time"]["set"] and "requeue" not in job
     slurm2 = FakeSlurm({"5001": [acc("COMPLETED")]})
@@ -865,6 +871,8 @@ def test_a_job_that_ended_243_on_the_node_is_reported_with_what_its_hand_back_sa
     class LogStager(NoStager):
         def __call__(self, words, feed=None, quiet=False):
             import base64
+            if words[0] != "log":
+                return super().__call__(words, feed, quiet)
             data = b"epoch 3 done\nresult hand-back: lakeFS did not take the step's result (POST https://l/x): HTTP 507 full\n"
             return 0, [{"event": "log", "offset": len(data), "data": base64.b64encode(data[int(words[4]):]).decode()}]
     rig.make(slurm, stager=LogStager())
@@ -886,16 +894,25 @@ def test_a_guest_on_a_shared_node_hands_its_result_back_like_a_job_alone(rig):
     assert rig.kube.run["state"] == "COMPLETED" and rig.kube.status["result"] == helpers.fixture("result-model.wire")
 
 
-def test_a_long_job_gets_a_fresh_wallet_for_its_result(rig, monkeypatch):
+def test_a_long_job_gets_a_fresh_key_for_its_result(rig, monkeypatch):
+    """The key obtained at submit ends in an hour; the hand-back of a 12 h job is read with a new one."""
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    minted = iter("w%d" % n for n in range(1, 99))
     r = rig.make(slurm)
-    r.runner._mint = lambda: next(minted)
+    r.keys.expires = 100.0 + 1e9           # a key the clock below has passed by the end of the job
+    clock = [100.0]
+    r.runner.clock = lambda: clock[0]
     seen = []
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 100.0 if w == "w1" else 1e12)
-    monkeypatch.setattr(r.runner, "handed_back", lambda name: seen.append(r.runner.wallet))
-    r.runner.run()
-    assert seen and "w1" not in seen, "the wallet minted at submit (w1) had expired by the end of the job"
+
+    def handed(name):
+        seen.append(r.runner.current_key().secret)
+        return helpers.fixture("result-model.wire").encode() if name == "kaos-result.json" else None
+    monkeypatch.setattr(r.runner, "handed_back", handed)
+    r.runner.prepare_handback()
+    first = r.runner.key.secret
+    r.keys.expires = 1e12
+    clock[0] = 100.0 + 1e9 + 1
+    r.runner.fetch_result()
+    assert seen and first not in seen, "the key obtained at submit had expired by the end of the job"
 
 
 # ---------------------------------------------------------------- SIGTERM (the controller deleted the runner Job)
@@ -1636,7 +1653,7 @@ def test_a_token_about_to_end_after_a_long_staging_that_cannot_be_minted_again_f
     assert slurm.submitted == []
     run = rig.kube.run
     assert run["state"] == "FAILED" and run["exitCode"] == 243 and run["terminal"] is True
-    assert "no data-plane token could be minted for this job" in run["message"]
+    assert "no tracking token could be minted for this job" in run["message"]
     assert "ResultNotHandedBack" in capsys.readouterr().out
 
 

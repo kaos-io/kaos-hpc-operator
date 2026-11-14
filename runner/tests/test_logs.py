@@ -20,6 +20,10 @@ class LogStager:
         return False            # no staging key: the runner stages nothing and only streams the log
 
     def __call__(self, words, feed=None, quiet=False):
+        if words[0] == "version":       # a runner asks the tool's contract and places the app's key; neither is a log call
+            return 0, [{"event": "version", "contract": 4}]
+        if words[0] == "key":
+            return 0, [{"event": "key"}]
         assert words[0] == "log" and quiet, "read-only, and its data is printed by the streamer, not echoed"
         w = dict(zip(words[1::2], words[2::2]))
         self.calls.append((w["--job"], int(w["--offset"])))

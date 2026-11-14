@@ -123,7 +123,7 @@ job's environment.
 | variable | why |
 |---|---|
 | `KAOS_STEP_CONTEXT` | the step's context |
-| `LAKEFS_ENDPOINT`, `LAKEFS_BEARER_TOKEN` | the data store; kaos-lib reads the bearer from the environment only |
+| `LAKEFS_ENDPOINT` | the data store. Its credential is NOT in the environment: the step reads the app's own key from the file `LAKEFS_KEY_FILE` (`/kaos/key/lakefs-key.json`, see below) |
 | `MLFLOW_TRACKING_URI`, `MLFLOW_TRACKING_TOKEN` | MLflow; its client reads the token from the environment only |
 | `KAOS_LIB_SUPPORT` | the one variable a job's `spec.env` may hand over |
 | `CUDA_VISIBLE_DEVICES`, `NVIDIA_VISIBLE_DEVICES` | GPU selection (renumbered by the script on a fenced shared node) |
@@ -152,7 +152,7 @@ and Evaluation of Environment Variables"): `$(...)`, backticks, `$VAR` and backs
 step's context carries run parameters, so the script does not hand the dangerous values to Apptainer at all, and does not
 depend on the flag or on the site's Apptainer version:
 
-* the context, the two bearers and `KAOS_LIB_SUPPORT` always travel as files, byte for byte;
+* the context, the tracker's bearer and `KAOS_LIB_SUPPORT` always travel as files, byte for byte;
 * any other value travels as `APPTAINERENV_<name>` only when every character is one of `A-Za-z0-9_.,:/+=@%[]-`, which
   evaluation leaves as it is; a value with any other character (a proxy with `$` in the password, a path with a space)
   travels as a file too;
@@ -162,8 +162,25 @@ depend on the flag or on the site's Apptainer version:
 * the folder is removed when the step ends and by the job's exit trap; the sweep below removes one a killed job left;
 * a value that cannot be written ends the step with exit 233 before it starts.
 
-So for as long as the step runs the two bearers are in a 0600 file of a 0700 folder as well as in the container's
-environment (the library reads them from the environment only; nothing the runner writes holds them after the step).
+So for as long as the step runs the tracker's bearer is in a 0600 file of a 0700 folder as well as in the container's
+environment (the library reads it from the environment only; nothing the runner writes holds it after the step).
+
+### The data store key
+The step does not hold a token for the data store. It holds a key of its APP, and only a file carries it: the runner writes
+`$SCR/kaos-tmp/key-<job>/lakefs-key.json` through the staging tool's `key` verb (folder 0700, file 0600, in the job's own
+folder, written to a temporary name and renamed, so a reader sees the whole old file or the whole new one), the folder is
+bound read-only at `/kaos/key` (a folder of its own: the loader above exports every file of `/kaos/env` as a variable), and
+`LAKEFS_KEY_FILE` points at the file in the container and in the script's own stage-in and hand-back programs. The key lives
+about an hour and a job up to 12: the runner replaces the file every 25 minutes while the job is queued or running, and the
+library reads it again before it signs a request. The key is never in the job script, the Slurm environment or the job log
+(the runner's log stream redacts it, and the key it replaced: a step may still print the one it read earlier; on the node the
+redaction program reads the file again whenever it changes and keeps the previous values too). The job waits up to 10 minutes for the first file and ends 247 without it. The folder
+is removed with the step's other folders; the sweep removes one a killed job left (`key-<digits>`). Before it waits for the
+file and before every read of it (the stage-in, the hand-back, the bind into the step) the script checks that the key folder
+and the file are owned by the job's user and are not symbolic links, and that the folder has no group or other permission
+bits; `$SCR/kaos-tmp` itself is checked the same way before anything is read from it. Otherwise the job ends 247 with one
+line saying which. The runner asks the staging tool to place or refresh the key only while the site job is not in a final
+state. A pending job that is cancelled leaves its key folder until the sweep of a later job of the same user removes it.
 
 The tests (`runner/tests/test_hardening.py`) run the whole script against a fake Apptainer that models the evaluation, and
 prove a 100 KB context holding `$HOME $(...)`, backticks, `\` and `"` arrives byte for byte and runs nothing.
@@ -181,11 +198,11 @@ prove a 100 KB context holding `$HOME $(...)`, backticks, `\` and `"` arrives by
   A guest's script copy in the claim folder is removed when its step ends or is handed back.
 * A failed job keeps its work folder; it holds no credential file. It is private to the site user (0700): only that
   account, which the platform's staging tool uses, can read it.
-* A job killed without a trap (SIGKILL, node loss) leaves `kaos-priv/host-<job>` (the bearer), `kaos-tmp/in-<job>` and
-  `kaos-tmp/env-<job>`. Every job script starts with `kaos_sweep "$SCR"` (`jobscript.SWEEP_HELPER`, self-contained shell):
+* A job killed without a trap (SIGKILL, node loss) leaves `kaos-priv/host-<job>` (the bearer), `kaos-tmp/in-<job>`,
+  `kaos-tmp/env-<job>` and `kaos-tmp/key-<job>`. Every job script starts with `kaos_sweep "$SCR"` (`jobscript.SWEEP_HELPER`, self-contained shell):
   it removes those whose Slurm job is no longer queued or running. It asks `squeue -u $USER`; when squeue cannot answer, or
   its answer lacks the asking job itself, it removes nothing. Only folders named exactly `host-<digits>`, `in-<digits>`,
-  `env-<digits>` directly under `<root>/kaos-priv` and `<root>/kaos-tmp`, owned by the caller, older than
+  `env-<digits>` and `key-<digits>` directly under `<root>/kaos-priv` and `<root>/kaos-tmp`, owned by the caller, older than
   `KAOS_SWEEP_MIN_AGE_MIN` (10) minutes; a link is never followed; an empty, relative or missing root does nothing. Any
   other caller (a cleanup workflow, the login-node staging tool) can run the same function: define it from
   `SWEEP_HELPER`, call `kaos_sweep <project scratch root>`.
@@ -201,7 +218,7 @@ The last 700 bytes of the job's output go into the job comment after `redact.py`
 replaced credentials. The same program redacts every line of the live log stream before the runner prints it. What it
 replaces, by shape or by exact value and never by "the line has the word key or token in it":
 
-* the exact values of the credentials the job holds (the data and MLflow bearer) and their base64, URL-safe base64, Basic
+* the exact values of the credentials the job holds (the MLflow bearer) and their base64, URL-safe base64, Basic
   (`oauth2accesstoken:<token>`) and percent-encoded forms;
 * `Bearer`/`Basic` values of 16 or more characters, the value after `Authorization:`, `Proxy-Authorization:`,
   `X-...-Key/Token/Secret:`, `Api-Key:`, a `Cookie:` header;

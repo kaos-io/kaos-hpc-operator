@@ -47,6 +47,7 @@ var _ = Describe("HPC invalid image", func() {
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: envNS},
 			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: image, WallTimeMinutes: 10,
 				StepName: "train", Command: []string{"x"}}}
+		withWorkflow(j)
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		return j
 	}
@@ -114,6 +115,20 @@ var _ = Describe("HPC invalid image", func() {
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonSharedDatasetUnavailable))
 		Expect(got.Status.Message).To(ContainSubstring("project other"))
+		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(0))))
+	})
+
+	It("should_end_a_job_whose_app_has_no_identity_as_failed_app_identity_unavailable_and_settle_nothing", func() {
+		j := reconcileOnce(newJob("no-identity", "zot.example/proj/app:v1"))
+		orig := j.DeepCopy()
+		code := hpcv1alpha1.ExitCodeAppIdentityUnavailable
+		j.Status.Run = &hpcv1alpha1.RunStatus{Attempt: 1, State: "FAILED", ExitCode: &code, Terminal: true,
+			Message: "the app yolo has no identity for its data: the service account yolo-workflow in ml-proj does not exist"}
+		Expect(k8sClient.Status().Patch(ctx, j, client.MergeFrom(orig))).To(Succeed())
+		got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonAppIdentityUnavailable))
+		Expect(got.Status.Message).To(ContainSubstring("app yolo"))
 		Expect(got.Status.SettledNodeMinutes).To(HaveValue(Equal(int64(0))))
 	})
 

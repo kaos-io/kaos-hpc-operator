@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -24,6 +25,16 @@ import (
 	"github.com/kaos-io/kaos-hpc-operator/internal/metrics"
 	"github.com/kaos-io/kaos-hpc-operator/internal/runnerjob"
 )
+
+// slowWorkflowReads fails every read of an Argo Workflow with a timeout and passes everything else on.
+type slowWorkflowReads struct{ client.Client }
+
+func (c slowWorkflowReads) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if u, ok := obj.(*unstructured.Unstructured); ok && u.GroupVersionKind() == workflowGVK {
+		return apierrors.NewTimeoutError("the API server is slow", 1)
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
 
 // Phase 1 (PRD-HPC-1461 D-58, D-64): a job with spec.stepName runs through a controller-owned
 // runner Job per attempt and is cancelled with its Workflow.
@@ -61,6 +72,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		wf.SetGroupVersionKind(workflowGVK)
 		wf.SetName(fmt.Sprintf("wf-%d", seq))
 		wf.SetNamespace(envNS)
+		wf.SetLabels(map[string]string{"platform.kubecore.io/app": "app"}) // the app of the pipeline's WorkflowTemplate
 		wf.Object["spec"] = map[string]any{"entrypoint": "main"}
 		Expect(k8sClient.Create(ctx, wf)).To(Succeed())
 		return wf
@@ -80,6 +92,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		if mod != nil {
 			mod(j)
 		}
+		withWorkflow(j) // a follower always names the Workflow: a job built without one gets a real one
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		return j
 	}
@@ -141,6 +154,42 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 			RunnerScheduling: runnerjob.Scheduling{NodeSelector: map[string]string{"pool": "system"}}}
 	})
 
+	It("refuses, before any runner starts, a job whose app is not the app of its Workflow", func() {
+		j := newServeJob(newWorkflow(), func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.App = "rival" })
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonAppIdentityUnavailable))
+		Expect(got.Status.Message).To(ContainSubstring("rival"))
+		Expect(runnerJob(got, 1)).To(BeNil())
+	})
+
+	It("refuses a serve-mode job that names no Workflow before any booking or runner", func() {
+		seq++
+		j := &hpcv1alpha1.HPCArgoWorkflowJob{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("hpc-%d", seq), Namespace: envNS},
+			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "reg.example/app:v1",
+				WallTimeMinutes: 60, Command: []string{"python", "train.py"}, StepName: "train"}}
+		Expect(k8sClient.Create(ctx, j)).To(Succeed())
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonAppIdentityUnavailable))
+		Expect(got.Status.Message).To(ContainSubstring("names no Workflow"))
+		Expect(got.Status.Booking).To(BeNil())
+		Expect(runnerJob(got, 1)).To(BeNil())
+	})
+
+	It("does not refuse a job whose Workflow cannot be read now: it asks again", func() {
+		wf := newWorkflow()
+		j := newServeJob(wf, nil)
+		flaky := &HPCArgoWorkflowJobReconciler{Client: slowWorkflowReads{k8sClient}, Scheme: r.Scheme, RunnerImage: r.RunnerImage}
+		_, err := flaky.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(j)})
+		Expect(err).To(HaveOccurred())
+		got := &hpcv1alpha1.HPCArgoWorkflowJob{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(j), got)).To(Succeed())
+		Expect(got.Status.Phase).NotTo(Equal(hpcv1alpha1.PhaseRefused))
+		Expect(runnerJob(got, 1)).To(BeNil())
+	})
+
 	It("creates the runner Job in the HPCSite namespace with env built only by the controller", func() {
 		wf := newWorkflow()
 		j := newServeJob(wf, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
@@ -173,7 +222,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		for _, v := range pod.Volumes {
 			volumes = append(volumes, v.Secret.SecretName)
 		}
-		Expect(volumes).To(ConsistOf("meluxina-jwt", "meluxina-staging", "mlflow-svc"))
+		Expect(volumes).To(ConsistOf("meluxina-jwt", "meluxina-staging", "mlflow-hpc"))
 
 		env := envMap(rj)
 		Expect(env).To(HaveKeyWithValue("HPC_JOB_NAMESPACE", envNS))

@@ -80,6 +80,7 @@ var _ = Describe("HPCArgoWorkflowJob node sharing plan", func() {
 		if mut != nil {
 			mut(j)
 		}
+		withWorkflow(j)
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
 		return j
 	}

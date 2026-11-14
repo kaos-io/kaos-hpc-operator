@@ -7,6 +7,8 @@ hack/local-lab/up.sh      # bring the lab up; safe to run twice
 hack/local-lab/down.sh    # tear it down (cluster, lake container and volume, local state)
 ```
 
+`hack/local-lab/app-identity.sh` declares a second app and checks what each app's key reaches: 200 on its own outputs repository and reads its own dataset repository, denied (the data store answers 401) on the other app's outputs and dataset and on a repository no app declares; writing a produced dataset is not checked (PRD kaos#1911 AC-14; run against a throwaway data store, passed).
+
 `hack/local-lab/smoke.sh` proves the lab: it runs a two-step workflow whose first step writes files to the
 lake and commits them and whose second step reads them back, and exits non-zero unless the checksums match: step two's copy of step one's files, and the dataset files it
 reads against the seeded files checksummed on the host. The fake site is pinged with its token, verified against its CA.

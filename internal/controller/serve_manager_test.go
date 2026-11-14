@@ -96,6 +96,7 @@ var _ = Describe("HPCArgoWorkflowJob controller wiring", func() {
 
 		job := &hpcv1alpha1.HPCArgoWorkflowJob{ObjectMeta: metav1.ObjectMeta{Name: "wired", Namespace: envNS},
 			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: 30, StepName: "s"}}
+		withWorkflow(job)
 		Expect(k8sClient.Create(ctx, job)).To(Succeed())
 
 		var rj batchv1.Job

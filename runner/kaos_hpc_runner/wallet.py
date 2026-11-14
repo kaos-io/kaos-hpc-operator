@@ -1,4 +1,5 @@
-"""The data-plane wallet: a short-lived Zitadel bearer minted from the mounted machine key.
+"""The tracker token: a short-lived Zitadel bearer minted from the mounted machine key (the data store has its own
+identity, identity.py; this token never goes to it).
 
 Same JWT-profile recipe as the seeded mlflow_zitadel_auth module (assertion aud = https://{domain};
 the project-audience scope is what makes the token acceptable to mlflow-oidc-auth AND carries the
@@ -18,7 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from . import settings
+from . import identity, settings
 
 # A still-PENDING job is replaced while its wallet (MLflow/lakeFS bearer, about 12 h lifetime) can still cover the
 # step's whole time limit: a job that starts later would lose access to its data and to tracking partway through
@@ -94,9 +95,22 @@ def jwt_rs256(claims, pem, kid):
     return head + '.' + body + '.' + _b64(rs256(pem, signing))
 
 
-def mint_wallet(env=None, keyfile=settings.MACHINE_KEY_FILE):
+def mint_tracker(env=None):
+    """The tracker's token (MLFLOW_TRACKING_TOKEN), minted from the project's second, non-admin machine user (Secret
+    mlflow-hpc). The data store never gets this token (its identity is the app's own key, identity.py). Without that
+    Secret the job is refused before staging (AppIdentityUnavailable): the project's admin machine key never reaches a
+    job, not even for the tracker."""
     env = os.environ if env is None else env
-    keyfile = env.get('ZITADEL_MACHINE_KEY_FILE') or keyfile
+    hpc = env.get('ZITADEL_HPC_KEY_FILE') or settings.HPC_KEY_FILE
+    if not os.path.exists(hpc):
+        raise identity.AppIdentityUnavailable(
+            'the project\'s HPC identity for the experiment tracker is not ready (Secret mlflow-hpc is absent). Nothing was '
+            'staged and nothing was submitted to the site. Ask a platform engineer to check the project\'s HPC identity')
+    return mint_wallet(env, hpc)
+
+
+def mint_wallet(env, keyfile):
+    env = os.environ if env is None else env
     domain = env.get('ZITADEL_DOMAIN') or ''
     if not keyfile or not os.path.exists(keyfile) or not domain:
         print('wallet: machine key / domain absent, data-plane env omitted', flush=True)

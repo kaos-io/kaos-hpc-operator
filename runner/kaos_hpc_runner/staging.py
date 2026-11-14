@@ -7,7 +7,7 @@ that can run nothing else (Secret meluxina-staging: key + verified host pin). Th
 base (its newest ready commit of the repo); the runner lists only the lakeFS diff base..commit, or
 the whole commit for a first copy, and streams one JSON line per file: every object of the commit,
 whatever the dataset's shape (PRD kaos#1911 F-04). Unchanged files are hard links of the base. Bytes
-come from the lakeFS API with the wallet bearer (sent once on stdin, held in memory only). Any failure
+come from the lakeFS API with the app's own key (sent once on stdin, held in memory only; identity.py). Any failure
 returns '' and the job stages in-job as before, saying so (F-06), with three exceptions that end the run
 before anything is submitted: no room in the quota (InsufficientQuota), a staging tool that speaks
 another staging contract (StagingMismatch), a dataset object whose name is reserved for the
@@ -15,9 +15,10 @@ platform (ReservedName), and a dataset above STAGE_FALLBACK_MAX_BYTES that the s
 (DatasetNotStaged: the job would download it on GPU time). The budget is stage_budget(bytes of the copy).
 
 A dataset another project shares (AC-44, D-61; the input names an owner) is staged the same way from the OWNER's
-data store: its public address comes from the own data store's peers, the credential is the same wallet bearer
-(the owner's data store accepts it for exactly what the owner shares with the project, and the project's own
-key or admin token is never sent), and the copy is filed under `<repo>@<owner>` on the site (dataset_key). The job never
+data store: its public address comes from the own data store's peers, the credential is the app's key IN the owner's
+data store (the own data store hands it out, `/kaos/v1/shared-credentials`; it reads exactly what the owner shares with
+the project, never writes, and expires), the app's own key is never sent to the owner, and the copy is filed under
+`<repo>@<owner>` on the site (dataset_key). The job never
 downloads it itself: a shared dataset the site cannot stage ends the run SharedDatasetUnavailable, before submit.
 
 Names that are not copied. Reserved: the staging tool's half-downloaded files end in `.kaos-part`, beside the
@@ -50,7 +51,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import settings, wallet as walletmod
+from . import identity, settings, wallet as walletmod
+from .redact import Redactor
 
 # How long staging goes on asking again (new attempts) before the job stages in-job: stage_budget(bytes). A new attempt
 # resumes the copy file by file. The same 72 hours, in total for all inputs of a step, is the allowance of the runner
@@ -63,7 +65,7 @@ STAGE_FALLBACK_MAX_BYTES = 50 * 10 ** 9   # above this a job never downloads the
 STAGE_NOTE_EVERY_S = 10 * 60         # how often the job's status says how far the copy is
 TOKEN_MIN_LEFT_S = 3600              # a data token with less left than this is not used for another attempt
 EX_RETRY, EX_NOSPACE, EX_USAGE, EX_CONTRACT = 75, 76, 2, 78
-CONTRACT = 3   # 3 = the whole tree of the commit under <copy>/data/, and a dataset another project shares filed as repo@owner; the tool's CONTRACT is the same number
+CONTRACT = 4   # 4 = the whole tree of the commit under <copy>/data/, a dataset another project shares filed as repo@owner, and the `key` verb (the app's key file for a job); the tool's CONTRACT is the same number
 
 
 class InsufficientQuota(Exception):
@@ -167,13 +169,13 @@ class Names:
         return True
 
 
-def refuse_names(api, repo, commit, wallet, prefix=''):
+def refuse_names(api, repo, commit, auth, prefix=''):
     """Raise ReservedName for the first object of the commit (under prefix) that cannot be copied (Names). A
     listing that cannot be read judges nothing: the stage plan and the in-job stage-in check the names again.
     Returns the bytes of the objects listed, or None when the listing could not be read."""
     names, total = Names(repo, commit), 0
     try:
-        for o in lakefs_pages(api + '/refs/%s/objects/ls' % commit, wallet, {'prefix': prefix}):
+        for o in lakefs_pages(api + '/refs/%s/objects/ls' % commit, auth, {'prefix': prefix}):
             size = int(o.get('size_bytes') or 0)
             names.take(o['path'], size)
             total += size
@@ -255,13 +257,13 @@ def quota_message(what, need_bytes, need_files):
             % (what, human_bytes(need_bytes), need_files))
 
 
-def lakefs_pages(url, wallet, params):
+def lakefs_pages(url, auth, params):
     # Every object of a paginated lakeFS listing (objects/ls or diff).
     after = ''
     while True:
         q = urllib.parse.urlencode(dict(params, amount=1000, after=after))
         page = json.load(urllib.request.urlopen(urllib.request.Request(
-            url + '?' + q, headers={'Authorization': 'Bearer ' + wallet}), timeout=120))
+            url + '?' + q, headers={'Authorization': auth}), timeout=120))
         for r in page.get('results') or []:
             if r.get('path_type') == 'object':
                 yield r
@@ -271,12 +273,12 @@ def lakefs_pages(url, wallet, params):
         after = pg.get('next_offset') or ''
 
 
-def stage_plan(api, commit, base, prefix, wallet):
+def stage_plan(api, commit, base, prefix, auth):
     # (kind, path, size) per file the stager applies: the two-dot diff against
     # the base (three-dot would be wrong when the base is not an ancestor), or
     # every object of the commit for a first copy.
     if base:
-        for d in lakefs_pages(api + '/refs/%s/diff/%s' % (base, commit), wallet,
+        for d in lakefs_pages(api + '/refs/%s/diff/%s' % (base, commit), auth,
                               {'prefix': prefix, 'type': 'two_dot'}):
             if d['type'] not in ('added', 'changed', 'removed'):
                 raise ValueError('unexpected diff entry %s for %s' % (d['type'], d['path']))
@@ -284,7 +286,7 @@ def stage_plan(api, commit, base, prefix, wallet):
                 continue                      # a folder marker that is gone: it was never copied
             yield d['type'], d['path'], int(d.get('size_bytes') or 0)
     else:
-        for o in lakefs_pages(api + '/refs/%s/objects/ls' % commit, wallet, {'prefix': prefix}):
+        for o in lakefs_pages(api + '/refs/%s/objects/ls' % commit, auth, {'prefix': prefix}):
             yield 'added', o['path'], int(o.get('size_bytes') or 0)
 
 
@@ -301,8 +303,9 @@ class Stager:
     MASTER_PERSIST_S = 300
     progress = None     # called with each `progress` event of a fetch (stage_dataset sets it)
 
-    def __init__(self, cfg, staging_dir=settings.STAGING_DIR):
+    def __init__(self, cfg, staging_dir=settings.STAGING_DIR, secrets=lambda: ()):
         self.cfg, self.staging_dir = cfg, staging_dir
+        self.secrets = secrets     # the credential values this job holds: what a verb that is fed a credential may print
         self._home = None      # private HOME for ssh (the pod's may not be writable); holds the socket
         self._mux = None       # None: not tried; True: master up; False: multiplexing off for this runner
         self._mux_lock = threading.Lock()   # the log streamer thread and the runner call concurrently
@@ -420,6 +423,10 @@ class Stager:
         err = p.stderr.read().strip()
         self.last_error = err                 # of the last call: tells a missing tool from an older one (stage_once)
         if err:
+            if feed is not None:
+                # A verb that is handed a credential on stdin (the app's key, the registry token, the dataset records)
+                # never has its stderr printed as it is: the held values and the credential shapes are redacted first.
+                err = Redactor(tuple(v for v in self.secrets() if v)).text(err).strip()
             print('stager stderr:', err[-2000:], flush=True)
         if failed is not None:
             raise failed
@@ -446,31 +453,44 @@ def _no_job_download(repo, owner, why):
         'keeps failing, a platform operator can read why the site\'s staging tool is not used.' % (repo, owner, why))
 
 
-def owner_store(own_url, wallet, owner, repo, commit):
+def owner_store(own_url, key, owner, repo, commit):
     """The public address of project `owner`'s data store, once it is clear that the owner shares `repo` at `commit`
     with this project. The address is the `url` of the owner in the own data store's peers (`endpoint` is an address
-    on the platform's network, which a login node cannot reach). The one credential sent anywhere is the wallet
-    bearer; the owner's data store lets it read what the owner shares with the project and nothing else. Raises
+    on the platform's network, which a login node cannot reach). `key` is the app's key in the own data store; the owner's
+    store is read with the key the own data store hands out for it (the app's own key never leaves the own data store).
+    Returns (the owner's address, the app's key in it). Raises
     SharedDatasetUnavailable; any other failure is a transient one the caller asks again."""
-    def get(url, what):
+    def get(url, what, auth):
         try:
             return json.load(urllib.request.urlopen(urllib.request.Request(
-                url, headers={'Authorization': 'Bearer ' + wallet}), timeout=60))
+                url, headers={'Authorization': auth}), timeout=60))
         except urllib.error.HTTPError as e:
             if e.code in (401, 403, 404):
                 raise _unavailable(repo, owner, what % e.code) from None
             raise
     peers = get(own_url + '/kaos/v1/peers',
-                'this project\'s data store does not list the projects it knows (HTTP %s)')
+                'this project\'s data store does not list the projects it knows (HTTP %s)', key.auth())
     found = next((p for p in peers.get('peers') or [] if isinstance(p, dict) and p.get('project') == owner), None)
     if found is None:
         raise _unavailable(repo, owner, '%s is not a project of this organisation that the data store knows' % owner)
     url = (found.get('url') or '').rstrip('/')
-    if not url.startswith(('https://', 'http://127.0.0.1:', 'http://localhost:')):   # the bearer never travels in clear
+    if not settings.https_or_loopback(url):   # a key never travels in clear
         raise _unavailable(repo, owner, 'project %s\'s data store has no public https address, so it cannot be read from a site' % owner)
+    try:
+        theirs = identity.peer_key(own_url, key, owner)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 404, 405, 501):
+            raise _unavailable(repo, owner, 'this project\'s data store gives no key for project %s\'s data store (HTTP %d): it was '
+                               'not approved, the share was withdrawn, or the data store is too old' % (owner, e.code)) from None
+        raise
+    except ValueError:
+        theirs = None
+    if theirs is None:
+        raise _unavailable(repo, owner, 'this project\'s data store gave no key for project %s\'s data store' % owner)
     get('%s/api/v1/repositories/%s/refs/%s/objects/ls?amount=1' % (url, urllib.parse.quote(repo, safe=''), commit),
-        'project %s\'s data store does not share it with this project (HTTP %%s): it was not approved, or the share was withdrawn' % owner)
-    return url
+        'project %s\'s data store does not share it with this project (HTTP %%s): it was not approved, or the share was withdrawn' % owner,
+        theirs.auth())
+    return url, theirs
 
 
 def staging_record(repo, commit, kind, files=0, nbytes=0, seconds=0):
@@ -486,12 +506,9 @@ def refused(rc, ev):
             next((e.get('contract') for e in reversed(ev) if e.get('event') == 'contract'), None)))
 
 
-def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None, key=None, plan=None):
-    # One staging attempt. Returns (path, retry): the ready path, or '' with
-    # whether a later attempt can help. info (a dict) receives the staging record when the copy is ready. repo is the
-    # repository in the data store at `lakefs`; key (default repo) is what the copy is filed under on the site.
-    # plan (a dict) receives the bytes and files the copy needs, once they are listed and before it begins.
-    key = key or repo
+def check_tool(stager):
+    """Ask the site's staging tool which contract it speaks. Returns the exit code of `version` (0 = it answered with
+    this runner's contract). Raises StagingMismatch for another contract, ToolAbsent for a login node that cannot run it."""
     rc, ev = stager(['version'])
     theirs = next((e.get('contract') for e in reversed(ev) if e.get('event') == 'version'), None)
     if rc in (EX_USAGE, 126, 127) and theirs is None:
@@ -502,6 +519,16 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None, key=None, p
         raise ToolAbsent(rc)
     if rc == 0 and theirs != CONTRACT:
         raise StagingMismatch(mismatch_message(theirs))
+    return rc
+
+
+def stage_once(stager, repo, ref, commit, lakefs, auth, info=None, key=None, plan=None):
+    # One staging attempt. Returns (path, retry): the ready path, or '' with
+    # whether a later attempt can help. info (a dict) receives the staging record when the copy is ready. repo is the
+    # repository in the data store at `lakefs`; key (default repo) is what the copy is filed under on the site.
+    # plan (a dict) receives the bytes and files the copy needs, once they are listed and before it begins.
+    key = key or repo
+    rc = check_tool(stager)
     if rc != 0:
         return '', rc in (EX_RETRY, 255)
     rc, ev = stager(['status', '--contract', CONTRACT, '--repo', key, '--commit', commit, '--ref', ref])
@@ -520,7 +547,7 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None, key=None, p
     base = st.get('base') if st.get('base') and st.get('base_prefix') == prefix else None
     need_bytes = need_files = added = removed = 0
     names, skip = Names(repo, commit), set()
-    for kind, path, size in stage_plan(api, commit, base, prefix, wallet):
+    for kind, path, size in stage_plan(api, commit, base, prefix, auth):
         if kind == 'removed':
             removed += 1
             continue
@@ -538,8 +565,8 @@ def stage_once(stager, repo, ref, commit, lakefs, wallet, info=None, key=None, p
              need_files, need_bytes / 1e6, removed, files), flush=True)
 
     def feed():
-        yield {'op': 'auth', 'authorization': 'Bearer ' + wallet}
-        for kind, path, size in stage_plan(api, commit, base, prefix, wallet):
+        yield {'op': 'auth', 'authorization': auth}
+        for kind, path, size in stage_plan(api, commit, base, prefix, auth):
             if kind == 'removed':
                 yield {'op': 'delete', 'path': path}
             elif path not in skip:
@@ -575,7 +602,7 @@ def ssh_present():
     return shutil.which('ssh') is not None
 
 
-def stage_dataset(cfg, inp, stager, mint_wallet, info=None, note=None, deadline=None):
+def stage_dataset(cfg, inp, stager, app_key, info=None, note=None, deadline=None):
     """The resident path of one input's pinned commit, or '' (the job then stages it in-job). inp is one entry
     of cfg.inputs (spec.inputs): its repository, label and commit; nothing is resolved here. Three failures
     are not a fallback:
@@ -592,25 +619,22 @@ def stage_dataset(cfg, inp, stager, mint_wallet, info=None, note=None, deadline=
     dataset above STAGE_FALLBACK_MAX_BYTES that the site did not stage is DatasetNotStaged, not an in-job download."""
     repo, ref, commit = inp['repo'], inp['ref'], inp['commit']
     owner = inp.get('owner') or ''
-    key = dataset_key(repo, owner)
+    dkey = dataset_key(repo, owner)
     lakefs = cfg.lakefs_url
     if not lakefs:
         if owner:
             raise _no_job_download(repo, owner, 'this project has no data store address')
         print('stage: skipped (needs the lakeFS endpoint) - the job stages in-job', flush=True)
         return ''
-    wallet = mint_wallet()
-    if not wallet:
-        if owner:
-            raise _no_job_download(repo, owner, 'no data-plane token could be minted')
-        return ''
+    key = app_key()      # the app's key (identity.Key); raises identity.AppIdentityUnavailable, which ends the run
+    auth = key.auth()
     api = lakefs + '/api/v1/repositories/' + urllib.parse.quote(repo, safe='')
     if not stager.have_key() or not ssh_present():
         if owner:
             raise _no_job_download(repo, owner, 'the site\'s staging tool cannot be used (no staging key, or no ssh client)')
         print('stage: skipped (needs the staging key and an ssh client) - the job stages in-job', flush=True)
         # the in-job copy joins every name to its folder: check them all
-        refuse_big_fallback(repo, commit, refuse_names(api, repo, commit, wallet), 'the site\'s staging tool cannot be used')
+        refuse_big_fallback(repo, commit, refuse_names(api, repo, commit, auth), 'the site\'s staging tool cannot be used')
         return ''
     began = time.time()
     budget, attempt, absent_since, plan, sized, posted = STAGE_UNKNOWN_BUDGET_S, 0, None, {}, False, [0.0]
@@ -621,7 +645,7 @@ def stage_dataset(cfg, inp, stager, mint_wallet, info=None, note=None, deadline=
             return
         posted[0] = time.time()
         text = ('staging dataset %s: %d of %d files, %s of %s fetched in this attempt, staging since %s UTC'
-                % (key, int(ev.get('files') or 0) + int(ev.get('skipped') or 0), plan['files'],
+                % (dkey, int(ev.get('files') or 0) + int(ev.get('skipped') or 0), plan['files'],
                    human_bytes(ev.get('bytes') or 0), human_bytes(plan['bytes']),
                    time.strftime('%Y-%m-%d %H:%M', time.gmtime(began))))
         print('stage:', text, flush=True)
@@ -632,13 +656,15 @@ def stage_dataset(cfg, inp, stager, mint_wallet, info=None, note=None, deadline=
         while True:
             attempt += 1
             try:
-                if attempt > 1:
-                    wallet = renewed_wallet(mint_wallet, wallet)    # never the token of an earlier attempt that is near its end
-                    if not wallet:
-                        raise RuntimeError('no data-plane token could be minted')
-                source = owner_store(lakefs, wallet, owner, repo, commit) if owner else lakefs
-                path, retry = stage_once(stager, repo, ref, commit, source, wallet, info, key, plan)
-            except (InsufficientQuota, StagingMismatch, ReservedName, SharedDatasetUnavailable):
+                key = app_key()                  # a staging that retries for hours must not carry a key that ended
+                auth = key.auth()
+                if owner:
+                    source, theirs = owner_store(lakefs, key, owner, repo, commit)
+                    source_auth = theirs.auth()
+                else:
+                    source, source_auth = lakefs, auth
+                path, retry = stage_once(stager, repo, ref, commit, source, source_auth, info, dkey, plan)
+            except (InsufficientQuota, StagingMismatch, ReservedName, SharedDatasetUnavailable, identity.AppIdentityUnavailable):
                 raise
             except ToolAbsent as e:
                 if absent_since is None:
@@ -653,14 +679,14 @@ def stage_dataset(cfg, inp, stager, mint_wallet, info=None, note=None, deadline=
                 path, retry = '', True
             size = plan.get('bytes')
             if size is None and attempt == 1 and not path and retry:
-                size = refuse_names(api, repo, commit, wallet)    # the stager did not get as far as listing the copy: size the commit
+                size = refuse_names(api, repo, commit, auth)    # the stager did not get as far as listing the copy: size the commit
             if size is not None and not sized:
                 sized, budget = True, stage_budget(size)
-                print('stage: dataset %s is %s; staging may go on for %.1f hours' % (key, human_bytes(size), budget / 3600),
+                print('stage: dataset %s is %s; staging may go on for %.1f hours' % (dkey, human_bytes(size), budget / 3600),
                       flush=True)
             elif size is None and attempt == 1 and not path and retry:
                 print('stage: the size of dataset %s could not be read; staging may go on for %.1f hours'
-                      % (key, budget / 3600), flush=True)
+                      % (dkey, budget / 3600), flush=True)
             if path or not retry or time.time() > min(began + budget, deadline or float('inf')):
                 break
             time.sleep(min(60 * attempt, 600))
@@ -675,7 +701,7 @@ def stage_dataset(cfg, inp, stager, mint_wallet, info=None, note=None, deadline=
     if not path:
         print('stage: NOT STAGED - the job will download the dataset in-job on GPU time',
               flush=True)
-        wallet = renewed_wallet(mint_wallet, wallet) or wallet     # the listing needs a token that is still good
-        size = [n for n in (refuse_names(api, repo, commit, wallet), plan.get('bytes')) if n is not None]   # before it is submitted, as above
+        auth = app_key().auth()      # the listing needs a key that is still good
+        size = [n for n in (refuse_names(api, repo, commit, auth), plan.get('bytes')) if n is not None]   # before it is submitted, as above
         refuse_big_fallback(repo, commit, max(size) if size else None, 'the site could not stage it in time')
     return path

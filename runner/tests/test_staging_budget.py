@@ -6,6 +6,7 @@ import io
 import json
 import urllib.request
 
+import helpers
 import pytest
 from kaos_hpc_runner import staging
 from test_staging import COMMIT, _LakeFS, _Stager
@@ -76,7 +77,7 @@ def test_a_large_dataset_is_asked_again_for_longer_than_four_hours_and_then_refu
     clock = Clock(monkeypatch)
     cfg, stager = _big(monkeypatch, int(2.5 * TB), [75] * 500)
     with pytest.raises(staging.DatasetNotStaged) as e:
-        staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt")
+        staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key)
     assert 27 * H < clock.slept < 29 * H, "kept asking for the budget of 2.5 TB (~27.8 h), not the old 4 h"
     msg = str(e.value)
     assert "dataset-poulaki" in msg and "2.5 TB" in msg and "could not stage it in time" in msg
@@ -89,7 +90,7 @@ def test_a_large_dataset_is_asked_again_for_longer_than_four_hours_and_then_refu
 def test_a_small_dataset_keeps_the_four_hours_and_falls_back_to_the_job_as_before(monkeypatch, capsys):
     clock = Clock(monkeypatch)
     cfg, stager = _big(monkeypatch, 10 * GB, [75] * 500)
-    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt") == ""
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key) == ""
     assert 4 * H <= clock.slept <= 4 * H + 600
     assert "NOT STAGED - the job will download" in capsys.readouterr().out
 
@@ -100,9 +101,9 @@ def test_a_dataset_just_above_the_fallback_size_is_refused_and_one_just_below_is
         cfg, stager = _big(monkeypatch, size, [75] * 500)
         if refused:
             with pytest.raises(staging.DatasetNotStaged):
-                staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt")
+                staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key)
         else:
-            assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt") == ""
+            assert staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key) == ""
 
 
 def test_an_unknown_size_gets_twelve_hours_and_then_the_job_stages_as_before(monkeypatch, capsys):
@@ -112,7 +113,7 @@ def test_an_unknown_size_gets_twelve_hours_and_then_the_job_stages_as_before(mon
     def no_listing(req, timeout=0):
         raise OSError("data store unreachable")
     cfg = _twin(monkeypatch, no_listing, stager)
-    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt") == ""
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key) == ""
     assert 12 * H <= clock.slept <= 12 * H + 600
     out = capsys.readouterr().out
     assert out.count("could not be read; staging may go on for 12.0 hours") == 1
@@ -123,10 +124,10 @@ def test_a_dataset_that_cannot_be_staged_because_there_is_no_staging_key_is_refu
     stager = _Stager({"ready": False}, key=False)
     cfg = _twin(monkeypatch, _LakeFS({"a.bin": 200 * GB}), stager)
     with pytest.raises(staging.DatasetNotStaged) as e:
-        staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt")
+        staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key)
     assert "200.0 GB" in str(e.value) and "staging tool cannot be used" in str(e.value)
     cfg = _twin(monkeypatch, _LakeFS({"a.bin": 5 * GB}), stager)
-    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt") == ""
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key) == ""
 
 
 def test_the_size_of_a_delta_never_hides_a_large_dataset_from_the_refusal(monkeypatch):
@@ -136,7 +137,7 @@ def test_the_size_of_a_delta_never_hides_a_large_dataset_from_the_refusal(monkey
     stager = _Stager({"ready": False, "base": "c1" * 32, "base_files": 1, "base_prefix": ""}, stage_rcs=[75] * 500)
     cfg = _twin(monkeypatch, lakefs, stager)
     with pytest.raises(staging.DatasetNotStaged) as e:
-        staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt")
+        staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key)
     assert "300.0 GB" in str(e.value)
 
 
@@ -146,18 +147,14 @@ def test_a_shared_dataset_is_not_affected_by_the_fallback_size_rule():
 
 # ---------------------------------------------------------------- the token
 
-def test_every_attempt_after_the_first_mints_a_new_token_and_sends_that_one(monkeypatch):
+def test_every_attempt_asks_for_the_apps_key_again_and_sends_that_one(monkeypatch):
     Clock(monkeypatch)
     cfg, stager = _big(monkeypatch, 1 * GB, [75, 75, 0])
-    minted = []
-
-    def mint():
-        minted.append("tok%d" % (len(minted) + 1))
-        return minted[-1]
-    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, mint).endswith(COMMIT)
+    keys = helpers.FakeKeys()
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, keys).endswith(COMMIT)
     auths = [r[0]["authorization"] for w, r in stager.calls if w[0] == "stage"]
-    assert auths == ["Bearer tok1", "Bearer tok2", "Bearer tok3"], "never the token of an earlier attempt"
-    assert minted == ["tok1", "tok2", "tok3"]
+    assert len(auths) == 3 and len(set(auths)) == 3, "never the key of an earlier attempt"
+    assert auths[-1] == helpers.FakeKeys.auth_of(keys.calls)
 
 
 def test_a_failed_mint_keeps_the_old_token_only_while_it_has_an_hour_left(monkeypatch):
@@ -169,14 +166,12 @@ def test_a_failed_mint_keeps_the_old_token_only_while_it_has_an_hour_left(monkey
     assert staging.renewed_wallet(lambda: "", "not-a-jwt") == "not-a-jwt", "an end that is unknown is not a reason"
 
 
-def test_an_attempt_with_no_usable_token_is_a_failed_attempt_that_is_asked_again(monkeypatch, capsys):
+def test_an_attempt_whose_key_cannot_be_obtained_is_a_failed_attempt_that_is_asked_again(monkeypatch, capsys):
     Clock(monkeypatch)
     cfg, stager = _big(monkeypatch, 1 * GB, [75, 0])
-    tokens = iter([_jwt(1_000_000 + 60), "", "", _jwt(1_000_000 + 20 * H)])
-    # the clock is fixed at 1_000_000 + whatever the sleeps add: the first token ends in a minute
-    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: next(tokens)).endswith(COMMIT)
-    out = capsys.readouterr().out
-    assert out.count("no data-plane token could be minted") == 2
+    keys = helpers.FakeKeys(fail=[None, None, OSError("blip"), OSError("blip")])
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, keys).endswith(COMMIT)
+    assert capsys.readouterr().out.count("failed: blip") == 2
 
 
 # ---------------------------------------------------------------- progress
@@ -202,7 +197,7 @@ def test_a_copy_that_makes_progress_says_how_far_it_is_every_ten_minutes_and_cle
     stager = _Progress(clock, [(0, 1, 5 * GB), (300, 2, 10 * GB), (600, 3, 20 * GB), (900, 4, 30 * GB)], stage_rcs=[0])
     cfg = _twin(monkeypatch, _LakeFS({"a": 500 * GB, "b": 500 * GB, "c": 1, "d": 2}), stager)
     notes = []
-    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", note=notes.append).endswith(COMMIT)
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key, note=notes.append).endswith(COMMIT)
     assert len(notes) == 3 and notes[-1] is None, "the first line at once, the next after ten minutes, then cleared"
     assert notes[0].startswith("staging dataset dataset-poulaki: 1 of 4 files, 5.0 GB of 1.0 TB fetched")
     assert "staging since 1970-01-12 13:46 UTC" in notes[0]
@@ -216,7 +211,7 @@ def test_no_note_is_made_when_nothing_was_copied(monkeypatch):
     stager = _Stager({"ready": True, "path": "/p"})
     cfg = _twin(monkeypatch, _LakeFS({"a": 1}), stager)
     notes = []
-    staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", note=notes.append)
+    staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key, note=notes.append)
     assert notes == []
 
 
@@ -228,11 +223,11 @@ def test_two_large_datasets_share_one_72_hour_clock_and_the_second_gets_what_is_
     deadline = start + staging.STAGE_MAX_BUDGET_S
     cfg, stager = _big(monkeypatch, 5 * TB, [75] * 2000)     # 5 TB: a budget of 55.6 h of its own
     with pytest.raises(staging.DatasetNotStaged):
-        staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", deadline=deadline)
+        staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key, deadline=deadline)
     spent = clock.now - start
     assert 55 * H < spent < 56 * H + 600, "the first dataset used its own size-based budget"
     with pytest.raises(staging.DatasetNotStaged):
-        staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", deadline=deadline)
+        staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key, deadline=deadline)
     assert clock.now - start <= 72 * H + 600, "the second stopped at the clock of the whole step, not 55.6 h later"
     assert clock.now - start > 71 * H, "and it used what was left"
 
@@ -240,7 +235,7 @@ def test_two_large_datasets_share_one_72_hour_clock_and_the_second_gets_what_is_
 def test_a_dataset_with_a_small_budget_is_not_stretched_by_the_step_clock(monkeypatch):
     clock = Clock(monkeypatch)
     cfg, stager = _big(monkeypatch, 10 * GB, [75] * 500)
-    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt",
+    assert staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key,
                                  deadline=clock.now + 72 * H) == ""
     assert clock.slept <= 4 * H + 600
 
@@ -257,7 +252,7 @@ def test_a_refusal_raised_mid_copy_clears_the_progress_note(monkeypatch):
     monkeypatch.setattr(staging, "stage_once", refused_mid_copy)
     notes = []
     with pytest.raises(staging.InsufficientQuota):
-        staging.stage_dataset(cfg, cfg.inputs[0], stager, lambda: "wallet-jwt", note=notes.append)
+        staging.stage_dataset(cfg, cfg.inputs[0], stager, helpers.app_key, note=notes.append)
     assert len(notes) == 2 and notes[0].startswith("staging dataset") and notes[1] is None
     assert stager.progress is None
 
