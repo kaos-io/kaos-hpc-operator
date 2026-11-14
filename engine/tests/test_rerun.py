@@ -494,7 +494,8 @@ def test_a_step_with_a_matrix_that_no_step_that_runs_needs_is_not_run_and_is_not
 def test_a_sweep_that_is_not_run_needs_no_record_in_the_earlier_run():
     """It does not run, so the earlier run's record of it (failed, or never written) does not matter."""
     steps = with_sweep()
-    got = prepare("evaluate", steps=steps, docs=earlier_run(steps, RESULTS, {**PARAMS, "tune": {}}), params={**PARAMS, "tune": {}})
+    params = {**PARAMS, "tune": {}}
+    got = prepare("evaluate", steps=steps, docs=earlier_run(steps, RESULTS, params), params=params)
     assert "tune" not in got.entries
 
 
