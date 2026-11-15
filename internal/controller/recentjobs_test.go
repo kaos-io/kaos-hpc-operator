@@ -195,6 +195,7 @@ func TestRecentJobOfSiteLimitPendingReason(t *testing.T) {
 
 // A job the site itself holds (maintenance, a closed partition, a node down) says why on the console.
 func TestRecentJobOfSiteHoldSaysWhy(t *testing.T) {
+	const booked = "booked 60 gpu node-minutes"
 	for _, c := range []struct {
 		name, slurm string
 		held        bool
@@ -208,14 +209,14 @@ func TestRecentJobOfSiteHoldSaysWhy(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			j := recentJob("q", time.Minute, hpcv1alpha1.PhaseRunning)
-			j.Status.Reason, j.Status.Message = "Submitted", "booked 60 gpu node-minutes"
+			j.Status.Message = booked
 			j.Status.SiteObservation = &hpcv1alpha1.SiteObservation{JobID: "1", State: "PENDING", PendingReason: c.slurm}
 			j.Status.Run = &hpcv1alpha1.RunStatus{SiteJobID: "1", State: "PENDING"}
 			rj := recentJobOf(&j, time.Now())
 			if rj.PendingReason != c.slurm {
 				t.Fatalf("pending reason %q, want Slurm's own word %q", rj.PendingReason, c.slurm)
 			}
-			want := "booked 60 gpu node-minutes"
+			want := booked
 			if c.held {
 				want = "held by the site: " + hpcv1alpha1.SiteHoldText(c.slurm)
 			}
@@ -225,10 +226,10 @@ func TestRecentJobOfSiteHoldSaysWhy(t *testing.T) {
 		})
 	}
 	j := recentJob("r", time.Minute, hpcv1alpha1.PhaseRunning)
-	j.Status.Message = "booked 60 gpu node-minutes"
+	j.Status.Message = booked
 	j.Status.SiteObservation = &hpcv1alpha1.SiteObservation{JobID: "1", State: "RUNNING", PendingReason: "ReqNodeNotAvail"}
 	j.Status.Run = &hpcv1alpha1.RunStatus{SiteJobID: "1", State: "RUNNING"}
-	if rj := recentJobOf(&j, time.Now()); rj.Message != "booked 60 gpu node-minutes" {
+	if rj := recentJobOf(&j, time.Now()); rj.Message != booked {
 		t.Fatalf("a running job keeps its message, got %q", rj.Message)
 	}
 }
