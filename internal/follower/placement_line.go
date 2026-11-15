@@ -33,10 +33,8 @@ func placementLines(job *hpcv1alpha1.HPCArgoWorkflowJob) []string {
 	if t := resumableText(job); t != "" {
 		parts = append(parts, t)
 	}
-	if r := job.Status.PendingReason; hpcv1alpha1.IsSiteLimitPendingReason(r) {
-		parts = append(parts, "queue reason: "+hpcv1alpha1.ReasonSiteLimit+": "+hpcv1alpha1.SiteLimitText)
-	} else if r != "" {
-		parts = append(parts, "queue reason: "+r)
+	if line := hpcv1alpha1.PendingReasonLine(job.Status.PendingReason); line != "" {
+		parts = append(parts, "queue reason: "+line)
 	}
 	return []string{strings.Join(parts, " · ")}
 }

@@ -287,8 +287,33 @@ def test_should_fail_with_a_clear_reason_when_the_site_stays_down_past_the_bound
     assert e.value.code == 1 and slurm.submitted == []
 
 
-def test_should_not_wait_on_an_auth_error_or_an_unreadable_reply(rig):
-    for err in (urllib.error.HTTPError("u", 401, "x", {}, None), ValueError("not JSON")):
+def test_should_wait_for_a_site_that_refuses_the_sign_in_and_say_so(rig):
+    """A site in maintenance answers 401 for as long as it lasts (live 2026-11-15): a wait under its own name,
+    one submission when it is over."""
+    slurm = SiteDownAtStart(14, urllib.error.HTTPError("u", 401, "Unauthorized", {}, None), {"5001": [acc("COMPLETED")]})
+    rig.make(slurm)
+    sleeps = []
+    rig.runner.sleep = sleeps.append
+    assert rig.runner.run() == 0
+    assert len(slurm.submitted) == 1 and rig.kube.run["state"] == "COMPLETED"
+    assert sum(sleeps) >= 600, "the refusal was waited out"
+    reasons = [p[2]["status"]["pendingReason"] for p in rig.kube.patches() if "pendingReason" in p[2]["status"]]
+    assert reasons[0] == "SiteAccessRefused" and reasons[1] is None
+
+
+def test_should_fail_naming_the_refused_sign_in_when_it_lasts_past_the_bound(rig, capsys):
+    slurm = SiteDownAtStart(10 ** 6, urllib.error.HTTPError("u", 403, "Forbidden", {}, None), {})
+    rig.make(slurm, HPC_SITE_WAIT_MAX_S="300")
+    rig.runner.sleep = lambda s: None
+    with pytest.raises(SystemExit) as e:
+        rig.runner.run()
+    out = capsys.readouterr().out
+    assert e.value.code == 1 and slurm.submitted == []
+    assert "SiteAccessRefused: the site refused the platform's sign-in" in out and "maintenance" in out
+
+
+def test_should_not_wait_on_an_unreadable_reply_or_an_unknown_job(rig):
+    for err in (urllib.error.HTTPError("u", 404, "x", {}, None), ValueError("not JSON")):
         slurm = SiteDownAtStart(1, err, {})
         rig.make(slurm)
         sleeps = []

@@ -171,6 +171,13 @@ def is_site_down(e):
                           http.client.HTTPException, ssl.SSLError))
 
 
+def is_access_refused(e):
+    """True when the site answered but refused the platform's sign-in (HTTP 401 or 403). A site in maintenance
+    does this for as long as it lasts: it closes its sessions, so no fresh token can be minted and the one in
+    hand expires (live 2026-11-15, almost four hours). So does a removed access key, which never heals."""
+    return isinstance(e, urllib.error.HTTPError) and e.code in (401, 403)
+
+
 # Why a site refuses a job because of its lane (QoS or reservation) rather than the job itself. The
 # texts are Slurm's own (slurm_errno / QOS reasons) and appear in the REST error body; matched
 # case-insensitively so a changed wording around them still counts.

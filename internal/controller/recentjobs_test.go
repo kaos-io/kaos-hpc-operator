@@ -193,6 +193,46 @@ func TestRecentJobOfSiteLimitPendingReason(t *testing.T) {
 	}
 }
 
+// A job the site itself holds (maintenance, a closed partition, a node down) says why on the console.
+func TestRecentJobOfSiteHoldSaysWhy(t *testing.T) {
+	for _, c := range []struct {
+		name, slurm string
+		held        bool
+	}{
+		{"should_explain_nodes_reserved_for_maintenance", "ReqNodeNotAvail", true},
+		{"should_explain_a_closed_partition", "PartitionDown", true},
+		{"should_explain_a_node_down", "NodeDown", true},
+		{"should_explain_an_administrator_hold", "JobHeldAdmin", true},
+		{"should_leave_the_ordinary_queue_alone", "Priority", false},
+		{"should_leave_free_node_waits_alone", "Resources", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			j := recentJob("q", time.Minute, hpcv1alpha1.PhaseRunning)
+			j.Status.Reason, j.Status.Message = "Submitted", "booked 60 gpu node-minutes"
+			j.Status.SiteObservation = &hpcv1alpha1.SiteObservation{JobID: "1", State: "PENDING", PendingReason: c.slurm}
+			j.Status.Run = &hpcv1alpha1.RunStatus{SiteJobID: "1", State: "PENDING"}
+			rj := recentJobOf(&j, time.Now())
+			if rj.PendingReason != c.slurm {
+				t.Fatalf("pending reason %q, want Slurm's own word %q", rj.PendingReason, c.slurm)
+			}
+			want := "booked 60 gpu node-minutes"
+			if c.held {
+				want = "held by the site: " + hpcv1alpha1.SiteHoldText(c.slurm)
+			}
+			if rj.Message != want {
+				t.Fatalf("message %q, want %q", rj.Message, want)
+			}
+		})
+	}
+	j := recentJob("r", time.Minute, hpcv1alpha1.PhaseRunning)
+	j.Status.Message = "booked 60 gpu node-minutes"
+	j.Status.SiteObservation = &hpcv1alpha1.SiteObservation{JobID: "1", State: "RUNNING", PendingReason: "ReqNodeNotAvail"}
+	j.Status.Run = &hpcv1alpha1.RunStatus{SiteJobID: "1", State: "RUNNING"}
+	if rj := recentJobOf(&j, time.Now()); rj.Message != "booked 60 gpu node-minutes" {
+		t.Fatalf("a running job keeps its message, got %q", rj.Message)
+	}
+}
+
 func TestRecentJobsKeepActiveAndLastSevenDays(t *testing.T) {
 	r := recentReconciler(t, projectNS("p-train", "p"))
 	day := 24 * time.Hour

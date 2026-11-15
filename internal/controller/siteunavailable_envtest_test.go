@@ -238,6 +238,31 @@ var _ = Describe("HPCArgoWorkflowJob waits for an unreachable site", func() {
 		Expect(got.Status.Message).To(ContainSubstring("did not answer for 30 min"))
 	})
 
+	It("should_end_the_attempt_with_SiteAccessRefused_when_the_site_refused_the_sign_in_for_that_long", func() {
+		j := newJob()
+		_, got := reconcileOnce(j)
+		rj := runnerJobs(got)[0]
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "sar-runner-pod", Namespace: hpcNS,
+			Labels: map[string]string{runnerjob.LabelRunnerJob: rj.Name}},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runner", Image: "reg.example/img:1"}}}}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "runner", State: corev1.ContainerState{
+			Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Message: "SiteAccessRefused: the site refused the platform's sign-in for 30 min, so nothing was submitted. A site in maintenance does this (last answer: HTTP Error 401: Unauthorized)"}}}}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		now := metav1.Now()
+		rj.Status.StartTime = &now
+		rj.Status.Failed = 1
+		rj.Status.Conditions = []batchv1.JobCondition{
+			{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded"},
+			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded"}}
+		Expect(k8sClient.Status().Update(ctx, &rj)).To(Succeed())
+
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonSiteAccessRefused), "not RunnerFailed")
+		Expect(got.Status.Message).To(ContainSubstring("A site in maintenance does this"))
+	})
+
 	It("should_pass_the_outage_bound_to_the_runner_and_extend_its_deadline", func() {
 		r.SiteOutageMax = 45 * time.Minute
 		j := newJob()

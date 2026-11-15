@@ -43,6 +43,14 @@ func TestPlacementLines(t *testing.T) {
 		{"waiting_without_placement_uses_declared_wall_time",
 			hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseRunning, PendingReason: "Resources"},
 			[]string{"HPC: waiting · lane standard · time limit 60 min (declared) · queue reason: Resources"}},
+		{"waiting_held_by_a_site_maintenance_says_so",
+			hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseRunning, PendingReason: "ReqNodeNotAvail, Reserved for maintenance"},
+			[]string{"HPC: waiting · lane standard · time limit 60 min (declared) · queue reason: ReqNodeNotAvail, Reserved for maintenance: " +
+				hpcv1alpha1.SiteHoldText("ReqNodeNotAvail")}},
+		{"waiting_on_a_closed_partition_says_so",
+			hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseRunning, PendingReason: "PartitionDown"},
+			[]string{"HPC: waiting · lane standard · time limit 60 min (declared) · queue reason: PartitionDown: " +
+				hpcv1alpha1.SiteHoldText("PartitionDown")}},
 		{"waiting_reserved_nodes_lane",
 			hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseRunning,
 				Placement: &hpcv1alpha1.Placement{TimeLimitMinutes: 10, Source: hpcv1alpha1.PlacementLearned, Samples: 1, Reservation: "gpudev"}},

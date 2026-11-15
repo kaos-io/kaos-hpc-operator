@@ -24,3 +24,43 @@ func DisplayPendingReason(raw string) string {
 	}
 	return raw
 }
+
+// siteHoldTexts are the plain sentences for a job the SITE holds in its queue for a reason that is not the
+// queue itself: the site's own trouble or decision. Keys are Slurm's pending reasons (state_reason). A site in
+// maintenance shows as ReqNodeNotAvail (the nodes are reserved for it) or as a closed partition.
+var siteHoldTexts = map[string]string{
+	"ReqNodeNotAvail": "the nodes this job needs are not available at the site: down, drained, or reserved " +
+		"(a site maintenance shows like this); the job starts when the site returns them",
+	"PartitionDown":     "the site has closed this partition (a site maintenance shows like this); the job starts when the site reopens it",
+	"PartitionInactive": "the site has closed this partition (a site maintenance shows like this); the job starts when the site reopens it",
+	"NodeDown":          "a node this job needs is down at the site; the job starts when the site brings it back",
+	"JobHeldAdmin":      "the site's administrators hold this job; it starts when they release it",
+	ReasonSiteAccessRefused: "the site refuses the platform's sign-in (a site maintenance shows like this); " +
+		"the job is submitted when the site accepts it again",
+	"Reservation": "the reserved nodes this job asks for are not available yet; the job starts when the reservation opens",
+}
+
+// SiteHoldText is the plain sentence for a pending reason that says the site itself holds the job, and "" for
+// every other reason (the ordinary queue: Priority, Resources, and the limits named elsewhere). Console and
+// follower share it, as they share SiteLimitText.
+func SiteHoldText(reason string) string {
+	if i := strings.IndexAny(reason, ", "); i > 0 {
+		reason = reason[:i] // "ReqNodeNotAvail, Reserved for maintenance" on sites that append the detail
+	}
+	return siteHoldTexts[reason]
+}
+
+// PendingReasonLine is what people read for a queued job: the reason, and after it the plain sentence when
+// there is one. Empty for no reason.
+func PendingReasonLine(raw string) string {
+	switch {
+	case raw == "":
+		return ""
+	case IsSiteLimitPendingReason(raw):
+		return ReasonSiteLimit + ": " + SiteLimitText
+	}
+	if t := SiteHoldText(raw); t != "" {
+		return raw + ": " + t
+	}
+	return raw
+}

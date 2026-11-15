@@ -47,6 +47,7 @@ Phases: `Pending` (not judged yet, or the next attempt is about to be judged), `
 | Reason | Phase | Meaning | What the user sees |
 |---|---|---|---|
 | `SiteUnavailable` | Waiting, Admitted, or Failed | The site's REST API does not answer (connection errors, 5xx, timeouts, slurmctld down) for at least 90 s, confirmed with a ping. While it is down nothing is admitted or booked and no runner starts: a wait, not a failure. After `--site-outage-max` (default 30 min) the job ends `Failed` with this reason. Also the pending reason a runner shows while it waits. | Follower: the wait and its reason. Job condition `SiteUnavailable` (its time is when the wait began), `SiteUnavailable` Warning event, `HPCSite` condition `SiteReachable` False and metric `kaos_hpc_site_up` 0. |
+| `SiteAccessRefused` | Admitted (as the queue reason), or Failed | The site answers but refuses the platform's sign-in (HTTP 401 or 403). A site in maintenance does this for as long as it lasts: it closes its sessions, so no fresh token is minted and the one in hand expires (live 2026-11-15, almost four hours). An access key the site no longer accepts looks the same and never heals. A runner that has not submitted yet waits for it as long as for a site that does not answer (`--site-outage-max`), then the attempt ends with this reason and nothing was submitted. A job already at the site is not touched: its runner keeps asking and follows it again when the site accepts the sign-in. | Follower while it waits: "queue reason: SiteAccessRefused: the site refuses the platform's sign-in (a site maintenance shows like this); the job is submitted when the site accepts it again". Failed: "SiteAccessRefused: the site refused the platform's sign-in for N min, so nothing was submitted. A site in maintenance does this (see the site's status page) ...". |
 | `RunnerFailed` | Failed | The runner Job ended (its retries used up, or its deadline passed) without a terminal report, so the site job's result is unknown. If a site job may exist, the orphan sweep first has a cancel-only runner stop it and report the site's state, then the attempt is settled. | Message with the runner Job's failure and its last pod message. |
 
 ## Interruptions, checkpoints and continuations
@@ -86,6 +87,24 @@ ends" and the booking stays in the ledger. When the runner reports the job's end
 attempt is settled to it and the message reads "attempt N settled M node-minutes (its Slurm job held the node until
 <time>)". `status.run.endTime` stays the step's own end: a learned time limit comes from the step's run time, never
 from the time the node was kept for guests (D-67).
+
+## Held in the site's queue by the site
+
+While a submitted job waits in the site's queue, the follower prints "queue reason: <Slurm's reason>". For the
+reasons that mean the site itself holds the job, a plain sentence follows the reason, and the console's job
+message reads "held by the site: <the same sentence>" (`HPCSite.status.recentJobs[].message`; the pending reason
+stays Slurm's own word).
+
+| Slurm's reason | What the user reads |
+|---|---|
+| `ReqNodeNotAvail` | the nodes this job needs are not available at the site: down, drained, or reserved (a site maintenance shows like this); the job starts when the site returns them |
+| `PartitionDown`, `PartitionInactive` | the site has closed this partition (a site maintenance shows like this); the job starts when the site reopens it |
+| `NodeDown` | a node this job needs is down at the site; the job starts when the site brings it back |
+| `JobHeldAdmin` | the site's administrators hold this job; it starts when they release it |
+| `Reservation` | the reserved nodes this job asks for are not available yet; the job starts when the reservation opens |
+
+`Priority`, `Resources` and the other reasons of the ordinary queue are shown as they are. The site's monthly
+account limit has its own reason (`SiteLimit`, above).
 
 ## Queue place lost (not a reason: `status.run.queueReplaced`)
 
