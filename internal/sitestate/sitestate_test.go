@@ -202,6 +202,40 @@ func TestShouldSplitTheListWhenOneUnknownIDFailsIt(t *testing.T) {
 	}
 }
 
+// Live 2026-11-15: with two guest jobs in the list the site answered 500 to every poll for ten minutes, and
+// no job of the project got an observation. The list is split as for 422.
+func TestShouldSplitTheListWhenTheSiteAnswers500ForOneID(t *testing.T) {
+	srv := httptest.NewServer((&recorder{}).handler(func(ids []string) (int, string) {
+		for _, id := range ids {
+			if id == "7" {
+				return 500, ``
+			}
+		}
+		return 200, fmt.Sprintf(`{"jobs":[{"job_id":"%s","state":["RUNNING"]}]}`, ids[0])
+	}))
+	defer srv.Close()
+	got, err := (&Client{HTTP: srv.Client()}).States(context.Background(), site(srv.URL), &noWait{}, []string{"5", "7", "9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || len(got["5"].State) == 0 || len(got["9"].State) == 0 {
+		t.Fatalf("got %v, want 5 and 9", got)
+	}
+}
+
+// A site that answers 500 to everything is failing: the poll fails, it does not report "no job listed".
+func TestShouldFailThePollWhenEveryPartOfTheListAnswers500(t *testing.T) {
+	srv := httptest.NewServer((&recorder{}).handler(func([]string) (int, string) { return 500, `` }))
+	defer srv.Close()
+	got, err := (&Client{HTTP: srv.Client()}).States(context.Background(), site(srv.URL), &noWait{}, []string{"5", "7", "9"})
+	if err == nil || got != nil {
+		t.Fatalf("got %v, %v; want the site's error and no map", got, err)
+	}
+	if !IsOutage(err) && !strings.Contains(err.Error(), "500") {
+		t.Fatalf("error %v does not carry the site's 500", err)
+	}
+}
+
 // Regression (found by the scale test): one unknown ID in a list of 100 made the poll walk the list one ID
 // at a time, 101 calls. At the production rate (2 calls per second) that outlasts the 30 s poll interval,
 // the poll is abandoned, and no job of the list gets an observation while the unknown ID stays in it.

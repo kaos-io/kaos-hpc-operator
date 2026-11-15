@@ -59,12 +59,18 @@ func (c *Client) States(ctx context.Context, s Site, bucket Waiter, ids []string
 			return nil, &rateLimitError{err}
 		}
 		jobs, err := c.call(ctx, s, part)
-		var se *statusError
-		if errors.As(err, &se) && se.code == http.StatusUnprocessableEntity && len(part) > 1 {
+		if rejectsTheList(err) && len(part) > 1 {
 			// The site rejects the whole list when one ID is unknown to it (a guest's job already
 			// cancelled and purged): split the list until the unknown IDs stand alone, so they never
-			// hide the others' state and cost about 2*log2(n) calls each, not n.
-			jobs, err = c.split(ctx, s, bucket, part)
+			// hide the others' state and cost about 2*log2(n) calls each, not n. The site answers 422
+			// for such a list, or 500 (live 2026-11-15: every poll failed for the ten minutes two guest
+			// jobs were in the list). A 500 can also be the site failing, so a split in which no call
+			// was answered keeps the list's own error.
+			first, good := err, 0
+			jobs, err = c.split(ctx, s, bucket, part, &good)
+			if err == nil && good == 0 {
+				err = first
+			}
 		}
 		if err != nil {
 			return nil, err
@@ -82,12 +88,12 @@ func (c *Client) States(ctx context.Context, s Site, bucket Waiter, ids []string
 	return out, nil
 }
 
-// split asks for a list the site rejected with 422 in two halves, and each half that is rejected in
+// split asks for a list the site rejected (422 or 500) in two halves, and each half that is rejected in
 // two again, down to single IDs. An ID the site does not know is skipped (the caller reads it as "not
-// listed"); any other error stops. One unknown ID in a list of 100 costs about 14 calls, not 100: at
+// listed"); any other error stops. good counts the calls the site answered. One unknown ID in a list of 100 costs about 14 calls, not 100: at
 // the production rate of 2 calls per second the old one-by-one walk took longer than the poll interval,
 // so the whole list's observations were never written while the unknown ID stayed in it.
-func (c *Client) split(ctx context.Context, s Site, bucket Waiter, ids []string) ([]Job, error) {
+func (c *Client) split(ctx context.Context, s Site, bucket Waiter, ids []string, good *int) ([]Job, error) {
 	if len(ids) <= 1 {
 		return nil, nil // a single ID that was rejected is the unknown one
 	}
@@ -97,9 +103,10 @@ func (c *Client) split(ctx context.Context, s Site, bucket Waiter, ids []string)
 			return nil, &rateLimitError{err}
 		}
 		jobs, err := c.call(ctx, s, half)
-		var se *statusError
-		if errors.As(err, &se) && se.code == http.StatusUnprocessableEntity {
-			jobs, err = c.split(ctx, s, bucket, half)
+		if rejectsTheList(err) {
+			jobs, err = c.split(ctx, s, bucket, half, good)
+		} else if err == nil {
+			*good++
 		}
 		if err != nil {
 			return nil, err
@@ -107,6 +114,12 @@ func (c *Client) split(ctx context.Context, s Site, bucket Waiter, ids []string)
 		out = append(out, jobs...)
 	}
 	return out, nil
+}
+
+// rejectsTheList says whether a reply may be the site refusing a list for one ID in it.
+func rejectsTheList(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && (se.code == http.StatusUnprocessableEntity || se.code == http.StatusInternalServerError)
 }
 
 // statusError is a non-2xx reply; text is the site's own error description (never a token).
