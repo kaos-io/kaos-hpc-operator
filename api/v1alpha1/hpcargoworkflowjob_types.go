@@ -191,6 +191,10 @@ const (
 	// site answers; after the controller's --site-outage-max it ends Failed with this reason (PRD-HPC-1461
 	// AC-28, AC-30). Also the pending reason a runner reports while it waits for the site.
 	ReasonSiteUnavailable = "SiteUnavailable"
+	// ReasonSiteAccessRefused: the site answers but refuses the platform's sign-in (HTTP 401 or 403). A site in
+	// maintenance does this while it lasts; so does an access key the site no longer accepts. The runner waits
+	// for it as long as for an unreachable site (shown as the pending reason), then the attempt fails with it.
+	ReasonSiteAccessRefused = "SiteAccessRefused"
 	// ConditionSiteUnavailable is the job condition that is True while the job waits for an unreachable site;
 	// its lastTransitionTime is when the wait began, which the outage bound counts from.
 	ConditionSiteUnavailable = "SiteUnavailable"

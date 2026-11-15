@@ -31,7 +31,7 @@ def checkpoint_every_seconds(context):
         return 0
     return value * 60 if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 from .sharing import inputs_in_script
-from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_site_down, lane_refusal,
+from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_access_refused, is_site_down, lane_refusal,
                     share_state, site_time, submit_limit_refusal)
 from .settings import (APP_IDENTITY_UNAVAILABLE_EXIT, CHECKPOINT_EXIT, CONTEXT_ENV, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT,
                        INVALID_IMAGE_EXIT, INVALID_RESULT_EXIT, OFFER_S, ROLE_POLL_S, RESERVED_NAME_EXIT, DATASET_NOT_STAGED_EXIT,
@@ -78,6 +78,8 @@ LOST_HOST_RESUBMITS = 3
 SITE_RETRY_FIRST_S = 5
 SITE_RETRY_MAX_S = 60
 SITE_UNAVAILABLE = 'SiteUnavailable'   # the pending reason the controller shows, and the prefix of the failure message
+# The same two uses for a site that answers but refuses the platform's sign-in (see slurm.is_access_refused).
+SITE_ACCESS_REFUSED = 'SiteAccessRefused'
 # The step's result on its way back (payload/handback.py): fetched this often before the runner gives up.
 RESULT_FETCH_TRIES = 4
 RESULT_FETCH_WAIT_S = 15
@@ -716,8 +718,9 @@ class Runner:
     def adopt_or_submit(self, job):
         """(site job id, log offset, adopted). An unreachable site is waited for, not failed on (AC-28, AC-30):
         every round starts with the adopt step, so a submit the site accepted but did not answer is found again
-        instead of being repeated. Real errors (auth, a refused job) end the runner at once."""
-        waited, delay = 0, SITE_RETRY_FIRST_S
+        instead of being repeated. A site that refuses the platform's sign-in is waited for in the same way and
+        for as long, under its own name: a maintenance looks like that. A refused job ends the runner at once."""
+        waited, delay, shown = 0, SITE_RETRY_FIRST_S, None
         while True:
             try:
                 jid, offset = self.adopt(job)
@@ -725,14 +728,24 @@ class Runner:
                 if not adopted:
                     jid, offset = self.submit(), 0
             except Exception as e:
-                if not is_site_down(e):
+                refused = is_access_refused(e)
+                if not (refused or is_site_down(e)):
                     raise
                 if waited >= self.cfg.site_wait_max:
+                    if refused:
+                        settings.fail_start(
+                            '%s: the site refused the platform\'s sign-in for %d min, so nothing was submitted. '
+                            'A site in maintenance does this (see the site\'s status page); so does an access key '
+                            'the site no longer accepts. Run the step again when the site is back (last answer: %s)' % (
+                                SITE_ACCESS_REFUSED, waited // 60, str(e)[:300]), 1)
                     settings.fail_start('%s: the site did not answer for %d min (last error: %s)' % (
                         SITE_UNAVAILABLE, waited // 60, str(e)[:300]), 1)
-                if waited == 0:
-                    self.reporter.pending_reason(SITE_UNAVAILABLE)
-                print('the site is unavailable (%s): asking again in %d s (%d s of at most %d)' % (
+                word = SITE_ACCESS_REFUSED if refused else SITE_UNAVAILABLE
+                if word != shown:
+                    self.reporter.pending_reason(word)
+                    shown = word
+                print('the site %s (%s): asking again in %d s (%d s of at most %d)' % (
+                    'refuses the platform\'s sign-in' if refused else 'is unavailable',
                     str(e)[:300], delay, waited, self.cfg.site_wait_max), flush=True)
                 self.sleep(delay)
                 waited, delay = waited + delay, min(delay * 2, SITE_RETRY_MAX_S)

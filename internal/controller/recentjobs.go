@@ -183,6 +183,11 @@ func recentJobOf(j *hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) hpcv1alpha1.R
 			// not the generic "Submitted".
 			rj.Reason = hpcv1alpha1.ReasonSiteLimit
 		}
+		if t := hpcv1alpha1.SiteHoldText(raw); t != "" {
+			// The site itself holds the job (maintenance, a closed partition, a node down): say so in the
+			// message the console shows, in the follower's words. What is booked stays in its own field.
+			rj.Message = truncateMessage("held by the site: " + t)
+		}
 	}
 	rj.BookedNodeMinutes = bookedOf(j)
 	for _, a := range st.Attempts {
