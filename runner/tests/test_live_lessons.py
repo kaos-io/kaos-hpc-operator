@@ -107,12 +107,18 @@ def test_fetch_workdir_presents_the_token_only_to_gar_hosts__live_job_5140432(re
     assert reg.requests and all(r.get_header('Authorization') == 'Bearer tok' for r in reg.requests)
 
 
-def _exec_script(tmp_path, workdir, gpus, extra_env=None, probe_ok=True):
+PROBE = 'exec --nv --nvccli img.sif nvidia-smi --query-gpu=index --format=csv,noheader'
+
+
+def _exec_script(tmp_path, workdir, gpus, extra_env=None, probe_ok=True, seen=None):
     """The batch script's PWD_OPT/NV lines and the `apptainer exec`, run against a recording fake apptainer."""
     block = ['fail(){ exit "$1"; }'] + _span('PWD_OPT=""', '  exec apptainer exec') + ['wait']
-    # The fence probe is `apptainer exec --nv --nvccli img.sif true`; the step's own exec records args and env.
+    # The fence probe lists the GPUs a fenced container sees (one index per line); the step's own exec records
+    # args and env. `seen` is how many the probe shows: by default the step's own count, so the fence holds.
+    cuda = (extra_env or {}).get('CUDA_VISIBLE_DEVICES', '')
+    shown = len([g for g in cuda.split(',') if g.strip()]) if seen is None else seen
     _fake(tmp_path / 'bin', 'apptainer',
-          '[ "$*" = "exec --nv --nvccli img.sif true" ] && exit %d\n' % (0 if probe_ok else 1) +
+          'if [ "$*" = "%s" ]; then %s exit %d; fi\n' % (PROBE, 'seq 0 %d;' % (shown - 1) if probe_ok else '', 0 if probe_ok else 1) +
           'echo "$@" > "$OUT"; env | grep "^APPTAINERENV_" | sort >> "$OUT.env"\n'
           'env | grep -E "^(CUDA_VISIBLE_DEVICES|NVIDIA_VISIBLE_DEVICES|KUBECORE_SLOT_GPUS)=" | sort > "$OUT.host"\n')
     env = dict(os.environ, PATH=str(tmp_path / 'bin') + os.pathsep + os.environ['PATH'], OUT=str(tmp_path / 'args'),
@@ -153,11 +159,11 @@ def test_nv_is_passed_on_gpu_classes_only__cpu_and_largemem_partitions(tmp_path,
 
 # ------------------------------------------------ AC-57 / D-29: a shared-node step sees only its own GPUs
 
-def _fenced(tmp_path, cuda, shared='1', cli=True, probe_ok=True):
+def _fenced(tmp_path, cuda, shared='1', cli=True, probe_ok=True, seen=None):
     if cli:
         _fake(tmp_path / 'bin', 'nvidia-container-cli', 'exit 0\n')
     env = {'KUBECORE_SLOT_SHARED': shared, 'CUDA_VISIBLE_DEVICES': cuda}
-    args = _exec_script(tmp_path, '', gpus=4, extra_env=env, probe_ok=probe_ok)
+    args = _exec_script(tmp_path, '', gpus=4, extra_env=env, probe_ok=probe_ok, seen=seen)
     envf = tmp_path / 'args.env'
     # Only the GPU variables: the step container gets the rest of its allow-list the same way (test_hardening).
     return args, ([e for e in envf.read_text().split() if e.split('=')[0].endswith(('CUDA_VISIBLE_DEVICES', 'NVIDIA_VISIBLE_DEVICES'))]
@@ -180,6 +186,16 @@ def test_apptainer_itself_is_told_the_gpu_set_or_it_binds_every_gpu__live_jobs_5
 
 def test_without_the_fence_apptainer_gets_no_gpu_set_of_ours(tmp_path):
     _fenced(tmp_path, '2', probe_ok=False)
+    host = (tmp_path / 'args.host').read_text().split()
+    assert not [h for h in host if h.startswith('NVIDIA_VISIBLE_DEVICES=')], host
+
+
+def test_a_fence_that_still_shows_every_gpu_is_not_used__live_jobs_5461684_5461685(tmp_path):
+    # The site binds the whole of /dev: the probe sees 4 GPUs for a set of 1. Renumbering would send every
+    # slot to the node's GPU 0, so the step keeps the node's own number and apptainer gets no set of ours.
+    args, env = _fenced(tmp_path, '2', seen=4)
+    assert '--nv' in args and '--nvccli' not in args
+    assert env == ['APPTAINERENV_CUDA_VISIBLE_DEVICES=2']
     host = (tmp_path / 'args.host').read_text().split()
     assert not [h for h in host if h.startswith('NVIDIA_VISIBLE_DEVICES=')], host
 
