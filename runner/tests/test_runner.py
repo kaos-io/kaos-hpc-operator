@@ -107,7 +107,7 @@ class Net:
         if "/objects?" in url:
             name = urllib.parse.unquote(url.split("path=", 1)[1])
             if name.startswith("hpc-outputs/"):
-                assert "/repositories/outputs-yolo/refs/hpc-%s-model-training/objects?" % WF in url, url   # lakeFS has no GET on branches/<b>/objects
+                assert "/repositories/outputs-yolo/refs/hpc-%s-model-training-0123456789abcdef0123/objects?" % WF in url, url   # lakeFS has no GET on branches/<b>/objects
                 assert req.get_header("Authorization", "").startswith("Basic "), "fetched with the app's key"
                 self.fetched.append(name)
                 if self.fail:
@@ -199,7 +199,7 @@ def test_a_successful_attempt_submits_once_reports_each_state_and_the_result(rig
     assert "pendingReason" not in status, "cleared once the job left the queue"
     states = [c[2]["status"]["run"]["state"] for c in rig.kube.patches() if "run" in c[2]["status"]]
     assert states == ["PENDING", "PENDING", "RUNNING", "COMPLETED"]
-    assert rig.net.deleted and "hpc-%s-model-training" % WF in rig.net.deleted[0], "the hand-off branch is deleted"
+    assert rig.net.deleted and "hpc-%s-model-training-0123456789abcdef0123" % WF in rig.net.deleted[0], "the hand-off branch is deleted"
     assert (signal_name(rig.sigterm[0][0]), rig.sigterm[0][1]) == ("SIGTERM", rig.runner.on_term)
 
 

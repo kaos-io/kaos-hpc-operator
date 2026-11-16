@@ -104,7 +104,7 @@ runs. Not staged: a model or an artifact a needed step wrote; kaos-lib downloads
 
 **The result.** After a step that exited 0, the job script runs `payload/handback.py`: it uploads
 `$KAOS_WORK/output/kaos-result.json`, unread, to `hpc-outputs/<workflow uid>/<step>/<site job id>/kaos-result.json` on the
-hand-off branch `hpc-<workflow uid>-<step>` of `outputs-<app>`, or the object `kaos-result.absent` when the step wrote no
+hand-off branch `hpc-<workflow uid>-<step>-<job>` of `outputs-<app>` (the job's own: each item of a step with `matrix=` has its own), or the object `kaos-result.absent` when the step wrote no
 file. When it cannot (no token or endpoint, a file that is not a regular file, cannot be read or is over 64 KiB, lakeFS
 refusing after three tries) it prints `result hand-back: <cause>` and the job ends 243. The script removes a result file
 left in the work folder before the step starts (a requeued job runs again under the same id).

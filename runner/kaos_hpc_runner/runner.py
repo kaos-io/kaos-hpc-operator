@@ -279,7 +279,7 @@ class Runner:
                'USER=' + ident['user'], 'IMAGE_REF=' + cfg.image, 'REG_TOKEN=' + reg,
                'HPC_GPUS=' + str(hpc.get('gpus') or 0),
                'STEP_CMD=' + cfg.command, 'STEP_WORKDIR=' + wallet.fetch_workdir(cfg.image, reg),
-               'WF_UID=' + cfg.wf_uid, 'STEP_NAME=' + cfg.step,
+               'WF_UID=' + cfg.wf_uid, 'STEP_NAME=' + cfg.step, 'KAOS_HANDOFF_BRANCH=' + cfg.handoff_branch,
                # The step's inputs, one word each: name|repository|commit|resident path ('' = stage in the job)|owner
                # ('' = the project's own dataset; a dataset another project shares is never staged in the job).
                'KAOS_INPUTS=' + ' '.join('|'.join((i['name'], i['repo'], i['commit'], self.staged.get(i['name']) or '', i['owner']))
@@ -563,8 +563,8 @@ class Runner:
         """One call on the hand-off branch of the app's outputs repository (payload/handback.py writes there).
         lakeFS reads an object under refs/<branch>/ (what the job staged on the branch is read there before any
         commit); branches/<branch>/objects takes writes only, a GET there never finds the result."""
-        base = '%s/api/v1/repositories/%s/%s/hpc-%s-%s' % (
-            self.cfg.lakefs_url, urllib.parse.quote(self.cfg.outputs_repo, safe=''), kind, self.cfg.wf_uid, self.cfg.step)
+        base = '%s/api/v1/repositories/%s/%s/%s' % (
+            self.cfg.lakefs_url, urllib.parse.quote(self.cfg.outputs_repo, safe=''), kind, self.cfg.handoff_branch)
         return urllib.request.urlopen(urllib.request.Request(
             base + path, method=method, headers={'Authorization': self.current_key().auth()}), timeout=60).read()
 
@@ -614,7 +614,8 @@ class Runner:
         """Delete the hand-off branch, once the terminal report was accepted. Never before: a runner that dies
         between the fetch and the report leaves the branch, and the next runner of the attempt reads the result
         from it. A branch left behind is harmless (the result's path names the site job) and goes with the next
-        terminal report of the same step, which deletes the whole branch."""
+        terminal report of the same job, which deletes the whole branch. The branch is the job's own: another
+        item of the same step has its own."""
         try:
             self.handoff('DELETE', '')
         except Exception as e:

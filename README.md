@@ -202,7 +202,7 @@ An HPC step runs on the same contract as a cluster step ([docs/step-contract.md]
 | Runner | Hands the context to the step unchanged: in the Slurm environment for a job alone on its node, as an export line of the job script on a shared node. Stages every input whole (a dataset another project shares from the owner's data store, filed under the owner on the site; one copy per reading project) and presents each as `$KAOS_STAGED_ROOT/<input>/`, holding the dataset's files and nothing else (on the site both caches keep them under `<copy>/data/`, beside the files of the platform), with the record `<input>.kaos-ready` beside it. Brings the step's result back, checks it and writes it in wire form into `status.result`, in the same report as the end of the step |
 
 **The result's way back.** When the step exits 0 the job script uploads the result file, unread, to
-`hpc-outputs/<workflow uid>/<step>/<site job id>/kaos-result.json` on the hand-off branch `hpc-<workflow uid>-<step>` of
+`hpc-outputs/<workflow uid>/<step>/<site job id>/kaos-result.json` on the job's own hand-off branch `hpc-<workflow uid>-<step>-<job>` (each item of a step with `matrix=` has its own) of
 the app's outputs repository (`outputs-<app>`), or the object `kaos-result.absent` when the step wrote no file (so
 that "the step wrote none" is told apart from "nothing arrived"). The runner reads it from the branch as a ref (`refs/<branch>/objects`, which lakeFS serves before any commit; `branches/<branch>/objects` takes writes only), checks it (`version` 1, `status` `ok`, `values`, `reads`, `writes`, at most 8 KiB by cost), writes it
 again in wire form and deletes the branch. Every way this can go wrong fails the job with a sentence naming the cause:
