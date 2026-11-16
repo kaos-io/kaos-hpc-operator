@@ -172,6 +172,11 @@ class Settings:
         self.step = g('STEP_NAME') or ''
         if not (self.wf_uid and self.step and g('IMAGE_REF')):
             fail_start('WF_UID / STEP_NAME / IMAGE_REF missing from the runner environment')
+        # The hand-off branch of the step's result, one for each HPC job. The items of a step with matrix= are
+        # jobs of one workflow and one step: on a branch they shared, the first item to end deleted the branch
+        # and with it the results the others had just handed back (live site jobs 5462108 and 5462109).
+        self.handoff_branch = 'hpc-%s-%s-%s' % (self.wf_uid, self.step,
+                                                 re.sub(r'[^A-Za-z0-9_-]', '-', re.sub(r'^hpc-', '', self.job_name)))
         self.wf_name = g('WF_NAME') or ''     # labels the step's log lines; it is not passed to the step
         self.image = normalize_image(g('IMAGE_REF'))
         # strict=False tolerates control characters inside strings (belt and braces for any

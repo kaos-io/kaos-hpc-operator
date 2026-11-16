@@ -1,6 +1,6 @@
 # Hands the step's result back (docs/step-contract.md, section 8). The step wrote one file,
 # /work/output/kaos-result.json ($KAOS_WORK/output on the node), or none. Its bytes go, unread, to lakeFS at
-# hpc-outputs/{wf-uid}/{step}/{site job id}/kaos-result.json on a hand-off branch of the app's outputs
+# hpc-outputs/{wf-uid}/{step}/{site job id}/kaos-result.json on the job's hand-off branch of the app's outputs
 # repository; the runner fetches them, checks them and puts them in the job's status, and deletes the branch only after
 # that report was accepted (a runner that dies in between leaves it for the next runner of the attempt).
 # When the step wrote no file, an object kaos-result.absent says so: the runner must be able to tell "no
@@ -21,7 +21,7 @@ def die(why):
 
 
 missing = [k for k in ('LAKEFS_ENDPOINT', 'LAKEFS_KEY_FILE', 'KAOS_OUTPUTS_REPO', 'WF_UID', 'STEP_NAME', 'KAOS_JOB_ID',
-                       'KAOS_WORK') if not os.environ.get(k)]
+                       'KAOS_WORK', 'KAOS_HANDOFF_BRANCH') if not os.environ.get(k)]
 if missing:
     die('the job has no %s, so the step\'s result cannot be handed back' % ', '.join(missing))
 base = os.environ['LAKEFS_ENDPOINT'].rstrip('/') + '/api/v1/repositories/' + urllib.parse.quote(os.environ['KAOS_OUTPUTS_REPO'], safe='')
@@ -36,7 +36,7 @@ def auth():
     except (OSError, ValueError, KeyError, TypeError):
         die('the key file %s has no access key (it is missing or unreadable)' % KEY_FILE)
     return {'Authorization': 'Basic ' + base64.b64encode(pair.encode()).decode()}
-branch = 'hpc-%s-%s' % (os.environ['WF_UID'], os.environ['STEP_NAME'])
+branch = os.environ['KAOS_HANDOFF_BRANCH']    # the job's own: the items of a step with matrix= each have theirs
 prefix = 'hpc-outputs/%s/%s/%s/' % (os.environ['WF_UID'], os.environ['STEP_NAME'], os.environ['KAOS_JOB_ID'])
 path = os.path.join(os.environ['KAOS_WORK'], 'output', 'kaos-result.json')
 

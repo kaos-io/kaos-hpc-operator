@@ -23,7 +23,7 @@ from kaos_hpc_runner import runner as runmod
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WF, STEP = helpers.BASE_ENV["WF_UID"], helpers.BASE_ENV["STEP_NAME"]
-BRANCH = "hpc-%s-%s" % (WF, STEP)
+BRANCH = "hpc-%s-%s-%s" % (WF, STEP, helpers.BASE_ENV["HPC_JOB_NAME"][len("hpc-"):])      # the job's own hand-off branch
 
 
 @pytest.fixture
@@ -102,7 +102,8 @@ def _handback(tmp_path, lakefs, write=None, **extra):
     if write is not None:
         (out / "kaos-result.json").write_bytes(write)
     env = dict(os.environ, LAKEFS_ENDPOINT=lakefs.url, LAKEFS_KEY_FILE=helpers.write_key_file(tmp_path / "key"), KAOS_OUTPUTS_REPO="outputs-yolo",
-               WF_UID=WF, STEP_NAME=STEP, KAOS_JOB_ID="5001", KAOS_WORK=str(tmp_path / "work"), KAOS_HANDBACK_RETRY_SLEEP="0")
+               WF_UID=WF, STEP_NAME=STEP, KAOS_JOB_ID="5001", KAOS_WORK=str(tmp_path / "work"), KAOS_HANDBACK_RETRY_SLEEP="0",
+               KAOS_HANDOFF_BRANCH=BRANCH)
     env.update(extra)
     env = {k: v for k, v in env.items() if v is not None}
     return subprocess.run([sys.executable, "-c", payloads.HANDBACK], env=env, capture_output=True, text=True)
@@ -744,3 +745,27 @@ def test_the_runner_hands_the_job_its_limit_so_the_copier_can_keep_the_last_minu
 
     from kaos_hpc_runner import runner
     assert "KAOS_TIME_LIMIT_S=%d' % (cfg.time_limit * 60)" in inspect.getsource(runner)
+
+
+# ------------------------------------------------ each HPC job has its own hand-off branch (matrix items)
+
+def test_two_items_of_one_step_hand_back_on_their_own_branches__live_site_jobs_5462108_5462109():
+    """The items of a step with matrix= are jobs of one workflow and one step. On a shared branch the first item to
+    end deleted the branch, and the results the other items had just handed back went with it (ResultNotHandedBack)."""
+    one = helpers.settings(HPC_JOB_NAME="hpc-3105c3ba677d0e7a8246")
+    two = helpers.settings(HPC_JOB_NAME="hpc-70ee38e4cae719a90578")
+    assert one.wf_uid == two.wf_uid and one.step == two.step
+    assert one.handoff_branch != two.handoff_branch
+    assert one.handoff_branch == "hpc-%s-%s-3105c3ba677d0e7a8246" % (WF, STEP)
+
+
+def test_the_branch_name_holds_only_what_lakefs_takes_in_a_branch_name():
+    odd = helpers.settings(HPC_JOB_NAME="hpc-lab.app_e2e/par1")
+    assert odd.handoff_branch == "hpc-%s-%s-lab-app_e2e-par1" % (WF, STEP)
+
+
+def test_the_job_is_told_its_branch_and_the_hand_back_program_needs_it(lakefs, tmp_path):
+    src = (REPO_ROOT / "runner" / "kaos_hpc_runner" / "runner.py").read_text()
+    assert "'KAOS_HANDOFF_BRANCH=' + cfg.handoff_branch" in src
+    r = _handback(tmp_path, lakefs, b'{"status":"ok","values":{}}', KAOS_HANDOFF_BRANCH=None)
+    assert r.returncode != 0 and "KAOS_HANDOFF_BRANCH" in r.stdout

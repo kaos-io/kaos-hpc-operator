@@ -213,6 +213,7 @@ def test_a_payload_without_a_readable_key_file_fails_and_says_so(tmp_path, progr
     import sys
     env = dict(os.environ, LAKEFS_ENDPOINT="http://127.0.0.1:9", LAKEFS_KEY_FILE=str(tmp_path / "gone.json"),
                KAOS_OUTPUTS_REPO="o", WF_UID="w", STEP_NAME="s", KAOS_JOB_ID="1", KAOS_WORK=str(tmp_path),
+               KAOS_HANDOFF_BRANCH="hpc-w-s-j",
                DATASET_REPO="ds", DATASET_COMMIT="c" * 12, DATASET_CACHE=str(tmp_path / "c"), DATASET_DIRFILE=str(tmp_path / "d"))
     (tmp_path / "output").mkdir()
     (tmp_path / "output" / "kaos-result.json").write_text("{}")
