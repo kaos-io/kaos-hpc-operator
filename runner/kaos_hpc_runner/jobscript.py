@@ -453,12 +453,16 @@ def batch_lines(scope, scratch):
         # step that touches another GPU (reason GPUViolation).
         'if [ -n "$NV" ] && [ "${KUBECORE_SLOT_SHARED:-0}" = 1 ] && [ -n "$CUDA_VISIBLE_DEVICES" ]'
         ' && command -v nvidia-container-cli >/dev/null 2>&1; then',
-        '  export APPTAINERENV_NVIDIA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES',
+        # Apptainer chooses the devices nvidia-container-cli binds from NVIDIA_VISIBLE_DEVICES in ITS OWN
+        # environment, and sets "all" when that is empty; APPTAINERENV_ only reaches the container. So the set
+        # is exported for apptainer too (live jobs 5460781 and 5460783: every GPU was bound, the step computed
+        # on GPU 0 and was stopped as a trespasser).
+        '  export APPTAINERENV_NVIDIA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES NVIDIA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES',
         '  KAOS_NGPU=$(echo "$CUDA_VISIBLE_DEVICES" | tr "," "\n" | grep -c .)',
         '  export APPTAINERENV_CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((KAOS_NGPU - 1)))',
         '  if apptainer exec --nv --nvccli "$SIF" true >/dev/null 2>&1; then NV="--nv --nvccli";'
         ' echo "gpu fence: nvccli, only GPU(s) $CUDA_VISIBLE_DEVICES are visible to the step"',
-        '  else unset APPTAINERENV_NVIDIA_VISIBLE_DEVICES APPTAINERENV_CUDA_VISIBLE_DEVICES;'
+        '  else unset APPTAINERENV_NVIDIA_VISIBLE_DEVICES APPTAINERENV_CUDA_VISIBLE_DEVICES NVIDIA_VISIBLE_DEVICES;'
         ' echo "gpu fence: --nvccli unusable here, env steering and the slot watchdog only"; fi',
         'elif [ -n "$NV" ] && [ "${KUBECORE_SLOT_SHARED:-0}" = 1 ]; then',
         '  echo "gpu fence: no nvidia-container-cli, env steering and the slot watchdog only"',

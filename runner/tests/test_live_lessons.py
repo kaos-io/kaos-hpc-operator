@@ -170,6 +170,20 @@ def test_a_shared_step_gets_only_its_gpu_bound_and_renumbered_when_nvccli_works(
     assert env == ['APPTAINERENV_CUDA_VISIBLE_DEVICES=0', 'APPTAINERENV_NVIDIA_VISIBLE_DEVICES=2']
 
 
+def test_apptainer_itself_is_told_the_gpu_set_or_it_binds_every_gpu__live_jobs_5460781_5460783(tmp_path):
+    # Apptainer reads NVIDIA_VISIBLE_DEVICES from its own environment for --nvccli and sets "all" when it is empty.
+    args, _ = _fenced(tmp_path, '2')
+    assert '--nvccli' in args
+    host = (tmp_path / 'args.host').read_text().split()
+    assert 'NVIDIA_VISIBLE_DEVICES=2' in host, host
+
+
+def test_without_the_fence_apptainer_gets_no_gpu_set_of_ours(tmp_path):
+    _fenced(tmp_path, '2', probe_ok=False)
+    host = (tmp_path / 'args.host').read_text().split()
+    assert not [h for h in host if h.startswith('NVIDIA_VISIBLE_DEVICES=')], host
+
+
 def test_a_two_gpu_shared_step_sees_cuda_0_and_1(tmp_path):
     args, env = _fenced(tmp_path, '1,3')
     assert '--nvccli' in args
