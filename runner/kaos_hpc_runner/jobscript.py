@@ -460,10 +460,17 @@ def batch_lines(scope, scratch):
         '  export APPTAINERENV_NVIDIA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES NVIDIA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES',
         '  KAOS_NGPU=$(echo "$CUDA_VISIBLE_DEVICES" | tr "," "\n" | grep -c .)',
         '  export APPTAINERENV_CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((KAOS_NGPU - 1)))',
-        '  if apptainer exec --nv --nvccli "$SIF" true >/dev/null 2>&1; then NV="--nv --nvccli";'
+        # The fence is measured, never assumed: the probe counts the GPUs a container started this way sees.
+        # Where the site binds the whole of /dev, every GPU stays visible whatever nvidia-container-cli was
+        # told, and device 0 of a renumbered list is then the node's GPU 0, not the step's (live jobs 5461684
+        # and 5461685: slots 1 and 2 both computed on GPU 0 and were stopped). Only a probe that sees exactly
+        # the step's count keeps the fence; otherwise the step keeps the node's own numbers.
+        '  KAOS_SEEN=$(apptainer exec --nv --nvccli "$SIF" nvidia-smi --query-gpu=index --format=csv,noheader'
+        ' 2>/dev/null | grep -c .)',
+        '  if [ "$KAOS_SEEN" = "$KAOS_NGPU" ]; then NV="--nv --nvccli";'
         ' echo "gpu fence: nvccli, only GPU(s) $CUDA_VISIBLE_DEVICES are visible to the step"',
         '  else unset APPTAINERENV_NVIDIA_VISIBLE_DEVICES APPTAINERENV_CUDA_VISIBLE_DEVICES NVIDIA_VISIBLE_DEVICES;'
-        ' echo "gpu fence: --nvccli unusable here, env steering and the slot watchdog only"; fi',
+        ' echo "gpu fence: --nvccli shows $KAOS_SEEN GPU(s) for a set of $KAOS_NGPU, env steering and the slot watchdog only"; fi',
         'elif [ -n "$NV" ] && [ "${KUBECORE_SLOT_SHARED:-0}" = 1 ]; then',
         '  echo "gpu fence: no nvidia-container-cli, env steering and the slot watchdog only"',
         'fi',

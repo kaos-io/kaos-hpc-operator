@@ -197,9 +197,11 @@ MeluXina has `ConstrainDevices=no`: a step's `CUDA_VISIBLE_DEVICES` steers CUDA 
 still visible. On a shared node (`KUBECORE_SLOT_SHARED=1`) two layers keep a step on its own GPU(s):
 
 - **Prevention (`jobscript.py`).** If `nvidia-container-cli` exists and a throw-away `apptainer exec --nv --nvccli`
-  succeeds, the step runs with `--nv --nvccli`, `NVIDIA_VISIBLE_DEVICES` set to its GPUs and
-  `CUDA_VISIBLE_DEVICES` rewritten to `0..G-1` (the bound devices are renumbered). The job log says
-  `gpu fence: nvccli ...` or why not. Otherwise plain `--nv`.
+  that lists the GPUs sees exactly the step's count, the step runs with `--nv --nvccli`, `NVIDIA_VISIBLE_DEVICES`
+  set to its GPUs and `CUDA_VISIBLE_DEVICES` rewritten to `0..G-1` (the bound devices are renumbered). The job
+  log says `gpu fence: nvccli ...` or why not. Otherwise plain `--nv` and the node's own GPU numbers: a site
+  that binds the whole of `/dev` shows every GPU whatever was asked, and a renumbered list would then send
+  every slot to GPU 0.
 - **Detection (`payload/slots.py`).** The slot manager reads `nvidia-smi --query-compute-apps`, attributes each pid
   to a step through `SLURM_STEP_ID` and its `KAOS_STEP_GPUS` (the set the step launcher stamped), and cancels a
   step that computes on a GPU outside it. Only that step stops; its host comment gets `reason=GPUViolation`.
