@@ -33,6 +33,7 @@ from kubecore.step_contract import (
     SENTINEL,
     RESULT_CAP,
     START_FIELD,
+    TARGET_FIELD,
     cost,
     wire,
 )
@@ -69,11 +70,34 @@ def downstream(steps: list, start: str) -> set:
     return found
 
 
-def reused_steps(steps: list, start: str) -> list:
+def upstream(steps: list, target: str) -> set:
+    """`target` and every step it needs, directly or through the steps in between."""
+    found = {target}
+    for step in reversed(steps):     # a step comes after the steps it needs, so going backwards meets each one after its users
+        if step["name"] in found:
+            found.update(step["needs"])
+    return found
+
+
+def reused_steps(steps: list, start: str, target: str = "") -> list:
     """The steps a run that starts from `start` does not run again: every step that is not `start` or after it, whether
-    it comes before `start` or on a branch that never meets it."""
+    it comes before `start` or on a branch that never meets it. With a `target`, only the steps the target needs count: the
+    others do not run at all."""
     again = downstream(steps, start)
-    return [s["name"] for s in steps if s["name"] not in again]
+    needed = upstream(steps, target) if target else {s["name"] for s in steps}
+    return [s["name"] for s in steps if s["name"] not in again and s["name"] in needed]
+
+
+def check_target(steps: list, target: str, start: str = "") -> None:
+    """A target that is a step of the pipeline and, with a start, a step at or after it: otherwise no step would run."""
+    if not target:
+        return
+    names = [s["name"] for s in steps]
+    if target not in names:
+        raise Refused(f"{TARGET_FIELD}: this pipeline has no step '{target}'. Its steps are: {', '.join(names)}.")
+    if start and target not in downstream(steps, start):
+        raise Refused(f"{TARGET_FIELD}: '{target}' is not '{start}' or a step after it, so no step would run. Name '{start}' "
+                      f"or a step after it, or leave {START_FIELD} empty.")
 
 
 def check_fields(steps: list, reuse: str, start: str) -> None:
@@ -268,12 +292,13 @@ def claim(record, client, app: str, run: str, instance: str) -> None:
 
 
 def prepare(steps: list, run: str, start: str, app: str, params: dict, when: dict, classes: dict, hpc: set,
-            promotes: dict, images: dict, record, client) -> Reuse:
+            promotes: dict, images: dict, record, client, target: str = "") -> Reuse:
     """Everything a run that starts at `start` takes from `run`, checked: a Reuse, or Refused with the sentence that says
     what to change. `steps` is the pipeline's step table, `params` each step's settings now, `when` the values of the run
     form fields the `when=`s name, `classes` the class each step is given, `hpc` the names of the HPC classes, `promotes`
-    {dataset: whether the form promotes it} and `images` {step: the image reference compose resolved for it}."""
-    reused = reused_steps(steps, start)
+    {dataset: whether the form promotes it} and `images` {step: the image reference compose resolved for it}. With a `target`, the steps it does not need are not run and
+    not looked at."""
+    reused = reused_steps(steps, start, target)
     by_name = {s["name"]: s for s in steps}
     # What a step that runs reads of the steps before it comes only through `needs=` (its `upstream`, its `when=` on
     # `<step>.<value>`, the datasets and artifacts of the steps it needs); a reused step's own needs are not read, its result

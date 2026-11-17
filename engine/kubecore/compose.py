@@ -54,6 +54,10 @@ before the step are not run again: compose takes their results from the earlier 
 the commits that run read, and refuses, before any step starts, whatever it cannot do (kubecore/rerun.py). Every run, this
 kind or not, leaves its plan as `kaos-runs/<run>/plan.json` of the app's outputs repository, best effort.
 
+A target: the run form's `target-step` names a step, and only that step and the steps it needs run; every other task is
+skipped by its `when` and starts no pod and no HPC job. With a start, a step runs when it is both. Compose refuses a target
+that is not a step, or is before the start.
+
 The run's own keys: `plan` and `pipeline-version` are the platform's; the ADVANCED override may carry
 neither. Whether a run promotes a dataset it produces is the run form's `promote-<dataset>` field
 (--promote): compose checks the value; the run's final task moves `latest` (kubecore/promote.py). A step
@@ -833,6 +837,8 @@ def main(argv=None) -> None:
                         help="The run form's reuse-from-run: an earlier run whose results the steps before --start-from-step take.")
     parser.add_argument("--start-from-step", default="",
                         help="The run form's start-from-step: the step this run runs first; with it and every step after it.")
+    parser.add_argument("--target-step", default="",
+                        help="The run form's target-step: the only step this run runs, with the steps it needs.")
     parser.add_argument("--hpc-classes", default="", help="The names of the HPC (Slurm) classes, separated by commas.")
     parser.add_argument("--when-field", action="append", default=[], metavar="FIELD=VALUE",
                         help="The value of a run form field that a step's when= names (repeatable).")
@@ -856,6 +862,7 @@ def main(argv=None) -> None:
             reuse_run, start = args.reuse_from_run.strip(), args.start_from_step.strip()
             if reuse_run or start:
                 rerun.check_fields(steps, reuse_run, start)
+            rerun.check_target(steps, args.target_step.strip(), start)
             settings = run_settings(steps, args.walltime, args.checkpoint_every, args.resumable_lead)
             for step, entry in run_matrix(steps, args.matrix, args.parallel).items():
                 settings.setdefault(step, {}).update(entry)
@@ -871,7 +878,7 @@ def main(argv=None) -> None:
                 reuse = rerun.prepare(
                     steps, reuse_run, start, args.app, {s["name"]: step_params(s, resolved) for s in steps},
                     _pairs(args.when_field), _pairs(args.classes), {c for c in args.hpc_classes.split(",") if c}, flags,
-                    images, _record(), _kaos_lib()[1])
+                    images, _record(), _kaos_lib()[1], args.target_step.strip())
                 for line in reuse.notes:
                     print(line)
             wait_for_grants(steps, args.app)

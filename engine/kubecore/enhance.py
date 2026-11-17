@@ -125,6 +125,7 @@ from kubecore.step_contract import (
     RESULT_PARAM,
     REUSE_FIELD,
     START_FIELD,
+    TARGET_FIELD,
     TEMPLATE_CAP,
     dataset_name_problem,
     image_of,
@@ -819,7 +820,8 @@ def enhance_run_form(spec: dict, steps: list, offers: dict, ctx: dict) -> None:
     `<step>-checkpoint-every` for a step that declares checkpoint_every= or resumable= (not checkpoint_every=False;
     default: the value in code, else the engine's for resumable= alone),
     `promote-<dataset>` for every dataset a step produces, and `reuse-from-run` and `start-from-step`, which start a
-    run from a step with the results of an earlier run. Compose gets each value (checks it,
+    run from a step with the results of an earlier run, and `target-step`, which runs one step and the steps it
+    needs. Compose gets each value (checks it,
     and writes the numbers as its output `kaos-run-settings`)."""
     compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
     if compose is None:
@@ -871,7 +873,9 @@ def enhance_run_form(spec: dict, steps: list, offers: dict, ctx: dict) -> None:
             (REUSE_FIELD, "", "Optional. The name of an earlier run of this app. Steps before the step below are not run again; "
                               "their results and outputs are taken from that run. Leave empty for a normal run."),
             (START_FIELD, "", "Optional. The step to run first; it and every step after it run again. Needs the earlier run "
-                              "above. Steps: %s." % ", ".join(e["name"] for e in table))):
+                              "above. Steps: %s." % ", ".join(e["name"] for e in table)),
+            (TARGET_FIELD, "", "Optional. The step to run: only it and the steps it needs run, every other step starts nothing. "
+                               "Leave empty for a normal run. Steps: %s." % ", ".join(e["name"] for e in table))):
         if name in existing:
             raise EnhanceError(f"the run form already has a field '{name}'; rename the setting that would give the form "
                                f"a second one")
@@ -1465,7 +1469,7 @@ def enhance_compose_class(spec: dict, steps: list, ctx: dict) -> None:
 
 
 ROLES = ("info", "experiment", "setting", "input", "class", "walltime", "checkpoint-every", "matrix",
-         "parallel", "reuse", "start", "promote", "advanced", "platform")
+         "parallel", "reuse", "start", "target", "promote", "advanced", "platform")
 STEP_ROLES = ("class", "walltime", "checkpoint-every", "matrix", "parallel")    # the per-step fields, in form order
 
 
@@ -1473,7 +1477,7 @@ def form_rank(spec: dict, steps: list, rendered: "set | None" = None) -> dict:
     """{param name: {"role": one of ROLES, "step": step name or None, "sort": (group, index)}} for every
     spec.arguments.parameters entry. "sort" is the key the form is ordered by (order_form): the text, the
     experiment fields, the settings in config order, the dataset fields, then each step's class, time limit and
-    checkpoint interval, the two fields that start a run from a step, the promote ticks, the extra YAML, and last
+    checkpoint interval, the three fields that start a run from a step or aim it at one, the promote ticks, the extra YAML, and last
     what the platform owns.
 
     A role is decided by the engine's own names first (what it adds: the text, the per-step fields, the rerun
@@ -1502,9 +1506,9 @@ def form_rank(spec: dict, steps: list, rendered: "set | None" = None) -> dict:
             return {"role": "experiment", "step": None, "sort": (1, 0)}
         if name in inputs:
             return {"role": "input", "step": None, "sort": (3, 0)}
-        if name in (REUSE_FIELD, START_FIELD):
-            return {"role": "reuse" if name == REUSE_FIELD else "start", "step": None,
-                    "sort": (5, (REUSE_FIELD, START_FIELD).index(name) - 2)}    # before the promote ticks
+        if name in (REUSE_FIELD, START_FIELD, TARGET_FIELD):
+            return {"role": {REUSE_FIELD: "reuse", START_FIELD: "start", TARGET_FIELD: "target"}[name], "step": None,
+                    "sort": (5, (REUSE_FIELD, START_FIELD, TARGET_FIELD).index(name) - 3)}    # before the promote ticks
         if name.startswith("promote-"):
             return {"role": "promote", "step": producers.get(name), "sort": (5, 0)}
         if name == "config":

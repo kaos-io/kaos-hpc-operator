@@ -607,7 +607,7 @@ days with "runs with HPC steps are kept at least 32 days, so the month's HPC spe
 | Authoring | `of=` in `dataset(...)` |
 | Dataset references | the form `<dataset>.<variant>@<ref>` |
 | Ledger entries | `line`; on a write, `path` (written by the platform only, section 13) |
-| Run form | `reuse-from-run` and `start-from-step` (section 13) |
+| Run form | `reuse-from-run`, `start-from-step` and `target-step` (section 13) |
 | Files in `outputs-<app>` | `kaos-runs/` (section 13) |
 
 ## 10. How the engine assembles the context
@@ -871,14 +871,15 @@ and that every record it takes has the same app, run, instance and step as the p
 step table and the settings, one file for each step of each run, and they stay with the repository. Nothing in the platform
 deletes them yet.
 
-**The run form.** Two text fields, empty by default, which mean a normal run:
+**The run form.** Three text fields, empty by default, which mean a normal run:
 
 | Field | Meaning |
 |---|---|
 | `reuse-from-run` | "Optional. The name of an earlier run of this app. Steps before the step below are not run again; their results and outputs are taken from that run. Leave empty for a normal run." |
 | `start-from-step` | "Optional. The step to run first; it and every step after it run again. Needs the earlier run above. Steps: <the steps>." |
+| `target-step` | "Optional. The step to run: only it and the steps it needs run, every other step starts nothing. Leave empty for a normal run. Steps: <the steps>." |
 
-Both reach compose as `--reuse-from-run=` and `--start-from-step=`, as `--promote` does, and a render also passes
+They reach compose as `--reuse-from-run=`, `--start-from-step=` and `--target-step=`, as `--promote` does, and a render also passes
 `--hpc-classes` (the names of the HPC classes) and one `--when-field <field>=<value>` for each form field a `when=` names.
 
 **Which tasks run.** Let X be `start-from-step`. A step is run again when X is empty, or is the step, or is a step it needs
@@ -891,6 +892,19 @@ a bare name (`depends: <step>` accepts Skipped; checked on Argo Workflows v4.0.6
 `depends`. (The tolerant form of section 10, `(<step>.Succeeded || <step>.Skipped || <step>.Omitted)`, is for a step that
 may be skipped: it is not used here, because a failed step makes the next task Omitted and every task that tolerates Omitted
 would then run.)
+
+**The target.** Let T be `target-step`. A step runs when T is empty, or is the step, or is a step that needs it (directly or
+through others): the step is T or before T. Every other step, after T or on a branch T does not need, starts no pod and no HPC
+(Slurm) job. The render gives every task a second term in its `when`, after the one of `start-from-step`:
+`{{=workflow.parameters['start-from-step'] in [...] && workflow.parameters['target-step'] in ['', '<step>', '<each step that
+needs it, directly or not>'] && (<the step's own when>)}}`. The HPC variant of a step has the same term, so a step the target
+does not need has neither its pod nor its `<step>-hpc` task: the task is Skipped and no job object is created. A skipped step
+leaves no record, the later tasks start as for `start-from-step` (a bare name in `depends` accepts Skipped), the task that joins
+a step with `matrix=` that is skipped hands on the sentinel, and the final task promotes no dataset of a skipped step.
+With both fields, a step runs when it is after the start and the target needs it (or is the target), and only the steps the
+target needs are taken from the earlier run, so the others are not looked at. A target needs no earlier run. A run that
+names a target saves records only for the steps it ran: a later run that starts from one of the steps it did not run is
+refused with the sentence for a step with no result.
 
 **The result of a step that is not run again.** Compose declares one more output for each step, `kaos-reused-<step>`
 (`/work/reused/<step>.json`): the step's result as the earlier run handed it on, in wire form, with `path` added to every
@@ -918,6 +932,8 @@ version that is another commit, is refused. An input read only by steps that run
 |---|---|
 | one field empty | `reuse-from-run and start-from-step go together: <field> is empty.` |
 | X is not a step | `start-from-step: this pipeline has no step 'X'. Its steps are: a, b, c.` |
+| T is not a step | `target-step: this pipeline has no step 'T'. Its steps are: a, b, c.` |
+| T is not X or after it | `target-step: 'T' is not 'X' or a step after it, so no step would run. Name 'X' or a step after it, or leave start-from-step empty.` |
 | a step that is not run again has `matrix=` and a step that runs needs it | `step 'S' runs once for each combination of its matrix= and this run does not run it again (it starts from 'X'), and step 'C' needs its result: a step with matrix= cannot be reused yet. Start from step 'S'.` (`steps 'C' and 'D' need its result` for several) |
 | no plan of R for this app | `reuse-from-run: run 'R' saved no record for this app (its step images may be older than this feature, or saving failed: see that run's log). Check the name: it must be a run of this app.` |
 | the plan is not at version 1, or is not R's or the app's | `reuse-from-run: the record of run 'R' is not one this platform reads. Choose another run, or start a run of the whole pipeline.` |

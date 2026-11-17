@@ -19,7 +19,7 @@ CTX = yaml.safe_load((ENGINE / "kubecore" / "local-dev" / "pipeline-context.yaml
 # order_form's output on tests/app before the form_rank refactor (a pure refactor: this must not move).
 APP_ORDER = ["pipeline-info", "experiment-name", "experiment-description", "dataset", "dataset-loading-class",
              "dataset-loading-walltime", "hello-world-class", "hello-world-walltime", "reuse-from-run",
-             "start-from-step", "promote-loaded", "config"]
+             "start-from-step", "target-step", "promote-loaded", "config"]
 LEAVES = ["learning-rate", "optimizer", "batch-size"]    # what derive_tree adds: group dropdown and its leaves
 
 
@@ -63,6 +63,7 @@ def test_rank_covers_every_parameter_and_sort_is_the_order_form_key():
     assert rank["hello-world-walltime"]["role"] == "walltime"
     assert rank["dataset-loading-walltime"]["step"] == "dataset-loading"
     assert rank["reuse-from-run"]["role"] == "reuse" and rank["start-from-step"]["role"] == "start"
+    assert rank["target-step"]["role"] == "target"
     assert rank["promote-loaded"]["role"] == "promote"
     assert rank["promote-loaded"]["step"] is not None       # the producer
     assert rank["config"]["role"] == "advanced"

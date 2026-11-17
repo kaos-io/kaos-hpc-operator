@@ -130,10 +130,11 @@ with the sentinel: a skipped or omitted step has an empty output. Section 10 of 
   sections the step names in `reads=`, `ledger` holds the step's own inputs,
   `experiment` is config `experiment.name` or else the app's name, `produces` names each repository;
 - writes the run's ledger at version 2, every pinned input, as the output `kaos-ledger`;
-- reads the run form's `reuse-from-run` and `start-from-step`: a run that starts from a step takes the results of the steps
+- reads the run form's `reuse-from-run`, `start-from-step` and `target-step`: a run that starts from a step takes the results of the steps
   before it from the earlier run's record (`kubecore/rerun.py`), pins the inputs they read to the earlier run's commits and
   writes each result as the output `kaos-reused-<step>` (empty for a step that runs); every refusal is one sentence, and every
-  run keeps its plan as `kaos-runs/<run>/plan.json` of `outputs-<app>`, best effort (`docs/step-contract.md`, section 13);
+  run keeps its plan as `kaos-runs/<run>/plan.json` of `outputs-<app>`, best effort; a target names the one step to run with the steps
+  it needs, and refuses a name that is not a step (`docs/step-contract.md`, section 13);
 - reads the run form's `promote-<dataset>` (checked only: a step never promotes; the final task below reads it),
   `<step>-walltime` and `<step>-checkpoint-every` (checked, written as the output `kaos-run-settings`);
   `plan` and `pipeline-version` in the ADVANCED override are reserved and refused (`plan.promote` with a sentence that
@@ -339,7 +340,7 @@ the `engine-tests` stage of `Dockerfile.engine` (the Go CI container has no Pyth
 |---|---|
 | `tests/test_step_contract.py` | Loads `docs/step-contract/fixtures/`: the wire writer equals every `.wire` file; a context assembled from compose's base and upstream results equals the context fixtures byte for byte, a skipped upstream included; the ledger; the follower's side of the `hpc-job` fixture |
 | `tests/test_authoring_contract.py` | Every keyword and every render refusal, with its message |
-| `tests/test_rerun.py` | Starting from a step: the condition of every task on a diamond and with a `when=` (and the same in the HPC variant), the result expression with its fallback, the size of a rendered pipeline, every refusal with its sentence, the pinned inputs, the entry point end to end |
+| `tests/test_rerun.py` | Starting from a step, and the target of a run: the condition of every task on a diamond and with a `when=` (and the same in the HPC variant), the result expression with its fallback, the size of a rendered pipeline, every refusal with its sentence, the pinned inputs, the entry point end to end |
 | `tests/test_compose_inputs.py` | Pinned inputs, contexts, `plan`, the size cap, every compose refusal with its message, the compose entry point |
 | `tests/template/test_step_contract_enhance.py` | The per-kind HPC rules, the result pair of a step with an HPC variant, the size of a rendered step, the references in a definition, the node sizing of every class shape |
 | `tests/test_compose_kaos_lib.py` | Compose against the real kaos-lib 0.5 (skipped without it: `make test-engine ENGINE_KAOS_LIB=<kaos-lib checkout>`) |
