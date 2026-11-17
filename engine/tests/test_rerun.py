@@ -133,7 +133,7 @@ def test_the_hpc_variant_of_a_step_has_the_same_gate():
 # ------------------------------------------------------------------------------------------------ the target of a run
 
 def runs_with(tasks, **form):
-    """The tasks of the DAG that run (are not skipped by their `when`) for these run form values, but compose and the final task."""
+    """The tasks of the DAG that run (their `when` does not skip them) for these form values, but compose and the final task."""
     return {name for name, task in tasks.items() if name not in ("compose-and-validate", "kaos-promote")
             and (not task.get("when") or run_when(task["when"], **form))}
 
@@ -171,7 +171,8 @@ def test_a_step_the_target_does_not_need_starts_no_hpc_job_either_for_a_twin_or_
         got = runs_with(tasks, **form, **{"target-step": "train"})
         assert got == {"load"} | ({"train-hpc"} if chosen == "meluxina-gpu" else {"train"}), chosen
         assert not got & {"report", "report-hpc"}
-    assert runs_with(tasks, **{"train-class": "meluxina-gpu", "report-class": "meluxina-gpu"}) == {"load", "train-hpc", "report-hpc"}
+    both = {"train-class": "meluxina-gpu", "report-class": "meluxina-gpu"}
+    assert runs_with(tasks, **both) == {"load", "train-hpc", "report-hpc"}
 
 
 def test_a_matrix_step_the_target_does_not_need_is_skipped_and_its_gather_task_still_hands_on_the_sentinel():
