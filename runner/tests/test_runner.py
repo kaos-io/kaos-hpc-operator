@@ -64,6 +64,10 @@ class FakeSlurm:
         v = self.live_view.get(str(jid), {})
         if isinstance(v, Exception):
             raise v
+        recs = self.jobs.get(str(jid))
+        if recs and "job_state" not in v:
+            # slurmctld always names the state: the same one the accounting record of this poll carries
+            v = dict(v, job_state=(recs[0].get("state") or {}).get("current") or [])
         return v
 
     def cancel(self, jid):
@@ -716,7 +720,7 @@ def test_a_job_a_host_took_is_never_replaced_for_its_wallet(rig, monkeypatch):
     rig.runner.run()
     assert slurm.cancelled == [] and len(slurm.submitted) == 1
     assert rig.kube.run["state"] == "COMPLETED" and rig.kube.run["exitCode"] == 0 and rig.kube.run["terminal"]
-    patch = next(c for c in rig.kube.patches() if c[2]["status"]["run"].get("hostSiteJobID"))
+    patch = next(c for c in rig.kube.patches() if c[2]["status"].get("run", {}).get("hostSiteJobID"))
     assert patch[2]["status"]["run"]["hostSiteJobID"] == "4000" and patch[2]["status"]["run"]["slot"] == 1
 
 

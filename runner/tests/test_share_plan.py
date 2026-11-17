@@ -90,3 +90,65 @@ def test_should_ignore_the_role_when_sharing_is_off(rig):  # noqa: F811
     assert rig.cfg.share_role == ""
     rig.runner.run()
     assert "begin_time" not in slurm.submitted[0]["job"]
+
+
+class SeqLive(FakeSlurm):
+    """slurmctld answers each question in turn (the last answer repeats); an exception is the site not answering."""
+
+    def __init__(self, jobs, answers):
+        super().__init__(jobs)
+        self.answers = list(answers)
+
+    def live(self, jid):
+        a = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(a, Exception):
+            raise a
+        return a
+
+
+HOST_PLAN = {"timeLimitMinutes": 20, "qos": "dev", "share": {"role": "host", "jobLimitMinutes": 40}}
+WAITS = {"job_state": ["PENDING"], "state_reason": "BeginTime"}
+TAKEN = {"job_state": ["PENDING"], "state_reason": "JobHeldUser", "comment": "kaos-state=taken host=7001 slot=1 attempt=1"}
+ENDED = acc("CANCELLED", comment="kaos-state=done rc=0 host=7001 start=1762300800")
+
+
+def test_should_not_replace_a_guest_a_host_took_after_the_poll_read_it(rig):  # noqa: F811
+    # The poll's reading says "waits"; the host takes the job before the replacement asks the site again.
+    slurm = SeqLive({"5001": [acc("PENDING", start=0), acc("PENDING", start=0), ENDED]}, [WAITS, TAKEN])
+    rig.make(slurm, status={"placement": HOST_PLAN}, HPC_SHARE_ROLE="guest", **SHARING)
+    rig.runner.run()
+    assert slurm.cancelled == [] and len(slurm.submitted) == 1, "its step runs on the host's node: one run, one result"
+    assert rig.runner.cfg.share_role == "guest" and rig.runner.cfg.qos != "dev", "the plan it was submitted with stays"
+    assert rig.kube.run["state"] == "COMPLETED" and rig.kube.run["hostSiteJobID"] == "7001"
+    assert not rig.kube.run.get("queueReplaced")
+
+
+def test_should_not_replace_a_guest_whose_step_ended_on_the_host_while_its_job_still_waits(rig):  # noqa: F811
+    # Live 2026-11-16: the step had saved its model, the job was still PENDING, and the job was replaced.
+    over = dict(TAKEN, comment="kaos-state=done rc=0 host=7001 start=1762300800")
+    slurm = SeqLive({"5001": [acc("PENDING", start=0), acc("PENDING", start=0), ENDED]}, [over])
+    rig.make(slurm, status={"placement": HOST_PLAN}, HPC_SHARE_ROLE="guest", **SHARING)
+    rig.runner.run()
+    assert slurm.cancelled == [] and len(slurm.submitted) == 1
+    assert rig.kube.run["state"] == "COMPLETED" and rig.kube.run["exitCode"] == 0
+
+
+def test_should_not_replace_a_guest_when_the_site_does_not_say_it_still_waits(rig):  # noqa: F811
+    slurm = SeqLive({"5001": [acc("PENDING", start=0), acc("PENDING", start=0), acc("COMPLETED")]},
+                    [WAITS, OSError("timed out")])
+    rig.make(slurm, status={"placement": HOST_PLAN}, HPC_SHARE_ROLE="guest", **SHARING)
+    rig.runner.run()
+    assert slurm.cancelled == [] and len(slurm.submitted) == 1, "no answer is not a yes"
+    assert rig.runner.cfg.share_role == "guest"
+
+
+def test_should_report_the_host_of_a_taken_guest_while_its_step_runs(rig):  # noqa: F811
+    # The accounting record does not show the host's write while the job waits; the job itself does. Without
+    # this report the controller counts the guest as not taken and plans it again after its take wait.
+    slurm = SeqLive({"5001": [acc("PENDING", start=0), acc("PENDING", start=0), ENDED]}, [TAKEN])
+    rig.make(slurm, status={"placement": {"timeLimitMinutes": 20, "share": {"role": "guest", "host": "ns/h1"}}},
+             HPC_SHARE_ROLE="guest", **SHARING)
+    rig.runner.run()
+    runs = [c[2]["status"]["run"] for c in rig.kube.patches() if "run" in c[2]["status"]]
+    waiting = [r for r in runs if r.get("state") == "PENDING" and r.get("hostSiteJobID")]
+    assert waiting and (waiting[0]["hostSiteJobID"], waiting[0]["slot"]) == ("7001", 1)

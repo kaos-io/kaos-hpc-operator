@@ -62,6 +62,7 @@ HOST_END_MARGIN_S = 10 * 60
 # observation older than STALE_INTERVALS of its own intervals (the controller is down), or none at all for
 # STALE_GRACE_S, makes the runner poll the site itself, but only every STALE_POLL_S, so jobs never stall.
 STALE_INTERVALS = 3
+WAITING_ONLY = ('TokenRefresh', 'Replanned')   # replacements that are right only for a job nobody runs yet
 DEFAULT_INTERVAL_S = 30
 STALE_GRACE_S = 90
 STALE_POLL_S = 120
@@ -529,13 +530,18 @@ class Runner:
     def resubmit(self, why, queue_lost=None):
         """Replace the site job of this attempt (cancel, then submit a fresh one). queue_lost is the reason
         (TokenRefresh, HostLost, Replanned) when the old job was still queued: its place in the queue is lost,
-        and the replacement is recorded in status.run.queueReplaced (PRD-HPC-1461 AC-35)."""
+        and the replacement is recorded in status.run.queueReplaced (PRD-HPC-1461 AC-35).
+
+        A job replaced because it waits (TokenRefresh, Replanned) is replaced only while the site itself says,
+        now, that it still waits and no host took it: False when it does not, and nothing is cancelled."""
         print(why, flush=True)
+        self.cfg.check_job()             # before the cancel: a job that cannot be replaced is not cancelled for it
+        self.prepare_handback()          # likewise: no identity, no token, no cancel
+        if queue_lost in WAITING_ONLY and not self.still_waiting():
+            return False
         if queue_lost and self.jid:
             self.replacing = {'old': str(self.jid), 'reason': queue_lost,
                               'queued': max(0, int(time.time() - self.submitted_at)) if self.submitted_at else 0}
-        self.cfg.check_job()             # before the cancel: a job that cannot be replaced is not cancelled for it
-        self.prepare_handback()          # likewise: no identity, no token, no cancel
         self.logs.finish()               # what the old job wrote, before its offset is replaced
         self.slurm.cancel(self.jid)
         self.jid = self.submit()
@@ -544,6 +550,27 @@ class Runner:
         self.pending_reason = None
         self.reported = None
         self.hosted = None
+        return True
+
+    def still_waiting(self):
+        """The site's own word, at this moment, that this job is queued and no host runs its step.
+
+        The poll loop's reading can be the controller's observation, up to STALE_INTERVALS polls old, and the
+        token and identity calls of a replacement take time: a host can take the job in between. Its step then
+        runs on the host's node while the job still reads PENDING. Replacing that job ran the step a second time
+        and saved its model twice (live 2026-11-16, site jobs 5464119 and 5464151). A site that does not answer
+        is not a yes: the job is left as it is and the next poll decides."""
+        try:
+            live = self.slurm.live(self.jid)
+        except Exception as e:
+            print('not replaced: the site did not say whether job %s still waits (%s)' % (self.jid, e), flush=True)
+            return False
+        state = share_state(comment_of(live)).get('kaos-state')
+        if 'PENDING' in (live.get('job_state') or []) and state not in ('taken', 'done'):
+            return True
+        print('not replaced: job %s no longer waits (state %s, %s)' % (
+            self.jid, ','.join(live.get('job_state') or []) or 'unknown', state or 'not taken'), flush=True)
+        return False
 
     def renew_wallet(self):
         """A new tracker token after a long staging (the one minted before it would reach the site job near its end).
@@ -935,13 +962,6 @@ class Runner:
                 print('state:', st, flush=True)
                 share = share_state(comment_of(job))
                 info = checkpoint_info(comment_of(job))
-                now = (','.join(st), share.get('host'), share.get('slot'))
-                info_key = json.dumps(info, sort_keys=True)
-                if (now != self.reported or info_key != self.reported_info) and not any(x in TERMINAL for x in st):
-                    reporter.report(siteJobID=str(jid), state=now[0], startTime=self.start_of(job),
-                                    hostSiteJobID=share.get('host'), checkpoint=info,
-                                    slot=int(share['slot']) if (share.get('slot') or '').isdigit() else None)
-                    self.reported, self.reported_info = now, info_key
                 reason = ''
                 if 'PENDING' in st:
                     try:
@@ -967,6 +987,16 @@ class Runner:
                             share = share_state(comment_of(slurm.live(jid))) or share
                     except Exception:
                         pass
+                # Reported with the comment as the job itself gives it, read just above: the accounting record
+                # shows a host's write late or not before the job ends, and a guest whose host is never
+                # reported is planned again by the controller as "not taken" while its step runs.
+                now = (','.join(st), share.get('host'), share.get('slot'))
+                info_key = json.dumps(info, sort_keys=True)
+                if (now != self.reported or info_key != self.reported_info) and not any(x in TERMINAL for x in st):
+                    reporter.report(siteJobID=str(jid), state=now[0], startTime=self.start_of(job),
+                                    hostSiteJobID=share.get('host'), checkpoint=info,
+                                    slot=int(share['slot']) if (share.get('slot') or '').isdigit() else None)
+                    self.reported, self.reported_info = now, info_key
                 if 'PENDING' not in st and self.pending_reason:
                     self.pending_reason = None
                     reporter.pending_reason(None)
@@ -1058,10 +1088,14 @@ class Runner:
         plan = self.reporter.placement()
         if (((plan or {}).get('share') or {}).get('role')) != 'host':
             return False
+        before = (cfg.share_role, cfg.qos, cfg.reservation, cfg.share_job_limit)
         cfg.apply_plan(plan)
         self.logs.active.clear()
-        self.resubmit('the controller planned this step again as a host (lane %s) - submitting it to start on a node '
-                      'of its own' % (cfg.qos or 'standard'), 'Replanned')
+        if not self.resubmit('the controller planned this step again as a host (lane %s) - submitting it to start '
+                             'on a node of its own' % (cfg.qos or 'standard'), 'Replanned'):
+            # A host took the job meanwhile: it runs as the guest it was submitted as.
+            cfg.share_role, cfg.qos, cfg.reservation, cfg.share_job_limit = before
+            return False
         return True
 
     def follow_host_job_end(self):
