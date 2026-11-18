@@ -274,6 +274,14 @@ def test_a_walltime_the_form_would_refuse_cannot_be_written(walltime):
                        f"at least one minute, at most 30 days, no other unit.")
 
 
+@pytest.mark.parametrize("walltime", ["31d", "30s", "0"])
+def test_should_refuse_a_walltime_in_days_or_seconds_or_of_no_time_naming_the_field(walltime):
+    """PRD kaos#1911 AC-35: 31 days and 30 seconds are refused, and the message names the run form's field."""
+    message = refused(lambda a: a.step("train", kind="evaluate", walltime=walltime))
+    assert message.startswith(f"step 'train': walltime={walltime!r} must be minutes or hours")
+    assert "at least one minute" in message and "`<step>-walltime`" in message
+
+
 @pytest.mark.parametrize("walltime", ["720h", "43200", "43200m", "1m"])
 def test_a_walltime_up_to_thirty_days_is_accepted(walltime):
     render(lambda a: a.step("train", kind="evaluate", walltime=walltime))
