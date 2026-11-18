@@ -413,3 +413,5 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+// No-op release marker (kaos PRD 2017 AC-28): comment only, no behaviour change.
