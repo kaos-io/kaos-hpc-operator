@@ -141,6 +141,21 @@ WORKSPACE_MOUNT = "/workspace"
 # Mount path for the Zitadel machine-key secret backing MLflow bearer auth
 # (#868) — matches the previous DSL's working reference (/etc/mlflow-svc).
 MLFLOW_SVC_MOUNT = "/etc/mlflow-svc"
+# The token of the step's own app (PRD kaos#1911 AC-43): the projected service-account token of the app's
+# workflow account, which the model registry accepts as the app. The delivery adds it to every step after
+# this engine (`add_step_token` in the CI chart: volume `kaos-lake-token`, this path) whenever the context
+# carries `workloadIdentity.audience`. kaos-lib reads KAOS_APP_TOKEN_FILE.
+APP_TOKEN_FILE = "/var/run/secrets/kaos-lake/token"
+
+
+def app_identity(ctx: dict) -> bool:
+    """Whether a step signs in to MLflow as its own app.
+
+    Both must be in the context: the switch (`mlflow.appIdentity`) and the app's own workflow account
+    (`workloadIdentity.audience`; an app on the shared account has no identity of its own and no token)."""
+    if not ((ctx or {}).get("mlflow") or {}).get("appIdentity"):
+        return False
+    return bool((((ctx or {}).get("workloadIdentity") or {}).get("audience") or "").strip())
 
 
 # GPU driver prelude (see enhance_gpu_driver). GKE and EKS GPU nodes mount the NVIDIA driver under
@@ -759,7 +774,10 @@ def enhance_env(step: dict, ctx: dict, annots: dict) -> None:
         mlflow_ctx = ctx.get("mlflow") or {}
         oidc_domain = (mlflow_ctx.get("oidcDomain") or "").strip()
         oidc_project = (mlflow_ctx.get("oidcProjectId") or "").strip()
-        if oidc_domain and oidc_project and (mlflow_ctx.get("svcSecret") or "").strip():
+        if app_identity(ctx):
+            add({"name": "MLFLOW_TRACKING_AUTH", "value": "zitadel"})
+            add({"name": "KAOS_APP_TOKEN_FILE", "value": APP_TOKEN_FILE})
+        elif oidc_domain and oidc_project and (mlflow_ctx.get("svcSecret") or "").strip():
             add({"name": "MLFLOW_TRACKING_AUTH", "value": "zitadel"})
             add({"name": "ZITADEL_DOMAIN", "value": oidc_domain})
             add({"name": "ZITADEL_MLFLOW_PROJECT_ID", "value": oidc_project})
@@ -1129,6 +1147,7 @@ def enhance_volumes(step: dict, annots: dict, ctx: dict = None) -> None:
     mlflow_ctx = (ctx or {}).get("mlflow") or {}
     if (
         not inject_disabled(annots, "mlflow")
+        and not app_identity(ctx)       # a step that signs in as its own app never gets the project's machine key
         and (mlflow_ctx.get("oidcDomain") or "").strip()
         and (mlflow_ctx.get("oidcProjectId") or "").strip()
         and (mlflow_ctx.get("svcSecret") or "").strip()

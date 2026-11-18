@@ -260,6 +260,14 @@ The value is in wire form: plain JSON to any parser.
   `kaos-context-<step>` and one `kaos-reused-<step>`. The composed config is written to a file only when `--output` is passed (`kaosctl`'s local
   run does), never in the cluster.
 
+**A step signs in to MLflow as its own app** (PRD kaos#1911 AC-43) when the pipeline context has both
+`mlflow.appIdentity: true` and `workloadIdentity.audience`. The step then gets `KAOS_APP_TOKEN_FILE`
+(`/var/run/secrets/kaos-lake/token`, the token `add_step_token` mounts) and `MLFLOW_TRACKING_AUTH=zitadel`, and
+neither the `ZITADEL_*` values nor the mount of the project's machine key. kaos-lib sends that token; the
+registry lets the app create an experiment or a model named `<app>` or `<app>.<x>` only. Without the switch, or
+for an app on the shared account, a step keeps the machine key. A step on HPC is not changed: it signs in with
+the token the runner hands it.
+
 **The HPC variant** (`kubecore/meluxina.py`). The `<step>-hpc` task gets the same `kaos-context` argument as the
 step's own task, and the follower receives it as `KAOS_STEP_CONTEXT`. The follower template has two outputs:
 `slurm-job-id` and `kaos-result` (`/tmp/outputs/kaos-result.json`, no default: the follower always writes it).
