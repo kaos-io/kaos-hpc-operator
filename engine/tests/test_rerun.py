@@ -28,8 +28,10 @@ def tasks_of(wft):
 def run_when(when, **form):
     """What the workflow engine's `when` of a task says for these run form values (the engine's own operators, in Python)."""
     body = re.fullmatch(r"\{\{=(.*)\}\}", when, re.S).group(1)
-    body = re.sub(r"workflow\.parameters\['([^']+)'\]", lambda m: repr(form[m.group(1)]), body)
-    return eval(body.replace("&&", " and ").replace("||", " or "), {"__builtins__": {}})  # noqa: S307 - the engine's own text
+    body = re.sub(r"workflow\.parameters\['([^']+)'\]", lambda m: repr(form.get(m.group(1), "")), body)
+    body = re.sub(r"!(?!=)", " not ", body.replace("&&", " and ").replace("||", " or "))
+    return eval(body,  # noqa: S307 - the engine's own text
+                {"__builtins__": {}, "hasPrefix": lambda text, prefix: text.startswith(prefix)})
 
 
 def diamond(a, when=None):
@@ -53,8 +55,8 @@ def test_a_step_runs_when_nothing_is_asked_when_it_is_the_start_or_when_it_is_af
 def test_the_gate_names_every_step_the_step_needs_directly_or_not():
     tasks = tasks_of(render(diamond))
     assert tasks["join"]["when"] == gated("join", "", "left", "load", "right")
-    assert tasks["left"]["when"] == gated("left", "", "load")
-    assert tasks["load"]["when"] == gated("load")
+    assert tasks["left"]["when"] == gated("left", "", "load", later=("join",))
+    assert tasks["load"]["when"] == gated("load", later=("left", "right", "join"))
 
 
 def test_the_gate_and_compose_agree_on_which_steps_are_not_run_again_for_every_start():
@@ -120,11 +122,175 @@ def test_the_hpc_variant_of_a_step_has_the_same_gate():
         load = a.step("load", kind="ingest", produces=[a.dataset("loaded")])
         a.step("train", kind="train", needs=[load], gpu=True, when="experiment-name != off", produces=[a.model("m")])
     tasks = tasks_of(hpc_render(build))
-    gate = "workflow.parameters['start-from-step'] in ['', 'train', 'load']"
+    gate = ("workflow.parameters['start-from-step'] in ['', 'train', 'load'] && "
+            "workflow.parameters['target-step'] in ['', 'train']")
     for name in ("train", "train-hpc"):
         assert gate + " && (workflow.parameters['experiment-name'] != 'off')" in tasks[name]["when"], name
     assert tasks["train"]["when"].endswith("!hasPrefix(workflow.parameters['train-class'], 'meluxina-')}}")
     assert tasks["train-hpc"]["when"].endswith("hasPrefix(workflow.parameters['train-class'], 'meluxina-')}}")
+
+
+# ------------------------------------------------------------------------------------------------ the target of a run
+
+def runs_with(tasks, **form):
+    """The tasks of the DAG that run (their `when` does not skip them) for these form values, but compose and the final task."""
+    return {name for name, task in tasks.items() if name not in ("compose-and-validate", "kaos-promote")
+            and (not task.get("when") or run_when(task["when"], **form))}
+
+
+def test_a_target_in_the_middle_runs_it_and_what_it_needs_and_nothing_after_it():
+    tasks = tasks_of(render(diamond))
+    expected = {   # target -> the steps that run
+        "": {"load", "left", "right", "join"}, "load": {"load"}, "left": {"load", "left"}, "right": {"load", "right"},
+        "join": {"load", "left", "right", "join"}}
+    for target, runs in expected.items():
+        assert runs_with(tasks, **{"target-step": target}) == runs, target
+
+
+def test_a_target_on_a_linear_pipeline_the_last_step_runs_all_and_the_first_runs_one():
+    def build(a):
+        one = a.step("one", kind="ingest", produces=[a.dataset("data")])
+        two = a.step("two", kind="transform", needs=[one], produces=[a.artifact("t")])
+        a.step("three", kind="evaluate", needs=[two])
+    tasks = tasks_of(render(build))
+    assert runs_with(tasks, **{"target-step": "three"}) == {"one", "two", "three"}
+    assert runs_with(tasks, **{"target-step": "two"}) == {"one", "two"}
+    assert runs_with(tasks, **{"target-step": "one"}) == {"one"}
+
+
+def test_a_step_the_target_does_not_need_starts_no_hpc_job_either_for_a_twin_or_for_the_step():
+    def build(a):
+        load = a.step("load", kind="ingest", produces=[a.dataset("loaded")])
+        train = a.step("train", kind="train", needs=[load], gpu=True, produces=[a.model("m")])
+        a.step("report", kind="evaluate", needs=[train], gpu=True)
+    tasks = tasks_of(hpc_render(build))
+    assert {"train", "train-hpc", "report", "report-hpc"} <= set(tasks)
+    for chosen in ("meluxina-gpu", "cpu-standard"):    # the class of the step: an HPC class, or a class of the cluster
+        form = {"train-class": chosen, "report-class": chosen}
+        assert runs_with(tasks, **form, **{"target-step": "load"}) == {"load"}, chosen
+        got = runs_with(tasks, **form, **{"target-step": "train"})
+        assert got == {"load"} | ({"train-hpc"} if chosen == "meluxina-gpu" else {"train"}), chosen
+        assert not got & {"report", "report-hpc"}
+    both = {"train-class": "meluxina-gpu", "report-class": "meluxina-gpu"}
+    assert runs_with(tasks, **both) == {"load", "train-hpc", "report-hpc"}
+
+
+def test_a_matrix_step_the_target_does_not_need_is_skipped_and_its_gather_task_still_hands_on_the_sentinel():
+    def build(a):
+        load = a.step("load", kind="ingest", produces=[a.dataset("loaded")])
+        a.step("tune", kind="train", needs=[load], matrix={"lr": [1, 2]}, produces=[a.model("tuned")])
+        fit = a.step("fit", kind="train", needs=[load], produces=[a.model("fitted")])
+        a.step("score", kind="evaluate", needs=[fit])
+    tasks = tasks_of(hpc_render(build))
+    assert runs_with(tasks, **{"target-step": "score"}) == {"load", "fit", "score", "kaos-gather-tune"}
+    assert "when" not in tasks["kaos-gather-tune"] and "tune" not in tasks["score"]["depends"]
+    assert runs_with(tasks, **{"target-step": "tune"}) == {"load", "tune", "kaos-gather-tune"}
+
+
+def test_a_target_with_a_start_runs_the_steps_that_are_after_the_start_and_needed_by_the_target():
+    tasks = tasks_of(render(diamond))
+    expected = {   # (start, target) -> the steps that run
+        ("load", "left"): {"load", "left"}, ("left", "left"): {"left"}, ("left", "join"): {"left", "join"},
+        ("load", "join"): {"load", "left", "right", "join"}, ("right", "join"): {"right", "join"}}
+    for (start, target), runs in expected.items():
+        assert runs_with(tasks, **{"start-from-step": start, "target-step": target}) == runs, (start, target)
+
+
+def test_the_gate_and_compose_agree_on_which_steps_are_not_run_for_every_target_and_start():
+    from kubecore import authoring
+    with authoring.pipeline("p") as p:
+        diamond(authoring)
+    wft = yaml.safe_load(p.wt.to_yaml())
+    tasks = tasks_of(wft)
+    table = [{"name": "load", "needs": []}, {"name": "left", "needs": ["load"]}, {"name": "right", "needs": ["load"]},
+             {"name": "join", "needs": ["left", "right"]}]
+    for target in [s["name"] for s in table]:
+        assert runs_with(tasks, **{"target-step": target}) == rerun.upstream(table, target), target
+        for start in [s["name"] for s in table]:
+            try:
+                rerun.check_target(table, target, start)
+            except rerun.Refused:
+                assert not runs_with(tasks, **{"start-from-step": start, "target-step": target}), (start, target)
+                continue
+            by_gate = runs_with(tasks, **{"start-from-step": start, "target-step": target})
+            assert by_gate == rerun.upstream(table, target) & rerun.downstream(table, start), (start, target)
+            assert not by_gate & set(rerun.reused_steps(table, start, target)), (start, target)
+
+
+def test_a_target_leaves_out_of_the_reused_steps_the_ones_it_does_not_need():
+    table = [{"name": "load", "needs": []}, {"name": "left", "needs": ["load"]}, {"name": "right", "needs": ["load"]},
+             {"name": "join", "needs": ["left", "right"]}]
+    assert rerun.reused_steps(table, "left") == ["load", "right"]
+    assert rerun.reused_steps(table, "left", "left") == ["load"]
+    assert rerun.reused_steps(table, "join", "join") == ["load", "left", "right"]
+
+
+def test_a_run_from_a_step_with_a_target_reads_the_records_of_the_steps_the_target_needs_only():
+    docs = earlier_run()
+    del docs[(RUN, "train")]       # not needed by a target of `prepare`, and the start is `prepare`: nothing is reused
+    got = prepare("prepare", docs=docs, target="prepare")
+    assert got.reused == []
+    with pytest.raises(rerun.Refused):
+        prepare("evaluate", docs=docs, target="evaluate")     # the target needs train, which has no record
+
+
+def test_the_target_is_a_step_of_the_pipeline():
+    with pytest.raises(rerun.Refused) as exc:
+        rerun.check_target(STEPS, "trian")
+    assert str(exc.value) == "target-step: this pipeline has no step 'trian'. Its steps are: prepare, train, evaluate, publish."
+    rerun.check_target(STEPS, "")
+    rerun.check_target(STEPS, "train")
+
+
+def test_a_target_before_the_start_is_refused_because_no_step_would_run():
+    with pytest.raises(rerun.Refused) as exc:
+        rerun.check_target(STEPS, "train", "evaluate")
+    assert str(exc.value) == ("target-step: 'train' is not 'evaluate' or a step after it, so no step would run. Name 'evaluate' "
+                              "or a step after it, or leave start-from-step empty.")
+    rerun.check_target(STEPS, "evaluate", "evaluate")
+    rerun.check_target(STEPS, "publish", "train")
+
+
+def test_the_form_field_defaults_to_a_normal_run_and_reaches_compose():
+    import copy
+
+    from kubecore import authoring, enhance
+    ctx = copy.deepcopy(yaml.safe_load(open(enhance.__file__.replace("enhance.py", "local-dev/pipeline-context.yaml"))))
+    with authoring.pipeline("p") as p:
+        diamond(authoring)
+    wft = enhance.enhance(yaml.safe_load(p.wt.to_yaml()), ctx)
+    form = {x["name"]: x for x in wft["spec"]["arguments"]["parameters"]}
+    assert form["target-step"]["value"] == ""
+    assert form["target-step"]["description"] == (
+        "Optional. The step to run: only it and the steps it needs run, every other step starts nothing. Leave empty for a "
+        "normal run. Steps: load, left, right, join.")
+    args = next(t for t in wft["spec"]["templates"] if t["name"] == "compose-and-validate")["container"]["args"]
+    assert "--target-step={{workflow.parameters.target-step}}" in args
+
+
+def test_an_unknown_target_ends_compose_before_any_file_is_written(tmp_path, monkeypatch, app_config, capsys):
+    with pytest.raises(SystemExit) as stop:
+        compose.main(run_main(tmp_path, monkeypatch, Records(), lake(), "--target-step", "nope"))
+    assert stop.value.code == 1
+    assert capsys.readouterr().err == ("compose-and-validate FAILED: target-step: this pipeline has no step 'nope'. Its "
+                                       "steps are: prepare, train, evaluate, publish.\n")
+    assert not (tmp_path / "ctx").exists()
+
+
+def test_a_run_with_a_target_needs_no_earlier_run_and_keeps_its_plan(tmp_path, monkeypatch, app_config):
+    records = Records()
+    compose.main(run_main(tmp_path, monkeypatch, records, lake(), "--target-step", "train"))
+    assert (tmp_path / "ctx" / "train.json").is_file()
+    assert "reused_from" not in records.written[-1][3]
+
+
+def test_a_target_with_an_earlier_run_reuses_only_the_steps_it_needs(tmp_path, monkeypatch, app_config, capsys):
+    records = Records(earlier_run())
+    compose.main(run_main(tmp_path, monkeypatch, records, lake(), "--reuse-from-run", RUN, "--start-from-step", "train",
+                          "--target-step", "train"))
+    out = capsys.readouterr().out
+    assert f"step prepare: reused from run {RUN}" in out and "step evaluate" not in out
+    assert records.written[-1][3]["reused_from"] == {"run": RUN, "start": "train"}
 
 
 # ------------------------------------------------------------------------------- the result a step that is not run again has
@@ -309,9 +475,9 @@ def lake(**more):
 
 
 def prepare(start="evaluate", docs=None, steps=STEPS, params=None, when=None, classes=None, hpc=(), promotes=None,
-            client=None, run=RUN, images=None):
+            client=None, run=RUN, images=None, target=""):
     return rerun.prepare(steps, run, start, APP, params or PARAMS, when or WHEN, classes or CLASSES, set(hpc), promotes or {},
-                         images or IMAGES, Records(earlier_run() if docs is None else docs), client or lake())
+                         images or IMAGES, Records(earlier_run() if docs is None else docs), client or lake(), target)
 
 
 def refused(**kwargs):

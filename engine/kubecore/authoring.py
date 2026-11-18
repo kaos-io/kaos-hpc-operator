@@ -72,6 +72,7 @@ from kubecore.step_contract import (
     REUSED_DIR,
     REUSED_OUTPUT_PREFIX,
     START_FIELD,
+    TARGET_FIELD,
     MATRIX_MAX_ITEMS,
     MATRIX_MAX_LEDGER,
     MATRIX_MIN_BASE,
@@ -327,6 +328,14 @@ def _start_gate(step) -> str:
     it, is taken from the earlier run (kubecore/rerun.py)."""
     runs = ["", step.name] + _ancestors(step)
     return "workflow.parameters['%s'] in [%s]" % (START_FIELD, ", ".join("'%s'" % name for name in runs))
+
+
+def _target_gate(step, steps) -> str:
+    """The condition that keeps a step out of a run that has a target (the run form's `target-step`): the step runs when no
+    target was asked for, when it is the target, or when the target is a step that needs it, directly or through others
+    (it is upstream of the target). Every other step starts no pod and no HPC job."""
+    runs = ["", step.name] + [s.name for s in steps if step.name in _ancestors(s)]
+    return "workflow.parameters['%s'] in [%s]" % (TARGET_FIELD, ", ".join("'%s'" % name for name in runs))
 
 
 def _when_condition(compares, joiners):
@@ -797,7 +806,7 @@ class pipeline:
                     )
                     context = context_expression(COMPOSE_STEP, s.name, [n.name for n in s.needs], fanned, open_end=bool(s.matrix))
                     own = _when_condition(*s.parsed_when)[3:-2] if s.parsed_when else None
-                    gate = _start_gate(s)
+                    gate = "%s && %s" % (_start_gate(s), _target_gate(s, self.steps))
                     when = "{{=%s}}" % (gate if own is None else "%s && (%s)" % (gate, own))
                     if s.matrix:     # one task that runs the step once for each combination (_fan_template)
                         Task(name=s.name, template=fan_template(s.name), depends=depends, when=when, arguments={

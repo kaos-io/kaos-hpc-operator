@@ -322,7 +322,8 @@ def test_and_binds_tighter_than_or_in_the_rendered_condition():
 def test_the_hpc_variant_keeps_the_steps_own_condition():
     from kubecore import meluxina
     assert meluxina._when_expr(_when_of("experiment-name != off")["when"]) == (
-        "workflow.parameters['start-from-step'] in ['', 'export'] && (workflow.parameters['experiment-name'] != 'off')")
+        "workflow.parameters['start-from-step'] in ['', 'export'] && workflow.parameters['target-step'] in ['', 'export']"
+        " && (workflow.parameters['experiment-name'] != 'off')")
 
 
 ALLOWED = ('A condition compares one name with a text, with == or != and nothing else, for example '

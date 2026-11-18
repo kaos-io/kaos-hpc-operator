@@ -46,21 +46,24 @@ def evaluate(expression: str, settings: dict):
     return eval(body, {"json": json, "int": int})  # noqa: S307 - the engine's own output, in a test
 
 
-def start_gate(step: str, *needs_of: str) -> str:
-    """The condition every task has on the run form's `start-from-step`: the step runs when the form names no step, the step
-    itself, or a step it needs (directly or not). `needs_of` is every step it needs, in the order the engine writes them."""
+def start_gate(step: str, *needs_of: str, later: tuple = ()) -> str:
+    """The conditions every task has on the run form's `start-from-step` and `target-step`. The step runs when the form names
+    no start, the step itself, or a step it needs (directly or not): `needs_of` is every step it needs, in the order the
+    engine writes them. It runs when the form names no target, the step itself, or a step that needs it: `later` is every
+    step that needs it (directly or not), in the pipeline's order."""
     names = ", ".join(f"'{n}'" for n in ("", step, *needs_of))
-    return f"workflow.parameters['start-from-step'] in [{names}]"
+    after = ", ".join(f"'{n}'" for n in ("", step, *later))
+    return f"workflow.parameters['start-from-step'] in [{names}] && workflow.parameters['target-step'] in [{after}]"
 
 
-def gated(step: str, own: str = "", *needs_of: str) -> str:
+def gated(step: str, own: str = "", *needs_of: str, later: tuple = ()) -> str:
     """The whole `when` of a task: the gate of `start_gate`, and the step's own condition (without the braces) after it."""
-    return "{{=" + start_gate(step, *needs_of) + (f" && ({own})" if own else "") + "}}"
+    return "{{=" + start_gate(step, *needs_of, later=later) + (f" && ({own})" if own else "") + "}}"
 
 
-def own_condition(when: str, step: str, *needs_of: str) -> str:
+def own_condition(when: str, step: str, *needs_of: str, later: tuple = ()) -> str:
     """The step's own condition as the engine writes it, `{{=...}}`, taken out of the whole `when` of its task."""
-    head, tail = "{{=" + start_gate(step, *needs_of) + " && (", ")}}"
+    head, tail = "{{=" + start_gate(step, *needs_of, later=later) + " && (", ")}}"
     assert when.startswith(head) and when.endswith(tail), when
     return "{{=" + when[len(head):-len(tail)] + "}}"
 
