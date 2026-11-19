@@ -48,8 +48,8 @@ def test_a_guest_whose_token_ends_before_its_step_could_is_not_taken(tmp_path):
 
 def test_a_host_killed_hard_leaves_its_guest_held_for_its_runner_to_find(tmp_path):
     """SIGKILL (node failure, OOM-killer on the manager): no TERM handler runs, nothing is handed back. The guest
-    stays held and marked taken; the guest's own runner detects the dead host (slurm.host_gone) and starts the
-    job over (test_core / test_runner)."""
+    stays held and marked taken; the guest's own runner detects the dead host (slurm.host_gone) and ends the
+    attempt as a lost host (test_core / test_runner)."""
     guests = dict([_guest(1, 10)])
     guests["101"]["script"] = guests["101"]["script"].replace("exit 0", "sleep 60")
     node = Node(tmp_path, guests, own_body="sleep 60\n")
@@ -60,9 +60,10 @@ def test_a_host_killed_hard_leaves_its_guest_held_for_its_runner_to_find(tmp_pat
     assert j["state"] == "PENDING" and j["held"] and "kaos-state=taken host=100" in j["comment"]
 
 
-def test_a_term_while_a_guest_is_being_taken_still_hands_it_back(tmp_path):
+def test_a_term_while_a_guest_is_being_taken_leaves_it_as_any_guest_of_an_ending_host(tmp_path):
     """F-7: the TERM arrives between writing `taken` and registering the guest. It is held until the guest is
-    registered, so the guest goes back to the queue instead of staying held forever. Repeated to catch the window."""
+    registered, so the guest is left like every guest of an ending host: held, marked taken, its lock removed,
+    for its runner to find. Repeated to catch the window."""
     import signal as sig
     for i in range(6):
         d = tmp_path / str(i)
@@ -75,4 +76,5 @@ def test_a_term_while_a_guest_is_being_taken_still_hands_it_back(tmp_path):
         node.proc.send_signal(sig.SIGTERM)
         node.finish()
         j = node.jobs()["101"]
-        assert j["state"] == "PENDING" and not j["held"] and "requeued" in j["comment"], (i, j)
+        assert j["state"] == "PENDING" and j["held"] and "kaos-state=taken host=100" in j["comment"], (i, j)
+        assert not list((d / "scratch" / "kaos-claims").glob("101-*")), (i, "the lock of the ending host is removed")

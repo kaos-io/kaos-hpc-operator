@@ -84,7 +84,8 @@ A guest no host took is planned again (`ShareReplanned` event, `kaos_hpc_share_r
 not start within `HostStartWait` (20 min), no longer has the time, or runs and did not take it within
 `GuestTakeWait` (10 min). It joins another open host or becomes a host; the runner, which reads the plan while it
 waits, replaces the deferred job by one that starts at once in the lane the plan names. A guest a host already took
-is left to the runner (a lost host resubmits it). Every guest is a Slurm job at the site until its host cancels it
+is left to its runner: when the host ends with the step unfinished, the runner cancels the held job and reports the attempt
+over as `HOST_LOST`, and the controller continues the step from its checkpoint copy or re-runs it, as after a node failure. Every guest is a Slurm job at the site until its host cancels it
 with the result, so it counts toward the site's submit cap.
 
 ### Budget sources (`HPCSite.spec.budget.source`)

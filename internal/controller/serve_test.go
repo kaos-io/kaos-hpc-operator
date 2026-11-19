@@ -1026,11 +1026,28 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRerunNodeFail))
 	})
 
+	It("re-runs a guest that left no checkpoint from the start when the host of its shared node is lost, settled 0", func() {
+		j := newServeJob(nil, nil)
+		reconcileOnce(j)
+		end := metav1.NewTime(time.Now())
+		// As the runner reports a guest whose host ended with its step unfinished: its own job never started.
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "301", HostSiteJobID: "300", State: "HOST_LOST",
+			EndTime: &end, Terminal: true})
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRerunNodeFail))
+		Expect(got.Status.Message).To(ContainSubstring("the job that held its shared node ended"))
+		Expect(got.Status.Reruns).To(Equal(int32(1)))
+		Expect(got.Status.Attempts).To(HaveLen(1))
+		Expect(got.Status.Attempts[0].SettledNodeMinutes).To(BeZero(), "the host's booking covered the node")
+		got = settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		Expect(envMap(runnerJob(got, 2))).NotTo(HaveKey("KAOS_RESUME_REF"))
+	})
+
 	It("continues a step that was never marked from the checkpoint copy it persisted, on every recoverable end", func() {
 		for i, c := range []struct {
 			state string
 			exit  *int32
-		}{{"TIMEOUT", nil}, {"NODE_FAIL", nil}, {"PREEMPTED", nil}, {"FAILED", i32(236)}, {"FAILED", i32(85)}} {
+		}{{"TIMEOUT", nil}, {"NODE_FAIL", nil}, {"PREEMPTED", nil}, {"HOST_LOST", nil}, {"FAILED", i32(236)}, {"FAILED", i32(85)}} {
 			j := newServeJob(nil, nil)
 			reconcileOnce(j)
 			ended(j, 1, c.state, c.exit, fmt.Sprintf("scratch://ckpt/%d", i), progress(2, 40))

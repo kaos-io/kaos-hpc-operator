@@ -384,13 +384,32 @@ def test_should_keep_a_queued_job_through_a_jwt_that_is_401_until_it_rotates(rig
 
 @pytest.mark.parametrize("state", ["NODE_FAIL", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "PREEMPTED", "FAILED",
                                    "COMPLETED"])
-def test_should_start_a_taken_guest_over_when_its_host_ended_in_any_terminal_state(rig, state):
-    taken = acc("PENDING", comment="kaos-state=taken host=4000 slot=0 attempt=1")
-    slurm = FakeSlurm({"5001": [taken], "5002": [acc("COMPLETED")], "4000": [acc(state)]})
+def test_should_end_the_attempt_of_a_taken_guest_when_its_host_ended_in_any_terminal_state(rig, state):
+    """The host is gone with this step unfinished: for the guest that is a lost node. The runner submits nothing
+    itself; it cancels the held job and reports the attempt over, and the controller runs the step again."""
+    taken = acc("PENDING", comment="kaos-state=taken host=4000 slot=2 attempt=1")
+    slurm = FakeSlurm({"5001": [taken], "4000": [acc(state)]})
     rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
-    rig.runner.run()
+    assert rig.runner.run() == 0
     assert slurm.cancelled == ["5001"], "the held job of the dead host is cancelled, once"
-    assert len(slurm.submitted) == 2 and rig.kube.run["siteJobID"] == "5002" and rig.kube.run["terminal"]
+    assert len(slurm.submitted) == 1, "one attempt per runner: the next job is the controller's decision"
+    run = rig.kube.run
+    assert run["state"] == "HOST_LOST" and run["terminal"] is True and run["siteJobID"] == "5001"
+    assert run["hostSiteJobID"] == "4000" and run["slot"] == 2, "the host's booking covered it: settled 0"
+    assert "checkpointRef" not in run
+
+
+def test_should_name_the_checkpoint_copy_of_a_guest_whose_host_is_gone(rig):
+    """A guest that saved before its host died continues from that copy: the copier wrote it into the guest's own
+    job comment, and the end report carries it (reproduces the restart from zero after a lost host)."""
+    note = ("kaos-ckpt=%s kaos-ckpt-path=kaos-ckpt/%s/model-training/000002.tar kaos-state=taken host=4000 slot=1 attempt=1"
+            % ("c" * 64, WF))
+    slurm = FakeSlurm({"5001": [acc("PENDING", comment=note)], "4000": [acc("NODE_FAIL")]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    assert rig.runner.run() == 0
+    assert slurm.cancelled == ["5001"] and len(slurm.submitted) == 1
+    assert rig.kube.run["state"] == "HOST_LOST"
+    assert rig.kube.run["checkpointRef"] == "scratch://kaos-ckpt/%s/model-training/000002.tar#%s" % (WF, "c" * 64)
 
 
 @pytest.mark.parametrize("state", ["RUNNING", "COMPLETING", "SUSPENDED", "PENDING"])
@@ -413,20 +432,19 @@ def test_should_leave_a_taken_guest_alone_when_the_host_record_cannot_be_read(ri
     assert slurm.cancelled == [] and len(slurm.submitted) == 1
 
 
-def test_should_start_over_at_most_three_times_when_hosts_keep_dying(rig):
-    """Each new job is taken by a host that dies too. After LOST_HOST_RESUBMITS the runner stops resubmitting
-    (no cancel/submit storm) and keeps watching the last job; the Job deadline is the only way out then."""
-    jobs, hosts = {}, {}
-    for i in range(1, 6):
-        jobs[str(5000 + i)] = [acc("PENDING", comment="kaos-state=taken host=%d slot=0 attempt=1" % (4000 + i))]
-        hosts[str(4000 + i)] = [acc("NODE_FAIL")]
-    slurm = FakeSlurm({**jobs, **hosts})
+def test_should_keep_the_attempt_open_while_the_site_refuses_to_cancel_the_held_job(rig):
+    """The held job of a dead host must be gone before the attempt is reported over: the controller starts the
+    next attempt on that report, and a job left held would run the step twice if anyone released it."""
+    taken = acc("PENDING", comment="kaos-state=taken host=4000 slot=0 attempt=1")
+    slurm = FakeSlurm({"5001": [taken], "4000": [acc("NODE_FAIL")]})
+    refused = []
+    slurm.cancel = lambda jid: refused.append(str(jid)) and False
     rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
-    stop_after(rig.runner, 200)
+    stop_after(rig.runner, 60)
     with pytest.raises(Stop):
         rig.runner.run()
-    assert len(slurm.submitted) == 1 + runmod.LOST_HOST_RESUBMITS
-    assert slurm.cancelled == ["5001", "5002", "5003"]
+    assert len(refused) > 1, "asked again at the next poll"
+    assert len(slurm.submitted) == 1 and not rig.kube.run.get("terminal")
 
 
 # ------------------------------------------------------------------------------------------------

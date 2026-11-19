@@ -748,12 +748,13 @@ def test_a_guest_reports_the_step_start_its_host_wrote(rig, monkeypatch):
     assert (run["startTime"], run["endTime"], run["hostSiteJobID"]) == ("2025-11-05T00:00:00Z", "2025-11-05T00:15:00Z", "5439966")
 
 
-def test_a_host_that_died_with_the_job_starts_it_over_bounded(rig):
+def test_a_host_that_died_with_the_job_ends_the_attempt_as_a_lost_host(rig):
     taken = acc("PENDING", comment="kaos-state=taken host=4000 slot=0 attempt=1")
-    slurm = FakeSlurm({"5001": [taken], "5002": [acc("COMPLETED")], "4000": [acc("NODE_FAIL")]})
+    slurm = FakeSlurm({"5001": [taken], "4000": [acc("NODE_FAIL")]})
     rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
-    rig.runner.run()
-    assert slurm.cancelled == ["5001"] and len(slurm.submitted) == 2 and rig.kube.run["siteJobID"] == "5002"
+    assert rig.runner.run() == 0
+    assert slurm.cancelled == ["5001"] and len(slurm.submitted) == 1
+    assert rig.kube.run["state"] == "HOST_LOST" and rig.kube.run["terminal"] and rig.kube.run["hostSiteJobID"] == "4000"
 
 
 def test_a_resubmit_replaces_the_log_and_clears_its_offset(rig):

@@ -26,6 +26,7 @@ func TestClassify(t *testing.T) {
 		{"should_be_node_failure_when_node_fail", "NODE_FAIL", nil, EndNodeFailure},
 		{"should_be_node_failure_when_boot_fail", "BOOT_FAIL", nil, EndNodeFailure},
 		{"should_be_preempted_when_preempted", "PREEMPTED", nil, EndPreempted},
+		{"should_be_host_lost_when_the_runner_reports_a_lost_host", "HOST_LOST", nil, EndHostLost},
 		{"should_be_idle_when_failed_with_236", "FAILED", i32(236), EndIdle},
 		{"should_be_step_error_when_236_but_not_failed", "COMPLETED", i32(236), EndStepError},
 		{"should_be_cancelled_when_cancelled_by", "CANCELLED by 1000", nil, EndCancelled},

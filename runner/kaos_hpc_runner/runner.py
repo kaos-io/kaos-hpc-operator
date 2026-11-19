@@ -31,7 +31,7 @@ def checkpoint_every_seconds(context):
         return 0
     return value * 60 if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 from .sharing import inputs_in_script
-from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_access_refused, is_site_down, lane_refusal,
+from .slurm import (HOST_LOST, RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_access_refused, is_site_down, lane_refusal,
                     share_state, site_time, submit_limit_refusal)
 from .settings import (APP_IDENTITY_UNAVAILABLE_EXIT, CHECKPOINT_EXIT, CONTEXT_ENV, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT,
                        INVALID_IMAGE_EXIT, INVALID_RESULT_EXIT, OFFER_S, ROLE_POLL_S, RESERVED_NAME_EXIT, DATASET_NOT_STAGED_EXIT,
@@ -74,7 +74,6 @@ REASON_POLL_S = 120
 # resubmission. Bounded, not once: a second long wait after the first resubmit must not strand the run.
 PULL_RESUBMITS = 3
 # PRD-1609: how often this run started over because its host died with it.
-LOST_HOST_RESUBMITS = 3
 # AC-28/AC-30: an unreachable site is waited for, asking again after SITE_RETRY_FIRST_S, doubling up to SITE_RETRY_MAX_S.
 SITE_RETRY_FIRST_S = 5
 SITE_RETRY_MAX_S = 60
@@ -154,7 +153,6 @@ class Runner:
         self.wallet, self.wallet_exp = '', 0.0
         self.staged, self.stage_tried = {}, False   # input name -> its resident path on the site ('' = the job stages it)
         self.resubmits = 0
-        self.lost_hosts = 0
         self.reported = None
         self.starts = {}          # site job id -> the start Slurm reported for it at any poll (kept for the end report)
         self.reported_info = 'null'   # the last checkpoint report sent (json), so a change is sent once
@@ -529,7 +527,7 @@ class Runner:
 
     def resubmit(self, why, queue_lost=None):
         """Replace the site job of this attempt (cancel, then submit a fresh one). queue_lost is the reason
-        (TokenRefresh, HostLost, Replanned) when the old job was still queued: its place in the queue is lost,
+        (TokenRefresh, Replanned) when the old job was still queued: its place in the queue is lost,
         and the replacement is recorded in status.run.queueReplaced (PRD-HPC-1461 AC-35).
 
         A job replaced because it waits (TokenRefresh, Replanned) is replaced only while the site itself says,
@@ -1007,14 +1005,10 @@ class Runner:
                 if 'PENDING' in st and share.get('kaos-state') != 'taken' and self.replan_guest():
                     continue
                 if ('PENDING' in st and share.get('kaos-state') == 'taken' and share.get('host')
-                        and self.lost_hosts < LOST_HOST_RESUBMITS and host_gone(slurm, share['host'])):
-                    # PRD-1609: the host died without handing this job back (node failure, crash): it
-                    # stays held forever. Start over as a new job - the same cancel + submit as the
-                    # wallet resubmit, so no new Slurm call.
-                    self.lost_hosts += 1
-                    self.logs.active.clear()
-                    self.resubmit('host job %s is gone with this step - resubmitting (%d/%d)'
-                                  % (share['host'], self.lost_hosts, LOST_HOST_RESUBMITS), 'HostLost')
+                        and host_gone(slurm, share['host'])):
+                    done = self.host_lost(job, share)
+                    if done is not None:
+                        return done
                     continue
                 # A job a host took stays queued (held) while its step runs: never resubmit it. The
                 # host checked its token outlives the step (D-07).
@@ -1062,6 +1056,25 @@ class Runner:
                 raise
             except Exception as e:
                 print('poll error (transient):', e, flush=True)
+
+    def host_lost(self, job, share):
+        """The host that ran this step on its node ended with the step unfinished (node failure, crash, time limit,
+        or its own run was stopped), so the job stays held forever. For the step that is a lost node: the held job
+        is cancelled and the attempt reported over as HOST_LOST, with the checkpoint copy the step left in its own
+        job comment. The controller decides what follows, as after a node failure: continue from the copy, run
+        again from the start, or end. Nothing is submitted here: a job submitted by this runner would start
+        from zero. None while the site does not take the cancel (asked again at the next poll)."""
+        print('host job %s is gone with this step unfinished - ending the attempt as a lost host' % share['host'],
+              flush=True)
+        try:
+            # The comment as the job itself gives it, before the cancel: it names the newest checkpoint copy.
+            job = dict(job, comment=comment_of(self.slurm.live(self.jid)) or comment_of(job))
+        except Exception:
+            pass
+        if not self.slurm.cancel(self.jid):
+            print('the held site job %s could not be cancelled: the attempt stays open' % self.jid, flush=True)
+            return None
+        return self.end(job, [HOST_LOST], None, share)
 
     def saved_host_waits(self, st, share):
         """AC-73: a resumable host whose own step saved (exit 85) while its Slurm job still holds the node for
