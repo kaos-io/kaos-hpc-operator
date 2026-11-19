@@ -215,3 +215,12 @@ def test_should_copy_at_the_platforms_interval_not_a_form_value():
     template = _template(_enhanced(kind="transform"), "one")
     env = {e["name"]: e.get("value") for c in template["sidecars"] for e in c["env"]}
     assert env["CKPT_EVERY_MIN"] == str(resilience.DEFAULT_EVERY_MINUTES)
+
+
+def test_should_not_bound_the_retries_by_time_since_the_first_attempt():
+    """Argo's backoff.maxDuration runs from the start of the first attempt: with it a step lost after ten minutes of
+    work is not run again. The wait between attempts is bounded by `cap` instead."""
+    from kubecore import resilience
+    backoff = resilience.retry_strategy()["backoff"]
+    assert "maxDuration" not in backoff
+    assert backoff == {"duration": "30s", "factor": "2", "cap": "5m"}

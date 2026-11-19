@@ -43,7 +43,10 @@ STAGE_MOUNT = "/stage"
 CHECKPOINT_BRANCH = "kaos-checkpoints"
 CHECKPOINT_ROOT = "resume"
 DEFAULT_EVERY_MINUTES = 10
-RETRY_BACKOFF = {"duration": "30s", "factor": "2", "maxDuration": "10m"}
+# No maxDuration: Argo counts it from the start of the FIRST attempt and then neither retries the step nor lets a
+# retry run past it (workflow/controller/operator.go, "Max duration limit exceeded"), so a step lost after its first
+# ten minutes was never run again. `cap` bounds the wait between two attempts instead.
+RETRY_BACKOFF = {"duration": "30s", "factor": "2", "cap": "5m"}
 INIT_NAME = "kaos-ckpt-restore"
 SIDECAR_NAME = "kaos-ckpt-copy"
 HELPER_PATH = Path(__file__).with_name("checkpoint_helper.py")
