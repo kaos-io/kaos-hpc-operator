@@ -253,7 +253,10 @@ def site_time(job, key):
 # Slurm states in which a job will not run again; HOST_ALIVE: states in which a host job still lives.
 TERMINAL = ('COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT', 'NODE_FAIL', 'PREEMPTED', 'OUT_OF_MEMORY', 'BOOT_FAIL', 'REVOKED')
 # Ends that are not the step's doing and after which a checkpoint copy, if there is one, continues the step (D-75).
-RECOVERABLE = ('TIMEOUT', 'NODE_FAIL', 'PREEMPTED', 'BOOT_FAIL', 'REVOKED')
+# HOST_LOST is the runner's own word, not a Slurm state: the job that ran this step on its node ended with the
+# step unfinished (see Runner.host_lost). For the step that is a lost node.
+HOST_LOST = 'HOST_LOST'
+RECOVERABLE = ('TIMEOUT', 'NODE_FAIL', 'PREEMPTED', 'BOOT_FAIL', 'REVOKED', HOST_LOST)
 HOST_ALIVE = ('PENDING', 'RUNNING', 'SUSPENDED', 'COMPLETING')
 
 

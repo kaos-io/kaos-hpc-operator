@@ -225,15 +225,18 @@ def test_a_guests_done_comment_carries_its_steps_start(tmp_path):
     assert "start=" not in jobs["100"]["comment"]
 
 
-def test_a_terminated_host_hands_its_guests_back_to_the_queue(tmp_path):
+def test_a_terminated_host_leaves_its_guests_held_for_their_runners(tmp_path):
+    """A guest whose host ends is not released: released, it would start from zero on another node. It stays held
+    and marked taken, and its own runner ends the attempt so the controller can continue it from its checkpoint."""
     guests = {"101": _job("kaos-%s-wf1-train" % SCOPE, "sleep 60\n", comment="kaos-commit=bbbbbbb2")}
     node = Node(tmp_path, guests, own_body="sleep 60\n")
     assert node.wait_for(lambda j: "kaos-state=taken" in j["101"]["comment"] and j["101"]["held"])
     node.proc.send_signal(signal.SIGTERM)   # walltime or scancel of the host: TERM, KILL 30 s later
     node.finish()
     j = node.jobs()["101"]
-    assert j["state"] == "PENDING" and not j["held"], "back in the queue, free to run alone or on another host"
-    assert j["comment"] == "kaos-commit=bbbbbbb2 kaos-state=requeued attempt=2", "next attempt, lease kept"
+    assert j["state"] == "PENDING" and j["held"], "never free to start alone from zero"
+    assert j["comment"].startswith("kaos-commit=bbbbbbb2 kaos-state=taken host=100 "), "still the host's, lease kept"
+    assert not list((tmp_path / "scratch" / "kaos-claims").glob("101-*")), "the host's lock is removed"
 
 
 def test_a_requeued_job_is_claimed_under_its_new_attempt(tmp_path):
@@ -264,10 +267,10 @@ def limit_s(text):
 
 
 
-def test_a_guest_killed_with_its_cancelled_host_is_requeued_not_failed(tmp_path):
+def test_a_guest_killed_with_its_cancelled_host_is_left_to_its_runner_not_failed(tmp_path):
     """Live 2026-11-03 (host 5417697): cancelling the host, Slurm killed the steps before the
     host's TERM handler ran, and the host recorded its guest's death as `done rc=143`. A run
-    whose host went away must go back to the queue, however Slurm orders its signals."""
+    whose host went away is never recorded as done, however Slurm orders its signals."""
     guests = {"101": _job("kaos-%s-wf1-train" % SCOPE, "sleep 60\n", comment="kaos-commit=bbbbbbb2")}
     node = Node(tmp_path, guests, own_body="sleep 60\n")
     assert node.wait_for(lambda j: "kaos-state=taken" in j["101"]["comment"] and j["101"]["held"])
@@ -282,8 +285,8 @@ def test_a_guest_killed_with_its_cancelled_host_is_requeued_not_failed(tmp_path)
         os.killpg(step["pid"], signal.SIGTERM)
     node.finish()
     j = node.jobs()["101"]
-    assert j["comment"] == "kaos-commit=bbbbbbb2 kaos-state=requeued attempt=2", j
-    assert j["state"] == "PENDING" and not j["held"]
+    assert j["comment"].startswith("kaos-commit=bbbbbbb2 kaos-state=taken host=100 "), j
+    assert j["state"] == "PENDING" and j["held"]
 
 
 def test_a_guests_own_output_is_on_disk_when_its_step_reads_it(tmp_path):

@@ -389,13 +389,12 @@ def unlock(claim):
         pass
 
 
-def requeue(s):
-    # Back to the queue with the next attempt number, still leasing its dataset.
-    if q(s['job'], '%T') == 'PENDING':
-        c = comment(s['job'])
-        set_comment(s['job'], '%skaos-state=requeued attempt=%d' % (lease(c), s['attempt'] + 1))
-        run('scontrol', 'release', s['job'])
-        log('requeued', s['job'], 'as attempt', s['attempt'] + 1)
+def leave_held(s):
+    # The host is going away with this guest's step unfinished. The guest stays held and marked taken: its own
+    # runner sees that the host is gone and reports the attempt over, and the controller runs the step again, from
+    # its newest checkpoint copy when it left one. Released here, it would start from zero on another node before
+    # anyone could hand it that copy.
+    log('leaving', s['job'], 'held for its runner: this host is ending')
     unlock(s.get('claim'))
 
 
@@ -435,9 +434,9 @@ def finish(slot, rc):
     if q(ME, '%T') != 'RUNNING' and rc != CHECKPOINT_EXIT:
         # The host itself is going away (cancelled, out of time): Slurm may end the
         # steps before this program's TERM handler runs (live 2026-11-03, host
-        # 5417697). The guest's run did not fail; it goes back to the queue. A step that saved and
+        # 5417697). The guest's run did not fail; it is left to its runner. A step that saved and
         # exited 85 is reported as it is: its checkpoint copy is in its comment (AC-73).
-        requeue(s)
+        leave_held(s)
         return
     c = comment(job)
     # start=: when the guest's step began. Its own job never starts, so this is the only start Slurm's records
@@ -448,16 +447,16 @@ def finish(slot, rc):
     log('guest', job, 'done rc=%d%s' % (rc, reason))
 
 
-def requeue_all(signum, frame):
+def host_ending(signum, frame):
     # Host cancelled or out of time (Slurm sends TERM, KILL 30 s later): every guest
-    # goes back to the queue with the next attempt number, still leasing its dataset.
+    # is left held for its own runner, still leasing its dataset.
     for s in list(slots.values()):
         if s['job'] != ME:
-            requeue(s)
+            leave_held(s)
     sys.exit(own_rc if own_rc is not None else 143)
 
 
-signal.signal(signal.SIGTERM, requeue_all)
+signal.signal(signal.SIGTERM, host_ending)
 OWN_LIMIT = int(os.environ.get('KAOS_STEP_LIMIT_MIN') or 0) * 60 or None
 OWN_PIDFILE = os.path.join(CLAIMS, '.own-%s.pid' % ME)
 os.makedirs(CLAIMS, mode=0o700, exist_ok=True)

@@ -34,6 +34,9 @@ const (
 	EndNodeFailure
 	// EndPreempted: the site pre-empted the job.
 	EndPreempted
+	// EndHostLost: the step ran on a node another job of the project held (a shared node) and that job ended
+	// with the step unfinished. The runner reports it as HOST_LOST; for the step it is a lost node.
+	EndHostLost
 )
 
 // Classify maps the site's final state and the step's exit code to an End.
@@ -54,12 +57,16 @@ func Classify(state string, exit *int32) End {
 		return EndNodeFailure
 	case st == "PREEMPTED":
 		return EndPreempted
+	case st == "HOST_LOST":
+		return EndHostLost
 	}
 	return EndStepError
 }
 
 // Infrastructure reports whether the end is not the step's doing: a node or the site took the job away.
-func (e End) Infrastructure() bool { return e == EndNodeFailure || e == EndPreempted }
+func (e End) Infrastructure() bool {
+	return e == EndNodeFailure || e == EndPreempted || e == EndHostLost
+}
 
 // Recoverable reports whether a step with a checkpoint continues after this end (D-75 5).
 func (e End) Recoverable() bool {
@@ -81,6 +88,8 @@ func (e End) Words() string {
 		return "the node failed or was taken for maintenance"
 	case EndPreempted:
 		return "the site pre-empted the job"
+	case EndHostLost:
+		return "the job that held its shared node ended"
 	case EndWallTime:
 		return "the wall time was reached"
 	case EndIdle:
