@@ -265,33 +265,6 @@ def test_a_when_with_a_line_break_is_refused_at_render():
     assert "holds a control character" in message
 
 
-# ------------------------------------------------ the time defaults: walltime and the checkpoint interval
-
-@pytest.mark.parametrize("walltime", ["721h", "43201", "43201m", "99999999m"])
-def test_a_walltime_the_form_would_refuse_cannot_be_written(walltime):
-    message = refused(lambda a: a.step("train", kind="evaluate", walltime=walltime))
-    assert message == (f"step 'train': train-walltime is {walltime!r}. Write minutes or hours, for example 90, 90m or 12h: "
-                       f"at least one minute, at most 30 days, no other unit.")
-
-
-@pytest.mark.parametrize("walltime", ["31d", "30s", "0"])
-def test_should_refuse_a_walltime_in_days_or_seconds_or_of_no_time_naming_the_field(walltime):
-    """PRD kaos#1911 AC-35: 31 days and 30 seconds are refused, and the message names the run form's field."""
-    message = refused(lambda a: a.step("train", kind="evaluate", walltime=walltime))
-    assert message.startswith(f"step 'train': walltime={walltime!r} must be minutes or hours")
-    assert "at least one minute" in message and "`<step>-walltime`" in message
-
-
-@pytest.mark.parametrize("walltime", ["720h", "43200", "43200m", "1m"])
-def test_a_walltime_up_to_thirty_days_is_accepted(walltime):
-    render(lambda a: a.step("train", kind="evaluate", walltime=walltime))
-
-
-def test_a_checkpoint_interval_the_form_would_refuse_cannot_be_written():
-    message = refused(lambda a: a.step("train", kind="evaluate", checkpoint_every="721h"))
-    assert message.startswith("step 'train': train-checkpoint-every is '721h'. Write minutes or hours")
-
-
 def form_of(build, hpc=False):
     wft = hpc_render(build) if hpc else None
     if wft is None:
@@ -304,34 +277,12 @@ def form_of(build, hpc=False):
     return {p["name"]: p for p in wft["spec"]["arguments"]["parameters"]}, wft
 
 
-def test_a_resumable_step_gets_the_checkpoint_field_with_the_engine_default():
-    form, wft = form_of(lambda a: a.step("train", kind="transform", resumable=True, produces=[a.artifact("r")]))
-    assert form["train-checkpoint-every"]["value"] == "10m"
+def test_should_give_a_step_the_checkpoint_helper_at_the_platforms_interval_with_no_form_field():
+    form, wft = form_of(lambda a: a.step("train", kind="transform", produces=[a.artifact("r")]))
+    assert not [n for n in form if n.endswith(("-walltime", "-checkpoint-every"))]
     train = next(t for t in wft["spec"]["templates"] if t["name"] == "train")
     env = {e["name"]: e.get("value") for c in train["initContainers"] for e in c["env"]}
-    assert env["CKPT_EVERY_MIN"] == "{{inputs.parameters.checkpoint-every}}", "the cluster's copier reads the form value"
-    dag = next(x for x in wft["spec"]["templates"] if x["name"] == "main")["dag"]["tasks"]
-    task = next(t for t in dag if t["name"] == "train")
-    assert any(p["name"] == "checkpoint-every" for p in task["arguments"]["parameters"])
-
-
-def test_the_step_default_is_the_forms_default_and_wins_over_the_engine_default():
-    form, _ = form_of(lambda a: a.step("train", kind="transform", resumable=True, checkpoint_every="25m",
-                                       produces=[a.artifact("r")]))
-    assert form["train-checkpoint-every"]["value"] == "25m"
-
-
-def test_a_step_that_is_neither_resumable_nor_declares_an_interval_has_no_checkpoint_field():
-    form, _ = form_of(lambda a: a.step("train", kind="transform", produces=[a.artifact("r")]))
-    assert "train-checkpoint-every" not in form
-
-
-def test_checkpoint_every_false_keeps_the_copies_off_even_for_a_resumable_step():
-    form, wft = form_of(lambda a: a.step("train", kind="transform", resumable=True, checkpoint_every=False,
-                                         produces=[a.artifact("r")]))
-    assert "train-checkpoint-every" not in form
-    train = next(t for t in wft["spec"]["templates"] if t["name"] == "train")
-    assert "initContainers" not in train, "no copies"
+    assert env["CKPT_EVERY_MIN"] == "10"
 
 
 # ------------------------------------------- a step never runs after a failure hidden behind a skipped step

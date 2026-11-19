@@ -44,12 +44,6 @@ release-gate rule):
                                       the ConfigMap indirection
   platform.kubecore.io/shm            /dev/shm emptyDir sizeLimit (e.g. "4Gi")
   platform.kubecore.io/workspace      per-run RWO PVC at /workspace (e.g. "50Gi")
-  platform.kubecore.io/hpc            the default of the step's time limit (authoring:
-                                      walltime=; the run form's <step>-walltime sets it)
-  platform.kubecore.io/checkpoint-every  default minutes between checkpoint copies of
-                                      the step's KAOS_CHECKPOINT_DIR (the run form's <step>-checkpoint-every sets it); "off"
-                                      removes the persistence helper (see
-                                      kubecore/resilience.py)
   platform.kubecore.io/idle-timeout   minutes a GPU step may show no GPU use
                                       and no new log line before the pool's
                                       idle watchdog ends it as Idle; "0" turns
@@ -84,21 +78,15 @@ from kubecore.meluxina import (
     STEP_KIND_LABEL,
     enhance_hpc,
     hpc_classes,
-    parse_time_limit,
     runs_on_hpc,
-    step_resumable_lead,
 )
 from kubecore.outputs_repo import outputs_repo
 from kubecore.run_settings import (
-    DEFAULT_WALLTIME,
     PROMOTE_CHOICES,
     SETTINGS_PARAM,
     SETTINGS_PATH,
-    WALLTIME_EXAMPLE,
-    add_input,
     add_task_argument,
     calls,
-    checkpoint_field,
     class_field,
     DEFAULT_PARALLEL,
     combinations,
@@ -106,10 +94,9 @@ from kubecore.run_settings import (
     matrix_setting,
     parallel_field,
     promote_field,
-    setting,
-    walltime_field,
+    step_cap_minutes,
 )
-from kubecore.resilience import enhance_resilience, every_field_default, every_minutes, shared_templates, write_helper_configmap
+from kubecore.resilience import enhance_resilience, shared_templates, write_helper_configmap
 from kubecore.step_contract import (
     RAW_FORM_ANNOTATION,
     CLUSTER_ONLY_KINDS,
@@ -135,8 +122,7 @@ from kubecore.step_contract import (
 )
 
 ANNOTATION_PREFIX = "platform.kubecore.io/"
-KNOWN_ANNOTATIONS = {"compute-class", "inject", "source", "image", "shm", "workspace", "hpc", "hpc-resumable",
-                     "checkpoint-every", "idle-timeout"}
+KNOWN_ANNOTATIONS = {"compute-class", "inject", "source", "image", "shm", "workspace", "idle-timeout"}
 WORKSPACE_MOUNT = "/workspace"
 # Mount path for the Zitadel machine-key secret backing MLflow bearer auth
 # (#868) — matches the previous DSL's working reference (/etc/mlflow-svc).
@@ -807,8 +793,8 @@ def enhance_env(step: dict, ctx: dict, annots: dict) -> None:
         add({"name": KAOS_LIB_SUPPORT_ENV, "value": support_value(ctx)})
 
 
-# The platform's own compose step keeps a short fixed limit. Every step of the developer's pipeline has one time
-# limit instead, the run form's `<step>-walltime` (enhance_walltime), wherever it runs.
+# The platform's own compose step keeps a short fixed limit. Every step of the developer's pipeline has the
+# platform's cap instead (enhance_step_cap), wherever it runs: nobody who writes or starts a run sets a time.
 #
 # That limit is not what bounds a step that never gets a machine (cloud stockout, exhausted quota, a pool at
 # max): a deadline counts from the pod's start, so a Pending pod accrues none. The CI workflows chart's
@@ -817,29 +803,18 @@ COMPOSE_STEP = "compose-and-validate"
 COMPOSE_DEADLINE_SECONDS = 1800
 
 
-def declared_walltime(annots: dict) -> str:
-    """The step's walltime= as written in pipeline.py, else the default: the form field's default."""
-    return annots.get("hpc") or DEFAULT_WALLTIME
-
-
-def enhance_walltime(spec: dict, step: dict, annots: dict) -> None:
-    """A step of the developer's pipeline is ended when the run form's `<step>-walltime` elapses: its deadline
-    is an input of the template, which every DAG task of the step gives from what compose wrote
-    (`kaos-run-settings`). The step's walltime= (else 4h) is the form's default (enhance_run_form)."""
+def enhance_step_cap(step: dict, ctx: dict) -> None:
+    """A step of the developer's pipeline is ended at the platform's cap (`stepCapMinutes` of the pipeline context,
+    seven days when absent): the pod's deadline, final, never retried."""
     if step["name"] == COMPOSE_STEP:
         return
-    add_input(step, "deadline", str(parse_time_limit(declared_walltime(annots)) * 60))
-    step["activeDeadlineSeconds"] = "{{inputs.parameters.deadline}}"
-    add_task_argument(spec, step["name"], "deadline", "{{=%s * 60}}" % setting(step["name"], "walltime"))
+    step["activeDeadlineSeconds"] = step_cap_minutes(ctx) * 60
 
 
 def enhance_run_form(spec: dict, steps: list, offers: dict, ctx: dict) -> None:
-    """The run form's own fields: `<step>-walltime` for every step (default: walltime= in code, else 4h),
-    `<step>-checkpoint-every` for a step that declares checkpoint_every= or resumable= (not checkpoint_every=False;
-    default: the value in code, else the engine's for resumable= alone),
-    `promote-<dataset>` for every dataset a step produces, and `reuse-from-run` and `start-from-step`, which start a
-    run from a step with the results of an earlier run, and `target-step`, which runs one step and the steps it
-    needs. Compose gets each value (checks it,
+    """The run form's own fields: `promote-<dataset>` for every dataset a step produces, `reuse-from-run` and
+    `start-from-step`, which start a run from a step with the results of an earlier run, and `target-step`, which
+    runs one step and the steps it needs. No field is about time. Compose gets each value (checks it,
     and writes the numbers as its output `kaos-run-settings`)."""
     compose = next((s for s in steps if s["name"] == COMPOSE_STEP), None)
     if compose is None:
@@ -860,22 +835,6 @@ def enhance_run_form(spec: dict, steps: list, offers: dict, ctx: dict) -> None:
         args.extend([flag, "%s={{workflow.parameters.%s}}" % (key, name)])
         declared = True
 
-    for step in steps:
-        step_name = step["name"]
-        if step_name == COMPOSE_STEP:
-            continue
-        annots = platform_annotations(step)
-        field(walltime_field(step_name), declared_walltime(annots),
-              f"The longest the step may run, as minutes or hours: {WALLTIME_EXAMPLE}. Default from pipeline.py.",
-              "--walltime", step_name)
-        lead = step_resumable_lead(step)
-        if lead:
-            args.extend(["--resumable-lead", f"{step_name}={lead}"])
-        every = every_field_default(annots)
-        if every:
-            field(checkpoint_field(step_name), f"{every}m",
-                  f"How often the '{step_name}' step's checkpoint is saved: minutes or hours, "
-                  f"for example 10m or 1h.", "--checkpoint-every", step_name)
     table = json.loads(args[args.index("--steps") + 1]) if "--steps" in args else []
     chosen = {name: offer for name, offer in offers.items() if offer and name != COMPOSE_STEP}
     for name in chosen:
@@ -962,7 +921,7 @@ def enhance_scheduling(step: dict, ctx: dict, annots: dict) -> None:
         for key, value in selector.items():
             step["nodeSelector"].setdefault(key, value)
 
-    # The compose step's fixed limit; a developer's step has its walltime (enhance_walltime).
+    # The compose step's fixed limit; a developer's step has the platform's cap (enhance_step_cap).
     if step["name"] == COMPOSE_STEP:
         step.setdefault("activeDeadlineSeconds", COMPOSE_DEADLINE_SECONDS)
 
@@ -1487,16 +1446,15 @@ def enhance_compose_class(spec: dict, steps: list, ctx: dict) -> None:
     parameters[:] = [p for p in parameters if p["name"] != field]
 
 
-ROLES = ("info", "experiment", "setting", "input", "class", "walltime", "checkpoint-every", "matrix",
+ROLES = ("info", "experiment", "setting", "input", "class", "matrix",
          "parallel", "reuse", "start", "target", "promote", "advanced", "platform")
-STEP_ROLES = ("class", "walltime", "checkpoint-every", "matrix", "parallel")    # the per-step fields, in form order
+STEP_ROLES = ("class", "matrix", "parallel")    # the per-step fields, in form order
 
 
 def form_rank(spec: dict, steps: list, rendered: "set | None" = None) -> dict:
     """{param name: {"role": one of ROLES, "step": step name or None, "sort": (group, index)}} for every
     spec.arguments.parameters entry. "sort" is the key the form is ordered by (order_form): the text, the
-    experiment fields, the settings in config order, the dataset fields, then each step's class, time limit and
-    checkpoint interval, the three fields that start a run from a step or aim it at one, the promote ticks, the extra YAML, and last
+    experiment fields, the settings in config order, the dataset fields, then each step's class, the three fields that start a run from a step or aim it at one, the promote ticks, the extra YAML, and last
     what the platform owns.
 
     A role is decided by the engine's own names first (what it adds: the text, the per-step fields, the rerun
@@ -1626,7 +1584,7 @@ def enhance(wft: dict, ctx: dict, form_data: "dict | None" = None) -> dict:
         compute_class = resolve_compute_class(step, ctx, annots)
         enhance_class_sizing(spec, step, ctx, annots)  # the node of the chosen class
         enhance_scheduling(step, ctx, annots)
-        enhance_walltime(spec, step, annots)
+        enhance_step_cap(step, ctx)
         # After scheduling fill, so the final requests (developer-set or
         # platform whole-node) are what get checked against the class budget.
         validate_scheduling(step, compute_class, gpu, env_has_gpu=bool(gpu_class_names(ctx)))
@@ -1635,7 +1593,7 @@ def enhance(wft: dict, ctx: dict, form_data: "dict | None" = None) -> dict:
         # the full gpu-tier picture.
         enhance_gpu_routing(spec, step, ctx, annots)
         enhance_volumes(step, annots, ctx)
-        enhance_resilience(spec, step, ctx, annots, gpu, inject_disabled(annots, "lakefs"), shared)
+        enhance_resilience(step, ctx, inject_disabled(annots, "lakefs"), shared)
         enhance_connections(step, ctx)
     enhance_images(spec, ctx, steps)
     enhance_workspace_pvc(spec, steps)

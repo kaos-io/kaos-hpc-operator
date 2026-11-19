@@ -30,7 +30,7 @@ side of it are on `main` of this repository; the library and the app templates a
 | Where | State |
 |---|---|
 | This page, the fixtures, the checks under `hack/contract-checks/` | On `main`. The checks prove the mechanisms the contract rests on; the engine's and the HPC side's tests load the fixtures. |
-| The engine (`engine/`) | On `main`: `kind=`, `inputs=`, `produces=`, `walltime=`, `matrix=`, the context and the `kaos-result` of every step, the render-time refusals, conditions on a value, the final promotion task. `outputs=`, `hpc_time_limit=` and `disk=` are refused, and so is an app from before the contract (section 1). |
+| The engine (`engine/`) | On `main`: `kind=`, `inputs=`, `produces=`, `matrix=`, the context and the `kaos-result` of every step, the render-time refusals, conditions on a value, the final promotion task. `outputs=`, `hpc_time_limit=`, `disk=`, `walltime=`, `resumable=` and `checkpoint_every=` are refused, and so is an app from before the contract (section 1). |
 | The HPC job definition, follower, controller, runner (`api/`, `internal/`, `runner/`) | On `main`: `spec.app`, `spec.context`, `spec.inputs`, `status.result`, the hand-back of the result and its checks (section 8). |
 | kaos-lib (another repository) | `kaos_lib.step` and the data lock at version 2 (the ledger) are on its `main`, in the release it prepares. |
 
@@ -40,8 +40,8 @@ from their own repositories; their state is in the PRD (kaos#1911), not here.
 ## 1. Authoring keywords
 
 ```python
-step(name, *, kind, reads=, inputs=, needs=, produces=, gpu=, when=, walltime=,
-     resumable=, checkpoint_every=, idle_timeout=, matrix=, matrix_allow_failed=)
+step(name, *, kind, reads=, inputs=, needs=, produces=, gpu=, when=,
+     idle_timeout=, matrix=, matrix_allow_failed=)
 ```
 
 Everything after `name` is keyword-only.
@@ -56,18 +56,16 @@ Everything after `name` is keyword-only.
 | `produces=` | What the step writes: `model("name")`, `artifact("name")`, `dataset("name")`. A dataset an app produces is the repository `dataset-<app>-<name>`: `dataset("clean")` in the app `hera1` is `dataset-hera1-clean`. The name is per app because every app made from a template declares the same names and a dataset has exactly one producer; two apps of a project never share one. |
 | `gpu=` | Unchanged. |
 | `when=` | A condition in plain words: a name, `==` or `!=`, and a value. The name is a field of the run form, `when="quantization-mode != off"` (a setting's path with dashes, as the run form shows it), or a value a step in `needs=` handed on, `when="evaluate.passed == true"`: `<step>.<value>`, where `<value>` is a keyword of that step's `step.result(...)` (letters, digits and `_`; a step that is not in this step's `needs=` is refused, naming the fix). The value is a bare word or number (`off`, `3`) or a quoted string (`"two words"`). Comparisons join with `and` / `or` (`and` binds tighter; no parentheses, no other operators). The engine writes it as one condition on the step's task and on its HPC variant (after the term every task has for starting a run from a step, section 13), comparing the field's value as text: `quantization-mode != off` becomes `{{=workflow.parameters['quantization-mode'] != 'off'}}` (`and` becomes `&&`, `or` becomes a double bar, in the order written). A step's value is read from the needed step's result (`kaos-result`) through the expression of section 10 item 3. **What is compared, exactly:** a value that is a string is compared with the text as text; a value that is a number or a boolean is compared by its JSON text, as the workflow system's `toJSON` writes it (`1000000` is `1000000`, `1e6` written in `when=` is read as `1000000`, `1.0` is `1`, `1e-5` is `0.00001`, `true` is `true`), never through `string()` (which writes `1e+06` for 1000000, `1.2345678e+07` for 12345678 and `1e-05` for 0.00001). Written in `when=`, a number is read the way JSON writes numbers, so `1e6`, `1000000` and `1000000.0` all match the value 1000000. `evaluate.rows != 1000000` therefore skips the step when `rows` is 1000000. A text that cannot be matched reliably is refused when the pipeline is rendered, naming the fix: a number written another way than JSON writes it (`.5`, `+1`, `01`, `5.`), a `True`/`NULL` that is not lowercase, an integer above 9007199254740992 (a result's number is a double), a number too large to hold, and any control character (a line break, a tab; also refused in `when=` as a whole). **A needed step that was skipped has no value, and the condition is false** for `==` and for `!=` alike (nothing can be said about a value that does not exist): the step that asked is skipped too, and the run goes on. That holds for a step skipped by its own `when=` (the absent sentinel), for one that ended itself with `step.skip()` (result `status: skipped`), on the cluster and on the HPC variant (the pair). A needed step that **ran and finished well but did not set the key** (a typo in the name, a value never set, or `null`) fails the task, naming step and key: `int("<sentence>")` of a sentence is the one failure the expression language lets us word, and the workflow system shows `failed to evaluate expression: invalid operation: int(step 'evaluate' ran but gave no value 'passed' (a typo in the name, or the value was never set with step.result(passed=...)): a when= on a step's value needs the value)` as the task's error. A result whose status is none of `ok`, `skipped` and `absent` is malformed and fails the task too. A needed step that failed never reaches the condition (its `depends`). The expression is `(<status> in ["absent", "skipped"] ? false : (<status> == "ok" ? <comparison> : int("<malformed sentence>")))` (checked on the lab, Argo Workflows v4.0.6: 29 comparisons over 999999, 1000000, 12345678, 3000000000, 0.5, 1.0, 1e-5, true, false, an empty string and a string that looks like a number; and the cases: gate passes, gate hands on false, gate skipped by `step.skip()` and by its own `when=` with `==` and `!=`, key missing, malformed result; the cluster shape and the HPC pair). `kaos-promote` is unaffected (its `depends` accept Skipped; a skipped step's dataset is simply not promoted), and a step that needs a matrix step cannot name its value (section 1). The step is skipped when the condition is false. |
-| `walltime=` | The step's time limit, on any kind: `'90m'`, `'12h'` or `'720'` (minutes). It is the default of the step's run-form field `<step>-walltime` (below). |
 | `matrix=` | `{"lr": [0.01, 0.001], "batch": [16, 32]}`: the step runs once for each combination of the values (section 12). The run form's `<step>-matrix` holds the combinations (every one by default) and `<step>-parallel` how many run at once. At most 32 combinations; the step may not produce a dataset or be `ingest`, `publish` or `control`; it may not need another matrix step. |
 | `matrix_allow_failed=` | `True` on a step with `matrix=`: the step after it runs when some items failed and sees which (section 12). By default one failed item fails the step. |
-| `resumable=`, `idle_timeout=` | Unchanged. |
-| `checkpoint_every=` | How often the step's checkpoint is saved: `'20m'`, `'1h'` or `20` (minutes); `False` for no copies. It is the default of the run-form field `<step>-checkpoint-every`. |
+| `idle_timeout=` | Unchanged. |
 
-Removed, with no alias: `outputs=` (the result replaces it), `hpc_time_limit=` (`walltime=` replaces it) and
+Removed, with no alias: `outputs=` (the result replaces it), `hpc_time_limit=` and
 `disk=`: a step is not told its disk, it gets the disk of the machine its class runs on (the usable disk of that
 class, less a fixed reserve for the container images, or 10Gi where the platform does not say). A step that
 passes one is refused with what to write instead, and then with the sentence for an app from before the contract
 (`OLD_APP_NOTICE`: "This app was made before the current pipelines. Create it again from the template."), because a
-pipeline that still uses one is an old app: "step 'x': outputs= is gone. Declare what the step writes with produces=[...] and hand it on with step.result(). This app was made before the current pipelines. Create it again from the template."; "step 'x': hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\". This app was made before the current pipelines. Create it again from the template."; "step 'x': disk= is gone. The step gets the disk of the machine class it runs on. This app was made before the current pipelines. Create it again from the template." Any other unknown keyword is refused with a sentence that lists the keywords that exist.
+pipeline that still uses one is an old app: "step 'x': outputs= is gone. Declare what the step writes with produces=[...] and hand it on with step.result(). This app was made before the current pipelines. Create it again from the template."; "step 'x': hpc_time_limit= is gone: the platform sets the time of a step. Delete it. This app was made before the current pipelines. Create it again from the template."; "step 'x': walltime= is gone: the platform sets the time of a step and finds out by itself whether it saves progress. Delete it. This app was made before the current pipelines. Create it again from the template." (`resumable=` the same; `checkpoint_every=` ends "...whether it saves progress, and the library chooses how often to save. Delete it."); "step 'x': disk= is gone. The step gets the disk of the machine class it runs on. This app was made before the current pipelines. Create it again from the template." Any other unknown keyword is refused with a sentence that lists the keywords that exist.
 
 **Step kinds.** A kind says what the step is for, and the engine refuses a step that does not do it:
 
@@ -92,7 +90,7 @@ and, for `control`, `step 'x': a control step steers the run and handles no data
 **The run form.** The form speaks to the developer, in this order: `pipeline-info` (how to fill the form, the machine
 classes, the developer's steps; no account, provider or platform step), the `experiment-*` fields, the other settings
 in the order of `config/`, the dataset fields (the config values `inputs=` names), then for each step, in pipeline order,
-`<step>-class`, `<step>-walltime` and `<step>-checkpoint-every`, then the `promote-<dataset>` choices (read by the final task `kaos-promote`), `config`
+`<step>-class`, then the `promote-<dataset>` choices (read by the final task `kaos-promote`), `config`
 ("Extra settings for this run, as YAML. They replace the values above."). There is no field for an image: see
 "Where a step's image comes from" below.
 A setting's description is the comment written next to it in `config/*.yaml`: the `# ...` at the end of its line, else
@@ -100,59 +98,18 @@ the comment lines directly above it with no blank line between; with no comment 
 platform's own compose step has no class field (it runs on the default class, fixed in the template) and the platform
 endpoints are not form fields.
 
-**Time limit and checkpoint interval on the run form.** Every step of the developer's pipeline has one time limit,
-wherever it runs, and the run form shows it: a field `<step>-walltime` for every step, with the description "The
-longest the step may run, as minutes or hours: 90m, 12h. Default from pipeline.py." Its default is the step's
-`walltime=`, else `4h` (the same default as an HPC class). On a cluster machine the value is the step's deadline; on
-an HPC class it is the job's limit. The platform's own compose step has a fixed limit of 30 minutes and no field.
-On an HPC class a run keeps its access to its data and to tracking for 11.5 hours at most (a step that runs longer
-would lose both partway through and fail late, after spending node-hours). So the form's `<step>-walltime` of a step on an
-HPC class that is not resumable is at most 11.5 hours (690 minutes): compose refuses a longer value before any step
-starts, naming the step, the limit in hours and the two fixes, shorten `walltime=` or make the step resumable
-(`resumable=True` with `checkpoint_every=`). A resumable step may ask for more: it runs as runs that each end inside
-that time, each with fresh access and continuing from its checkpoint, and together they stay within the limit (at most
-six runs: 69 hours). Waiting for a machine does not count: a step that never gets one is bounded by the platform's pending reaper, not by
-this limit. A step that declares `checkpoint_every=` (not `False`) or `resumable=` also has `<step>-checkpoint-every` ("How often
-the 'x' step's checkpoint is saved: minutes or hours, for example 10m or 1h."), default the value in code (10 minutes,
-`resilience.DEFAULT_EVERY_MINUTES`, for a step that declares `resumable=` alone). Both are
-text: minutes (`90`, `90m`) or hours (`12h`), at least one minute; compose refuses any other value before a step
-starts, naming the field: `<step>-walltime is '1d'. Write minutes or hours, for example 90, 90m or 12h: at least
-one minute, at most 30 days, no other unit.` Compose writes the numbers as its output `kaos-run-settings` (`{"<step>": {"walltime":
-minutes, "checkpoint-every": minutes}}`), which the deadline, the HPC job's limit and the checkpoint copies read.
-A step with a checkpoint interval has the field `checkpoint_every` (minutes, a number) in its context, after
-`produces`; a step without one has no such field.
+**Time and checkpoints are the platform's.** The run form has no time or checkpoint field, and a step declares
+neither (`walltime=`, `resumable=` and `checkpoint_every=` are refused). The platform's cap, `stepCapMinutes` of the
+pipeline context (default 7 days, 10080 minutes), ends every step of the developer's pipeline: on a cluster machine it is the
+pod's deadline, on an HPC class it is the `time-limit` (minutes) of the step's job. A deadline is final and is not retried.
+The platform's own compose step has a fixed limit of 30 minutes. The engine sends no `resumable` value to the HPC follower.
 
-| | Who sets it | Order, first wins | Default | Read by |
-|---|---|---|---|---|
-| time limit | the run form's `<step>-walltime` | the form value, then `step(walltime=)` | `walltime=`, else `4h` | the cluster deadline; the HPC job's limit (the follower and the runner) |
-| checkpoint interval | the run form's `<step>-checkpoint-every`, a field of a step that declares `checkpoint_every=` or `resumable=` (not `checkpoint_every=False`) | the form value, then `step(checkpoint_every=)`, then the argument of `kaos_lib.checkpoint.register(...)` in code, then the library's adaptive default | `checkpoint_every=`, else 10 minutes for a `resumable=` step | cluster: the helper's `CKPT_EVERY_MIN` (from the form field); HPC: the job's copier (`KAOS_CKPT_EVERY_S`, from `checkpoint_every` of the step context, as the target, with the spacing below); the step: `kaos_lib.checkpoint.tick()` (the same context field) |
-
-**How the copier uses the interval.** The form value is the TARGET interval between copies, counted from the end of the
-previous copy. On HPC (Slurm) the copier never starts a periodic copy sooner than the larger of the form value and five
-minutes (`MIN_EVERY_S` 300 s), nor sooner than ten times the duration of the previous copy (copying stays under a tenth of the run
-time), and it starts none when the time left before the limit is not more than the resumable lead plus the time the copy
-takes, so that no periodic copy is in flight when the wall-time signal asks for the final copy (it writes one plain line,
-`copying every N minutes, not every M: <why>`, when it copies less often than asked, and one when it stops for the limit).
-On the cluster the helper never copies sooner than 60 seconds after the previous copy ended, nor sooner than ten times its
-duration, and not less often than hourly; it has no wall-time signal, a stop (SIGTERM) triggers the final copy.
-
-`step(walltime=)` and `step(checkpoint_every=)` are checked when the pipeline is rendered, and by lint, with compose's
-sentence above: a default the form would refuse (over 30 days, under a minute) cannot be written. `checkpoint_every=False`
-means no field and no copies; `register(checkpoint_every=False)` in code turns the library's periodic checkpoints off only
-for a step that has no form value.
-
-**A long job continues instead of starting over.** A step that declares `resumable=` is run again, and continues
-from its newest checkpoint, in each of three cases, on a cluster machine and on an HPC class, at most five times
-after the first run: it reaches its time limit, its machine is lost, or it asks to be restarted (exit code 85,
-`kaos_lib.checkpoint.exit_for_restart`). The time limit applies to each run of the step, not to the sum: on the
-cluster each run is a new pod with the full deadline; on an HPC class each continuation is a new job with the full
-limit, and the follower's own deadline covers the queue and every continuation. The exception is a limit longer than one run
-can be (the longest the site allows, or the 11.5 hours of access above): that limit is then the total, each run gets at most
-the longest run and never more than what the earlier runs left, and the step ends with its limit used up. On the cluster the step is run
-again by the step's retry rule (a step that does not declare `resumable=` is retried only when its machine is lost)
-and restores its checkpoint folder in the init container; on HPC the controller sends the stop signal the declared
-lead (`resumable=`) before the limit and submits the continuation. The form's `<step>-walltime` must be longer than
-that lead: compose refuses a smaller value, naming the field.
+Every step except the kinds `control` and `publish` gets the checkpoint helper (restore on start, copies while it runs), at
+one interval chosen by the platform (10 minutes, `resilience.DEFAULT_EVERY_MINUTES`); the library decides what to save
+(`kaos_lib.checkpoint`). One retry rule covers every step: the step is run again, and continues from its newest
+checkpoint, when its machine is lost or it exits with code 85 (`kaos_lib.checkpoint.exit_for_restart`). Its limit is 50
+runs (`resilience.RETRY_LIMIT`), because the workflow system has one limit for both causes; a step that is ended as idle,
+fails by itself or reaches its deadline is not run again. The checkpoint folder `KAOS_CHECKPOINT_DIR` is set on every step.
 
 **Classes on the run form.** A step is offered the GPU classes of the cluster only when its code declares
 `gpu=True`. A step with `gpu=True` is offered the GPU and the CPU classes (it can run CPU-only on a CPU class); a step
@@ -753,7 +710,7 @@ every combination of the values in `matrix=`, in the order written, the first na
 (`[{"lr":0.01,"batch":16},{"lr":0.01,"batch":32},...]`). `<step>-parallel` is a whole number from 1 to 32 or `all`: how
 many items run at the same time (more than there are items means all). **The default is 4**, the 1-GPU steps one node
 holds, so that on an HPC class the items share one node; a larger number asks for more nodes. Both follow the step's
-`<step>-class` and `<step>-walltime`. Compose checks them before any step starts and refuses, naming the field: not
+`<step>-class`. Compose checks them before any step starts and refuses, naming the field: not
 JSON; not a list or an empty list; more than 32 combinations ("holds 33 combinations; a step runs at most 32. Remove
 1."); a combination that is not an object, has a name the step did not declare, or lacks one; a value that is not a
 number, a boolean or a text of 1 to 64 letters, digits, spaces and `. _ + / : = @ , ( ) [ ] # % ^ ~ * -`; a whole number
@@ -765,7 +722,7 @@ writes the checked combinations into `kaos-run-settings`: `{"<step>": {"matrix":
 non-empty lists; a name that is not `[a-z][a-z0-9_]*` or is also a section in `reads=`; a value that is not a number, a
 boolean or short text, or a whole number beyond 2 to the power 53; more than 32 combinations; the kinds `ingest`,
 `publish`, `control`; a dataset in `produces=`; more than 4 things read and written together (`inputs=` plus
-`produces=`), because up to 32 items hand their ledgers back in one shared result; `resumable=` or `checkpoint_every=`;
+`produces=`), because up to 32 items hand their ledgers back in one shared result;
 a matrix step that needs a matrix step; a step that needs two matrix steps, or that needs more than 4 steps in all when
 one of them is a matrix step; `matrix_allow_failed=` without `matrix=`; a `when=` that reads `<matrix step>.<value>` (a
 `when=` on a matrix step itself is fine: every item is skipped).
@@ -818,9 +775,8 @@ Workflows v4.0.6, 32 items that read two inputs and write a model, results of 1.
 `<step>-parallel` 4 and 1.5 MB at 1; the workflow system compresses it (94 KB at 1) and both runs handed back all 32
 results (`hack/local-lab`, evidence in the PRD).
 
-**Checkpoints.** A matrix step is never continued from a checkpoint: its runs would share one checkpoint folder.
-`resumable=` and `checkpoint_every=` are refused on it, and the render opts the step out of continuation on HPC. The
-step's `walltime=` (the form's `<step>-walltime`) is each item's limit.
+**Checkpoints.** The checkpoint helper is not added to a matrix step: its runs would share one checkpoint folder.
+The platform's cap is each item's limit.
 
 **How the engine runs it** (the HPC leg is the same, section 8). The step's task `<step>` calls a template
 `kaos-matrix-<step>` that runs the step's container for `items` in rounds of `par`: the first `par` items in parallel,

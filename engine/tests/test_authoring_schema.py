@@ -20,8 +20,8 @@ def test_should_list_every_step_option_in_signature_order_with_its_default():
     sig = {n: p for n, p in inspect.signature(authoring.step).parameters.items()
            if p.kind is not inspect.Parameter.VAR_KEYWORD}
     assert [p["name"] for p in SCHEMA["params"]] == list(sig)
-    assert list(sig) == ["name", "kind", "reads", "inputs", "needs", "produces", "gpu", "when", "walltime",
-                         "resumable", "checkpoint_every", "idle_timeout", "matrix", "matrix_allow_failed"], \
+    assert list(sig) == ["name", "kind", "reads", "inputs", "needs", "produces", "gpu", "when",
+                         "idle_timeout", "matrix", "matrix_allow_failed"], \
         "the keywords of the step contract"
     for entry in SCHEMA["params"]:
         param = sig[entry["name"]]
@@ -31,7 +31,7 @@ def test_should_list_every_step_option_in_signature_order_with_its_default():
 
 def test_should_document_the_options_new_in_the_engine_over_a_copy_vendored_before_2026_11_05():
     names = {p["name"] for p in SCHEMA["params"]}
-    assert {"checkpoint_every", "idle_timeout"} <= names
+    assert "idle_timeout" in names and not {"walltime", "resumable", "checkpoint_every"} & names
 
 
 def test_should_publish_patterns_that_agree_with_the_validators():
@@ -39,14 +39,15 @@ def test_should_publish_patterns_that_agree_with_the_validators():
 
     from kubecore import authoring
     by_name = {p["name"]: p for p in SCHEMA["params"]}
-    assert re.match(by_name["walltime"]["pattern"], "90m") and not re.match(by_name["walltime"]["pattern"], "1d")
+    assert re.match(by_name["idle_timeout"]["pattern"], "90m") and not re.match(by_name["idle_timeout"]["pattern"], "1d")
     assert by_name["kind"]["enum"] == ["ingest", "transform", "train", "evaluate", "publish", "control"]
-    assert by_name["resumable"]["true_means"] == authoring.DEFAULT_RESUMABLE_LEAD
 
 
 def test_should_tell_the_linter_what_was_removed_and_what_to_write_instead():
-    assert set(SCHEMA["removed"]) == {"outputs", "hpc_time_limit", "disk"}
+    assert set(SCHEMA["removed"]) == {"outputs", "hpc_time_limit", "disk", "walltime", "resumable", "checkpoint_every"}
+    assert SCHEMA["removed"]["walltime"] == ("walltime= is gone: the platform sets the time of a step and finds out by "
+                                             "itself whether it saves progress. Delete it.")
     assert SCHEMA["removed"]["disk"] == "disk= is gone. The step gets the disk of the machine class it runs on."
-    assert not {"outputs", "hpc_time_limit", "disk"} & {p["name"] for p in SCHEMA["params"]}
+    assert not set(SCHEMA["removed"]) & {p["name"] for p in SCHEMA["params"]}
     assert "migration_guide" not in SCHEMA
     assert SCHEMA["old_app_marker"] == "Create it again from the template."

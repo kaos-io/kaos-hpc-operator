@@ -1,7 +1,7 @@
 """The Kubernetes backend of the resilience contract (PRD-HPC-1461 D-76), as the enhancer renders it.
 
 Tier 1 re-run (retryStrategy), the KAOS_CHECKPOINT_DIR folder on every step, and the restore init
-container + copy sidecar on GPU steps (or any step with checkpoint_every). The GPU step's injected pieces
+container + copy sidecar on every step except control and publish steps. The GPU step's injected pieces
 are compared with tests/golden/resilience_gpu_step.yaml (regenerate: UPDATE_GOLDEN=1 pytest).
 Run:  python -m pytest tests/ -v
 """
@@ -39,8 +39,8 @@ def env_of(tpl, container="container"):
 def pipeline_steps():
     authoring.step("prep", kind="evaluate")
     authoring.step("train", kind="evaluate", gpu=True)
-    authoring.step("cpu-opt-in", kind="evaluate", checkpoint_every="20m")
-    authoring.step("gpu-off", kind="evaluate", gpu=True, checkpoint_every=False)
+    authoring.step("gate", kind="control")
+    authoring.step("ship", kind="publish")
 
 
 @pytest.fixture(scope="module")
@@ -48,10 +48,10 @@ def tpls():
     return render(pipeline_steps)
 
 
-def test_should_retry_every_step_only_when_the_node_is_lost(tpls):
-    for name in ("prep", "train", "cpu-opt-in", "gpu-off", "compose-and-validate"):
+def test_should_retry_every_step_when_the_node_is_lost_or_it_exits_85(tpls):
+    for name in ("prep", "train", "gate", "ship", "compose-and-validate"):
         retry = tpls[name]["retryStrategy"]
-        assert retry["retryPolicy"] == "Always" and retry["limit"] == "2"
+        assert retry["retryPolicy"] == "Always" and retry["limit"] == resilience.RETRY_LIMIT
         assert retry["expression"] == resilience.RETRY_EXPRESSION
         assert retry["backoff"]["duration"] == "30s"
 
@@ -62,14 +62,14 @@ def test_should_keep_the_pod_loss_rule_and_exclude_a_step_ended_as_idle():
     v1.17) for these inputs: Failed+KaosIdle -> not re-run, Error+KaosIdle -> not re-run, "pod deleted"
     -> re-run, node shutdown -> re-run, Error (exit code 1) -> not re-run."""
     expr = resilience.RETRY_EXPRESSION
-    assert expr.startswith("(%s)" % meluxina.POD_LOSS_RETRY)     # the pod-loss rule is unchanged
+    assert expr.startswith("((%s) or lastRetry.exitCode == '85')" % meluxina.POD_LOSS_RETRY)
     assert expr.endswith("and not (lastRetry.message startsWith '%s')" % resilience.IDLE_END_PREFIX)
     assert resilience.IDLE_END_PREFIX == "KaosIdle"
 
 
 def test_should_not_retry_the_steps_own_failure(tpls):
     msgs = meluxina.POD_LOSS_MESSAGES
-    for own in ("Error (exit code 1)", "OOMKilled (exit code 137)", "Error (exit code 85)"):
+    for own in ("Error (exit code 1)", "OOMKilled (exit code 137)"):
         assert not re.search(".*(%s).*" % msgs, own), own
 
 
@@ -85,26 +85,25 @@ def test_should_keep_a_retry_strategy_the_developer_set():
 
 
 def test_should_give_every_step_the_folder_env_and_an_empty_dir(tpls):
-    for name in ("prep", "train", "cpu-opt-in", "gpu-off"):
+    for name in ("prep", "train", "gate", "ship"):
         tpl = tpls[name]
         assert env_of(tpl)["KAOS_CHECKPOINT_DIR"]["value"] == resilience.CHECKPOINT_MOUNT
         assert {"name": "kaos-checkpoint", "emptyDir": {}} in tpl["volumes"]
         assert {"name": "kaos-checkpoint", "mountPath": "/kaos/checkpoint"} in tpl["container"]["volumeMounts"]
 
 
-def test_should_add_the_helper_to_gpu_steps_and_opt_in_cpu_steps_only(tpls):
-    assert [c["name"] for c in tpls["train"]["initContainers"]] == ["kaos-ckpt-restore"]
-    assert [c["name"] for c in tpls["train"]["sidecars"]] == ["kaos-ckpt-copy"]
-    assert "sidecars" in tpls["cpu-opt-in"]
-    for name in ("prep", "gpu-off", "compose-and-validate"):
+def test_should_add_the_helper_to_every_step_except_control_and_publish(tpls):
+    for name in ("train", "prep"):
+        assert [c["name"] for c in tpls[name]["initContainers"]] == ["kaos-ckpt-restore"]
+        assert [c["name"] for c in tpls[name]["sidecars"]] == ["kaos-ckpt-copy"]
+    for name in ("gate", "ship", "compose-and-validate"):
         assert "sidecars" not in tpls[name] and "initContainers" not in tpls[name]
 
 
-def test_should_use_the_interval_the_step_asked_for(tpls):
-    side = {e["name"]: e for e in tpls["cpu-opt-in"]["sidecars"][0]["env"]}
-    assert side["CKPT_EVERY_MIN"]["value"] == "{{inputs.parameters.checkpoint-every}}"   # the run form's value
-    assert {"name": "checkpoint-every", "default": "20"} in tpls["cpu-opt-in"]["inputs"]["parameters"]
-    assert {e["name"]: e for e in tpls["train"]["sidecars"][0]["env"]}["CKPT_EVERY_MIN"]["value"] == "10"
+def test_should_use_one_interval_for_every_step_and_no_form_field(tpls):
+    for name in ("prep", "train"):
+        assert {e["name"]: e for e in tpls[name]["sidecars"][0]["env"]}["CKPT_EVERY_MIN"]["value"] == "10"
+        assert "checkpoint-every" not in [p["name"] for p in tpls[name].get("inputs", {}).get("parameters", [])]
 
 
 def test_should_key_the_copies_by_workflow_and_step_in_the_outputs_repository(tpls):
@@ -134,14 +133,14 @@ def test_should_let_the_copy_sidecar_read_files_the_step_made_private(tpls):
 
 def test_should_not_embed_the_helper_source_in_any_step(tpls):
     """The helper ships once, as a ConfigMap: no step carries it (the render stays under the etcd limits)."""
-    for name in ("train", "cpu-opt-in"):
+    for name in ("train", "prep"):
         for c in tpls[name]["initContainers"] + tpls[name]["sidecars"]:
             assert c["command"] == ["python3", "/ckpt-helper/checkpoint_helper.py", c["command"][2]]
             assert c["command"][2] in ("restore", "watch")
             assert {"name": "kaos-ckpt-helper", "mountPath": "/ckpt-helper", "readOnly": True} in c["volumeMounts"]
         vol = next(v for v in tpls[name]["volumes"] if v["name"] == "kaos-ckpt-helper")
         assert vol["configMap"] == {"name": "PLACEHOLDER-app-ckpt-helper", "defaultMode": 0o444}
-    assert "kaos-ckpt-helper" not in str(tpls["gpu-off"]) and "kaos-ckpt-helper" not in str(tpls["prep"])
+    assert "kaos-ckpt-helper" not in str(tpls["gate"]) and "kaos-ckpt-helper" not in str(tpls["ship"])
 
 
 def test_should_grow_by_a_small_constant_per_helper_step():
@@ -168,7 +167,7 @@ def test_should_write_the_helper_configmap_for_the_gitops_commit(tmp_path):
 
 def test_should_remove_a_stale_helper_configmap_when_no_step_uses_it(tmp_path):
     with authoring.pipeline("t") as p:
-        authoring.step("prep", kind="evaluate")
+        authoring.step("gate", kind="control")
     wft = enhance.enhance(yaml.safe_load(p.wt.to_yaml()), CONTEXT)
     out = tmp_path / "ckpt-helper.yaml"
     out.write_text("stale")
@@ -205,7 +204,7 @@ def test_should_keep_retry_and_folder_but_skip_copies_and_say_so_without_a_platf
     ctx["checkpoints"].pop("helperImage")
     tpls_no_image = render(pipeline_steps, ctx)
     assert "sidecars" not in tpls_no_image["train"] and "initContainers" not in tpls_no_image["train"]
-    assert tpls_no_image["train"]["retryStrategy"]["limit"] == "2"
+    assert tpls_no_image["train"]["retryStrategy"]["limit"] == resilience.RETRY_LIMIT
     assert env_of(tpls_no_image["train"])["KAOS_CHECKPOINT_DIR"]
     assert "no checkpoints.helperImage" in capsys.readouterr().err
 
@@ -244,21 +243,6 @@ def test_should_keep_the_developers_own_checkpoint_folder():
     tpl["container"]["env"] = [{"name": "KAOS_CHECKPOINT_DIR", "value": "/mine"}]
     a = next(t for t in enhance.enhance(raw, CONTEXT)["spec"]["templates"] if t["name"] == "a")
     assert env_of(a)["KAOS_CHECKPOINT_DIR"]["value"] == "/mine" and "sidecars" not in a
-
-
-@pytest.mark.parametrize("bad", ["soon", 0, "0m", True, "10 min"])
-def test_should_reject_a_bad_checkpoint_every(bad):
-    with pytest.raises(authoring.AuthoringError):
-        with authoring.pipeline("t"):
-            authoring.step("a", kind="evaluate", gpu=True, checkpoint_every=bad)
-
-
-@pytest.mark.parametrize("given,annotation", [("20m", "20"), ("1h", "60"), (30, "30"), (False, "off")])
-def test_should_map_checkpoint_every_to_the_annotation(given, annotation):
-    with authoring.pipeline("t") as p:
-        authoring.step("a", kind="evaluate", checkpoint_every=given)
-    tpl = next(t for t in yaml.safe_load(p.wt.to_yaml())["spec"]["templates"] if t["name"] == "a")
-    assert tpl["metadata"]["annotations"]["platform.kubecore.io/checkpoint-every"] == annotation
 
 
 def test_should_not_change_the_hpc_follower_template():
