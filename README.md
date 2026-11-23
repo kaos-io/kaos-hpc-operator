@@ -302,7 +302,9 @@ Controller flags (chart `controllerManager.container.args`, `runnerImage`, `runn
 
 - **Tier 1, every step, no code:** a step with no checkpoint is re-run from the start after a node failure,
   maintenance or pre-emption, at most twice (`status.reruns`; reasons `RerunNodeFailure`, `RerunPreempted`,
-  `RerunLimit`). Never after the step's own error, an out-of-memory kill, a cancel or a wall-time kill.
+  `RerunLimit`). Never after the step's own error, an out-of-memory kill, a cancel or a wall-time kill. A
+  continuation stopped the same way before it saved a new copy starts again from the copy it had and counts with
+  these: two for the step in all, then `RerunLimit`.
 - **Tier 2, the checkpoint folder:** every job gets `KAOS_CHECKPOINT_DIR` (`/work/ckpt`, on scratch). The job keeps at
   most two copies of it per step (one tar + one manifest each), copies it periodically and when the wall-time signal
   arrives, and deletes the copies when the step succeeds or after 7 days. A copy whose folder digest equals the newest copy's is skipped (the exit-85 copy right after a wall-time copy). A periodic copy is skipped when it would
@@ -312,13 +314,15 @@ Controller flags (chart `controllerManager.container.args`, `runnerImage`, `runn
   from the newest verified one, however many times it takes; a person sets nothing for it (D-75). A continuation that does not get past its
   checkpoint ends `NoProgress`; one that does (or that runs to completion, which leaves no copy to compare) marks the step key verified
   (`status.placement.resumable`), the only source of "this step saves progress". The cap on the step's total time (`spec.wallTimeMinutes`) ends it
-  too: `WallTimeReached`, "it reached the platform's cap of ...". A job that ran to its limit and saved nothing ends `NoSavedProgress`.
+  too: `WallTimeReached`, "it reached the platform's cap of ... (N jobs)". The cap counts the time each job ran
+  (`status.attempts[].wallMinutes`: start to end at the site, rounded up), also as a guest on a shared node, which is billed nothing
+  (`settledNodeMinutes` 0); N is the number of jobs that ran. A job that ran to its limit and saved nothing ends `NoSavedProgress`.
   The follower still tolerates an engine that sends `HPC_RESUMABLE*` or `HPC_MAX_CONTINUATIONS`: they are not read.
 - **Resumable steps share nodes (AC-73, reverses D-44's gate):** a resumable step may host or be a guest on a shared
   node. Slurm's warning signal is the batch job's and never reaches a guest, so the slot manager sends USR1 to each
-  resumable step itself, `lead` before the end of the step's own limit or of the host's job, whichever is first
-  (the host's own step included; a plain step is never signalled). A guest whose limit does not fit the host's remaining
-  time is still taken when its lead plus a 5-minute margin does. Any other guest is taken when the host has at least its limit less 30 minutes left, and its limit becomes what the host has left less the margin (D-75: a step asks for the job limit, so a guest that starts minutes after its host would otherwise never fit); with less than 15 minutes left after the margin it gets a node of its own. A guest that saves and exits 85 is reported like a step
+  step itself, its `lead` (a sixth of its limit, at most 10 minutes, always less than the limit) before the end of the step's own limit;
+  only a step with verified saved progress (`KAOS_RESUMABLE=1`) is also taken when its limit does not fit the host's remaining
+  time but its lead plus a 5-minute margin does, and is then signalled its lead before the host job's end. A plain guest is never taken by its lead and never stopped for the host's end. Any other guest whose limit is above 30 minutes is taken when the host has at least its limit less 30 minutes left, and its limit becomes what the host has left less the margin (D-75: a step asks for the job limit, so a guest that starts minutes after its host would otherwise never fit); with less than 15 minutes left after the margin it gets a node of its own. A limit of 30 minutes or less is never cut: such a guest joins only when it fits whole. A guest that saves and exits 85 is reported like a step
   alone and continued from its checkpoint, settled 0 (its host's booking covers the node); the continuation may host,
   guest or run alone. A resumable host's end is reported when its Slurm job ends, so the node time it held is settled to
   that end, and its job is not padded to twice its step. Details and tests: `docs/extreme-cases.md` 4.13-4.18.
