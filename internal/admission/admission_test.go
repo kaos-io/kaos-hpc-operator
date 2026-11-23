@@ -65,17 +65,6 @@ func TestDecide(t *testing.T) {
 		{name: "more than one node is refused (D-41)",
 			site: site(nil), job: job("meluxina-gpu", 60, 2),
 			phase: hpcv1alpha1.PhaseRefused, reason: hpcv1alpha1.ReasonMultiNodeUnsupported},
-		{name: "wall time over the class limit",
-			site: site(nil), job: job("meluxina-gpu", 2881, 1),
-			phase: hpcv1alpha1.PhaseRefused, reason: hpcv1alpha1.ReasonTooLongNotResumable},
-		{name: "a class with no known wall limit cannot run a longer step: WallTimeOverLimit",
-			site:  site(func(s *hpcv1alpha1.HPCSite) { s.Spec.Profile.Classes[0].MaxWallTimeMinutes = 0 }),
-			job:   job("meluxina-gpu", 60, 1),
-			phase: hpcv1alpha1.PhaseRefused, reason: hpcv1alpha1.ReasonWallTimeOverLimit},
-		{name: "wall time over the project limit, below the class limit",
-			site:  site(func(s *hpcv1alpha1.HPCSite) { s.Spec.Limits.MaxWallTimeMinutes = 120 }),
-			job:   job("meluxina-gpu", 121, 1),
-			phase: hpcv1alpha1.PhaseRefused, reason: hpcv1alpha1.ReasonTooLongNotResumable},
 		{name: "never fits this period: BudgetBlocked (D-24)",
 			site: site(nil), job: job("meluxina-gpu", 300, 1), used: 400,
 			phase: hpcv1alpha1.PhaseRefused, reason: hpcv1alpha1.ReasonBudgetBlocked},
@@ -128,10 +117,10 @@ func TestDecideForBooksTheEffectiveWallTime(t *testing.T) {
 	if d.Phase != hpcv1alpha1.PhaseAdmitted || d.Cost != 30 {
 		t.Fatalf("got %s cost %d, want Admitted 30", d.Phase, d.Cost)
 	}
-	// What the job asked for is still checked against the site limits.
+	// A cap above the class's longest job is not refused (D-75).
 	d = DecideFor(job("meluxina-gpu", 2881, 1), s, led(s, 0, 0, 0), 30)
-	if d.Reason != hpcv1alpha1.ReasonTooLongNotResumable {
-		t.Fatalf("got %s, want TooLongNotResumable", d.Reason)
+	if d.Phase != hpcv1alpha1.PhaseAdmitted {
+		t.Fatalf("got %s, want Admitted", d.Phase)
 	}
 	// A cap that does not fit the share fits once learned down.
 	d = DecideFor(job("meluxina-gpu", 600, 1), s, led(s, 0, 0, 0), 30)

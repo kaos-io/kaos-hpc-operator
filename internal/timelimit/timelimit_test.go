@@ -46,8 +46,8 @@ func TestLearn(t *testing.T) {
 		{"exactly_2h_is_still_learned", mins(80, 80, 80), caps, 120, hpcv1alpha1.PlacementLearned},
 		{"multi_day_training_keeps_its_declared_limit", mins(600, 610, 620), Caps{Spec: 2880, Class: 2880}, 2880, hpcv1alpha1.PlacementDeclared},
 		{"capped_by_the_spec_means_declared", mins(200, 200, 200), caps, 240, hpcv1alpha1.PlacementDeclared},
-		{"capped_by_the_class_maximum", mins(70, 70, 70), Caps{Spec: 240, Class: 90}, 90, hpcv1alpha1.PlacementLearned},
-		{"capped_by_the_site_maximum", mins(70, 70, 70), Caps{Spec: 240, Class: 2880, Site: 90}, 90, hpcv1alpha1.PlacementLearned},
+		{"capped_by_the_class_maximum", mins(70, 70, 70), Caps{Spec: 240, Class: 90}, 90, hpcv1alpha1.PlacementDeclared},
+		{"capped_by_the_site_maximum", mins(70, 70, 70), Caps{Spec: 240, Class: 2880, Site: 90}, 90, hpcv1alpha1.PlacementDeclared},
 		{"unknown_class_and_site_maxima_do_not_bound", mins(70, 70, 70), Caps{Spec: 240}, 105, hpcv1alpha1.PlacementLearned},
 		{"spec_below_the_floor_stays_the_cap", mins(1, 1, 1), Caps{Spec: 10, Class: 2880}, 10, hpcv1alpha1.PlacementDeclared},
 	}
@@ -185,50 +185,67 @@ func TestTokenCoverIsTheLifeLessTheMargin(t *testing.T) {
 	}
 }
 
-func TestCapsMaxIncludesWhatOneRunsAccessCovers(t *testing.T) {
-	if got := (Caps{Spec: 60, Class: 2880, Site: 1440, Token: TokenCoverMinutes}).Max(); got != TokenCoverMinutes {
-		t.Fatalf("got %d, want the access cover", got)
-	}
-	if got := (Caps{Spec: 60, Class: 300, Token: TokenCoverMinutes}).Max(); got != 300 {
-		t.Fatalf("got %d, want the lane's 300", got)
-	}
-}
-
-func TestSegment(t *testing.T) {
-	const run = TokenCoverMinutes
+func TestAJobAsksForTheMostAJobCanGetAndNeverMoreThanTheCap(t *testing.T) {
 	cases := []struct {
-		name                   string
-		declared, perRun, used int32
-		limit                  int32
-		spent                  bool
+		name string
+		c    Caps
+		want int32
 	}{
-		{"should_run_a_limit_shorter_than_one_run_as_declared", 400, run, 0, 400, false},
-		{"should_not_count_down_a_limit_that_fits_one_run", 400, run, 800, 400, false},
-		{"should_run_a_limit_equal_to_one_run_as_declared", run, run, 0, run, false},
-		{"should_cut_a_limit_of_several_runs_at_one_run_first", 3 * run, run, 0, run, false},
-		{"should_cut_the_second_run_at_one_run", 3 * run, run, run, run, false},
-		{"should_cut_the_third_run_at_one_run", 3 * run, run, 2 * run, run, false},
-		{"should_give_the_last_run_what_is_left", 3*run - 120, run, 2 * run, run - 120, false},
-		{"should_count_runs_that_ended_early", 3 * run, run, 100, run, false},
-		{"should_give_a_short_remainder_after_early_ends", 2*run + 30, run, 2*run + 10, 20, false},
-		{"should_be_spent_when_the_whole_limit_is_used", 3 * run, run, 3 * run, 0, true},
-		{"should_be_spent_when_more_than_the_limit_is_used", 3 * run, run, 3*run + 5, 0, true},
-		{"should_not_cut_when_no_run_maximum_is_known", 5000, 0, 100, 5000, false},
+		{"should_take_the_token_cover_when_it_is_the_lowest", Caps{Spec: 10080, Class: 2880, Site: 1440, Token: TokenCoverMinutes}, TokenCoverMinutes},
+		{"should_take_the_lane_when_it_is_below_the_token_cover", Caps{Spec: 10080, Class: 300, Token: TokenCoverMinutes}, 300},
+		{"should_take_the_site_maximum", Caps{Spec: 10080, Class: 2880, Site: 400, Token: TokenCoverMinutes}, 400},
+		{"should_never_exceed_the_cap", Caps{Spec: 60, Class: 2880, Token: TokenCoverMinutes}, 60},
+		{"should_take_the_cap_when_no_maximum_is_known", Caps{Spec: 10080}, 10080},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			limit, spent := Segment(c.declared, c.perRun, c.used)
-			if limit != c.limit || spent != c.spent {
-				t.Fatalf("Segment(%d, %d, %d) = %d, %v; want %d, %v", c.declared, c.perRun, c.used, limit, spent, c.limit, c.spent)
+			if got, src := Learn(nil, c.c); got != c.want || src != hpcv1alpha1.PlacementDeclared {
+				t.Fatalf("Learn without history = %d (%s), want %d declared", got, src, c.want)
+			}
+			if got := Retry(c.c); got != c.want {
+				t.Fatalf("Retry = %d, want %d", got, c.want)
 			}
 		})
 	}
 }
 
-func TestHours(t *testing.T) {
-	for in, want := range map[int32]string{690: "11.5 h", 720: "12 h", 60: "1 h", 100: "1.7 h"} {
-		if got := Hours(in); got != want {
-			t.Errorf("Hours(%d) = %q, want %q", in, got, want)
+func TestALearnedLimitIsKeptBelowTheJobLimit(t *testing.T) {
+	got, src := Learn(mins(20, 20, 20), Caps{Spec: 10080, Class: 2880, Token: TokenCoverMinutes})
+	if got != 30 || src != hpcv1alpha1.PlacementLearned {
+		t.Fatalf("got %d (%s), want a learned 30", got, src)
+	}
+}
+
+func TestSegment(t *testing.T) {
+	const job = TokenCoverMinutes
+	cases := []struct {
+		name                string
+		total, perJob, used int32
+		limit               int32
+		spent               bool
+	}{
+		{"should_give_a_job_its_limit_when_the_cap_is_far", 10080, job, 0, job, false},
+		{"should_count_down_a_cap_that_fits_one_job", 400, job, 100, 300, false},
+		{"should_give_the_last_job_what_is_left", 10080, job, 10080 - 120, 120, false},
+		{"should_count_jobs_that_ended_early", 10080, job, 100, job, false},
+		{"should_keep_a_learned_limit_below_what_is_left", 10080, 30, 100, 30, false},
+		{"should_be_spent_when_the_whole_cap_is_used", 3 * job, job, 3 * job, 0, true},
+		{"should_be_spent_when_more_than_the_cap_is_used", 3 * job, job, 3*job + 5, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			limit, spent := Segment(c.total, c.perJob, c.used)
+			if limit != c.limit || spent != c.spent {
+				t.Fatalf("Segment(%d, %d, %d) = %d, %v; want %d, %v", c.total, c.perJob, c.used, limit, spent, c.limit, c.spent)
+			}
+		})
+	}
+}
+
+func TestMinTimeIsAnHourOrTheLimitIfShorter(t *testing.T) {
+	for limit, want := range map[int32]int32{690: 60, 60: 60, 45: 45} {
+		if got := MinTime(limit); got != want {
+			t.Errorf("MinTime(%d) = %d, want %d", limit, got, want)
 		}
 	}
 }

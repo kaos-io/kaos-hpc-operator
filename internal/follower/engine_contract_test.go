@@ -112,7 +112,7 @@ func TestEngineGoldenIsAValidFollowerEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the engine's follower template is not a valid follower environment: %v", err)
 	}
-	if cfg.StepName != "train" || cfg.Class != "meluxina-gpu" || cfg.WallTimeMinutes != 90 || cfg.ResumableLead != 10 {
+	if cfg.StepName != "train" || cfg.Class != "meluxina-gpu" || cfg.WallTimeMinutes != 90 {
 		t.Errorf("fields did not come through: %+v", cfg)
 	}
 	if cfg.IdleTimeout == nil || *cfg.IdleTimeout != 40 {
@@ -148,6 +148,7 @@ func TestEngineGoldenSetsNoVariableTheFollowerIgnores(t *testing.T) {
 		"HPC_JOB_NAMESPACE": true, "WF_NAME": true, "WF_UID": true, "STEP_NAME": true, "NODE_KEY": true,
 		"IMAGE_REF": true, "HPC_CLASS": true, "KAOS_STEP_CONTEXT": true, "HPC_SCOPE": true, "STEP_COMMAND": true,
 		"SLURM_TIME_LIMIT": true, "HPC_IDLE_TIMEOUT_MINUTES": true, "HPC_SHARING": true,
+		// Sent by an engine from before D-75, tolerated and ignored.
 		"HPC_RESUMABLE_LEAD": true, "HPC_RESUMABLE": true, "HPC_MAX_CONTINUATIONS": true,
 	}
 	for _, n := range hpcv1alpha1.AllowedEnvNames {

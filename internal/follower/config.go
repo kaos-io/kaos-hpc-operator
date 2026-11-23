@@ -25,26 +25,20 @@ import (
 // nameHexLen is how many hex characters of the hash the job name keeps.
 const nameHexLen = 20
 
-// defaultMaxContinuations is the continuation cap when HPC_MAX_CONTINUATIONS is not set.
-const defaultMaxContinuations = 5
-
 // Config is what the follower reads from its environment (set by the enhancer).
 type Config struct {
-	Namespace        string // HPC_JOB_NAMESPACE (the pod's namespace)
-	WorkflowName     string // WF_NAME
-	WorkflowUID      string // WF_UID
-	StepName         string // STEP_NAME
-	NodeKey          string // NODE_KEY: the Argo node name without the retry suffix
-	Image            string // IMAGE_REF
-	Command          []string
-	WallTimeMinutes  int32 // SLURM_TIME_LIMIT
-	Class            string
-	ResumableLead    int32 // HPC_RESUMABLE_LEAD, 0 = not resumable
-	MaxContinuations int32
-	ResumableOptOut  bool   // HPC_RESUMABLE=0|false (resumable=False in pipeline.py): never continued from a checkpoint
-	Context          string // KAOS_STEP_CONTEXT: the step context in wire form, carried into the job unchanged
-	App              string // the context's app
-	Kind             string // the context's kind: the job's step-kind label
+	Namespace       string // HPC_JOB_NAMESPACE (the pod's namespace)
+	WorkflowName    string // WF_NAME
+	WorkflowUID     string // WF_UID
+	StepName        string // STEP_NAME
+	NodeKey         string // NODE_KEY: the Argo node name without the retry suffix
+	Image           string // IMAGE_REF
+	Command         []string
+	WallTimeMinutes int32 // SLURM_TIME_LIMIT: the platform's cap on the step's total time (D-75)
+	Class           string
+	Context         string // KAOS_STEP_CONTEXT: the step context in wire form, carried into the job unchanged
+	App             string // the context's app
+	Kind            string // the context's kind: the job's step-kind label
 	// Inputs are the datasets the job stages: the context's ledger reads and every dataset a needed step wrote.
 	Inputs      []hpcv1alpha1.StepInput
 	Scope       string // HPC_SCOPE: set means node sharing
@@ -84,9 +78,6 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 		return c, fmt.Errorf("SLURM_TIME_LIMIT must be a positive number of minutes, got %q", get("SLURM_TIME_LIMIT"))
 	}
 	c.WallTimeMinutes = int32(wall)
-	if err := c.readResumable(get); err != nil {
-		return c, err
-	}
 	if raw := get("HPC_IDLE_TIMEOUT_MINUTES"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 0 {
@@ -103,29 +94,6 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 		}
 	}
 	return c, nil
-}
-
-func (c *Config) readResumable(get func(string) string) error {
-	if raw := get("HPC_RESUMABLE_LEAD"); raw != "" && raw != "0" {
-		lead, err := strconv.Atoi(raw)
-		if err != nil || lead < 1 {
-			return fmt.Errorf("HPC_RESUMABLE_LEAD must be a positive number of minutes, got %q", raw)
-		}
-		c.ResumableLead = int32(lead)
-		c.MaxContinuations = defaultMaxContinuations
-	}
-	switch strings.ToLower(get("HPC_RESUMABLE")) {
-	case "0", "false", "no":
-		c.ResumableOptOut = true
-	}
-	if raw := get("HPC_MAX_CONTINUATIONS"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 0 {
-			return fmt.Errorf("HPC_MAX_CONTINUATIONS must be a number, got %q", raw)
-		}
-		c.MaxContinuations = int32(n)
-	}
-	return nil
 }
 
 // Cost is what a value in wire form costs against its cap (docs/step-contract.md, section 7): its length as
@@ -261,10 +229,6 @@ func (c Config) Job() *hpcv1alpha1.HPCArgoWorkflowJob {
 		App: c.App, Context: c.Context, Inputs: c.Inputs, StepName: c.StepName,
 		Workflow: &hpcv1alpha1.WorkflowRef{Name: c.WorkflowName, UID: c.WorkflowUID}, Env: c.Env,
 	}
-	if c.ResumableLead > 0 {
-		spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: c.ResumableLead, MaxContinuations: c.MaxContinuations}
-	}
-	spec.ResumableOptOut = c.ResumableOptOut
 	spec.IdleTimeoutMinutes = c.IdleTimeout
 	if c.Scope != "" {
 		spec.Sharing = &hpcv1alpha1.Sharing{Scope: c.Scope}
@@ -287,8 +251,7 @@ func (c Config) Job() *hpcv1alpha1.HPCArgoWorkflowJob {
 // fills into every job it stores. A nil or zero value in a request is indistinguishable from an
 // absent one, so they are applied before two specs are compared.
 const (
-	crdDefaultNodes       = int32(1)
-	crdDefaultLeadMinutes = int32(10)
+	crdDefaultNodes = int32(1)
 )
 
 // withCRDDefaults returns spec as the API server would store it. It never changes the argument.
@@ -298,16 +261,6 @@ func withCRDDefaults(spec hpcv1alpha1.HPCArgoWorkflowJobSpec) hpcv1alpha1.HPCArg
 	}
 	if spec.IdleTimeoutMinutes == nil {
 		spec.IdleTimeoutMinutes = ptr.To(hpcv1alpha1.DefaultIdleTimeoutMinutes)
-	}
-	if spec.Resumable != nil {
-		r := *spec.Resumable
-		if r.LeadMinutes == 0 {
-			r.LeadMinutes = crdDefaultLeadMinutes
-		}
-		if r.MaxContinuations == 0 {
-			r.MaxContinuations = int32(defaultMaxContinuations)
-		}
-		spec.Resumable = &r
 	}
 	return spec
 }

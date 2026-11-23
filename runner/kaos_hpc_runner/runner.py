@@ -213,6 +213,8 @@ class Runner:
                         'current_working_directory': ident['home'],
                         'environment': env, 'tasks': 1, 'nodes': '1'},
                 'script': batch}
+        if cfg.time_minimum:
+            body['job']['time_minimum'] = {'set': True, 'number': cfg.time_minimum}   # slurmrestd v0.0.44 job_desc_msg
         # The leases: every input's commit (above), and kaos-image= for the staged image tar (D-62).
         lease = list(commits)
         # AC-65: always. The SIF has the tar's key, so the lease also keeps the SIF (staged or not) from the

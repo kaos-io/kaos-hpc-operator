@@ -305,21 +305,28 @@ func TestConfigFromEnv(t *testing.T) {
 		check   func(t *testing.T, c Config)
 	}{
 		{"should_read_a_minimal_environment", with(), "", func(t *testing.T, c Config) {
-			if c.WallTimeMinutes != 90 || c.ResumableLead != 0 || c.Job().Spec.Resumable != nil || c.Job().Spec.Sharing != nil {
+			if c.WallTimeMinutes != 90 || c.Job().Spec.Sharing != nil {
 				t.Errorf("%+v", c)
 			}
 		}},
-		{"should_opt_out_of_resuming_when_resumable_is_false", with("HPC_RESUMABLE", "False"), "", func(t *testing.T, c Config) {
-			if !c.ResumableOptOut || !c.Job().Spec.ResumableOptOut {
-				t.Errorf("resumable=False must set spec.resumableOptOut: %+v", c)
+		// D-75: the engine no longer sends these; one that still does is tolerated, whatever the values, and the
+		// job is the same as without them.
+		{"should_tolerate_the_old_resumable_parameters", with("HPC_RESUMABLE_LEAD", "20", "HPC_RESUMABLE", "False",
+			"HPC_MAX_CONTINUATIONS", "x"), "", func(t *testing.T, c Config) {
+			want, err := ConfigFromEnv(with())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !equality.Semantic.DeepEqual(c.Job().Spec, want.Job().Spec) {
+				t.Errorf("the old parameters changed the job:\n%+v\n%+v", c.Job().Spec, want.Job().Spec)
 			}
 		}},
-		{"should_read_resumable_sharing_command_and_allowlisted_env",
-			with("HPC_RESUMABLE_LEAD", "20", "HPC_MAX_CONTINUATIONS", "3", "HPC_SCOPE", "abcdef123456",
+		{"should_read_sharing_command_and_allowlisted_env",
+			with("HPC_SCOPE", "abcdef123456",
 				"STEP_COMMAND", `["x","y"]`, "OUTPUTS_REPO", "outputs-app", "HOME", "/root", "KAOS_LIB_SUPPORT", "{}"), "",
 			func(t *testing.T, c Config) {
 				s := c.Job().Spec
-				if s.Resumable.LeadMinutes != 20 || s.Resumable.MaxContinuations != 3 || s.Sharing.Scope != "abcdef123456" ||
+				if s.Sharing.Scope != "abcdef123456" ||
 					len(s.Command) != 2 || len(s.Env) != 1 || s.Env[0].Name != "KAOS_LIB_SUPPORT" {
 					t.Errorf("%+v", s)
 				}
@@ -369,8 +376,8 @@ func podEnv(extra map[string]string) func(string) string {
 	m := map[string]string{
 		"HPC_JOB_NAMESPACE": "ns", "WF_NAME": "wf-1", "WF_UID": "uid-1", "STEP_NAME": "train", "NODE_KEY": "train-meluxina",
 		"IMAGE_REF": "img:1", "STEP_COMMAND": `["python","-m","app.entry"]`, "SLURM_TIME_LIMIT": "60", "HPC_CLASS": "meluxina-gpu",
-		"HPC_RESUMABLE_LEAD": "0", "HPC_RESUMABLE": "auto", "HPC_IDLE_TIMEOUT_MINUTES": "", "HPC_MAX_CONTINUATIONS": "5",
-		"KAOS_STEP_CONTEXT": testContext,
+		"HPC_IDLE_TIMEOUT_MINUTES": "",
+		"KAOS_STEP_CONTEXT":        testContext,
 	}
 	for k, v := range extra {
 		m[k] = v
@@ -381,7 +388,6 @@ func podEnv(extra map[string]string) func(string) string {
 func TestShouldBuildTheSameJobOnEveryPodAttemptOfTheStep(t *testing.T) {
 	cases := map[string]map[string]string{
 		"should_build_the_same_job_for_a_default_step":     nil,
-		"should_build_the_same_job_for_a_resumable_step":   {"HPC_RESUMABLE_LEAD": "15"},
 		"should_build_the_same_job_for_a_sharing_step":     {"HPC_SHARING": "on", "HPC_SCOPE": "abcdef12"},
 		"should_build_the_same_job_when_idle_timeout_is_0": {"HPC_IDLE_TIMEOUT_MINUTES": "0"},
 	}

@@ -365,8 +365,10 @@ func (k *kubelet) submit(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCArgo
 			env = append(env, key+"="+v)
 		}
 	}
-	if res := j.Spec.Resumable; res != nil {
-		env = append(env, fmt.Sprintf("%s=%d", envLead, res.LeadMinutes))
+	for _, e := range r.rj.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "HPC_RESUMABLE_LEAD" {
+			env = append(env, envLead+"="+e.Value) // every job but a shared node's host is warned (D-75)
+		}
 	}
 	var begin *int64
 	if sh := sharingOf(r.rj, cls); sh.on {

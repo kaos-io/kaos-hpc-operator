@@ -23,6 +23,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
+	"github.com/kaos-io/kaos-hpc-operator/internal/timelimit"
 )
 
 // Names the runner contract fixes (phase 1 contract section 2).
@@ -234,9 +235,9 @@ func Build(cfg Config, job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HP
 		LabelRunnerJob:                 name,
 	}
 	wall := int64(job.EffectiveWallMinutes())
-	if job.Spec.Sharing != nil && site.Spec.Sharing && job.EffectiveResumable() == nil {
+	if job.Spec.Sharing != nil && site.Spec.Sharing && !job.VerifiedResumable() {
 		// A host's Slurm job may run up to twice its step's limit for guests, and its runner follows it to its
-		// end so the node is settled to what the site charges (D-26). A resumable step never hosts.
+		// end so the node is settled to what the site charges (D-26). A step verified resumable never hosts.
 		wall *= 2
 	}
 	deadline := (wall+queueAllowanceMinutes+teardownMarginMinutes)*60 + int64(cfg.SiteWaitMax/time.Second)
@@ -390,10 +391,17 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 	}
 	// D-72: the idle watchdog's window; the runner hands it to the job script (0 = off).
 	kv = append(kv, [2]string{"HPC_IDLE_TIMEOUT_MINUTES", strconv.Itoa(int(job.EffectiveIdleTimeoutMinutes()))})
-	// A step declared resumable, or verified resumable from its history (D-74), gets the wall-time signal
-	// and never shares a node; every other step still gets its checkpoint folder (D-75).
-	if res := job.EffectiveResumable(); res != nil {
-		kv = append(kv, [2]string{"HPC_RESUMABLE_LEAD", strconv.Itoa(int(res.LeadMinutes))})
+	// D-75: every job gets the lead, so the site sends the warning before its limit (the job script passes it only
+	// to a process that catches it); a shared-node host does not, its slot manager signals each step itself and its
+	// job is padded for guests. A step verified resumable (D-74) never shares as a host, so it always gets it.
+	if host := job.Status.Placement != nil && job.Status.Placement.Share != nil &&
+		job.Status.Placement.Share.Role == hpcv1alpha1.ShareHost; !host || job.VerifiedResumable() {
+		kv = append(kv, [2]string{"HPC_RESUMABLE_LEAD", strconv.Itoa(int(hpcv1alpha1.DefaultLeadMinutes))})
+	}
+	// A step with verified saved progress also asks for a minimum time, so the site may fit it into any gap. Only
+	// where the site profile says its scheduler accepts it.
+	if site.Spec.Profile.TimeMin && job.VerifiedResumable() {
+		kv = append(kv, [2]string{"HPC_TIME_MIN_MINUTES", strconv.Itoa(int(timelimit.MinTime(job.EffectiveWallMinutes())))})
 	}
 	// AC-39: the site's submit cap, so a refusal for it can name the cap beside the count the runner reads.
 	if m := site.Spec.Profile.MaxSubmitJobs; m > 0 {

@@ -285,9 +285,6 @@ func (w *world) createJobs(p *project, specs []jobSpec) {
 			if s.segments > 0 {
 				j.Annotations[annSegments] = fmt.Sprint(s.segments)
 			}
-			if s.resumable {
-				j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 5, MaxContinuations: max(s.maxCont, 5)}
-			}
 			if s.hostTail != "" || s.guest || s.shareable {
 				j.Spec.Sharing = &hpcv1alpha1.Sharing{Scope: "scalescope1"}
 				j.Annotations[annHostTail] = s.hostTail

@@ -91,10 +91,10 @@ func TestPlacementLines(t *testing.T) {
 			hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseFailed, Reason: hpcv1alpha1.ReasonWallTimeReached,
 				Message: "This step ran its full 4 h time limit and was stopped. Set a longer limit."},
 			[]string{"HPC: This step ran its full 4 h time limit and was stopped. Set a longer limit."}},
-		{"waiting_long_resumable_step_shows_its_continuation_plan",
+		{"waiting_step_with_a_cap_above_its_job_limit_shows_the_cap",
 			hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseAdmitted,
 				Placement: &hpcv1alpha1.Placement{TimeLimitMinutes: 30, Source: hpcv1alpha1.PlacementDeclared, QOS: "default"}},
-			[]string{"HPC: waiting · lane standard · time limit 30 min (declared), declared 60 min runs as continuations of up to 30 min each"}},
+			[]string{"HPC: waiting · lane standard · time limit 30 min (declared), at most 60 min over all its jobs"}},
 		{"succeeded_prints_nothing_extra", hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseSucceeded, Placement: learned}, nil},
 	}
 	for _, tc := range cases {
@@ -124,28 +124,6 @@ func TestShowPlacementPrintsOnlyOnChange(t *testing.T) {
 	}
 }
 
-func TestShowPlacementPrintsTheWarningOnce(t *testing.T) {
-	var out bytes.Buffer
-	f := &follower{o: Options{Out: &out}}
-	w := "Warning: this step was stopped at its 4 h limit in an earlier run and will be again unless you raise its limit on the run form (`<step>-walltime`) or make it resumable."
-	job := jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseAdmitted,
-		Placement: &hpcv1alpha1.Placement{TimeLimitMinutes: 240, Source: hpcv1alpha1.PlacementDeclared, Warning: w}})
-	f.showPlacement(job)
-	job.Status.Phase = hpcv1alpha1.PhaseRunning
-	job.Status.PendingReason = "Priority" // placement line changes; the warning must not repeat
-	f.showPlacement(job)
-	if n := strings.Count(out.String(), w); n != 1 {
-		t.Fatalf("warning printed %d times:\n%s", n, out.String())
-	}
-	quiet := &bytes.Buffer{}
-	g := &follower{o: Options{Out: quiet}}
-	g.showPlacement(jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseAdmitted,
-		Placement: &hpcv1alpha1.Placement{TimeLimitMinutes: 240, Source: hpcv1alpha1.PlacementDeclared}}))
-	if strings.Contains(quiet.String(), "Warning") {
-		t.Fatalf("unexpected warning: %s", quiet.String())
-	}
-}
-
 func TestResumableAndRecoveryLines(t *testing.T) {
 	since := metav1.NewTime(time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC))
 	place := func(rs *hpcv1alpha1.ResumableStatus) *hpcv1alpha1.Placement {
@@ -164,16 +142,14 @@ func TestResumableAndRecoveryLines(t *testing.T) {
 		{"should_show_why_not_verified", jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseAdmitted,
 			Placement: place(&hpcv1alpha1.ResumableStatus{Reason: "NoProgress: nothing new"})}),
 			"HPC: waiting · lane standard · time limit 60 min (declared) · resumable not verified: NoProgress: nothing new"},
-		{"should_show_opt_out", func() *hpcv1alpha1.HPCArgoWorkflowJob {
-			j := jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseAdmitted, Placement: place(nil)})
-			j.Spec.ResumableOptOut = true
-			return j
-		}(), "HPC: waiting · lane standard · time limit 60 min (declared) · not resumable (resumable=False)"},
 		{"should_explain_a_rerun", jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhasePending,
 			Reason: hpcv1alpha1.ReasonRerunNodeFail, Reruns: 1}),
 			"HPC: re-running from the start (1/2): the node failed or was taken for maintenance"},
 		{"should_explain_a_preemption_rerun", jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhasePending,
 			Reason: hpcv1alpha1.ReasonRerunPreempted, Reruns: 2}), "HPC: re-running from the start (2/2): the site pre-empted the job"},
+		{"should_say_what_the_ending_of_a_job_without_saved_progress_is", jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{
+			Phase: hpcv1alpha1.PhaseFailed, Reason: hpcv1alpha1.ReasonNoSavedProgress, Message: "Ended: it ran 11 h on default without saving progress."}),
+			"HPC: Ended: it ran 11 h on default without saving progress."},
 		{"should_explain_no_progress", jobWith(hpcv1alpha1.HPCArgoWorkflowJobStatus{Phase: hpcv1alpha1.PhaseFailed,
 			Reason: hpcv1alpha1.ReasonNoProgress, Message: "x"}),
 			"HPC: stopped: the continuation did not get past its checkpoint (NoProgress): x"},

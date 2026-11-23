@@ -413,6 +413,12 @@ spec:
                     description: ScratchRoot is the per-project working area on the
                       site's shared filesystem.
                     type: string
+                  timeMin:
+                    description: |-
+                      TimeMin makes a step with verified saved progress ask the scheduler for a minimum time as well (one hour,
+                      or the job's limit if that is shorter), so the site may fit it into any gap (D-75). Off by default: it
+                      is switched on once the site's REST version is known to accept the field.
+                    type: boolean
                   transport:
                     default: slurmrestd
                     description: Transport to the scheduler.

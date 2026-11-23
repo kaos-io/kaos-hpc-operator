@@ -2,7 +2,6 @@ package controller
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -18,10 +17,9 @@ import (
 	"github.com/kaos-io/kaos-hpc-operator/internal/runnerjob"
 )
 
-// A step whose declared limit is above the longest lane (PRD-HPC-1461 D-67, D-74, AC-77): refused at
-// admission with a reason the follower prints when it is not resumable, run as continuations of at most
-// the lane maximum when it is, and refused again beyond the continuation cap.
-var _ = Describe("a step longer than the longest lane", func() {
+// A step whose cap on its total time is above what one job can get (PRD kaos#1911 D-75): nothing is refused for
+// its time; its first job gets the most a job can get and the cap bounds the jobs together.
+var _ = Describe("a step with a cap above what one job can get", func() {
 	const laneMax = int32(600) // shorter than what a run's data access covers, so the lane is what binds
 	var (
 		r      *HPCArgoWorkflowJobReconciler
@@ -82,55 +80,19 @@ var _ = Describe("a step longer than the longest lane", func() {
 		r = &HPCArgoWorkflowJobReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), RunnerImage: "kaos/hpc-operator:test"}
 	})
 
-	It("refuses a step that is not resumable with the numbers and the fix, books nothing and submits nothing", func() {
+	It("admits a cap of days and gives the first job the longest lane, booking one job, not the cap", func() {
 		got := submit(4*1440, nil)
-		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused))
-		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonTooLongNotResumable))
-		for _, w := range []string{"4 days (5760 min)", "10 h (600 min)", "resumable=True", "walltime"} {
-			Expect(got.Status.Message).To(ContainSubstring(w))
-		}
-		Expect(got.Status.Booking).To(BeNil())
-		rj := &batchv1.Job{}
-		err := k8sClient.Get(ctx, types.NamespacedName{Namespace: hpcNS, Name: runnerjob.Name(got.UID, 1)}, rj)
-		Expect(client.IgnoreNotFound(err)).To(Succeed())
-		Expect(err).To(HaveOccurred(), "nothing is submitted for a refused step")
-	})
-
-	It("refuses a step that opted out of resuming even when it is longer only slightly", func() {
-		got := submit(laneMax+1, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
-			j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: 5}
-			j.Spec.ResumableOptOut = true
-		})
-		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonTooLongNotResumable))
-	})
-
-	It("runs a declared resumable step as continuations of at most the lane maximum", func() {
-		got := submit(3000, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
-			j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: 5}
-		})
-		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
-		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(laneMax))
-		Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(laneMax)), "one run is booked, not the whole declared limit")
-		Expect(runnerEnv(got)).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "600"))
-	})
-
-	It("refuses a resumable step that would need more runs than the continuation cap", func() {
-		got := submit(6*laneMax+1, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
-			j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: 5}
-		})
-		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonTooLongBeyondContinuations))
-		Expect(strings.Contains(got.Status.Message, "5 continuations")).To(BeTrue(), got.Status.Message)
-	})
-
-	It("admits a new job of a step that earlier jobs verified resumable", func() {
-		old := submit(60, nil)
-		image := old.Spec.Image
-		orig := old.DeepCopy()
-		old.Status.ResumeEvidence = &hpcv1alpha1.ResumeEvidence{Verified: true, At: metav1.Now()}
-		Expect(k8sClient.Status().Patch(ctx, old, client.MergeFrom(orig))).To(Succeed())
-		got := submit(3000, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = image })
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted), got.Status.Message)
 		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(laneMax))
+		Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(laneMax)))
+		Expect(runnerEnv(got)).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "600"))
+		Expect(runnerEnv(got)).To(HaveKeyWithValue("HPC_RESUMABLE_LEAD", "10"), "every job is warned before its limit")
+	})
+
+	It("admits a cap below the longest lane as the one job", func() {
+		got := submit(90, nil)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted), got.Status.Message)
+		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(90)))
 	})
 
 	// A run's access to its data and to tracking ends before most lanes do (PRD kaos#1911 F-40, issue 2212).
@@ -142,30 +104,20 @@ var _ = Describe("a step longer than the longest lane", func() {
 			Expect(k8sClient.Update(ctx, site)).To(Succeed())
 		})
 
-		It("refuses a step that is not resumable and asks for longer than the access, naming the step and the fixes", func() {
-			got := submit(12*60, nil)
-			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused))
-			Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonTooLongNotResumable))
-			for _, w := range []string{"step train asks for 12 h", "11.5 h at most", "walltime=", "resumable=True", "checkpoint_every="} {
-				Expect(got.Status.Message).To(ContainSubstring(w))
+		It("admits a step of 12 hours or 20 hours with a first job that ends inside the access", func() {
+			for _, wall := range []int32{12 * 60, 20 * 60} {
+				got := submit(wall, nil)
+				Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted), got.Status.Message)
+				Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(690)))
+				Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(690)))
+				Expect(runnerEnv(got)).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "690"))
 			}
-			Expect(got.Status.Booking).To(BeNil())
 		})
 
 		It("admits a step exactly as long as the access", func() {
 			got := submit(690, nil)
 			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted), got.Status.Message)
 			Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(690)))
-		})
-
-		It("runs a resumable step of 20 hours as a first run that ends inside the access", func() {
-			got := submit(20*60, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
-				j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: 5}
-			})
-			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted), got.Status.Message)
-			Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(690)))
-			Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(690)))
-			Expect(runnerEnv(got)).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "690"))
 		})
 	})
 })

@@ -19,9 +19,11 @@ import (
 	"github.com/kaos-io/kaos-hpc-operator/internal/timelimit"
 )
 
-// Learned time limit (PRD-HPC-1461 F-41, D-67). The spec's wallTimeMinutes is the cap; the limit
-// of an attempt is learned from the run times of the same step's earlier successful jobs that are
-// still in the cluster (no store of its own), and written to status.placement.
+// Time of one job (PRD kaos#1911 D-75). The spec's wallTimeMinutes is the platform's cap on the step's total
+// time. A job asks for the most a job can get (the lowest of the class's, the site's and the data access's
+// maximum), unless the step has a learned limit (F-41, D-67): that comes from the run times of the same step's
+// earlier successful jobs still in the cluster (no store of its own). The jobs of a step together never exceed
+// the cap. The choice is written to status.placement.
 
 // capsOf are the bounds of a job's time limit on a site.
 func capsOf(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite) timelimit.Caps {
@@ -33,29 +35,26 @@ func capsOf(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite) time
 }
 
 // placementFor chooses the time limit of the job's next attempt. A job that already got its one
-// timeout retry keeps that limit. Only serve-mode jobs learn (the runner Job carries the limit
-// there), and a resumable step keeps its declared limit: its checkpoint signal is timed from it.
+// timeout retry keeps that limit. Only serve-mode jobs learn (the runner Job carries the limit there).
 func (r *HPCArgoWorkflowJobReconciler) placementFor(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
 	site *hpcv1alpha1.HPCSite) (*hpcv1alpha1.Placement, error) {
 	p, err := r.placementUncapped(ctx, job, site)
 	if err != nil {
 		return nil, err
 	}
-	return capAtLaneMax(p, capsOf(job, site), usedMinutes(job)), nil
+	return capAtRemaining(p, capsOf(job, site), usedMinutes(job)), nil
 }
 
-// capAtLaneMax runs a resumable step whose declared limit is above the longest run (the lane's maximum, or what
-// a run's data access covers) as continuations of at most that long each (D-67, D-74; PRD kaos#1911 F-40), each
-// submitted as a new site job with its own fresh access. The continuations together stay within the declared
-// limit: a run is never given more than what the earlier runs (used minutes) left of it (timelimit.Segment).
-// Admission refuses a step that is not resumable, so only a resumable step reaches a booking with a limit above
-// the maximum.
-func capAtLaneMax(p *hpcv1alpha1.Placement, caps timelimit.Caps, used int64) *hpcv1alpha1.Placement {
-	if m := caps.Max(); m > 0 && p.TimeLimitMinutes > m {
-		p.TimeLimitMinutes, _ = timelimit.Segment(p.TimeLimitMinutes, m, int32(min(used, math.MaxInt32)))
-	}
+// capAtRemaining gives a job no more than what the earlier jobs (used minutes) left of the cap on the step's total
+// time (timelimit.Segment): a step that needs more jobs than one runs as continuations, each a new site job
+// with its own fresh access, and the jobs together stay within the cap.
+func capAtRemaining(p *hpcv1alpha1.Placement, caps timelimit.Caps, used int64) *hpcv1alpha1.Placement {
+	p.TimeLimitMinutes, _ = timelimit.Segment(caps.Spec, p.TimeLimitMinutes, int32(min(used, math.MaxInt32)))
 	return p
 }
+
+// defaultQOS names the QoS of a class that names none.
+const defaultQOS = "default"
 
 // usedMinutes is the time the job's earlier attempts ran (their settled node-minutes; a job runs on one node).
 // A guest on a shared node settles to zero, so its runs are not counted.
@@ -67,14 +66,12 @@ func usedMinutes(job *hpcv1alpha1.HPCArgoWorkflowJob) int64 {
 	return total
 }
 
-// segmentsSpent: the step is cut into runs (its declared limit is above the longest run) and the runs so far
-// used the whole declared limit, so no further run is started.
-func segmentsSpent(job *hpcv1alpha1.HPCArgoWorkflowJob, caps timelimit.Caps) bool {
-	_, spent := timelimit.Segment(job.Spec.WallTimeMinutes, caps.Max(), int32(min(usedMinutes(job), math.MaxInt32)))
-	return spent
+// capSpent: the earlier jobs of the step used the whole cap on its total time, so no further job is started.
+func capSpent(job *hpcv1alpha1.HPCArgoWorkflowJob) bool {
+	return usedMinutes(job) >= int64(job.Spec.WallTimeMinutes)
 }
 
-// placementUncapped is placementFor before the lane maximum is applied.
+// placementUncapped is placementFor before the cap on the step's total time is applied.
 func (r *HPCArgoWorkflowJobReconciler) placementUncapped(ctx context.Context, job *hpcv1alpha1.HPCArgoWorkflowJob,
 	site *hpcv1alpha1.HPCSite) (*hpcv1alpha1.Placement, error) {
 	if p := job.Status.Placement; p != nil && p.Source == hpcv1alpha1.PlacementTimeoutRetry {
@@ -92,48 +89,9 @@ func (r *HPCArgoWorkflowJobReconciler) placementUncapped(ctx context.Context, jo
 	if err != nil {
 		return nil, err
 	}
-	// A declared or verified resumable step keeps its declared limit (D-67): its signal is timed from it.
-	if job.Spec.Resumable != nil || (!job.Spec.ResumableOptOut && rs != nil && rs.Verified) {
-		return withResumable(declaredWithWarning(job, caps, history, 0), rs), nil
-	}
 	samples := samplesOf(history, r.now())
 	limit, source := timelimit.Learn(samples, caps)
-	if source == hpcv1alpha1.PlacementDeclared {
-		return withResumable(declaredWithWarning(job, caps, history, int32(len(samples))), rs), nil
-	}
 	return &hpcv1alpha1.Placement{TimeLimitMinutes: limit, Source: source, Samples: int32(len(samples)), Resumable: rs}, nil
-}
-
-// withResumable records the step's resumable status on a placement.
-func withResumable(p *hpcv1alpha1.Placement, rs *hpcv1alpha1.ResumableStatus) *hpcv1alpha1.Placement {
-	p.Resumable = rs
-	return p
-}
-
-// declaredWithWarning is the placement at the declared limit, with a warning when a recent run of
-// the step was stopped at that same limit. It never changes the limit.
-func declaredWithWarning(job *hpcv1alpha1.HPCArgoWorkflowJob, caps timelimit.Caps,
-	history []*hpcv1alpha1.HPCArgoWorkflowJob, samples int32) *hpcv1alpha1.Placement {
-	p := &hpcv1alpha1.Placement{TimeLimitMinutes: caps.Spec, Source: hpcv1alpha1.PlacementDeclared, Samples: samples}
-	if stoppedAtLimit(history, caps.Spec) {
-		p.Warning = timelimit.WarnMessage(caps.Spec, job.Spec.Resumable != nil)
-	}
-	return p
-}
-
-// RecentRuns is how many of a step's latest finished jobs are looked at for a time-limit warning.
-const RecentRuns = 3
-
-// stoppedAtLimit reports whether, among the last RecentRuns finished jobs of the step (history is
-// newest first), one ended WallTimeReached at the given declared limit.
-func stoppedAtLimit(history []*hpcv1alpha1.HPCArgoWorkflowJob, limit int32) bool {
-	for _, o := range history[:min(len(history), RecentRuns)] {
-		if o.Status.Reason == hpcv1alpha1.ReasonWallTimeReached && o.Spec.WallTimeMinutes == limit &&
-			o.EffectiveWallMinutes() == limit {
-			return true
-		}
-	}
-	return false
 }
 
 // finishedAt orders jobs: the end of the last attempt, else the job's creation.
@@ -198,7 +156,8 @@ func timeoutRetry(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite
 	if p == nil || p.Source != hpcv1alpha1.PlacementLearned || !strings.EqualFold(run.State, "TIMEOUT") {
 		return nil
 	}
-	limit := timelimit.Retry(capsOf(job, site))
+	caps := capsOf(job, site)
+	limit, _ := timelimit.Segment(caps.Spec, timelimit.Retry(caps), int32(min(usedMinutes(job), math.MaxInt32)))
 	if limit <= p.TimeLimitMinutes {
 		return nil
 	}
@@ -324,7 +283,7 @@ func (r *HPCArgoWorkflowJobReconciler) countLanePlacement(job *hpcv1alpha1.HPCAr
 		qos = class.QOS
 	}
 	if qos == "" {
-		qos = "default"
+		qos = defaultQOS
 	}
 	metrics.LanePlacements.WithLabelValues(qos, pl.Reservation, "false").Inc()
 }

@@ -224,14 +224,25 @@ var _ = Describe("HPCArgoWorkflowJob node sharing plan", func() {
 			Expect(share(short).Host).To(Equal(client.ObjectKeyFromObject(host).String()))
 		})
 
-		It("should_not_join_a_host_with_less_time_left_than_the_step_and_the_margin", func() {
+		It("should_join_a_host_with_a_little_less_time_left_than_the_step_with_what_the_host_has_left", func() {
+			// D-75: steps within minutes of each other pack. A guest joins when the host has at least its limit
+			// less 30 minutes left, and its limit is what the host has left less the margin.
 			siteWith(nil)
 			host := admit(20, nil)
 			start(host, "100")
 			clock = clock.Add(5 * time.Minute) // 30-minute job, 5 gone: 25 left < 20 + 6
-			Expect(share(admit(20, nil)).Role).To(Equal(hpcv1alpha1.ShareHost))
-			clock = clock.Add(-4 * time.Minute) // 29 left... of 30: 1 gone, 29 >= 26
-			Expect(share(admit(20, nil)).Role).To(Equal(hpcv1alpha1.ShareGuest))
+			late := admit(20, nil)
+			Expect(share(late).Role).To(Equal(hpcv1alpha1.ShareGuest))
+			Expect(share(late).Host).To(Equal(client.ObjectKeyFromObject(host).String()))
+			Expect(late.Status.Placement.TimeLimitMinutes).To(Equal(int32(25 - ShareMarginMinutes)))
+		})
+
+		It("should_give_a_guest_arriving_more_than_30_minutes_late_a_job_of_its_own", func() {
+			siteWith(nil)
+			host := admit(120, nil)
+			start(host, "100")
+			clock = clock.Add(10 * time.Minute) // 240-minute job, 10 gone: 230 left, a 300-minute step needs 270
+			Expect(share(admit(300, nil)).Role).To(Equal(hpcv1alpha1.ShareHost))
 		})
 
 		It("should_not_share_across_scopes_or_classes", func() {
@@ -253,36 +264,6 @@ var _ = Describe("HPCArgoWorkflowJob node sharing plan", func() {
 			got := admit(20, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Sharing = nil })
 			Expect(got.Status.Placement.Share).To(BeNil())
 			Expect(envOf(got)).NotTo(HaveKey("HPC_SHARE_ROLE"))
-		})
-
-		It("should_pack_a_mix_of_resumable_and_plain_steps_onto_ceil_n_over_four_hosts", func() {
-			// AC-73: a resumable step shares too. Seven steps, three of them resumable, arrive at once. (A resumable step that
-			// opens a host gets a job of its own limit, not padded, so it takes only guests that fit that: here both hosts are plain.)
-			siteWith(nil)
-			resumable := func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
-				j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 5, MaxContinuations: 3}
-			}
-			muts := []func(*hpcv1alpha1.HPCArgoWorkflowJob){nil, resumable, nil, resumable, nil, resumable, nil}
-			var jobs []*hpcv1alpha1.HPCArgoWorkflowJob
-			for i, m := range muts {
-				jobs = append(jobs, admit(20, m))
-				Expect(hostsOf(jobs)).To(Equal((i+4)/4), "after %d steps", i+1)
-			}
-			Expect(hostsOf(jobs)).To(Equal(2), "ceil(7 / 4)")
-			Expect(envOf(jobs[1])).To(HaveKeyWithValue("HPC_SHARE_ROLE", "guest"))
-		})
-
-		It("should_not_pad_a_resumable_hosts_job_and_join_it_by_the_guests_lead_when_only_the_lead_fits", func() {
-			siteWith(nil)
-			lead := func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
-				j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 5, MaxContinuations: 3}
-			}
-			host := admit(20, lead)
-			Expect(share(host).JobLimitMinutes).To(Equal(int32(20)), "a resumable host's job is the step's own limit")
-			// A 60-minute resumable guest does not fit 20 minutes by its limit, but its lead (5 + 6) does.
-			Expect(share(admit(60, lead)).Host).To(Equal(client.ObjectKeyFromObject(host).String()))
-			// A 60-minute plain step does not.
-			Expect(share(admit(60, nil)).Role).To(Equal(hpcv1alpha1.ShareHost))
 		})
 
 		It("should_not_plan_anything_on_a_site_that_does_not_share", func() {

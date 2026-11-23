@@ -172,6 +172,11 @@ type SiteProfile struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxSubmitJobs int32 `json:"maxSubmitJobs,omitempty"`
+	// TimeMin makes a step with verified saved progress ask the scheduler for a minimum time as well (one hour,
+	// or the job's limit if that is shorter), so the site may fit it into any gap (D-75). Off by default: it
+	// is switched on once the site's REST version is known to accept the field.
+	// +optional
+	TimeMin bool `json:"timeMin,omitempty"`
 	// Classes offered by the site.
 	// +kubebuilder:validation:MinItems=1
 	// +listType=map

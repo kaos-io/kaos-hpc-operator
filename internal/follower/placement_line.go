@@ -74,8 +74,6 @@ func resumableText(job *hpcv1alpha1.HPCArgoWorkflowJob) string {
 		rs = p.Resumable
 	}
 	switch {
-	case job.Spec.ResumableOptOut:
-		return "not resumable (resumable=False)"
 	case rs != nil && rs.Verified:
 		when := ""
 		if rs.Since != nil {
@@ -84,8 +82,6 @@ func resumableText(job *hpcv1alpha1.HPCArgoWorkflowJob) string {
 		return "resumable (verified" + when + ")"
 	case rs != nil && rs.Reason != "":
 		return "resumable not verified: " + rs.Reason
-	case job.Spec.Resumable != nil:
-		return "resumable (declared, not yet verified)"
 	}
 	return ""
 }
@@ -106,6 +102,8 @@ func endLines(job *hpcv1alpha1.HPCArgoWorkflowJob) []string {
 		return []string{fmt.Sprintf("HPC: re-running from the start (%d/%d): %s", job.Status.Reruns, hpcv1alpha1.MaxReruns, rerunWhy(job))}
 	case hpcv1alpha1.ReasonRerunLimit:
 		return []string{fmt.Sprintf("HPC: stopped: the step was interrupted again after %d re-runs", hpcv1alpha1.MaxReruns)}
+	case hpcv1alpha1.ReasonNoSavedProgress:
+		return []string{"HPC: " + job.Status.Message}
 	case hpcv1alpha1.ReasonNoProgress:
 		return []string{"HPC: stopped: the continuation did not get past its checkpoint (NoProgress): " + job.Status.Message}
 	case hpcv1alpha1.ReasonTimeLimitRetry:
@@ -149,20 +147,15 @@ func timeLimitText(job *hpcv1alpha1.HPCArgoWorkflowJob) string {
 		}
 	}
 	text := fmt.Sprintf("time limit %d min (%s)", limit, src)
-	if declared := job.Spec.WallTimeMinutes; declared > limit && src == "declared" {
-		// A resumable step declared longer than the longest lane (admission refuses any other):
-		// say how it will run so the author sees the plan before the first segment ends.
-		text += fmt.Sprintf(", declared %d min runs as continuations of up to %d min each", declared, limit)
+	if total := job.Spec.WallTimeMinutes; total > limit && src == "declared" {
+		// The cap is on the step's total time: a step that saves progress is continued in new jobs up to it.
+		text += fmt.Sprintf(", at most %d min over all its jobs", total)
 	}
 	return text
 }
 
 // showPlacement prints the placement lines when they differ from the last print.
 func (f *follower) showPlacement(job *hpcv1alpha1.HPCArgoWorkflowJob) {
-	if p := job.Status.Placement; p != nil && p.Warning != "" && p.Warning != f.lastWarning {
-		f.lastWarning = p.Warning // once per text, at submit
-		_, _ = fmt.Fprintln(f.o.Out, p.Warning)
-	}
 	lines := placementLines(job)
 	key := strings.Join(lines, "\n")
 	if lines == nil || key == f.lastPlacement {

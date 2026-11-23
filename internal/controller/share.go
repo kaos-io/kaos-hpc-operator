@@ -14,6 +14,7 @@ import (
 	"github.com/kaos-io/kaos-hpc-operator/internal/admission"
 	"github.com/kaos-io/kaos-hpc-operator/internal/ledger"
 	"github.com/kaos-io/kaos-hpc-operator/internal/metrics"
+	"github.com/kaos-io/kaos-hpc-operator/internal/timelimit"
 )
 
 // Deterministic node sharing (PRD-HPC-1461 D-26, D-70). A running host can only take a guest that is still
@@ -34,6 +35,11 @@ const (
 	// ShareMarginMinutes is the time a guest must end before its host's job does: the slot manager's own margin
 	// (5 min, payload/slots.py MARGIN_S) plus a minute for its poll.
 	ShareMarginMinutes = 6
+	// ShareLateMinutes is how much shorter than its step's limit the time left on a host may be for a guest to join
+	// it all the same (D-75): every step without a learned limit asks for the job limit, so a guest that starts
+	// minutes after its host would otherwise never fit. The guest's limit is then what the host has left, less the
+	// margin. A guest that cannot get at least timelimit.RoundMinutes that way gets a node of its own.
+	ShareLateMinutes = 30
 	// DefaultHostStartWait is how long a guest waits for a host whose Slurm job is still queued before it is
 	// planned again; a queued host older than this takes no new guests either.
 	DefaultHostStartWait = 20 * time.Minute
@@ -66,27 +72,32 @@ func shareableClass(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSi
 	return class, true
 }
 
-// resumableOf reports whether the attempt is treated as resumable and its signal lead in minutes: the declaration,
-// else the default lead of a step the controller found resumable (D-74), unless the step opted out. pl is the
-// placement being decided (the job's own may be an earlier attempt's).
-func resumableOf(job *hpcv1alpha1.HPCArgoWorkflowJob, pl *hpcv1alpha1.Placement) (int32, bool) {
-	switch {
-	case job.Spec.ResumableOptOut:
-		return 0, false
-	case job.Spec.Resumable != nil:
-		return job.Spec.Resumable.LeadMinutes, true
-	case pl != nil && pl.Resumable != nil && pl.Resumable.Verified:
+// resumableOf reports whether the attempt is treated as resumable and its signal lead in minutes: only a step the
+// controller found resumable (D-74) is, and then the default lead. pl is the placement being decided (the job's own
+// may be an earlier attempt's).
+func resumableOf(pl *hpcv1alpha1.Placement) (int32, bool) {
+	if pl != nil && pl.Resumable != nil && pl.Resumable.Verified {
 		return hpcv1alpha1.DefaultLeadMinutes, true
 	}
 	return 0, false
 }
 
-// fits reports whether a guest of step limit and resumable lead (0: plain) can be taken by a host with remaining
-// minutes of its job left. It is the slot manager's rule (payload/slots.py fits) plus a minute for its poll: the step
-// and the margin must end before the host does; a resumable guest is also taken when only its lead plus the margin
-// do, since it is told to save before the host's end.
-func fits(remaining, limit, lead int32) bool {
-	return remaining >= limit+ShareMarginMinutes || (lead > 0 && remaining >= lead+ShareMarginMinutes)
+// guestLimit is the limit a guest of step limit and resumable lead (0: plain) gets on a host with remaining minutes
+// of its job left, and whether the host can take it. The slot manager's rule (payload/slots.py fits) plus a minute for
+// its poll: the step and the margin must end before the host does. A guest with verified progress is also taken
+// when only its lead plus the margin do, since it is told to save before the host's end. Any other guest is taken
+// when the host has at least its limit less ShareLateMinutes left, and its limit becomes what the host has left
+// less the margin.
+func guestLimit(remaining, limit, lead int32) (int32, bool) {
+	switch {
+	case remaining >= limit+ShareMarginMinutes:
+		return limit, true
+	case lead > 0 && remaining >= lead+ShareMarginMinutes:
+		return limit, true
+	case remaining >= limit-ShareLateMinutes && remaining-ShareMarginMinutes >= timelimit.RoundMinutes:
+		return remaining - ShareMarginMinutes, true
+	}
+	return 0, false
 }
 
 // withShare returns pl with the attempt's lane and share plan. A step that cannot share gets the lane of withLane
@@ -116,9 +127,10 @@ func (r *HPCArgoWorkflowJobReconciler) planShare(ctx context.Context, job *hpcv1
 		if err != nil {
 			return nil, err
 		}
-		if host := r.pickHost(peers, site, class, pl.TimeLimitMinutes, leadOf(job, pl), exclude); host != nil {
+		if host, limit := r.pickHost(peers, site, class, pl.TimeLimitMinutes, leadOf(pl), exclude); host != nil {
 			// The guest rides on the host's node: no lane of its own, so it never takes a one-job lane a host needs.
 			out.QOS, out.Reservation = "", ""
+			out.TimeLimitMinutes = limit
 			out.Share = &hpcv1alpha1.SharePlan{Role: hpcv1alpha1.ShareGuest, Host: client.ObjectKeyFromObject(host).String(),
 				Since: now, Replans: replans}
 			return &out, nil
@@ -128,7 +140,7 @@ func (r *HPCArgoWorkflowJobReconciler) planShare(ctx context.Context, job *hpcv1
 	if err != nil {
 		return nil, err
 	}
-	_, resumable := resumableOf(job, pl)
+	_, resumable := resumableOf(pl)
 	hosted.Share = &hpcv1alpha1.SharePlan{Role: hpcv1alpha1.ShareHost, Since: now, Replans: replans,
 		JobLimitMinutes: hostJobLimit(site, class, hosted.TimeLimitMinutes, hosted.QOS, resumable)}
 	return hosted, nil
@@ -157,8 +169,8 @@ func (r *HPCArgoWorkflowJobReconciler) hostLane(ctx context.Context, job *hpcv1a
 }
 
 // leadOf is the resumable lead of the attempt in minutes, 0 for a plain step.
-func leadOf(job *hpcv1alpha1.HPCArgoWorkflowJob, pl *hpcv1alpha1.Placement) int32 {
-	lead, _ := resumableOf(job, pl)
+func leadOf(pl *hpcv1alpha1.Placement) int32 {
+	lead, _ := resumableOf(pl)
 	return lead
 }
 
@@ -270,26 +282,34 @@ type hostSlot struct {
 	job       *hpcv1alpha1.HPCArgoWorkflowJob
 	free      int32 // slots not held by its own step or a guest
 	remaining int32 // minutes of its Slurm job left
+	// guestLimit is the limit the guest being placed gets on this host (set by pickHost).
+	guestLimit int32
 }
 
-// pickHost returns the open host of the peers a guest with the given step limit joins, or nil. A host qualifies
-// when it has a free slot, enough time left for the step and the margin, was not excluded and is not a queued host
+// pickHost returns the open host of the peers a guest with the given step limit joins, or nil, with the limit the
+// guest gets there (guestLimit). A host qualifies when it has a free slot, enough time left for the step (or, late,
+// for the guest cut to what is left), was not excluded and is not a queued host
 // that waited too long. The fullest host wins, so nodes fill one after the other and N steps use ceil(N / slots)
 // of them; ties go to the older host, then the name.
 func (r *HPCArgoWorkflowJobReconciler) pickHost(peers []*hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite,
-	class hpcv1alpha1.SiteClass, limit, lead int32, exclude string) *hpcv1alpha1.HPCArgoWorkflowJob {
+	class hpcv1alpha1.SiteClass, limit, lead int32, exclude string) (*hpcv1alpha1.HPCArgoWorkflowJob, int32) {
 	fit := make([]hostSlot, 0, len(peers))
 	for _, h := range r.hostSlots(peers, site, class) {
-		if client.ObjectKeyFromObject(h.job).String() == exclude || h.free <= 0 || !fits(h.remaining, limit, lead) {
+		if client.ObjectKeyFromObject(h.job).String() == exclude || h.free <= 0 {
 			continue
 		}
+		g, ok := guestLimit(h.remaining, limit, lead)
+		if !ok {
+			continue
+		}
+		h.guestLimit = g
 		if !hostStarted(h.job) && r.now().Sub(hostSince(h.job)) > r.hostStartWait() {
 			continue
 		}
 		fit = append(fit, h)
 	}
 	if len(fit) == 0 {
-		return nil
+		return nil, 0
 	}
 	sort.SliceStable(fit, func(i, j int) bool {
 		a, b := fit[i], fit[j]
@@ -301,7 +321,7 @@ func (r *HPCArgoWorkflowJobReconciler) pickHost(peers []*hpcv1alpha1.HPCArgoWork
 		}
 		return a.job.Name < b.job.Name
 	})
-	return fit[0].job
+	return fit[0].job, fit[0].guestLimit
 }
 
 // hostSlots computes the free slots and remaining time of every open host among the peers. A host's own step holds
@@ -366,7 +386,7 @@ func hostLimitOf(h *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, c
 	if p := h.Status.Placement; p != nil {
 		qos = p.QOS
 	}
-	_, resumable := resumableOf(h, h.Status.Placement)
+	_, resumable := resumableOf(h.Status.Placement)
 	return hostJobLimit(site, class, h.EffectiveWallMinutes(), qos, resumable)
 }
 
@@ -425,8 +445,13 @@ func (r *HPCArgoWorkflowJobReconciler) replanGuest(ctx context.Context, job *hpc
 	if err != nil || why == "" {
 		return err
 	}
+	// The guest's limit was cut to its host's remaining time; planned again it starts from the step's own limit.
+	fresh, err := r.placementFor(ctx, job, site)
+	if err != nil {
+		return err
+	}
 	replans := p.Share.Replans + 1
-	np, err := r.planShare(ctx, job, site, class, p, p.Share.Host, replans, why == replanNotTaken || replans > MaxShareReplans)
+	np, err := r.planShare(ctx, job, site, class, fresh, p.Share.Host, replans, why == replanNotTaken || replans > MaxShareReplans)
 	if err != nil {
 		return err
 	}
@@ -484,7 +509,7 @@ func (r *HPCArgoWorkflowJobReconciler) guestStranded(ctx context.Context, job *h
 		}
 		return "", nil
 	}
-	if !fits(r.hostRemaining(&host, site, class), job.Status.Placement.TimeLimitMinutes, leadOf(job, job.Status.Placement)) {
+	if _, ok := guestLimit(r.hostRemaining(&host, site, class), job.Status.Placement.TimeLimitMinutes, leadOf(job.Status.Placement)); !ok {
 		return replanNoLongerFits, nil
 	}
 	// A running host takes a waiting guest at its next look (seconds); one that has not by now will not.

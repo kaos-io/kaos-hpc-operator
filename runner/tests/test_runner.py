@@ -1282,6 +1282,18 @@ def test_a_guest_stopped_by_its_own_time_limit_reports_a_timeout_and_any_other_k
         assert (run["state"], run["exitCode"], run["hostSiteJobID"], run["slot"]) == (state, 143, "5439966", 0), comment
         assert "hostJobOpen" not in run, "a guest never holds a node of its own"
 
+def test_a_job_asks_the_site_for_a_minimum_time_only_when_the_controller_names_one(rig):
+    """D-75: slurmrestd's `time_minimum` (Slurm --time-min), in minutes, as a set number."""
+    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm, HPC_TIME_MIN_MINUTES="60")
+    rig.runner.run()
+    assert slurm.submitted[0]["job"]["time_minimum"] == {"set": True, "number": 60}
+    slurm2 = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm2)
+    rig.runner.run()
+    assert "time_minimum" not in slurm2.submitted[0]["job"]
+
+
 def test_a_resumable_sharing_job_hands_its_lead_to_the_slot_manager_and_asks_slurm_for_no_warning_signal(rig):
     """AC-73: a host's batch shell is the slot manager, which USR1 would kill; every step on a shared node is
     signalled by the slot manager, from the lead in its script (KAOS_RESUMABLE_LEAD_MIN). A resumable job alone

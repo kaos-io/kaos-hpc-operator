@@ -45,7 +45,6 @@ import (
 	"github.com/kaos-io/kaos-hpc-operator/internal/metrics"
 	"github.com/kaos-io/kaos-hpc-operator/internal/runnerjob"
 	"github.com/kaos-io/kaos-hpc-operator/internal/sitestate"
-	"github.com/kaos-io/kaos-hpc-operator/internal/timelimit"
 )
 
 // WaitingResync is how often a Waiting job is judged again (bookings settle, limits free up).
@@ -424,7 +423,7 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		}
 	}
 
-	v := r.recoverAttempt(job, run, capsOf(job, site), attempt, attemptEnd{phase: phase, reason: reason, msg: msg})
+	v := r.recoverAttempt(job, run, attempt, attemptEnd{phase: phase, reason: reason, msg: msg})
 	phase, reason, msg, next := v.phase, v.reason, v.msg, v.next
 	if retry := timeoutRetry(job, site, run); !next && reason == hpcv1alpha1.ReasonWallTimeReached && retry != nil {
 		// D-67: a learned limit that was too tight is not a failure; one more attempt with twice
@@ -435,10 +434,10 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		job.Status.Placement = retry
 		phase, reason = hpcv1alpha1.PhasePending, hpcv1alpha1.ReasonTimeLimitRetry
 	}
-	stopped := !next && !v.spent && reason == hpcv1alpha1.ReasonWallTimeReached
+	stopped := !next && !v.spent && reason == hpcv1alpha1.ReasonWallTimeReached && job.Spec.StepName != ""
 	if stopped {
-		// The step ran its whole declared limit: say so in plain words (settled minutes are in attempts).
-		msg = timelimit.StopMessage(job.EffectiveWallMinutes(), capsOf(job, site).Max(), job.Spec.Resumable != nil)
+		// D-75, ending 2: a job ran to its limit and saved nothing, so there is nothing to continue from.
+		reason, msg = hpcv1alpha1.ReasonNoSavedProgress, noSavedProgressMessage(job, run)
 	}
 	if run.HostJobOpen && run.HostSiteJobID == "" && phase.Terminal() && booking != nil {
 		// D-26: the step ended but the host's Slurm job still holds the node for its guests, and the site
@@ -464,7 +463,7 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 	r.noteEnded(string(job.UID))
 	observeSettled(site, tier, used, run, admittedAt)
 	if stopped && r.Recorder != nil {
-		r.Recorder.Event(job, corev1.EventTypeWarning, hpcv1alpha1.ReasonWallTimeReached, msg)
+		r.Recorder.Event(job, corev1.EventTypeWarning, hpcv1alpha1.ReasonNoSavedProgress, msg)
 	}
 	return next, nil
 }
