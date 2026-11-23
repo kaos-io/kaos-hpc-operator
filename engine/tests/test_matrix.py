@@ -86,14 +86,12 @@ def test_a_matrix_step_cannot_need_a_matrix_step():
     assert "cannot need another step with matrix=" in refused(build)
 
 
-def test_a_matrix_step_is_never_continued_from_a_checkpoint():
-    assert "is not continued from a checkpoint yet" in refused(lambda a: a.step(
-        "t", kind="train", matrix={"x": [1]}, resumable=True, produces=[a.model("m")]))
-    assert "is not continued from a checkpoint yet" in refused(lambda a: a.step(
-        "t", kind="train", matrix={"x": [1]}, checkpoint_every="20m", produces=[a.model("m")]))
+def test_should_refuse_resumable_and_checkpoint_every_on_a_matrix_step_like_on_any_other():
+    for keyword, value in (("resumable", True), ("checkpoint_every", "20m")):
+        message = refused(lambda a: a.step("t", kind="train", matrix={"x": [1]}, produces=[a.model("m")], **{keyword: value}))
+        assert message.startswith(f"step 't': {keyword}= is gone: the platform sets the time of a step")
     wft = render(sweep)
-    annotations = template(wft, "train")["metadata"]["annotations"]
-    assert annotations["platform.kubecore.io/hpc-resumable"] == "off"
+    assert "platform.kubecore.io/hpc-resumable" not in (template(wft, "train").get("metadata", {}).get("annotations") or {})
 
 
 def test_a_name_must_be_a_settings_name_and_not_a_section_the_step_reads():
@@ -237,7 +235,7 @@ def test_compose_gets_the_two_fields_and_the_form_shows_them_after_the_steps_cla
     assert "--matrix" in args and "train={{workflow.parameters.train-matrix}}" in args
     assert "--parallel" in args and "train={{workflow.parameters.train-parallel}}" in args
     names = [p["name"] for p in wft["spec"]["arguments"]["parameters"]]
-    order = [names.index(f"train-{suffix}") for suffix in ("class", "walltime", "matrix", "parallel")]
+    order = [names.index(f"train-{suffix}") for suffix in ("class", "matrix", "parallel")]
     assert order == sorted(order)
 
 
@@ -245,9 +243,8 @@ def test_an_item_gets_the_same_arguments_as_the_step_does_on_its_own():
     wft = enhanced()
     item = template(wft, fan_template("train"))["steps"][0][0]
     names = {p["name"] for p in item["arguments"]["parameters"]}
-    assert {"kaos-context", "kaos-item", "deadline", "gpus", "cpu", "mem", "disk"} <= names
-    deadline = next(p["value"] for p in item["arguments"]["parameters"] if p["name"] == "deadline")
-    assert 'inputs.parameters["kaos-run-settings"]' in deadline and "tasks[" not in deadline
+    assert {"kaos-context", "kaos-item", "gpus", "cpu", "mem", "disk"} <= names
+    assert "deadline" not in names, "the deadline is the platform's cap on the template, not a value passed in"
 
 
 def test_the_gather_task_joins_the_items_and_the_run_fails_with_it():
@@ -288,7 +285,7 @@ def test_an_item_has_an_hpc_variant_in_its_round_and_the_template_joins_both():
     args = {p["name"]: p["value"] for p in twin["arguments"]["parameters"]}
     assert args["node-suffix"] == "-{{=item.index}}" and args["kaos-item"] == "{{item.index}}"
     assert args["kaos-context"] == next(p["value"] for p in run["arguments"]["parameters"] if p["name"] == "kaos-context")
-    assert "tasks[" not in args["time-limit"] and 'inputs.parameters["kaos-run-settings"]' in args["time-limit"]
+    assert args["time-limit"] == "10080", "the platform's cap, not a form value"
     for out in fan["outputs"]["parameters"]:
         expression = out["valueFrom"]["expression"]
         assert "steps[\"run\"]" in expression and "steps[\"run-hpc\"]" in expression and "steps[\"rest\"]" in expression

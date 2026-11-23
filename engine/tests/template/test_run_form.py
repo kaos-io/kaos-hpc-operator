@@ -23,7 +23,7 @@ def _form(account=None):
         ctx["hpc"]["account"] = account
     with authoring.pipeline("t") as p:
         load = authoring.step("load", kind="ingest", inputs=["dataset"], produces=[authoring.dataset("loaded")])
-        train = authoring.step("train", kind="train", needs=[load], gpu=True, walltime="12h", checkpoint_every="10m",
+        train = authoring.step("train", kind="train", needs=[load], gpu=True,
                                produces=[authoring.model("m")])
         authoring.step("report", kind="evaluate", needs=[train])
     return enhance.enhance(yaml.safe_load(p.wt.to_yaml()), ctx)["spec"]["arguments"]["parameters"]
@@ -84,9 +84,7 @@ def test_the_form_is_in_the_order_a_developer_reads_it():
     names = [p["name"] for p in _form()]
     assert names == [
         "pipeline-info", "experiment-name", "experiment-description", "dataset",
-        "load-class", "load-walltime",
-        "train-class", "train-walltime", "train-checkpoint-every",
-        "report-class", "report-walltime",
+        "load-class", "train-class", "report-class",
         "reuse-from-run", "start-from-step", "target-step", "promote-loaded", "config"]
 
 
