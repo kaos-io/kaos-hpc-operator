@@ -245,9 +245,15 @@ func TestMinTimeIsAnHourOrTheLimitIfShorter(t *testing.T) {
 }
 
 func TestLeadIsASixthOfTheLimitBetweenOneAndTenMinutes(t *testing.T) {
-	for limit, want := range map[int32]int32{1: 1, 3: 1, 12: 2, 15: 2, 30: 5, 60: 10, 120: 10, 690: 10, 2880: 10} {
+	for limit, want := range map[int32]int32{0: 0, 1: 0, 2: 1, 3: 1, 12: 2, 15: 2, 30: 5, 60: 10, 120: 10, 690: 10, 2880: 10} {
 		if got := Lead(limit); got != want {
 			t.Errorf("Lead(%d) = %d, want %d", limit, got, want)
+		}
+	}
+	// The warning never fires as the job starts: the lead is always shorter than the limit.
+	for limit := int32(1); limit <= 3000; limit++ {
+		if got := Lead(limit); got >= limit || got < 0 {
+			t.Errorf("Lead(%d) = %d, want less than the limit", limit, got)
 		}
 	}
 	// A step that is on time under a learned limit is never warned: the lead is shorter than the slack.

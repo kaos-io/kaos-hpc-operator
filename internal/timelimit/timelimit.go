@@ -156,9 +156,10 @@ const MaxLeadMinutes = 10
 // process that catches it): a sixth of the limit, at least one minute and at most MaxLeadMinutes. A fixed ten
 // minutes would stop a short job early: a learned limit is one and a half times what the step needs
 // (Margin), so a warning in the last sixth never reaches a step that is on time, and a job of a few minutes
-// is not told to stop as it starts.
+// is not told to stop as it starts. The lead is always shorter than the limit: a job of one minute gets 0, no
+// warning.
 func Lead(limit int32) int32 {
-	return min(MaxLeadMinutes, max(1, limit/6))
+	return min(MaxLeadMinutes, max(1, limit/6), max(limit-1, 0))
 }
 
 // MinTime is the minimum time submitted with a job of the given limit: one hour, or the limit if that is shorter.
