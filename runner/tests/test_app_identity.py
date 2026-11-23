@@ -312,6 +312,49 @@ def test_a_token_that_cannot_be_minted_fails_the_round_which_is_asked_again_and_
     assert r.runner.key_for == "5001" and not r.kube.run.get("message")
 
 
+class _OldTool:
+    """A staging tool from before the tracker's token: it places the key and answers {"event":"key"} with no tracker."""
+    keys = []
+
+    def have_key(self):
+        return False
+
+    def __call__(self, words, feed=None, quiet=False):
+        if words[0] == "key":
+            self.keys = self.keys + [list(feed)[0]]
+            return 0, [{"event": "key"}]
+        return 0, [{"event": "log", "offset": 0, "data": ""}]
+
+
+def test_a_staging_tool_that_does_not_place_the_token_fails_the_round_which_is_asked_again_and_never_stops_the_job(rig, capsys):
+    """Contract 4 on both sides: the runner sends the field, an old tool ignores it. The answer lacks tracker:true, so the
+    round is reported (no value in it), asked again at the next poll, and the job goes on."""
+    r = rig.make(FakeSlurm({}), stager=_OldTool())
+    r.runner._mint = lambda: "tracker-token-OLD.made.up"
+    r.runner.prepare_handback()
+    r.runner.jid = "5001"
+    r.runner.keep_key()
+    out = capsys.readouterr().out
+    assert "the staging tool on the site does not place the tracker's token yet" in out
+    assert "not placed for site job 5001" in out and "tracker-token-OLD" not in out
+    msg = r.kube.run["message"]
+    assert "does not place the tracker's token yet" in msg and "tracker-token-OLD" not in msg
+    assert r.runner.key_for is None, "asked again at the next poll"
+    r.runner.keep_key()
+    assert len(r.runner.stager.keys) == 2, "and it is asked again"
+    r.runner.stager = type("New", (), {"__call__": lambda self, words, feed=None, quiet=False: (0, [{"event": "key", "tracker": True}])})()
+    r.runner.keep_key()
+    assert r.runner.key_for == "5001" and not r.kube.run.get("message")
+
+
+def test_a_job_without_a_tracker_needs_no_tracker_answer(rig):
+    r = rig.make(FakeSlurm({}), MLFLOW_EXTERNAL_URL="", stager=_OldTool())
+    r.runner.prepare_handback()
+    r.runner.jid = "5001"
+    r.runner.keep_key()
+    assert r.runner.key_for == "5001" and "tracker_token" not in r.runner.stager.keys[0]
+
+
 def test_the_token_that_was_replaced_is_still_a_held_secret_and_no_log_line_shows_one(rig, capsys):
     r = rig.make(FakeSlurm({}))
     r.keys.expires = 5000.0 + 3600
@@ -389,7 +432,7 @@ def test_a_key_that_cannot_be_placed_is_reported_asked_again_and_never_stops_the
     assert "could not be renewed on the site" in r.kube.run["message"], "reported in the job's status"
     assert "not placed for site job 5001" in capsys.readouterr().out
     assert r.runner.key_for is None, "asked again at the next poll"
-    r.runner.stager = type("Ok", (), {"__call__": lambda self, words, feed=None, quiet=False: (0, [{"event": "key"}])})()
+    r.runner.stager = type("Ok", (), {"__call__": lambda self, words, feed=None, quiet=False: (0, [{"event": "key", "tracker": True}])})()
     r.runner.keep_key()
     assert r.runner.key_for == "5001" and not r.kube.run.get("message"), "the message clears when a key lands"
 

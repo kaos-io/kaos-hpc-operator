@@ -470,6 +470,8 @@ class Runner:
             staging.refused(rc, ev)
             if rc != 0 or not any(e.get('event') == 'key' for e in ev):
                 raise RuntimeError('the staging tool answered %s' % rc)
+            if 'tracker_token' in record and not any(e.get('event') == 'key' and e.get('tracker') is True for e in ev):
+                raise RuntimeError('the staging tool on the site does not place the tracker\'s token yet')
         except Exception as e:
             print('app key: not placed for site job %s (%s): asking again at the next poll' % (self.jid, e), flush=True)
             self.note_key('the app\'s data store key or the tracker\'s token could not be renewed on the site (%s); trying again' % str(e)[:200])

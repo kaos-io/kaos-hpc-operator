@@ -145,8 +145,9 @@ class NoStager:
         if words[0] == "version":
             return 0, [{"event": "version", "contract": runmod.staging.CONTRACT}]
         if words[0] == "key":
-            self.keys = getattr(self, "keys", []) + [list(feed)[0]]
-            return 0, [{"event": "key"}]
+            record = list(feed)[0]
+            self.keys = getattr(self, "keys", []) + [record]
+            return 0, [{"event": "key", "tracker": True} if "tracker_token" in record else {"event": "key"}]
         raise AssertionError(words)
 
 

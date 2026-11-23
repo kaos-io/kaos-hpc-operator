@@ -64,7 +64,7 @@ STAGE_FLOOR_BPS = 50 * 10 ** 6       # a copy slower than this for hours is not 
 STAGE_FALLBACK_MAX_BYTES = 50 * 10 ** 9   # above this a job never downloads the dataset itself, on GPU time
 STAGE_NOTE_EVERY_S = 10 * 60         # how often the job's status says how far the copy is
 EX_RETRY, EX_NOSPACE, EX_USAGE, EX_CONTRACT = 75, 76, 2, 78
-CONTRACT = 5   # 5 = 4 plus the tracker's token in the `key` verb's record (tracker_token, placed as its own file beside the key); 4 = the whole tree of the commit under <copy>/data/, a dataset another project shares filed as repo@owner, and the `key` verb (the app's key file for a job); the tool's CONTRACT is the same number
+CONTRACT = 4   # 4 = the whole tree of the commit under <copy>/data/, a dataset another project shares filed as repo@owner, and the `key` verb (the app's key file for a job; its optional `tracker_token`, the tracker's token as a file beside it, is additive and did not change the number); the tool's CONTRACT is the same number
 
 
 class InsufficientQuota(Exception):

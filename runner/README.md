@@ -125,7 +125,7 @@ hand-back) and the job's stage-in and hand-back use that pair (HTTP Basic); the 
 staging tool's `key` verb (folder `$SCR/kaos-tmp/key-<job>` 0700, file 0600, replaced atomically) right after submit and
 then every 25 minutes while the job is queued or running; a refresh that fails is logged, written into `status.run.message`
 and asked again at every poll, and never stops the job. The file is never in the job script, the Slurm environment or the
-job log. The same call places the tracker's bearer (`tracker_token` in the record, staging contract 5) as the file `tracker-token`
+job log. The same call places the tracker's bearer (`tracker_token` in the record; the staging contract stays 4, the field is additive and the tool answers `"tracker": true` when it placed the file) as the file `tracker-token`
 in the same folder, minted anew on every round the way the first was; the step finds it by `MLFLOW_TRACKING_TOKEN_FILE`
 (`/kaos/key/tracker-token`). That is why no credential bounds a job's time. The job waits up to 10 minutes for the first files and ends 247 without them. A dataset another project shares is
 staged with the key the app's own data store hands out for the owner (`/kaos/v1/shared-credentials`), over https only.

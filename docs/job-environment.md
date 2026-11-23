@@ -176,7 +176,7 @@ its own site job and so its own folder and file. The job waits for it with the k
 is the job user's own and not a link, as it does the key. The bearer is never in the job script, the Slurm job comment, an
 argument list or the job log; the runner's log stream redacts the one in the file and the one it replaced, and the node's
 redaction program knows a bearer by its shape. A round that fails is logged, written to `status.run.message` and asked again
-at the next poll; the job is never stopped for it, and the old file stays until a new one lands.
+at the next poll; the job is never stopped for it, and the old file stays until a new one lands. The staging tool answers `"tracker": true` when it placed the file; a tool on the site from before the token (the staging contract is the same, 4) does not, the round counts as failed with the sentence "the staging tool on the site does not place the tracker's token yet", and a job with a tracker then waits for the file as above and ends 247.
 
 ### The data store key
 The step does not hold a token for the data store. It holds a key of its APP, and only a file carries it: the runner writes
