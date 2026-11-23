@@ -966,7 +966,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Attempts).To(HaveLen(4), "every interrupted attempt is settled")
 	})
 
-	It("counts the interruptions of a step over its whole life: a job that saved progress in between does not reset them", func() {
+	It("counts the interruptions of a step since its last saved progress: a job that saved new progress starts the count again", func() {
 		j := newServeJob(nil, nil)
 		reconcileOnce(j)
 		ended(j, 1, "NODE_FAIL", nil, "", nil) // re-run from the start (1/2)
@@ -975,14 +975,16 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		ended(j, 2, "TIMEOUT", nil, "scratch://ckpt/a", progress(1))
 		_, got := reconcileOnce(j)
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
-		Expect(got.Status.Reruns).To(Equal(int32(1)), "a job that saved progress does not reset the count")
+		Expect(got.Status.Reruns).To(BeZero(), "a job that saved new progress starts the count again")
+		for n := int32(1); n <= hpcv1alpha1.MaxReruns; n++ {
+			settleTo(j, hpcv1alpha1.PhaseAdmitted)
+			ended(j, 2+n, "NODE_FAIL", nil, "", nil) // continued again from the same checkpoint
+			_, got = reconcileOnce(j)
+			Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+			Expect(got.Status.Reruns).To(Equal(n))
+		}
 		settleTo(j, hpcv1alpha1.PhaseAdmitted)
-		ended(j, 3, "NODE_FAIL", nil, "", nil) // continued again (2/2)
-		_, got = reconcileOnce(j)
-		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
-		Expect(got.Status.Reruns).To(Equal(int32(2)))
-		settleTo(j, hpcv1alpha1.PhaseAdmitted)
-		ended(j, 4, "PREEMPTED", nil, "", nil)
+		ended(j, 3+hpcv1alpha1.MaxReruns, "PREEMPTED", nil, "", nil)
 		_, got = reconcileOnce(j)
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRerunLimit))
 	})

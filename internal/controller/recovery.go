@@ -19,7 +19,7 @@ import (
 //	ends NoProgress, and the cap on the step's total time ends it too (D-75). No count of continuations. The
 //	step's own error is never recovered. A job that ran to its limit and saved nothing ends NoSavedProgress.
 //	A continuation that an infrastructure end stops before a new checkpoint starts again from the same one; these
-//	count with the re-runs of tier 1, MaxReruns for the step in all.
+//	count with the re-runs of tier 1, MaxReruns since the step's last saved progress.
 
 // attemptEnd is the verdict on one ended attempt: the job's next phase, and whether another attempt follows.
 type attemptEnd struct {
@@ -77,6 +77,7 @@ func continueFrom(job *hpcv1alpha1.HPCArgoWorkflowJob, run *hpcv1alpha1.RunStatu
 		return v
 	}
 	job.Status.Continuations++
+	job.Status.Reruns = 0 // new saved progress: the interruptions are counted again from here
 	job.Status.Attempt = attempt + 1
 	job.Status.Resume = &hpcv1alpha1.ResumeInfo{CheckpointRef: run.CheckpointRef, FromAttempt: attempt,
 		ProgressValues: cur.Values, Digest: cur.Digest}
@@ -94,7 +95,7 @@ func exitWithoutCheckpoint(v attemptEnd) attemptEnd {
 
 // afterInfrastructureEnd handles a node failure or pre-emption with no new checkpoint: a continuation
 // that had a checkpoint tries the same one again; a step without one is re-run from the start (tier 1). Both
-// count as re-runs, MaxReruns for the step in all.
+// count as re-runs, MaxReruns since the step last saved new progress.
 func afterInfrastructureEnd(job *hpcv1alpha1.HPCArgoWorkflowJob, attempt int32, end resume.End, v attemptEnd) attemptEnd {
 	if job.Status.Reruns >= hpcv1alpha1.MaxReruns {
 		v.phase, v.reason = hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonRerunLimit

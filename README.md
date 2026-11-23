@@ -304,7 +304,7 @@ Controller flags (chart `controllerManager.container.args`, `runnerImage`, `runn
   maintenance or pre-emption, at most twice (`status.reruns`; reasons `RerunNodeFailure`, `RerunPreempted`,
   `RerunLimit`). Never after the step's own error, an out-of-memory kill, a cancel or a wall-time kill. A
   continuation stopped the same way before it saved a new copy starts again from the copy it had and counts with
-  these: two for the step in all, then `RerunLimit`.
+  these: two since the step last saved new progress, then `RerunLimit`.
 - **Tier 2, the checkpoint folder:** every job gets `KAOS_CHECKPOINT_DIR` (`/work/ckpt`, on scratch). The job keeps at
   most two copies of it per step (one tar + one manifest each), copies it periodically and when the wall-time signal
   arrives, and deletes the copies when the step succeeds or after 7 days. A copy whose folder digest equals the newest copy's is skipped (the exit-85 copy right after a wall-time copy). A periodic copy is skipped when it would
