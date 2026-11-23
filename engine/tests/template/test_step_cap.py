@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]  # engine/
 sys.path.insert(0, str(ROOT))
 
 from kubecore import authoring, enhance, meluxina, resilience  # noqa: E402
-from kubecore.meluxina import STAGING_ALLOWANCE_MINUTES, QUEUE_ALLOWANCE_MINUTES  # noqa: E402
+from kubecore.meluxina import STAGING_ALLOWANCE_MINUTES  # noqa: E402
 from helpers import valid  # noqa: E402
 
 BASE = yaml.safe_load((ROOT / "kubecore" / "local-dev" / "pipeline-context.yaml").read_text())
@@ -109,7 +109,7 @@ def test_should_pass_the_cap_as_the_time_limit_of_the_hpc_twin_and_no_resumable_
     wft = _enhanced(_context(stepCapMinutes=90))
     args = _arguments(wft, "one-hpc")
     assert args["time-limit"] == "90"
-    assert args["deadline-seconds"] == str((90 + QUEUE_ALLOWANCE_MINUTES + STAGING_ALLOWANCE_MINUTES) * 60)
+    assert args["deadline-seconds"] == str((2 * 90 + STAGING_ALLOWANCE_MINUTES) * 60) == "270000"
     assert "resumable" not in args and "resumable-lead" not in args
     twin = _template(wft, meluxina.HPC_TWIN_TEMPLATE)
     assert {p["name"] for p in twin["inputs"]["parameters"]}.isdisjoint({"resumable", "resumable-lead"})
@@ -224,3 +224,14 @@ def test_should_not_bound_the_retries_by_time_since_the_first_attempt():
     backoff = resilience.retry_strategy()["backoff"]
     assert "maxDuration" not in backoff
     assert backoff == {"duration": "30s", "factor": "2", "cap": "5m"}
+
+
+def test_should_give_the_hpc_twin_a_deadline_that_is_only_a_backstop_far_beyond_the_cap():
+    """The controller ends the step at the cap. A step of 7 days is many jobs, each of them queued: the twin's own
+    deadline must never cut it first, so it is twice the cap plus the staging allowance, in both kinds of twin."""
+    week = 7 * 24 * 60
+    wft = _enhanced(_context(stepCapMinutes=week))
+    deadline = int(_arguments(wft, "one-hpc")["deadline-seconds"])
+    assert deadline == (2 * week + 72 * 60) * 60
+    assert deadline >= 2 * week * 60, "a queue wait as long as the step's whole run time still fits"
+    assert meluxina.twin_deadline_seconds(90) == 270000

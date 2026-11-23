@@ -50,18 +50,23 @@ from kubecore.step_contract import (
 )
 
 
-# Argo budget on top of the Slurm limit: the twin pod also waits in the
-# MeluXina queue (evening waits run to hours), builds the SIF and stages the
-# dataset in before the job's own clock starts. If the twin's deadline fires
-# first, on_term leaves a RUNNING job to finish unobserved — so the deadline
-# must comfortably exceed queue + prep + time limit.
-QUEUE_ALLOWANCE_MINUTES = 480
 # The longest the HPC runner goes on staging the inputs of a step to the site: 72 hours in total for all inputs of a
 # step (STAGE_MAX_BUDGET_S in the runner, stagingAllowanceMinutes of the runner Job's deadline), counted once: a
 # staging that is making progress is never cut by this deadline. It is added for every HPC twin, with or without
-# inputs, because the inputs are only known at run time; it only matters for a hung follower, since a twin whose
-# job ends is done long before the deadline.
+# inputs, because the inputs are only known at run time.
 STAGING_ALLOWANCE_MINUTES = 72 * 60
+# The Argo deadline of an HPC twin is a backstop only, for a controller that never answers: the controller ends the
+# step at the platform's cap on its total time (D-75), and a twin whose step ended is done long before this. A step
+# is many jobs, each waiting in the site's queue before its own clock starts, so the deadline is this many times the
+# cap, plus the staging allowance. If it fired first, on_term would leave a RUNNING job to finish unobserved.
+BACKSTOP_CAPS = 2
+
+
+def twin_deadline_seconds(cap):
+    """The Argo deadline of the HPC twin of a step whose cap is `cap` minutes (see BACKSTOP_CAPS)."""
+    return (BACKSTOP_CAPS * cap + STAGING_ALLOWANCE_MINUTES) * 60
+
+
 # PRD-HPC-1461 AC-18, D-22: the follower is the only pod that may create an HPCArgoWorkflowJob. It runs
 # as this ServiceAccount (kubecore-operator kubenv renders it in every ml environment namespace and binds
 # it, alone, to the controller's submitter role plus Argo's workflowtaskresults Role); ordinary step pods
@@ -245,7 +250,7 @@ def enhance_matrix_hpc(spec: dict, ctx: dict, steps: list, by_tpl: dict, prefix:
                 {"name": "step-command", "value": json.dumps(command, separators=(",", ":"))},
                 {"name": "step-kind", "value": ((step.get("metadata") or {}).get("labels") or {}).get(STEP_KIND_LABEL, "")},
                 {"name": "time-limit", "value": str(cap)},
-                {"name": "deadline-seconds", "value": str((cap + QUEUE_ALLOWANCE_MINUTES + STAGING_ALLOWANCE_MINUTES) * 60)},
+                {"name": "deadline-seconds", "value": str(twin_deadline_seconds(cap))},
                 {"name": "idle-timeout", "value": step_idle_timeout(step)},
                 {"name": "hpc-class", "value": "{{workflow.parameters.%s-class}}" % name},
                 {"name": "node-suffix", "value": "-{{=item.index}}"},
@@ -327,7 +332,7 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
                 {"name": "step-kind", "value": ((step.get("metadata") or {}).get("labels") or {}).get(STEP_KIND_LABEL, "")},
                 # The platform's cap on the step's total time; the controller sets each job's limit from it.
                 {"name": "time-limit", "value": str(cap)},
-                {"name": "deadline-seconds", "value": str((cap + QUEUE_ALLOWANCE_MINUTES + STAGING_ALLOWANCE_MINUTES) * 60)},
+                {"name": "deadline-seconds", "value": str(twin_deadline_seconds(cap))},
                 {"name": "idle-timeout", "value": step_idle_timeout(step)},
                 {"name": "hpc-class", "value": "{{workflow.parameters.%s-class}}" % step["name"]},
                 {"name": CONTEXT_PARAM, "value": context},
@@ -401,8 +406,7 @@ def enhance_hpc(spec: dict, ctx: dict, steps: list, gpu_step_names: set) -> None
             {"name": "idle-timeout", "value": ""},
             *([{"name": "node-suffix", "value": ""}, {"name": ITEMS_PARAM, "value": ""}] if matrix_routed else []),
             {"name": CONTEXT_PARAM}]},
-        # Per-step: Slurm time limit + queue/prep allowance (see
-        # QUEUE_ALLOWANCE_MINUTES). Argo resolves the parameter here.
+        # Per-step: the backstop of twin_deadline_seconds. Argo resolves the parameter here.
         "activeDeadlineSeconds": "{{inputs.parameters.deadline-seconds}}",
         # A lost follower pod (node preemption, eviction, deletion) is not a
         # step failure: retry it - the job's name is deterministic (workflow UID
