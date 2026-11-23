@@ -20,14 +20,14 @@ import (
 )
 
 // Time of one job (PRD kaos#1911 D-75). The spec's wallTimeMinutes is the platform's cap on the step's total
-// time. A job asks for the most a job can get (the lowest of the class's, the site's and the data access's
-// maximum), unless the step has a learned limit (F-41, D-67): that comes from the run times of the same step's
+// time. A job asks for the most a job can get (the lowest of the class's and the site's maximum),
+// unless the step has a learned limit (F-41, D-67): that comes from the run times of the same step's
 // earlier successful jobs still in the cluster (no store of its own). The jobs of a step together never exceed
 // the cap. The choice is written to status.placement.
 
 // capsOf are the bounds of a job's time limit on a site.
 func capsOf(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite) timelimit.Caps {
-	c := timelimit.Caps{Spec: job.Spec.WallTimeMinutes, Site: site.Spec.Limits.MaxWallTimeMinutes, Token: timelimit.TokenCoverMinutes}
+	c := timelimit.Caps{Spec: job.Spec.WallTimeMinutes, Site: site.Spec.Limits.MaxWallTimeMinutes}
 	if class, ok := admission.ClassOf(site, job.Spec.Class); ok {
 		c.Class = class.MaxWallTimeMinutes
 	}

@@ -241,11 +241,123 @@ def test_the_key_is_placed_once_the_job_is_known_and_renewed_every_25_minutes(ri
     r.keys.expires = clock[0] + 3600
     r.runner.keep_key()
     assert [k["secret_access_key"] for k in r.stager.keys] == [helpers.APP_KEY_SECRET + "1", helpers.APP_KEY_SECRET + "2"]
-    assert set(r.stager.keys[1]) == {"access_key_id", "secret_access_key", "expiration"}
+    assert set(r.stager.keys[1]) == {"access_key_id", "secret_access_key", "expiration", "tracker_token"}
     clock[0] += 26 * 60
     r.keys.expires = clock[0] + 3600
     r.runner.keep_key()
     assert len(r.stager.keys) == 3, "again after another 25 minutes"
+
+
+# PRD kaos#1911 D-76 (AC-54): the tracker's bearer is a file beside the app's key, replaced on the same round.
+
+def _minting(r):
+    """The tracker's token as the runner mints it: a new one on every call (a JWT-shaped made-up string)."""
+    calls = []
+    r.runner._mint = lambda: calls.append(1) or "tracker-token-%d.made.up" % len(calls)
+    return calls
+
+
+def test_the_tracker_token_is_placed_with_the_key_and_replaced_on_every_round(rig):
+    r = rig.make(FakeSlurm({}))
+    r.keys.expires = 5000.0 + 3600
+    clock = [5000.0]
+    r.runner.clock = lambda: clock[0]
+    minted = _minting(r)
+    r.runner.prepare_handback()
+    r.runner.jid = "5001"
+    r.runner.keep_key()
+    clock[0] += 26 * 60
+    r.keys.expires = clock[0] + 3600
+    r.runner.keep_key()
+    clock[0] += 26 * 60
+    r.keys.expires = clock[0] + 3600
+    r.runner.keep_key()
+    placed = [k["tracker_token"] for k in r.stager.keys]
+    assert len(placed) == 3 and len(set(placed)) == 3, "a new token on every round, minted the way the first one is"
+    assert len(minted) >= 3
+
+
+def test_a_new_site_job_reuses_the_token_minted_a_moment_ago_when_it_lives_long_enough(rig, monkeypatch):
+    r = rig.make(FakeSlurm({}))
+    r.runner.clock = lambda: 5000.0
+    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 5000.0 + 12 * 3600)
+    minted = _minting(r)
+    r.runner.prepare_handback()
+    r.runner.jid = "5001"
+    r.runner.keep_key()
+    assert len(minted) == 1 and r.stager.keys[0]["tracker_token"] == "tracker-token-1.made.up"
+
+
+def test_a_job_without_a_tracker_gets_no_token_file(rig):
+    r = rig.make(FakeSlurm({}), MLFLOW_EXTERNAL_URL="")
+    minted = _minting(r)
+    r.runner.prepare_handback()
+    before = len(minted)
+    r.runner.jid = "5001"
+    r.runner.keep_key()
+    assert "tracker_token" not in r.stager.keys[0] and len(minted) == before, "no token minted or placed for a job without a tracker"
+
+
+def test_a_token_that_cannot_be_minted_fails_the_round_which_is_asked_again_and_never_stops_the_job(rig, capsys):
+    r = rig.make(FakeSlurm({}))
+    r.runner.prepare_handback()
+    r.runner.jid = "5001"
+    r.runner._mint = lambda: ""
+    r.runner.keep_key()
+    assert getattr(r.stager, "keys", []) == [] and r.runner.key_for is None, "nothing placed, asked again at the next poll"
+    assert "could not be renewed on the site" in r.kube.run["message"]
+    assert "not placed for site job 5001" in capsys.readouterr().out
+    r.runner._mint = lambda: "tracker-token-9.made.up"
+    r.runner.keep_key()
+    assert r.runner.key_for == "5001" and not r.kube.run.get("message")
+
+
+def test_the_token_that_was_replaced_is_still_a_held_secret_and_no_log_line_shows_one(rig, capsys):
+    r = rig.make(FakeSlurm({}))
+    r.keys.expires = 5000.0 + 3600
+    clock = [5000.0]
+    r.runner.clock = lambda: clock[0]
+    r.runner.prepare_handback()
+    r.runner.jid = "5001"
+    r.runner._mint = lambda: "tracker-token-AAAA.made.up"
+    r.runner.keep_key()
+    clock[0] += 26 * 60
+    r.keys.expires = clock[0] + 3600
+    r.runner._mint = lambda: "tracker-token-BBBB.made.up"
+    r.runner.keep_key()
+    held = r.runner.held_secrets()
+    assert "tracker-token-AAAA.made.up" in held and "tracker-token-BBBB.made.up" in held
+    out = capsys.readouterr().out
+    assert "tracker-token-" not in out and "made.up" not in out, "the refresh path never prints a token"
+    assert all("tracker-token-" not in str(v) for v in r.kube.run.values()), "nor reports one"
+
+
+def test_the_job_script_says_where_the_token_file_is_and_never_holds_a_later_token(rig):
+    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
+    r = rig.make(slurm)
+    _minting(r)
+    r.runner._mint = lambda: "tracker-token-FIRST.made.up"
+    assert r.runner.run() == 0
+    script = slurm.submitted[0]["script"]
+    assert "APPTAINERENV_MLFLOW_TRACKING_TOKEN_FILE=/kaos/key/tracker-token" in script
+    assert "-B $KAOS_KEY_DIR:/kaos/key:ro" in script, "the folder the file is in is bound read-only"
+    assert "$KAOS_KEY_DIR" in script and 'rm -rf "$KAOS_KEY_DIR"' in script, "removed with the key on every way out"
+    assert "MLFLOW_TRACKING_TOKEN=tracker-token-FIRST.made.up" in slurm.submitted[0]["job"]["environment"], \
+        "the first value is still handed over, as before"
+    assert "tracker-token-FIRST" not in script, "and is not in the script text"
+    refreshed = "tracker-token-LATER.made.up"
+    r.runner._mint = lambda: refreshed
+    r.runner.key_for = None
+    r.runner.keep_key()
+    assert refreshed not in script and refreshed not in str(slurm.submitted[0]["job"]), \
+        "a refreshed token is in no script, comment or argument"
+
+
+def test_the_script_waits_for_the_token_file_too_and_checks_it_is_the_job_users_own():
+    text = "\n".join(jobscript.batch_lines("-", "/scr"))
+    assert "KAOS_TRACKER_FILE=$KAOS_KEY_DIR/tracker-token" in text
+    assert '[ -O "$KAOS_TRACKER_FILE" ]' in text and "the token file is not the job user" in text
+    assert text.index("KAOS_TRACKER_FILE") < text.index("KAOS_KEY_WAIT=0") < text.index('BIND=""; KAOS_IN_ROOT')
 
 
 def test_a_job_that_waits_in_the_queue_gets_a_fresh_key_for_its_new_site_job(rig):

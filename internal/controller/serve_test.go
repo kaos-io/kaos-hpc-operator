@@ -885,11 +885,11 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		r.Recorder = rec
 		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.WallTimeMinutes = 10080 })
 		reconcileOnce(j)
-		timeout(j, 1, 690)
+		timeout(j, 1, 2880)
 		_, got := reconcileOnce(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonNoSavedProgress))
-		Expect(got.Status.Message).To(ContainSubstring("it ran 690 min on"))
+		Expect(got.Status.Message).To(ContainSubstring("it ran 2 days on"))
 		Expect(got.Status.Message).To(ContainSubstring("without saving progress. A step that saves progress through the library is continued instead."))
 		Expect(<-rec.Events).To(HavePrefix("Warning NoSavedProgress "))
 	})

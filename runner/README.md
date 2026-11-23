@@ -20,7 +20,7 @@ Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /ru
 | `identity.py` | the app's own identity in the data store: a token of the app's workflow service account (TokenRequest) exchanged for an access key (the app name must be a DNS-1123 label before it reaches the request path); the key of a shared dataset's owner |
 | `staging.py` | `Stager` (ssh to the forced-command stager), dataset staging (every object of the pinned commit, whatever the dataset's shape; `CONTRACT` is the staging contract the runner checks against the staging tool's `version` and sends with every `status` and `stage`; `name_rule` and `Names` refuse, before anything is staged or submitted, the object names that cannot be copied), `staging_record` (one bounded record of `status.run.staged` per input: kind first/delta/cached, files, bytes, seconds; the follower prints one line from each) |
 | `image.py` | registry client, docker-archive streaming, `image_key` (tar name = SIF name = `kaos-image=` lease, always in the job comment), `cleanup_images` (asks the stager's `gc` when an attempt is over; AC-65) |
-| `jobscript.py` | the batch script (+ KAOS_METRIC sampler, tar deletion after SIF build); private files and folders (umask 077), the step's `--cleanenv` allow-list, the registry token only to an Artifact Registry host and unset after the pull, the redacted failure tail, the host's script copy removed on every exit, a sweep of what a killed job left (`kaos_sweep`), the context and bearers handed to the container as files, never through Apptainer's evaluation: `docs/job-environment.md` |
+| `jobscript.py` | the batch script (+ KAOS_METRIC sampler, tar deletion after SIF build); private files and folders (umask 077), the step's `--cleanenv` allow-list, the registry token only to an Artifact Registry host and unset after the pull, the redacted failure tail, the host's script copy removed on every exit, a sweep of what a killed job left (`kaos_sweep`), the context and the first bearer handed to the container as files, the later tracker bearers as the file `tracker-token` beside the app's key, never through Apptainer's evaluation: `docs/job-environment.md` |
 | `redact.py` | the one credential redaction, run on the node for the failure tail (shipped as `REDACT_B64`, Python 3.6) and by `logs.py` for the live log stream; it holds the app's key and the key before it, and reads the key file again when it changes |
 | `payload/` | on-node programs: stagein/handback/ckpt/slots/idlewatch (`payloads.py` loads them). Stage-in keeps a copy as `<copy>/data/` (the dataset's files) with `.kaos-complete` (it holds the word `data`) and `.kaos-parts/` beside it; it believes a cache hit only if the marker names that layout and is still in the folder after it looked for the cleanup's lock; a copy of an older layout (files directly in the folder) is moved aside whole, under the cleanup's lock, and made again |
 | `result.py` | the step's result on its way back: the check (`version` 1, `status` `ok`, `values`, `reads`, `writes`, 8 KiB by cost) and the wire form it is written in |
@@ -125,7 +125,9 @@ hand-back) and the job's stage-in and hand-back use that pair (HTTP Basic); the 
 staging tool's `key` verb (folder `$SCR/kaos-tmp/key-<job>` 0700, file 0600, replaced atomically) right after submit and
 then every 25 minutes while the job is queued or running; a refresh that fails is logged, written into `status.run.message`
 and asked again at every poll, and never stops the job. The file is never in the job script, the Slurm environment or the
-job log. The job waits up to 10 minutes for the first file and ends 247 without it. A dataset another project shares is
+job log. The same call places the tracker's bearer (`tracker_token` in the record, staging contract 5) as the file `tracker-token`
+in the same folder, minted anew on every round the way the first was; the step finds it by `MLFLOW_TRACKING_TOKEN_FILE`
+(`/kaos/key/tracker-token`). That is why no credential bounds a job's time. The job waits up to 10 minutes for the first files and ends 247 without them. A dataset another project shares is
 staged with the key the app's own data store hands out for the owner (`/kaos/v1/shared-credentials`), over https only.
 
 ## The site job's name, adopt, and a site that does not answer
@@ -176,7 +178,7 @@ the job's signal cannot serve them: the job does not ask for it (`runner.py`), a
 per step. A step's lead comes from `KAOS_RESUMABLE_LEAD_MIN` (its script, or the host's environment for its own step);
 USR1 goes to the step's own shell (its pid, written by the launcher) at `signal_at()` = `min(start + limit, host job
 end) - lead`, and the shell does what it does for a step alone (`kaos_stop`: copy now, USR1 only to processes that
-handle it). `srun --signal` is not used: see `docs/extreme-cases.md` 4.14. Admission is `fits()`.
+handle it). `srun --signal` is not used: see `docs/extreme-cases.md` 4.14. Admission is `fits()` (the host's end and the margin; no credential bounds a guest).
 
 ## Live lessons
 

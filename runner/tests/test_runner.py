@@ -652,71 +652,38 @@ def test_the_dataset_staging_record_is_reported_from_the_first_report_on(rig):
         "the job is told where the resident copy of each input is"
 
 
-def test_a_queued_job_is_replaced_before_its_wallet_expires(rig, monkeypatch):
-    slurm = FakeSlurm({"5001": [acc("PENDING")], "5002": [acc("COMPLETED")]})
-    rig.make(slurm)
-    exp = [1000.0]
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: exp[0])
-    monkeypatch.setattr(runmod.time, "time", lambda: 1000.0 - 600)        # 10 min before: inside the margin
+def test_a_long_wait_in_the_queue_never_replaces_a_job_for_its_token(rig, monkeypatch):
+    """D-76: the tracker's token is a file replaced while the job waits, so no wait however long replaces the job."""
+    slurm = FakeSlurm({"5001": [acc("PENDING")] * 5 + [acc("COMPLETED")]})
+    rig.make(slurm, SLURM_TIME_LIMIT="2880")
+    clock = [100.0]
+    monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
+    rig.runner.sleep = lambda s: clock.__setitem__(0, clock[0] + 6 * 3600)     # every poll takes six hours
     rig.runner.run()
-    assert slurm.cancelled == ["5001"] and len(slurm.submitted) == 2 and rig.kube.run["siteJobID"] == "5002"
-
-
-def test_a_queued_job_is_replaced_as_soon_as_its_wallet_cannot_cover_the_step(rig, monkeypatch):
-    """PRD kaos#1911 F-40: a job that starts with less wallet than its time limit loses access to its data and
-    to tracking partway through. A queued job is replaced while a fresh wallet can still cover the whole limit."""
-    slurm = FakeSlurm({"5001": [acc("PENDING")], "5002": [acc("COMPLETED")]})
-    rig.make(slurm, SLURM_TIME_LIMIT="240")
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 1000.0)
-    monkeypatch.setattr(runmod.time, "time", lambda: 1000.0 - 4 * 3600 - 200)      # 4 h 3 min 20 s left: less than limit + slack
-    rig.runner.run()
-    assert slurm.cancelled == ["5001"] and rig.kube.run["siteJobID"] == "5002"
-
-
-def test_a_queued_job_whose_wallet_covers_the_step_is_left_in_the_queue(rig, monkeypatch):
-    slurm = FakeSlurm({"5001": [acc("PENDING"), acc("COMPLETED")]})
-    rig.make(slurm, SLURM_TIME_LIMIT="240")
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 1000.0)
-    monkeypatch.setattr(runmod.time, "time", lambda: 1000.0 - 4 * 3600 - 400)      # more than limit + slack left
-    rig.runner.run()
-    assert slurm.cancelled == [] and len(slurm.submitted) == 1
-
-
-def test_the_longest_step_the_controller_allows_is_replaced_only_after_a_short_wait(rig, monkeypatch):
-    """The controller allows a step of life - 30 min (690 min); a wallet of 12 h leaves it a 30 min queue window, less
-    the slack, before it is replaced - never at once."""
-    slurm = FakeSlurm({"5001": [acc("PENDING"), acc("COMPLETED")]})
-    rig.make(slurm, SLURM_TIME_LIMIT="690")
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 1000.0 + 12 * 3600)
-    monkeypatch.setattr(runmod.time, "time", lambda: 1000.0 + 60)                  # a minute after the wallet was minted
-    rig.runner.run()
-    assert slurm.cancelled == [] and len(slurm.submitted) == 1
+    assert slurm.cancelled == [] and len(slurm.submitted) == 1 and not rig.kube.run.get("queueReplaced")
 
 
 def test_the_replacement_of_a_queued_job_is_reported_with_both_ids_and_the_queued_seconds(rig, monkeypatch):
-    """AC-35: the queue place lost to a token refresh is recorded in status.run, not only in the log."""
-    slurm = FakeSlurm({"5001": [acc("PENDING")], "5002": [acc("COMPLETED")]})
-    rig.make(slurm)
+    """AC-35: the queue place lost to a replacement is recorded in status.run, not only in the log."""
+    taken = acc("PENDING", comment="kaos-commit=c0ffee12 kaos-state=taken host=4000 slot=1 attempt=1")
+    slurm = FakeSlurm({"5001": [taken], "5002": [acc("COMPLETED")]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
     clock = [100.0]
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 100.0 + 8 * 3600)
     monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
-    rig.runner.cfg.time_limit = 240
-    rig.runner.sleep = lambda s: clock.__setitem__(0, clock[0] + 3600)   # every poll of the queued job takes an hour
+    monkeypatch.setattr(runmod, "host_gone", lambda slurm, host: True)
+    rig.runner.sleep = lambda s: clock.__setitem__(0, clock[0] + 3600)
     rig.runner.run()
     assert slurm.cancelled == ["5001"] and rig.kube.run["siteJobID"] == "5002"
     (rec,) = rig.kube.run["queueReplaced"]
-    assert (rec["oldSiteJobID"], rec["newSiteJobID"], rec["reason"]) == ("5001", "5002", "TokenRefresh")
-    assert 3 * 3600 <= rec["queuedSeconds"] <= 4 * 3600 and rec["at"].endswith("Z")
-    assert rig.kube.run["queueReplacedCount"] == 1
+    assert (rec["oldSiteJobID"], rec["newSiteJobID"], rec["reason"]) == ("5001", "5002", "HostLost")
+    assert rec["at"].endswith("Z") and rig.kube.run["queueReplacedCount"] == 1
 
 
-def test_a_job_a_host_took_is_never_replaced_for_its_wallet(rig, monkeypatch):
+def test_a_job_a_host_took_is_never_replaced_while_the_host_lives(rig, monkeypatch):
     taken = acc("PENDING", comment="kaos-commit=c0ffee12 kaos-state=taken host=4000 slot=1 attempt=1")
     done = acc("RUNNING", comment="kaos-state=done rc=0 host=4000")
     slurm = FakeSlurm({"5001": [taken, done], "4000": [acc("RUNNING")]})
     rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 1000.0)
-    monkeypatch.setattr(runmod.time, "time", lambda: 5000.0)               # long past the wallet
     rig.runner.run()
     assert slurm.cancelled == [] and len(slurm.submitted) == 1
     assert rig.kube.run["state"] == "COMPLETED" and rig.kube.run["exitCode"] == 0 and rig.kube.run["terminal"]
@@ -1634,49 +1601,6 @@ def test_a_dataset_the_site_could_not_stage_and_the_job_must_not_download_ends_t
     assert run["state"] == "FAILED" and run["exitCode"] == 246 and run["terminal"] is True
     assert "2.5 TB" in run["message"] and not run.get("siteJobID")
     assert "DatasetNotStaged" in capsys.readouterr().out
-
-
-def _jwt_ending(exp):
-    import base64
-    seg = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).rstrip(b"=").decode()
-    return "h.%s.s" % seg
-
-
-def _long_staging(rig, monkeypatch, token_left_after):
-    """A job whose staging took two hours; the token minted before it has token_left_after seconds left then, and
-    the next mint fails."""
-    clock = [1_000_000.0]
-    monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
-    old = _jwt_ending(clock[0] + 2 * 3600 + token_left_after)
-    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    rig.make(slurm)
-    mints = []
-
-    def mint():
-        mints.append(1)
-        return old if len(mints) == 1 else ""
-    rig.runner._mint = mint
-    rig.monkeypatch.setattr(runmod.staging, "stage_dataset",
-                            lambda *a, **kw: clock.__setitem__(0, clock[0] + 2 * 3600) or "/scr/ds")
-    return slurm, old
-
-
-def test_a_token_about_to_end_after_a_long_staging_that_cannot_be_minted_again_fails_the_attempt(rig, monkeypatch, capsys):
-    slurm, _ = _long_staging(rig, monkeypatch, token_left_after=600)
-    with pytest.raises(SystemExit) as e:
-        rig.runner.run()
-    assert e.value.code == 0
-    assert slurm.submitted == []
-    run = rig.kube.run
-    assert run["state"] == "FAILED" and run["exitCode"] == 243 and run["terminal"] is True
-    assert "no tracking token could be minted for this job" in run["message"]
-    assert "ResultNotHandedBack" in capsys.readouterr().out
-
-
-def test_the_old_token_with_enough_life_left_after_a_long_staging_is_kept_when_it_cannot_be_minted_again(rig, monkeypatch):
-    slurm, old = _long_staging(rig, monkeypatch, token_left_after=3 * 3600)
-    rig.runner.run()
-    assert len(slurm.submitted) == 1 and rig.runner.wallet == old
 
 
 def test_every_input_of_a_job_is_staged_against_one_72_hour_clock_started_at_the_first(rig, monkeypatch):

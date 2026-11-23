@@ -179,22 +179,16 @@ func TestAppOfIsTheLastSegmentOfTheImageRepository(t *testing.T) {
 	}
 }
 
-func TestTokenCoverIsTheLifeLessTheMargin(t *testing.T) {
-	if TokenLifeMinutes != 720 || TokenCoverMinutes != 690 {
-		t.Fatalf("life %d, cover %d", TokenLifeMinutes, TokenCoverMinutes)
-	}
-}
-
 func TestAJobAsksForTheMostAJobCanGetAndNeverMoreThanTheCap(t *testing.T) {
 	cases := []struct {
 		name string
 		c    Caps
 		want int32
 	}{
-		{"should_take_the_token_cover_when_it_is_the_lowest", Caps{Spec: 10080, Class: 2880, Site: 1440, Token: TokenCoverMinutes}, TokenCoverMinutes},
-		{"should_take_the_lane_when_it_is_below_the_token_cover", Caps{Spec: 10080, Class: 300, Token: TokenCoverMinutes}, 300},
-		{"should_take_the_site_maximum", Caps{Spec: 10080, Class: 2880, Site: 400, Token: TokenCoverMinutes}, 400},
-		{"should_never_exceed_the_cap", Caps{Spec: 60, Class: 2880, Token: TokenCoverMinutes}, 60},
+		{"should_take_the_class_maximum_when_it_is_the_lowest", Caps{Spec: 10080, Class: 2880, Site: 4320}, 2880},
+		{"should_take_the_lane_when_it_is_below_the_site_maximum", Caps{Spec: 10080, Class: 300, Site: 1440}, 300},
+		{"should_take_the_site_maximum", Caps{Spec: 10080, Class: 2880, Site: 400}, 400},
+		{"should_never_exceed_the_cap", Caps{Spec: 60, Class: 2880}, 60},
 		{"should_take_the_cap_when_no_maximum_is_known", Caps{Spec: 10080}, 10080},
 	}
 	for _, c := range cases {
@@ -210,14 +204,14 @@ func TestAJobAsksForTheMostAJobCanGetAndNeverMoreThanTheCap(t *testing.T) {
 }
 
 func TestALearnedLimitIsKeptBelowTheJobLimit(t *testing.T) {
-	got, src := Learn(mins(20, 20, 20), Caps{Spec: 10080, Class: 2880, Token: TokenCoverMinutes})
+	got, src := Learn(mins(20, 20, 20), Caps{Spec: 10080, Class: 2880})
 	if got != 30 || src != hpcv1alpha1.PlacementLearned {
 		t.Fatalf("got %d (%s), want a learned 30", got, src)
 	}
 }
 
 func TestSegment(t *testing.T) {
-	const job = TokenCoverMinutes
+	const job = 690
 	cases := []struct {
 		name                string
 		total, perJob, used int32

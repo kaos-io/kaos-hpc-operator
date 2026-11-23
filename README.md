@@ -322,10 +322,9 @@ Controller flags (chart `controllerManager.container.args`, `runnerImage`, `runn
   alone and continued from its checkpoint, settled 0 (its host's booking covers the node); the continuation may host,
   guest or run alone. A resumable host's end is reported when its Slurm job ends, so the node time it held is settled to
   that end, and its job is not padded to twice its step. Details and tests: `docs/extreme-cases.md` 4.13-4.18.
-- **The time of a job and the cap (D-75):** one job asks for the most a job can get: the lowest of the class's maximum, the site's maximum and
-  11.5 hours (how long one run keeps its access to its data and tracking, `timelimit.TokenCoverMinutes`), or its learned limit
+- **The time of a job and the cap (D-75):** one job asks for the most a job can get: the lowest of the class's maximum and the site's maximum (no credential bounds a job: the job's keys are files the runner replaces while it queues and runs), or its learned limit
   (three earlier runs, at most 2 hours). `spec.wallTimeMinutes` is the cap on the step's total time over all its jobs; a job gets at most what the
-  earlier jobs left of it (`status.placement.timeLimitMinutes`, one job booked at a time, each submitted with fresh access); when none is left
+  earlier jobs left of it (`status.placement.timeLimitMinutes`, one job booked at a time, each submitted with fresh keys); when none is left
   the step ends `WallTimeReached`. Nothing is refused for its time; the follower prints "..., at most N min over all its jobs".
   Every job that is not a shared node's host is warned `HPC_RESUMABLE_LEAD` (10 minutes) before its limit; the job script passes the signal only to
   processes that catch it. A step with verified progress is also submitted with a minimum time (`HPC_TIME_MIN_MINUTES`, Slurm `--time-min`, REST field

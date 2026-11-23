@@ -20,7 +20,7 @@ import (
 // A step whose cap on its total time is above what one job can get (PRD kaos#1911 D-75): nothing is refused for
 // its time; its first job gets the most a job can get and the cap bounds the jobs together.
 var _ = Describe("a step with a cap above what one job can get", func() {
-	const laneMax = int32(600) // shorter than what a run's data access covers, so the lane is what binds
+	const laneMax = int32(600) // shorter than the cap, so the lane is what binds
 	var (
 		r      *HPCArgoWorkflowJobReconciler
 		envNS  string
@@ -95,8 +95,8 @@ var _ = Describe("a step with a cap above what one job can get", func() {
 		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(90)))
 	})
 
-	// A run's access to its data and to tracking ends before most lanes do (PRD kaos#1911 F-40, issue 2212).
-	Context("on a site whose lane is longer than a run's data access", func() {
+	// No credential bounds a job (D-76): on a site whose lane is long, the first job gets the whole cap.
+	Context("on a site whose lane is longer than the cap", func() {
 		BeforeEach(func() {
 			site := &hpcv1alpha1.HPCSite{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: hpcNS, Name: "meluxina"}, site)).To(Succeed())
@@ -104,20 +104,14 @@ var _ = Describe("a step with a cap above what one job can get", func() {
 			Expect(k8sClient.Update(ctx, site)).To(Succeed())
 		})
 
-		It("admits a step of 12 hours or 20 hours with a first job that ends inside the access", func() {
+		It("admits a step of 12 hours or 20 hours with a first job of the whole cap", func() {
 			for _, wall := range []int32{12 * 60, 20 * 60} {
 				got := submit(wall, nil)
 				Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted), got.Status.Message)
-				Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(690)))
-				Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(690)))
-				Expect(runnerEnv(got)).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "690"))
+				Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(wall))
+				Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(wall)))
+				Expect(runnerEnv(got)).To(HaveKeyWithValue("SLURM_TIME_LIMIT", fmt.Sprint(wall)))
 			}
-		})
-
-		It("admits a step exactly as long as the access", func() {
-			got := submit(690, nil)
-			Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted), got.Status.Message)
-			Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(690)))
 		})
 	})
 })

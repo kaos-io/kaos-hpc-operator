@@ -447,14 +447,13 @@ type QueueReplacement struct {
 	// QueuedSeconds is how long the old job had been queued.
 	// +kubebuilder:validation:Minimum=0
 	QueuedSeconds int64 `json:"queuedSeconds"`
-	// Reason: TokenRefresh (the job's wallet or token would expire before it started: the replacement
-	// carries fresh credentials), HostLost (the host a guest waited for is gone), Replanned (the
-	// controller planned a waiting guest as a host).
+	// Reason: HostLost (the host a guest waited for is gone), Replanned (the controller planned a
+	// waiting guest as a host).
 	Reason QueueReplacementReason `json:"reason"`
 }
 
 // QueueReplacementReason says why a queued site job was replaced.
-// +kubebuilder:validation:Enum=TokenRefresh;HostLost;Replanned
+// +kubebuilder:validation:Enum=HostLost;Replanned
 type QueueReplacementReason string
 
 // RunStatus is written by the submitter (in phase 0 the in-pod runner, D-34): what the site says

@@ -105,13 +105,13 @@ account limit has its own reason (`SiteLimit`, above).
 
 ## Queue place lost (not a reason: `status.run.queueReplaced`)
 
-A queued site job whose token would expire before it starts is replaced by a fresh one with fresh credentials; its
-place in the site's queue is lost, so the runner records each replacement (PRD-HPC-1461 AC-35). It is not a
+A queued site job is replaced by a new one only when its host is gone (a guest) or the controller planned a waiting guest as a host; its
+place in the site's queue is lost, so the runner records each replacement (PRD-HPC-1461 AC-35). A queued job is never replaced for a credential: its keys are files the runner replaces while it waits. It is not a
 `status.reason`: the job stays `Admitted` (or `Running`) and starts as soon as the new job is scheduled.
 
 | Field | Meaning |
 |---|---|
-| `status.run.queueReplaced` | The newest 5 replacements of this attempt, oldest first: `at`, `oldSiteJobID`, `newSiteJobID`, `queuedSeconds` (how long the old job had queued) and `reason` (`TokenRefresh`; also `HostLost` for a guest whose host is gone and `Replanned` for a guest planned as a host). |
+| `status.run.queueReplaced` | The newest 5 replacements of this attempt, oldest first: `at`, `oldSiteJobID`, `newSiteJobID`, `queuedSeconds` (how long the old job had queued) and `reason` (`HostLost` for a guest whose host is gone, `Replanned` for a guest planned as a host). |
 | `status.run.queueReplacedCount` | All replacements of this attempt, also the ones no longer listed. |
 | `status.attempts[].queueReplaced`, `.queueReplacedCount` | The same, copied when the attempt is settled. |
 | `HPCSite.status.recentJobs[].queueReplacedCount` | The total over the job's attempts, for the console to say "queue place lost N times (token refresh)". A count only, so the list stays bounded. |

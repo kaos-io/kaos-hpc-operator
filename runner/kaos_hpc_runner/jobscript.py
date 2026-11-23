@@ -19,10 +19,11 @@ mode separates two of them from each other (see docs/job-environment.md).
 from .settings import CONTEXT_ENV
 
 # What the step container receives, and nothing else (Apptainer --cleanenv; see "How a value reaches the step").
-#  - the step context, the data store's endpoint, the MLflow endpoint and bearer: kaos-lib reads the tracker's bearer from
-#    the ENVIRONMENT only (mlflow.py MLFLOW_TRACKING_TOKEN), so that one credential is in the container's environment and
-#    nowhere else. The data store has NO credential in the environment: the app's own key is a FILE (KEY_MOUNT), set by
-#    the script itself as APPTAINERENV_LAKEFS_KEY_FILE, which the platform replaces before the key ends;
+#  - the step context, the data store's endpoint, the MLflow endpoint and its first bearer (MLFLOW_TRACKING_TOKEN, for a
+#    step whose library does not read the file below, for the token's first life). The data store has NO credential in the
+#    environment: the app's own key is a FILE (KEY_MOUNT), set by the script itself as APPTAINERENV_LAKEFS_KEY_FILE, which
+#    the platform replaces before the key ends. The tracker's bearer is a FILE too, beside it (TRACKER_FILE_NAME, set as
+#    APPTAINERENV_MLFLOW_TRACKING_TOKEN_FILE), replaced on the same round, so a job is not bounded by the token's life;
 #  - KAOS_LIB_SUPPORT (the one variable a job's spec.env may hand over);
 #  - the GPU selection and the slot's share of the node (kaos_lib.runtime reads KUBECORE_SLOT_*);
 #  - SLURM_JOB_ID, SLURM_STEP_ID, KAOS_STEP_GPUS: the slot manager finds a step's processes (memory use, GPU
@@ -61,6 +62,8 @@ ENV_MOUNT = '/kaos/env'
 # read-only; the step finds the file by LAKEFS_KEY_FILE.
 KEY_MOUNT = '/kaos/key'
 KEY_FILE_NAME = 'lakefs-key.json'
+# The tracker's bearer: a file of the same folder (the bearer only), placed by the same verb and replaced on the same round.
+TRACKER_FILE_NAME = 'tracker-token'
 # POSIX sh, run by the image's /bin/sh. `$(cat f; printf x)` keeps trailing newlines, which `$(cat f)` would drop.
 LOADER = ('for f in ' + ENV_MOUNT + '/*; do [ -f "$f" ] || continue; v=$(cat "$f"; printf x); export "${f##*/}=${v%x}"; done;'
           ' unset f v;')
@@ -278,6 +281,7 @@ def batch_lines(scope, scratch):
         # ends). The job never starts a step, a stage-in or a hand-back without it, and a job whose key never came ends 247
         # saying so. The file is in the job's own folder and is never copied into this script, its environment or its log.
         'KAOS_KEY_DIR=$SCR/kaos-tmp/key-$KAOS_JOB_ID; export LAKEFS_KEY_FILE=$KAOS_KEY_DIR/' + KEY_FILE_NAME,
+        'KAOS_TRACKER_FILE=$KAOS_KEY_DIR/' + TRACKER_FILE_NAME,
         # Before the key is waited for and before every read of it (and before it is bound into the step): the folder and the
         # file, when they exist, must be the job user's own and not links, and the folder must have no group or other bits.
         # What is not so ends the job 247 with one line; nothing is read.
@@ -287,8 +291,11 @@ def batch_lines(scope, scratch):
         ' bad="the key folder is not the job user\'s own private folder (or is a link)"; fi',
         '  if [ -z "$bad" ] && { [ -e "$LAKEFS_KEY_FILE" ] || [ -L "$LAKEFS_KEY_FILE" ]; }; then',
         '    { [ -O "$LAKEFS_KEY_FILE" ] && [ ! -L "$LAKEFS_KEY_FILE" ]; } || bad="the key file is not the job user\'s own (or is a link)"; fi',
+        '  if [ -z "$bad" ] && { [ -e "$KAOS_TRACKER_FILE" ] || [ -L "$KAOS_TRACKER_FILE" ]; }; then',
+        '    { [ -O "$KAOS_TRACKER_FILE" ] && [ ! -L "$KAOS_TRACKER_FILE" ]; } || bad="the token file is not the job user\'s own (or is a link)"; fi',
         '  [ -z "$bad" ] || { echo "AppIdentityUnavailable: $bad: the app\'s key is not read"; fail 247; }; }',
-        'KAOS_KEY_WAIT=0; until kaos_key_check; [ -s "$LAKEFS_KEY_FILE" ]; do',
+        # The token file is placed by the same call as the key; a job with a tracker does not start without both.
+        'KAOS_KEY_WAIT=0; until kaos_key_check; [ -s "$LAKEFS_KEY_FILE" ] && { [ -z "$MLFLOW_TRACKING_URI" ] || [ -s "$KAOS_TRACKER_FILE" ]; }; do',
         '  if [ $KAOS_KEY_WAIT -ge ${KAOS_KEY_WAIT_S:-600} ]; then',
         '    echo "the app\'s data store key was not placed on the site within ${KAOS_KEY_WAIT_S:-600} s: the job cannot read or '
         'write the app\'s data. Run the step again"; fail 247; fi',
@@ -522,6 +529,7 @@ def batch_lines(scope, scratch):
         ' SLURM_GPUS_ON_NODE=$(echo "$KAOS_STEP_GPUS" | tr "," "\\n" | grep -c .);',
         '  fi;',
         '  export APPTAINERENV_LAKEFS_KEY_FILE=' + KEY_MOUNT + '/' + KEY_FILE_NAME + ';',
+        '  [ -z "$MLFLOW_TRACKING_URI" ] || export APPTAINERENV_MLFLOW_TRACKING_TOKEN_FILE=' + KEY_MOUNT + '/' + TRACKER_FILE_NAME + ';',
         '  for KAOS_V in $KAOS_STEP_ENV; do [ -n "${!KAOS_V+x}" ] || continue; KAOS_A=APPTAINERENV_$KAOS_V;',
         '    [ -z "${!KAOS_A+x}" ] || continue;',
         '    case " $KAOS_FILE_ENV " in *" $KAOS_V "*) KAOS_F=1;; *) case "${!KAOS_V}" in *[!' + PLAIN_CHARS + ']*) KAOS_F=1;;'

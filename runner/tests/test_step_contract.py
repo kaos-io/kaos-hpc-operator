@@ -321,6 +321,9 @@ class Site:
     def place_key(self, jid):
         """What the staging tool's `key` verb does on the site: the app's key in the job's own folder, 0700 / 0600."""
         helpers.write_key_file(self.scratch / "kaos-tmp" / ("key-" + jid), self.runner.key)
+        tok = self.scratch / "kaos-tmp" / ("key-" + jid) / "tracker-token"        # the tracker's bearer, beside the key
+        tok.write_text("tracker-bearer-made-up")
+        tok.chmod(0o600)
         self.lakefs.auth = self.runner.key.auth()          # the data store knows the pair the runner obtained
 
     def run(self, jid="5001", result_text=None):

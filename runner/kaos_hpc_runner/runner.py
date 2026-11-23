@@ -40,8 +40,8 @@ from .settings import (APP_IDENTITY_UNAVAILABLE_EXIT, CHECKPOINT_EXIT, CONTEXT_E
                        registry_token_host)
 
 POLL_S = 30
-# The app's key for the data store lives about an hour and a job runs up to 12 h: the runner puts a new key into the job's
-# key file on the site every KEY_REFRESH_S while the job is queued or running (a failed refresh is asked again at every
+# The app's key for the data store lives about an hour, the tracker's token 12 h, and a job runs for days: the runner puts a
+# new key and a new token into the job's files on the site every KEY_REFRESH_S while the job is queued or running (a failed refresh is asked again at every
 # poll). The old key is still good for about half an hour then, so one failed round never ends a job.
 KEY_REFRESH_S = 25 * 60
 KEY_SLACK_S = 300          # a key that ends sooner than this is not used for a call of the runner's own
@@ -62,7 +62,7 @@ HOST_END_MARGIN_S = 10 * 60
 # observation older than STALE_INTERVALS of its own intervals (the controller is down), or none at all for
 # STALE_GRACE_S, makes the runner poll the site itself, but only every STALE_POLL_S, so jobs never stall.
 STALE_INTERVALS = 3
-WAITING_ONLY = ('TokenRefresh', 'Replanned')   # replacements that are right only for a job nobody runs yet
+WAITING_ONLY = ('Replanned',)   # replacements that are right only for a job nobody runs yet
 DEFAULT_INTERVAL_S = 30
 STALE_GRACE_S = 90
 STALE_POLL_S = 120
@@ -151,7 +151,8 @@ class Runner:
         self.jid = None
         self.submitted_at = 0.0      # when the current site job was submitted (its queue time starts here)
         self.replacing = None        # the queued job being replaced, noted into the next report
-        self.wallet, self.wallet_exp = '', 0.0
+        self.wallet, self.wallet_exp = '', 0.0      # the tracker's token (the newest) and its end
+        self.wallet_before = ''                    # the one before it (a step may still print it)
         self.staged, self.stage_tried = {}, False   # input name -> its resident path on the site ('' = the job stages it)
         self.resubmits = 0
         self.lost_hosts = 0
@@ -189,8 +190,6 @@ class Runner:
                                                                  note=self.reporter.pending_reason,
                                                                  deadline=staging_began + staging.STAGE_MAX_BUDGET_S)
                 self.reporter.note_staging(info)    # carried by every later report; the follower prints it
-            if time.time() - staging_began > 3600:
-                self.renew_wallet()   # the job's token was minted before a long staging began: it would reach the site job near its end
         reg = ''
         try:
             r = urllib.request.Request(
@@ -315,8 +314,10 @@ class Runner:
             env.append('KAOS_LIB_SUPPORT=' + cfg.env['KAOS_LIB_SUPPORT'])
         w = self.wallet      # the tracker's token, minted by prepare_handback, before anything was staged or cancelled
         # Public endpoints only, short-lived credentials only (T-03). MLflow's client honors MLFLOW_TRACKING_TOKEN
-        # natively. The data store gets NO credential from this environment: the job reads the app's key from a file
-        # (jobscript.py KEY_MOUNT) that keep_key writes on the site and replaces before the key ends.
+        # natively; this first value serves a step whose library does not read the file, for the token's first life.
+        # The data store gets NO credential from this environment: the job reads the app's key from a file
+        # (jobscript.py KEY_MOUNT) that keep_key writes on the site and replaces before the key ends, and the tracker's
+        # token is a file beside it (MLFLOW_TRACKING_TOKEN_FILE) that keep_key replaces on the same round.
         if cfg.mlflow_url:
             env += ['MLFLOW_TRACKING_URI=' + cfg.mlflow_url, 'MLFLOW_TRACKING_TOKEN=' + w]
         env += ['LAKEFS_ENDPOINT=' + cfg.lakefs_url,
@@ -348,8 +349,6 @@ class Runner:
                 job_limit = max(step_limit, min(2 * step_limit, cap))
             if cfg.share_job_limit:
                 job_limit = cfg.share_job_limit      # a guest planned again as a host: the controller's figure
-            if self.wallet_exp:
-                env.append('KAOS_TOKEN_EXP=%d' % self.wallet_exp)   # the host's fit rule (D-07)
         if cfg.sharing:
             batch, env = inputs_in_script(batch, env)
         return batch, env, commits, job_limit
@@ -442,17 +441,17 @@ class Runner:
         return key
 
     def held_secrets(self):
-        """What the log stream must never print: the tracker's token and the app's key, and the key before it (the
-        key file is replaced while a step runs; the step may still hold what it read earlier)."""
-        return ((self.wallet,) + (self.key.secrets() if self.key else ())
+        """What the log stream must never print: the tracker's token and the app's key, and the ones before them (both
+        files are replaced while a step runs; the step may still hold what it read earlier)."""
+        return ((self.wallet, self.wallet_before) + (self.key.secrets() if self.key else ())
                 + (self.key_before.secrets() if self.key_before else ()))
 
     def keep_key(self):
-        """The app's key file for the current site job, on the site (the staging tool's `key` verb: folder 0700, file
-        0600, replaced atomically). Written when the job is new and then every KEY_REFRESH_S, from the first poll to
-        the job's end; a job queued for hours gets its key replaced while it waits. A round that fails is logged,
-        written into the job's status (message) and asked again at the next poll; the job is never stopped for it, and
-        the old key stays in the file until a new one lands."""
+        """The app's key file and the tracker's token file for the current site job, on the site (the staging tool's `key`
+        verb: folder 0700, files 0600, replaced atomically). Written when the job is new and then every KEY_REFRESH_S,
+        from the first poll to the job's end; a job queued for hours gets both replaced while it waits. A round that
+        fails (the key, the token, or the site) is logged, written into the job's status (message) and asked again at
+        the next poll; the job is never stopped for it, and the old files stay until new ones land."""
         if not self.jid:
             return
         now = self.clock()
@@ -464,17 +463,33 @@ class Runner:
                 key = self.key            # the one prepare_handback obtained a moment ago
             else:
                 key = self.take_key(self.new_key())
-            rc, ev = self.stager(['key', '--contract', staging.CONTRACT, '--job', self.jid], iter([key.record()]), quiet=True)
+            record = key.record()
+            if self.cfg.mlflow_url:
+                record['tracker_token'] = self.fresh_token(new_job, now)
+            rc, ev = self.stager(['key', '--contract', staging.CONTRACT, '--job', self.jid], iter([record]), quiet=True)
             staging.refused(rc, ev)
             if rc != 0 or not any(e.get('event') == 'key' for e in ev):
                 raise RuntimeError('the staging tool answered %s' % rc)
         except Exception as e:
             print('app key: not placed for site job %s (%s): asking again at the next poll' % (self.jid, e), flush=True)
-            self.note_key('the app\'s data store key could not be renewed on the site (%s); trying again' % str(e)[:200])
+            self.note_key('the app\'s data store key or the tracker\'s token could not be renewed on the site (%s); trying again' % str(e)[:200])
             return
         self.key_for, self.key_next = self.jid, now + KEY_REFRESH_S
         print('app key: placed for site job %s, replaced again in %d min' % (self.jid, KEY_REFRESH_S // 60), flush=True)
         self.note_key(None)
+
+    def fresh_token(self, new_job, now):
+        """The tracker's token for a round of keep_key: the one prepare_handback minted a moment ago when the job is new
+        and it lives longer than a round, else a new one, minted the same way. The one it replaces is kept for held_secrets."""
+        if new_job and self.wallet and self.wallet_exp - now > KEY_REFRESH_S:
+            return self.wallet
+        token = self._mint()
+        if not token:
+            raise RuntimeError('no tracking token could be minted')
+        if self.wallet and self.wallet != token:
+            self.wallet_before = self.wallet
+        self.wallet, self.wallet_exp = token, wallet.wallet_exp(token)
+        return token
 
     def note_key(self, text):
         """status.run.message while a key refresh fails; cleared when one lands. The next report writes the run whole."""
@@ -531,10 +546,10 @@ class Runner:
 
     def resubmit(self, why, queue_lost=None):
         """Replace the site job of this attempt (cancel, then submit a fresh one). queue_lost is the reason
-        (TokenRefresh, HostLost, Replanned) when the old job was still queued: its place in the queue is lost,
+        (HostLost, Replanned) when the old job was still queued: its place in the queue is lost,
         and the replacement is recorded in status.run.queueReplaced (PRD-HPC-1461 AC-35).
 
-        A job replaced because it waits (TokenRefresh, Replanned) is replaced only while the site itself says,
+        A job replaced because it waits (Replanned) is replaced only while the site itself says,
         now, that it still waits and no host took it: False when it does not, and nothing is cancelled."""
         print(why, flush=True)
         self.cfg.check_job()             # before the cancel: a job that cannot be replaced is not cancelled for it
@@ -573,18 +588,6 @@ class Runner:
         print('not replaced: job %s no longer waits (state %s, %s)' % (
             self.jid, ','.join(live.get('job_state') or []) or 'unknown', state or 'not taken'), flush=True)
         return False
-
-    def renew_wallet(self):
-        """A new tracker token after a long staging (the one minted before it would reach the site job near its end).
-        When it cannot be minted, the old one is kept only while it has staging.TOKEN_MIN_LEFT_S left: a job submitted
-        with a token about to end could not report to the experiment tracker. A job without a tracker has none to renew.
-        The data store needs no renewal here: the app's key is replaced on the site by keep_key."""
-        if not self.cfg.mlflow_url:
-            return
-        w = staging.renewed_wallet(self._mint, self.wallet)
-        if not w:
-            self.fail_handback('no tracking token could be minted for this job')
-        self.wallet, self.wallet_exp = w, wallet.wallet_exp(w)
 
     # ------------------------------------------------------------------ outputs and checkpoints
 
@@ -1012,19 +1015,11 @@ class Runner:
                         and self.lost_hosts < LOST_HOST_RESUBMITS and host_gone(slurm, share['host'])):
                     # PRD-1609: the host died without handing this job back (node failure, crash): it
                     # stays held forever. Start over as a new job - the same cancel + submit as the
-                    # wallet resubmit, so no new Slurm call.
+                    # other replacement, so no new Slurm call.
                     self.lost_hosts += 1
                     self.logs.active.clear()
                     self.resubmit('host job %s is gone with this step - resubmitting (%d/%d)'
                                   % (share['host'], self.lost_hosts, LOST_HOST_RESUBMITS), 'HostLost')
-                    continue
-                # A job a host took stays queued (held) while its step runs: never resubmit it. The
-                # host checked its token outlives the step (D-07).
-                if ('PENDING' in st and share.get('kaos-state') != 'taken' and self.wallet_exp
-                        and time.time() > self.wallet_exp - self.cfg.time_limit * 60 - wallet.REFRESH_SLACK_S):
-                    self.resubmit('the wallet no longer covers the step\'s %d min limit and the job is still queued - '
-                                  'resubmitting with a fresh wallet (queue position is lost, credentials are not)'
-                                  % self.cfg.time_limit, 'TokenRefresh')
                     continue
                 if self.saved_host_waits(st, share):
                     continue

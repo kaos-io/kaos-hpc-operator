@@ -339,11 +339,9 @@ spec:
                           type: integer
                         reason:
                           description: |-
-                            Reason: TokenRefresh (the job's wallet or token would expire before it started: the replacement
-                            carries fresh credentials), HostLost (the host a guest waited for is gone), Replanned (the
-                            controller planned a waiting guest as a host).
+                            Reason: HostLost (the host a guest waited for is gone), Replanned (the controller planned a
+                            waiting guest as a host).
                           enum:
-                          - TokenRefresh
                           - HostLost
                           - Replanned
                           type: string

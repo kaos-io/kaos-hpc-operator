@@ -278,7 +278,7 @@ def lakefs():
 
 
 SHELL_ADDED = {"PWD", "OLDPWD", "SHLVL", "_", "LC_CTYPE"}      # what the shell that runs the step command adds itself
-STEP_ALLOWED = set(jobscript.STEP_ENV) | {"LAKEFS_KEY_FILE", "PATH", "KAOS_STAGED_ROOT", "KAOS_CHECKPOINT_DIR", "KAOS_RESUME_PATH"}
+STEP_ALLOWED = set(jobscript.STEP_ENV) | {"LAKEFS_KEY_FILE", "MLFLOW_TRACKING_TOKEN_FILE", "PATH", "KAOS_STAGED_ROOT", "KAOS_CHECKPOINT_DIR", "KAOS_RESUME_PATH"}
 
 
 @tsc.MODES

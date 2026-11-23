@@ -4,11 +4,10 @@ import (
 	"testing"
 
 	hpcv1alpha1 "github.com/kaos-io/kaos-hpc-operator/api/v1alpha1"
-	"github.com/kaos-io/kaos-hpc-operator/internal/timelimit"
 )
 
 // The spec's wall time is the platform's cap on the step's total time (D-75). A cap above the time of one job
-// (the class's, the site's or the data access's maximum) is the normal case: it is never refused, whether or not
+// (the class's or the site's maximum) is the normal case: it is never refused, whether or not
 // the step saves progress, and the attempt books what it will run with, not the cap.
 func TestDecideAdmitsACapAboveTheTimeOfOneJob(t *testing.T) {
 	const total = 10080
@@ -24,9 +23,9 @@ func TestDecideAdmitsACapAboveTheTimeOfOneJob(t *testing.T) {
 				s.Spec.Limits.MaxWallTimeMinutes = 360
 				s.Spec.Budget.GPUNodeHours = 1000
 			}), nil, 360},
-		{"should_admit_a_cap_above_the_data_access_of_one_job", laneMaxSite(2880), nil, timelimit.TokenCoverMinutes},
+		{"should_admit_a_cap_above_the_class_maximum_at_the_lane", laneMaxSite(2880), nil, 2880},
 		{"should_admit_a_step_named_in_serve_mode", laneMaxSite(2880),
-			func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.StepName = "train" }, timelimit.TokenCoverMinutes},
+			func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.StepName = "train" }, 2880},
 		{"should_admit_a_class_with_no_known_maximum", laneMaxSite(0), nil, 600},
 	}
 	for _, c := range cases {

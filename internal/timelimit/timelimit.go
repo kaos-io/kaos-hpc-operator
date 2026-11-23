@@ -30,19 +30,6 @@ const (
 	MaxLearnedMinutes = 120
 )
 
-// The data-plane access a run has (PRD kaos#1911 F-40). The bearer a step gets for its data and its tracking
-// is minted when its site job is submitted and lives TokenLifeMinutes; the controller cannot see the real
-// expiry, so this is the one figure it uses (the identity provider's access-token lifetime) and the engine
-// repeats it in engine/kubecore/run_settings.py (a test keeps the two equal). The runner reads the real
-// expiry from the token itself. A queued job whose bearer would end before the step's own limit is replaced
-// with a fresh one (runner/kaos_hpc_runner/runner.py), so a step starts with its whole limit covered as long as
-// the limit is at most TokenCoverMinutes: the life, less the margin the runner keeps for the hand-back.
-const (
-	TokenLifeMinutes   = 12 * 60
-	TokenMarginMinutes = 30
-	TokenCoverMinutes  = TokenLifeMinutes - TokenMarginMinutes
-)
-
 // Key identifies "the same step of the same app on the same class": jobs with an equal Key share
 // their run times. The app is its image repository (registry and path without tag or digest): the
 // pipeline builds one image per app and the tag changes with every build, while a namespace can
@@ -83,15 +70,13 @@ func AppOf(image string) string {
 // site's maximum wall time (0 means unknown, no bound).
 type Caps struct {
 	Spec, Class, Site int32
-	// Token is how long one run's data access covers (0: not bounded).
-	Token int32
 }
 
-// lowest is the limit of one job that is not learned: the most a job can get (the lowest of the class's, the
-// site's and the data access's maximum), and never more than the cap.
+// lowest is the limit of one job that is not learned: the most a job can get (the lowest of the class's and
+// the site's maximum), and never more than the cap.
 func (c Caps) lowest() int32 {
 	m := c.Spec
-	for _, v := range []int32{c.Class, c.Site, c.Token} {
+	for _, v := range []int32{c.Class, c.Site} {
 		if v > 0 && v < m {
 			m = v
 		}

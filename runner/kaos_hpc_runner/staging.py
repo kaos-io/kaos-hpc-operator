@@ -63,9 +63,8 @@ STAGE_UNKNOWN_BUDGET_S = 12 * 3600   # the size could not be read from the data 
 STAGE_FLOOR_BPS = 50 * 10 ** 6       # a copy slower than this for hours is not healthy; the budget allows twice the time
 STAGE_FALLBACK_MAX_BYTES = 50 * 10 ** 9   # above this a job never downloads the dataset itself, on GPU time
 STAGE_NOTE_EVERY_S = 10 * 60         # how often the job's status says how far the copy is
-TOKEN_MIN_LEFT_S = 3600              # a data token with less left than this is not used for another attempt
 EX_RETRY, EX_NOSPACE, EX_USAGE, EX_CONTRACT = 75, 76, 2, 78
-CONTRACT = 4   # 4 = the whole tree of the commit under <copy>/data/, a dataset another project shares filed as repo@owner, and the `key` verb (the app's key file for a job); the tool's CONTRACT is the same number
+CONTRACT = 5   # 5 = 4 plus the tracker's token in the `key` verb's record (tracker_token, placed as its own file beside the key); 4 = the whole tree of the commit under <copy>/data/, a dataset another project shares filed as repo@owner, and the `key` verb (the app's key file for a job); the tool's CONTRACT is the same number
 
 
 class InsufficientQuota(Exception):
@@ -207,16 +206,6 @@ def refuse_big_fallback(repo, commit, nbytes, why):
     """Raise DatasetNotStaged when the job would download a dataset of nbytes (None: not known) itself."""
     if nbytes is not None and nbytes > STAGE_FALLBACK_MAX_BYTES:
         raise DatasetNotStaged(not_staged_message(repo, commit, nbytes, why))
-
-
-def renewed_wallet(mint_wallet, old):
-    """The token for the next attempt: minted again, never an old one close to its end. When the mint fails the old
-    one is kept while it has TOKEN_MIN_LEFT_S left (a token whose end is unknown is kept); else ''."""
-    new = mint_wallet()
-    if new:
-        return new
-    exp = walletmod.wallet_exp(old)
-    return '' if exp and exp - time.time() < TOKEN_MIN_LEFT_S else old
 
 
 class ToolAbsent(Exception):
