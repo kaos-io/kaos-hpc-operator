@@ -84,7 +84,8 @@ def test_outputs_says_what_to_write_instead():
 
 def test_hpc_time_limit_says_what_to_write_instead():
     message = refused(lambda a: a.step("train", kind="evaluate", hpc_time_limit="12h"))
-    assert message == "step 'train': " + 'hpc_time_limit= is gone: the platform sets the time of a step. Delete it.' + " " + OLD_APP_NOTICE
+    assert message == ("step 'train': hpc_time_limit= is gone: the platform sets the time of a step. Delete it. "
+                       + OLD_APP_NOTICE)
 
 
 def test_disk_says_a_step_gets_the_disk_of_its_class():
@@ -117,10 +118,13 @@ def test_an_app_on_the_old_contract_fails_the_render_and_writes_nothing(tmp_path
     assert not (repo / "out").exists()
 
 
+GONE = "= is gone: the platform sets the time of a step and finds out by itself whether it saves progress"
+
+
 @pytest.mark.parametrize("keyword, value, sentence", [
-    ("walltime", "12h", 'walltime= is gone: the platform sets the time of a step and finds out by itself whether it saves progress. Delete it.'),
-    ("resumable", True, 'resumable= is gone: the platform sets the time of a step and finds out by itself whether it saves progress. Delete it.'),
-    ("checkpoint_every", "20m", 'checkpoint_every= is gone: the platform sets the time of a step and finds out by itself whether it saves progress, and the library chooses how often to save. Delete it.'),
+    ("walltime", "12h", "walltime" + GONE + ". Delete it."),
+    ("resumable", True, "resumable" + GONE + ". Delete it."),
+    ("checkpoint_every", "20m", "checkpoint_every" + GONE + ", and the library chooses how often to save. Delete it."),
 ])
 def test_should_refuse_a_time_keyword_with_the_sentence_that_says_the_platform_sets_the_time(keyword, value, sentence):
     message = refused(lambda a: a.step("train", kind="evaluate", **{keyword: value}))
@@ -131,7 +135,7 @@ def test_should_refuse_a_time_keyword_with_the_sentence_that_says_the_platform_s
 @pytest.mark.parametrize("kind", ["ingest", "transform", "train", "evaluate", "publish", "control"])
 def test_should_refuse_a_time_keyword_on_every_kind_whatever_its_value(keyword, kind):
     for value in ("2h", "0", 90, True, False, None):
-        message = refused(lambda a: a.step("one", kind=kind, **{keyword: value}, **valid(a, kind)))
+        message = refused(lambda a, value=value: a.step("one", kind=kind, **{keyword: value}, **valid(a, kind)))
         assert message.startswith(f"step 'one': {keyword}= is gone: the platform sets the time of a step")
 
 

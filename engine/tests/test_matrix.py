@@ -88,7 +88,8 @@ def test_a_matrix_step_cannot_need_a_matrix_step():
 
 def test_should_refuse_resumable_and_checkpoint_every_on_a_matrix_step_like_on_any_other():
     for keyword, value in (("resumable", True), ("checkpoint_every", "20m")):
-        message = refused(lambda a: a.step("t", kind="train", matrix={"x": [1]}, produces=[a.model("m")], **{keyword: value}))
+        message = refused(lambda a, keyword=keyword, value=value: a.step(
+            "t", kind="train", matrix={"x": [1]}, produces=[a.model("m")], **{keyword: value}))
         assert message.startswith(f"step 't': {keyword}= is gone: the platform sets the time of a step")
     wft = render(sweep)
     assert "platform.kubecore.io/hpc-resumable" not in (template(wft, "train").get("metadata", {}).get("annotations") or {})

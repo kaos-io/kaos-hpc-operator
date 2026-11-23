@@ -37,7 +37,6 @@ def test_should_document_the_options_new_in_the_engine_over_a_copy_vendored_befo
 def test_should_publish_patterns_that_agree_with_the_validators():
     import re
 
-    from kubecore import authoring
     by_name = {p["name"]: p for p in SCHEMA["params"]}
     assert re.match(by_name["idle_timeout"]["pattern"], "90m") and not re.match(by_name["idle_timeout"]["pattern"], "1d")
     assert by_name["kind"]["enum"] == ["ingest", "transform", "train", "evaluate", "publish", "control"]
