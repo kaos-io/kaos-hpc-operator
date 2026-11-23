@@ -366,8 +366,10 @@ func (k *kubelet) submit(ctx context.Context, r *frunner, j *hpcv1alpha1.HPCArgo
 		}
 	}
 	for _, e := range r.rj.Spec.Template.Spec.Containers[0].Env {
-		if e.Name == "HPC_RESUMABLE_LEAD" {
-			env = append(env, envLead+"="+e.Value) // every job but a shared node's host is warned (D-75)
+		// Every job but a shared node's host is warned (D-75), and only a step that saves progress answers it: the
+		// job script passes the signal to processes that catch it, a plain step is not disturbed.
+		if e.Name == "HPC_RESUMABLE_LEAD" && j.Annotations[annSegments] != "" {
+			env = append(env, envLead+"="+e.Value)
 		}
 	}
 	var begin *int64

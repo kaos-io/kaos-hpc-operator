@@ -318,7 +318,7 @@ Controller flags (chart `controllerManager.container.args`, `runnerImage`, `runn
   node. Slurm's warning signal is the batch job's and never reaches a guest, so the slot manager sends USR1 to each
   resumable step itself, `lead` before the end of the step's own limit or of the host's job, whichever is first
   (the host's own step included; a plain step is never signalled). A guest whose limit does not fit the host's remaining
-  time is still taken when its lead plus a 5-minute margin does. A guest that saves and exits 85 is reported like a step
+  time is still taken when its lead plus a 5-minute margin does. Any other guest is taken when the host has at least its limit less 30 minutes left, and its limit becomes what the host has left less the margin (D-75: a step asks for the job limit, so a guest that starts minutes after its host would otherwise never fit); with less than 15 minutes left after the margin it gets a node of its own. A guest that saves and exits 85 is reported like a step
   alone and continued from its checkpoint, settled 0 (its host's booking covers the node); the continuation may host,
   guest or run alone. A resumable host's end is reported when its Slurm job ends, so the node time it held is settled to
   that end, and its job is not padded to twice its step. Details and tests: `docs/extreme-cases.md` 4.13-4.18.

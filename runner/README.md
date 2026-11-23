@@ -36,7 +36,7 @@ Env (controller): `HPC_JOB_NAMESPACE`, `HPC_JOB_NAME`, `KAOS_ATTEMPT`, `KAOS_RES
 `KAOS_STEP_CONTEXT` (the step context, exactly as the job carries it; the runner never reads into it), `HPC_INPUTS` (the job's inputs as JSON: `name`, `repo`, `commit`, `ref`; the runner never resolves a version), `HPC_SHARING` (`on`/`1`) + `HPC_SCOPE`, allowlisted
 `KAOS_LIB_SUPPORT`, site: `HPC_ACCOUNT`, `HPC_USER`, `HPC_SCRATCH`, `HPC_HOME`, `HPC_CLASSES_JSON`, `HPC_ENDPOINT`,
 `HPC_REST_VERSION`, the lane the controller chose (`HPC_QOS`, `HPC_RESERVATION`, `HPC_QOS_MAX_MINUTES`), the idle window
-(`HPC_IDLE_TIMEOUT_MINUTES`, 0 = off, default 20), the site's per-user submit cap when the profile has one
+(`HPC_IDLE_TIMEOUT_MINUTES`, 0 = off, default 20), the minimum time of a step with verified saved progress (`HPC_TIME_MIN_MINUTES`, sent as the job's `time_minimum`, Slurm `--time-min`; absent = not asked), the site's per-user submit cap when the profile has one
 (`HPC_MAX_SUBMIT_JOBS`), optional `HPC_SITE_WAIT_MAX_S` (how long an unreachable site is waited for, default 1800; the controller's `--site-outage-max`), `HPC_LOGIN_HOST` (`host:port`, default login.lxp.lu:8822), `SLURM_TOKEN` (fallback),
 and the ConfigMap: `ZITADEL_DOMAIN`, `ZITADEL_MLFLOW_PROJECT_ID`, `MLFLOW_EXTERNAL_URL`, `LAKEFS_EXTERNAL_URL`.
 Files: `/etc/meluxina-jwt/token`, `/etc/meluxina-staging/{id_ed25519,known_hosts}`,
@@ -49,7 +49,7 @@ The job script and the runner reserve these codes; the controller turns them int
 
 | Code | Who | Meaning | Job ends |
 |---|---|---|---|
-| 85 | the step | saved a checkpoint, continue me (the wall-time signal arrived) | continues from the newest verified copy, else `Timeout` (checkpoint missing) / `NotResumable` |
+| 85 | the step | saved a checkpoint, continue me (the wall-time signal arrived) | continues from the newest verified copy, else `Timeout` (checkpoint missing) |
 | 210 | job script | no `apptainer` after loading the module | `SiteFAILED` |
 | 231 | job script | the image could not be pulled (the registry token expires while queued: the runner resubmits with a fresh one, bounded) | `SiteFAILED` |
 | 232 | job script | an input could not be staged in the job, or its copy is not complete (never run without the data) | `SiteFAILED` |

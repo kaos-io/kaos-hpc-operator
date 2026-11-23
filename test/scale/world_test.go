@@ -249,7 +249,6 @@ type jobSpec struct {
 	forceEnd    string
 	segments    int
 	resumable   bool
-	maxCont     int32  // continuations a resumable job may make (0: 5)
 	hostTail    string // a node-sharing host: dilated minutes its Slurm job keeps the node after its step
 	guest       bool   // a node-sharing guest: taken by a running host, never started on its own
 	shareable   bool   // a step of the project's sharing scope; the controller plans it as a host or a guest (D-70)

@@ -1256,8 +1256,7 @@ class Runner:
                 print('not continuing the step: it exited 85, but the job comment names no checkpoint copy of this '
                       'step (neither Slurm accounting nor the live job has kaos-ckpt=). If the step log shows '
                       '"checkpoint: copy NNNNNN", the copy exists on scratch and only its entry in the job comment '
-                      'is missing; if it does not, no copy was made in time (a longer resumable= lead leaves the '
-                      'copy more time)', flush=True)
+                      'is missing; if it does not, no copy was made in time', flush=True)
         if rc == RESULT_NOT_HANDED_BACK_EXIT and 'COMPLETED' not in st:
             fields['message'] = self.handback_failure()[:500]
             print('ERROR: ResultNotHandedBack:', fields['message'], flush=True)
