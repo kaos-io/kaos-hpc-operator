@@ -225,16 +225,29 @@ var _ = Describe("HPCArgoWorkflowJob node sharing plan", func() {
 		})
 
 		It("should_join_a_host_with_a_little_less_time_left_than_the_step_with_what_the_host_has_left", func() {
-			// D-75: steps within minutes of each other pack. A guest joins when the host has at least its limit
-			// less 30 minutes left, and its limit is what the host has left less the margin.
+			// D-75: steps within minutes of each other pack. A guest whose limit is above 30 minutes joins when the
+			// host has at least its limit less 30 minutes left, and its limit is what the host has left less the margin.
+			siteWith(nil)
+			host := admit(60, nil)
+			start(host, "100")
+			Expect(share(host).JobLimitMinutes).To(Equal(int32(120)))
+			clock = clock.Add(60 * time.Minute) // 120-minute job, 60 gone: 60 left < 60 + 6
+			late := admit(60, nil)
+			Expect(share(late).Role).To(Equal(hpcv1alpha1.ShareGuest))
+			Expect(share(late).Host).To(Equal(client.ObjectKeyFromObject(host).String()))
+			Expect(late.Status.Placement.TimeLimitMinutes).To(Equal(int32(60 - ShareMarginMinutes)))
+		})
+
+		It("should_never_cut_the_limit_of_a_late_guest_of_30_minutes_or_less", func() {
+			// A limit of 30 minutes or less (a learned one, mostly) is all the step is known to need: it joins a host
+			// only when it fits whole.
 			siteWith(nil)
 			host := admit(20, nil)
 			start(host, "100")
 			clock = clock.Add(5 * time.Minute) // 30-minute job, 5 gone: 25 left < 20 + 6
 			late := admit(20, nil)
-			Expect(share(late).Role).To(Equal(hpcv1alpha1.ShareGuest))
-			Expect(share(late).Host).To(Equal(client.ObjectKeyFromObject(host).String()))
-			Expect(late.Status.Placement.TimeLimitMinutes).To(Equal(int32(25 - ShareMarginMinutes)))
+			Expect(share(late).Role).To(Equal(hpcv1alpha1.ShareHost), "25 minutes left do not hold 20 and the margin")
+			Expect(late.Status.Placement.TimeLimitMinutes).To(Equal(int32(20)))
 		})
 
 		It("should_give_a_guest_arriving_more_than_30_minutes_late_a_job_of_its_own", func() {
