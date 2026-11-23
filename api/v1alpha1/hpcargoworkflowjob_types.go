@@ -208,7 +208,8 @@ const (
 	ReasonRerunLimit     = "RerunLimit"
 	// MaxReruns caps the re-runs of a step that has no checkpoint.
 	MaxReruns = int32(2)
-	// DefaultLeadMinutes is the lead of the warning before a job's limit, the same for every step (D-75).
+	// DefaultLeadMinutes is the longest lead of the warning before a job's limit (D-75); a short job's is a sixth
+	// of its limit (timelimit.Lead).
 	DefaultLeadMinutes = int32(10)
 )
 

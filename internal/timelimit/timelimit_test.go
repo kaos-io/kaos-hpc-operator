@@ -243,3 +243,19 @@ func TestMinTimeIsAnHourOrTheLimitIfShorter(t *testing.T) {
 		}
 	}
 }
+
+func TestLeadIsASixthOfTheLimitBetweenOneAndTenMinutes(t *testing.T) {
+	for limit, want := range map[int32]int32{1: 1, 3: 1, 12: 2, 15: 2, 30: 5, 60: 10, 120: 10, 690: 10, 2880: 10} {
+		if got := Lead(limit); got != want {
+			t.Errorf("Lead(%d) = %d, want %d", limit, got, want)
+		}
+	}
+	// A step that is on time under a learned limit is never warned: the lead is shorter than the slack.
+	for need := int32(1); need <= 80; need++ {
+		d := time.Duration(need) * time.Minute
+		limit, src := Learn([]time.Duration{d, d, d}, Caps{Spec: 10080, Class: 2880, Site: 2880})
+		if src == hpcv1alpha1.PlacementLearned && limit-Lead(limit) < need {
+			t.Errorf("need %d min, learned limit %d: warned at %d, before the step is done", need, limit, limit-Lead(limit))
+		}
+	}
+}

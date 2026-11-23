@@ -543,6 +543,8 @@ func TestShouldGiveEveryJobTheWarningLeadExceptASharedNodeHost(t *testing.T) {
 	}{
 		{"should_warn_a_job_with_no_placement_yet", nil, "10"},
 		{"should_warn_a_job_that_does_not_share", &hpcv1alpha1.Placement{TimeLimitMinutes: 60}, "10"},
+		{"should_warn_a_short_job_late_enough_to_finish", &hpcv1alpha1.Placement{TimeLimitMinutes: 15}, "2"},
+		{"should_warn_a_job_of_three_minutes_in_its_last_minute", &hpcv1alpha1.Placement{TimeLimitMinutes: 3}, "1"},
 		{"should_warn_a_guest", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Share: &hpcv1alpha1.SharePlan{Role: hpcv1alpha1.ShareGuest}}, "10"},
 		{"should_not_warn_a_host_whose_step_is_not_verified", &hpcv1alpha1.Placement{TimeLimitMinutes: 60,
 			Share: &hpcv1alpha1.SharePlan{Role: hpcv1alpha1.ShareHost}}, ""},

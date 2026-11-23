@@ -149,6 +149,18 @@ func Segment(total, perRun, used int32) (limit int32, spent bool) {
 // hour, so the site may fit it into any gap.
 const MinTimeMinutes = 60
 
+// MaxLeadMinutes is the longest warning before a job's limit (D-75).
+const MaxLeadMinutes = 10
+
+// Lead is how long before its limit a job is warned (the site sends the signal, the job script passes it to a
+// process that catches it): a sixth of the limit, at least one minute and at most MaxLeadMinutes. A fixed ten
+// minutes would stop a short job early: a learned limit is one and a half times what the step needs
+// (Margin), so a warning in the last sixth never reaches a step that is on time, and a job of a few minutes
+// is not told to stop as it starts.
+func Lead(limit int32) int32 {
+	return min(MaxLeadMinutes, max(1, limit/6))
+}
+
 // MinTime is the minimum time submitted with a job of the given limit: one hour, or the limit if that is shorter.
 func MinTime(limit int32) int32 {
 	return min(MinTimeMinutes, limit)

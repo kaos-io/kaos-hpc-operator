@@ -396,7 +396,7 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 	// job is padded for guests. A step verified resumable (D-74) never shares as a host, so it always gets it.
 	if host := job.Status.Placement != nil && job.Status.Placement.Share != nil &&
 		job.Status.Placement.Share.Role == hpcv1alpha1.ShareHost; !host || job.VerifiedResumable() {
-		kv = append(kv, [2]string{"HPC_RESUMABLE_LEAD", strconv.Itoa(int(hpcv1alpha1.DefaultLeadMinutes))})
+		kv = append(kv, [2]string{"HPC_RESUMABLE_LEAD", strconv.Itoa(int(timelimit.Lead(job.EffectiveWallMinutes())))})
 	}
 	// A step with verified saved progress also asks for a minimum time, so the site may fit it into any gap. Only
 	// where the site profile says its scheduler accepts it.
