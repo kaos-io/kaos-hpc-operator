@@ -290,10 +290,13 @@ class Runner:
                'KAOS_ATTEMPT=%d' % cfg.attempt,
                # The step context, exactly as the job carries it: the one value the step receives.
                CONTEXT_ENV + '=' + cfg.context]
-        if cfg.resumable_lead:
+        if cfg.resumable:
+            # The step may be cut and continued (the controller verified its saved progress): a host may take it
+            # as a guest when only its lead fits (payload/slots.py fits). Never set for a plain step.
             env.append('KAOS_RESUMABLE=1')
-            # AC-73: a host reads a waiting guest's lead from its script (a step on a shared node is signalled
-            # by the slot manager, not by Slurm).
+        if cfg.resumable_lead:
+            # The lead of the warning before the step's own limit, for every step. AC-73: a host reads a waiting
+            # guest's lead from its script (a step on a shared node is signalled by the slot manager, not by Slurm).
             env.append('KAOS_RESUMABLE_LEAD_MIN=%d' % cfg.resumable_lead)
         # D-72: the idle watchdog the job script starts beside the step (its window; 0 = none).
         env.append('KAOS_IDLE_TIMEOUT_MIN=%d' % cfg.idle_timeout)

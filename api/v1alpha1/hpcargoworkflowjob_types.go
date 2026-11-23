@@ -209,9 +209,6 @@ const (
 	// MaxReruns caps the re-runs of a step: from the start when it has no checkpoint, from the same checkpoint
 	// when a continuation was stopped before it saved a new one.
 	MaxReruns = int32(2)
-	// DefaultLeadMinutes is the longest lead of the warning before a job's limit (D-75); a short job's is a sixth
-	// of its limit (timelimit.Lead).
-	DefaultLeadMinutes = int32(10)
 )
 
 // CancelFinalizer holds a serve-mode job until its runner Job is gone and its attempt is settled

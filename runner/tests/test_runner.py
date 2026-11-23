@@ -246,7 +246,7 @@ def test_timeout_and_node_fail_are_terminal_states_too(rig):
 
 def test_the_submitted_job_is_the_proven_one(rig):
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    rig.make(slurm, KAOS_ATTEMPT="3", HPC_RESUMABLE_LEAD="20", KAOS_LIB_SUPPORT='{"a":1}', KAOS_RESUME_REF=REF,
+    rig.make(slurm, KAOS_ATTEMPT="3", HPC_RESUMABLE_LEAD="20", HPC_RESUMABLE="1", KAOS_LIB_SUPPORT='{"a":1}', KAOS_RESUME_REF=REF,
              # what the engine set before the step contract: nothing reads it, so nothing passes it on
              CHECKPOINT_BUCKET="b", KUBECORE_RUN_ID="run-1", OUTPUTS_REPO="outputs-other")
     rig.runner.run()
@@ -1262,12 +1262,36 @@ def test_a_job_asks_the_site_for_a_minimum_time_only_when_the_controller_names_o
     assert "time_minimum" not in slurm2.submitted[0]["job"]
 
 
+def test_a_plain_sharing_job_is_not_marked_as_one_a_host_may_cut_and_continue(rig):
+    """D-75: every job gets the lead of the warning before its own limit, a plain step too. Only a step whose saved
+    progress the controller verified (HPC_RESUMABLE=1) is marked KAOS_RESUMABLE=1, the word the slot manager needs
+    before it takes a guest that does not fit and stops it before the host's end."""
+    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", HPC_SHARE_ROLE="guest", HPC_RESUMABLE_LEAD="10")
+    rig.runner.run()
+    script = slurm.submitted[0]["script"].split("\n")
+    assert "export KAOS_RESUMABLE_LEAD_MIN=10" in script, "its own warning, before its own limit"
+    assert not [line for line in script if line.startswith("export KAOS_RESUMABLE=")], "not verified: never cut for a host"
+    slurm2 = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm2, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", HPC_SHARE_ROLE="guest", HPC_RESUMABLE_LEAD="10", HPC_RESUMABLE="1")
+    rig.runner.run()
+    script = slurm2.submitted[0]["script"].split("\n")
+    assert "export KAOS_RESUMABLE=1" in script and "export KAOS_RESUMABLE_LEAD_MIN=10" in script
+    # A job alone: the same meaning, in its environment.
+    slurm3 = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm3, HPC_RESUMABLE_LEAD="10")
+    rig.runner.run()
+    env = dict(e.split("=", 1) for e in slurm3.submitted[0]["job"]["environment"])
+    assert "KAOS_RESUMABLE" not in env and env["KAOS_RESUMABLE_LEAD_MIN"] == "10"
+    assert slurm3.submitted[0]["job"]["kill_warning_delay"] == {"set": True, "number": 600}, "a plain job alone is still warned"
+
+
 def test_a_resumable_sharing_job_hands_its_lead_to_the_slot_manager_and_asks_slurm_for_no_warning_signal(rig):
     """AC-73: a host's batch shell is the slot manager, which USR1 would kill; every step on a shared node is
     signalled by the slot manager, from the lead in its script (KAOS_RESUMABLE_LEAD_MIN). A resumable job alone
     keeps Slurm's own warning signal (test_the_submitted_job_is_the_proven_one)."""
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", HPC_RESUMABLE_LEAD="15")
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", HPC_RESUMABLE_LEAD="15", HPC_RESUMABLE="1")
     rig.runner.run()
     sub = slurm.submitted[0]
     assert "export KAOS_RESUMABLE_LEAD_MIN=15" in sub["script"].split("\n"), "a host reads it from the waiting script"
@@ -1277,7 +1301,7 @@ def test_a_resumable_sharing_job_hands_its_lead_to_the_slot_manager_and_asks_slu
     slurm2 = FakeSlurm({"5001": [acc("COMPLETED")]})
     rig.make(slurm2, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
     rig.runner.run()
-    assert "KAOS_RESUMABLE_LEAD_MIN" not in slurm2.submitted[0]["script"], "a step that is not resumable carries none"
+    assert "KAOS_RESUMABLE" not in slurm2.submitted[0]["script"], "a step without a lead carries neither word"
 
 
 def test_a_resumable_guest_that_saved_is_reported_like_a_resumable_step_alone(rig):

@@ -32,7 +32,8 @@ Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /ru
 ## Inputs
 Env (controller): `HPC_JOB_NAMESPACE`, `HPC_JOB_NAME`, `KAOS_ATTEMPT`, `KAOS_RESUME_REF` (a
 `scratch://<tar path>#<sha256>` checkpoint reference), `HPC_CKPT_BUDGET_PERCENT`, `IMAGE_REF`, `STEP_COMMAND`, `SLURM_TIME_LIMIT`,
-`HPC_RESUMABLE_LEAD`, `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `WF_NAME` (labels the log lines), `KAOS_APP` (the app: its outputs repository is `outputs-<app>`),
+`HPC_RESUMABLE_LEAD` (minutes before its own limit that a job is warned; every job but a shared node's host), `HPC_RESUMABLE` (`1`: the
+controller verified that the step saves progress and continues from it; only such a step may be cut and continued), `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `WF_NAME` (labels the log lines), `KAOS_APP` (the app: its outputs repository is `outputs-<app>`),
 `KAOS_STEP_CONTEXT` (the step context, exactly as the job carries it; the runner never reads into it), `HPC_INPUTS` (the job's inputs as JSON: `name`, `repo`, `commit`, `ref`; the runner never resolves a version), `HPC_SHARING` (`on`/`1`) + `HPC_SCOPE`, allowlisted
 `KAOS_LIB_SUPPORT`, site: `HPC_ACCOUNT`, `HPC_USER`, `HPC_SCRATCH`, `HPC_HOME`, `HPC_CLASSES_JSON`, `HPC_ENDPOINT`,
 `HPC_REST_VERSION`, the lane the controller chose (`HPC_QOS`, `HPC_RESERVATION`, `HPC_QOS_MAX_MINUTES`), the idle window
@@ -175,7 +176,10 @@ manifest; the runner's message says which of the two is unknown.
 A step alone is told to save by Slurm (`kill_warning_signal` USR1 to the batch shell, `lead` minutes before the wall
 time). On a shared node the batch shell is the slot manager and a guest is only a `srun` step of the host's job, so
 the job's signal cannot serve them: the job does not ask for it (`runner.py`), and `payload/slots.py` runs one timer
-per step. A step's lead comes from `KAOS_RESUMABLE_LEAD_MIN` (its script, or the host's environment for its own step);
+per step. A step's lead comes from `KAOS_RESUMABLE_LEAD_MIN` (its script, or the host's environment for its own step):
+every step has one, it is the warning before the step's own limit. `KAOS_RESUMABLE=1` is a different word: the step may be
+cut and continued (the controller verified its saved progress), and only then does `fits()` take a guest that fits by its
+lead alone and stop it before the host's end;
 USR1 goes to the step's own shell (its pid, written by the launcher) at `signal_at()` = `min(start + limit, host job
 end) - lead`, and the shell does what it does for a step alone (`kaos_stop`: copy now, USR1 only to processes that
 handle it). `srun --signal` is not used: see `docs/extreme-cases.md` 4.14. Admission is `fits()` (the host's end and the margin; no credential bounds a guest).

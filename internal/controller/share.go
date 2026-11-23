@@ -73,11 +73,12 @@ func shareableClass(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSi
 }
 
 // resumableOf reports whether the attempt is treated as resumable and its signal lead in minutes: only a step the
-// controller found resumable (D-74) is, and then the default lead. pl is the placement being decided (the job's own
-// may be an earlier attempt's).
+// controller found resumable (D-74) is, and then the lead its job is warned with (timelimit.Lead of its limit, the
+// one the slot manager reads from its script). pl is the placement being decided (the job's own may be an earlier
+// attempt's).
 func resumableOf(pl *hpcv1alpha1.Placement) (int32, bool) {
 	if pl != nil && pl.Resumable != nil && pl.Resumable.Verified {
-		return hpcv1alpha1.DefaultLeadMinutes, true
+		return timelimit.Lead(pl.TimeLimitMinutes), true
 	}
 	return 0, false
 }

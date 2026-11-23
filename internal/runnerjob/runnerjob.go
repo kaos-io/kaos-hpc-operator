@@ -393,10 +393,18 @@ func Env(job *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, attempt
 	kv = append(kv, [2]string{"HPC_IDLE_TIMEOUT_MINUTES", strconv.Itoa(int(job.EffectiveIdleTimeoutMinutes()))})
 	// D-75: every job gets the lead, so the site sends the warning before its limit (the job script passes it only
 	// to a process that catches it); a shared-node host does not, its slot manager signals each step itself and its
-	// job is padded for guests. A step verified resumable (D-74) never shares as a host, so it always gets it.
+	// job is padded for guests. A step verified resumable (D-74) never shares as a host, so it always gets it. A
+	// job too short for a warning (lead 0) asks for none.
 	if host := job.Status.Placement != nil && job.Status.Placement.Share != nil &&
 		job.Status.Placement.Share.Role == hpcv1alpha1.ShareHost; !host || job.VerifiedResumable() {
-		kv = append(kv, [2]string{"HPC_RESUMABLE_LEAD", strconv.Itoa(int(timelimit.Lead(job.EffectiveWallMinutes())))})
+		if lead := timelimit.Lead(job.EffectiveWallMinutes()); lead > 0 {
+			kv = append(kv, [2]string{"HPC_RESUMABLE_LEAD", strconv.Itoa(int(lead))})
+		}
+	}
+	// Only a step with verified saved progress may be cut and continued: on a shared node its host takes it when
+	// only its lead fits and stops it before the host's own end (share.go guestLimit plans it the same way).
+	if job.VerifiedResumable() {
+		kv = append(kv, [2]string{"HPC_RESUMABLE", "1"})
 	}
 	// A step with verified saved progress also asks for a minimum time, so the site may fit it into any gap. Only
 	// where the site profile says its scheduler accepts it.

@@ -566,6 +566,42 @@ func TestShouldGiveEveryJobTheWarningLeadExceptASharedNodeHost(t *testing.T) {
 	}
 }
 
+// D-75: "this step may be cut and continued" is said only for a step whose saved progress the controller verified.
+// Every other job still gets the lead of the warning before its own limit, and nothing more: on a shared node the
+// slot manager must not take a plain guest by its lead or stop it for the host's end.
+func TestShouldSayAStepMayBeContinuedOnlyWhenItsProgressIsVerified(t *testing.T) {
+	verified := &hpcv1alpha1.ResumableStatus{Verified: true}
+	guest, host := &hpcv1alpha1.SharePlan{Role: hpcv1alpha1.ShareGuest}, &hpcv1alpha1.SharePlan{Role: hpcv1alpha1.ShareHost}
+	cases := []struct {
+		name            string
+		pl              *hpcv1alpha1.Placement
+		lead, resumable string
+	}{
+		{"should_not_say_it_for_a_plain_guest", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Share: guest}, "10", ""},
+		{"should_say_it_for_a_verified_guest", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Share: guest, Resumable: verified}, "10", "1"},
+		{"should_not_say_it_for_a_plain_job_alone", &hpcv1alpha1.Placement{TimeLimitMinutes: 60}, "10", ""},
+		{"should_say_it_for_a_verified_job_alone", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Resumable: verified}, "10", "1"},
+		{"should_not_say_it_for_a_plain_host", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Share: host}, "", ""},
+		{"should_say_it_for_a_verified_host", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Share: host, Resumable: verified}, "10", "1"},
+		{"should_not_say_it_without_a_placement", nil, "10", ""},
+		{"should_ask_for_no_warning_for_a_job_of_one_minute", &hpcv1alpha1.Placement{TimeLimitMinutes: 1}, "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			job, site := fixtures()
+			job.Status.Placement = c.pl
+			env, err := Env(job, site, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := envOf(t, env)
+			if got["HPC_RESUMABLE_LEAD"] != c.lead || got["HPC_RESUMABLE"] != c.resumable {
+				t.Errorf("HPC_RESUMABLE_LEAD = %q, HPC_RESUMABLE = %q; want %q, %q", got["HPC_RESUMABLE_LEAD"], got["HPC_RESUMABLE"], c.lead, c.resumable)
+			}
+		})
+	}
+}
+
 // D-75: a step with verified saved progress asks for a minimum time (one hour, or the job limit if shorter), only
 // where the site profile says the scheduler takes it.
 func TestShouldAskForAMinimumTimeOnlyForVerifiedProgressOnASiteThatTakesIt(t *testing.T) {

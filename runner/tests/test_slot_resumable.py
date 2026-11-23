@@ -13,7 +13,7 @@ from test_slot_manager import SCOPE, Node, _job
 SHORT = {"LEAD_UNIT_S = 60": "LEAD_UNIT_S = 4", "MARGIN_S = 300": "MARGIN_S = 1"}
 
 # A step that checkpoints when asked: USR1 stamps the time and exits 85, as kaos-lib's handler does.
-SAVES = ("export KAOS_RESUMABLE_LEAD_MIN=%d\nexport KAOS_STEP_LIMIT_MIN=%d\n"
+SAVES = ("export KAOS_RESUMABLE=1\nexport KAOS_RESUMABLE_LEAD_MIN=%d\nexport KAOS_STEP_LIMIT_MIN=%d\n"
          "trap 'date +%%s.%%N > $OUT/%s.sig; echo saved > $OUT/%s.ckpt; exit 85' USR1\n"
          "date +%%s.%%N > $OUT/%s.start\nwhile :; do sleep 0.2; done\n")
 
@@ -84,7 +84,8 @@ def test_a_resumable_guest_is_taken_when_its_lead_fits_and_a_plain_one_is_not(tm
     """Admission (AC-73): the host has 30 min left; a 180-minute guest does not fit, unless it is resumable and its
     lead plus the margin does. A 30-minute lead does not fit 30 minutes."""
     def guest(n, lead):
-        body = "export KAOS_STEP_LIMIT_MIN=180\n" + ("export KAOS_RESUMABLE_LEAD_MIN=%d\n" % lead if lead else "") + "exit 0\n"
+        body = ("export KAOS_STEP_LIMIT_MIN=180\n"
+                + ("export KAOS_RESUMABLE=1\nexport KAOS_RESUMABLE_LEAD_MIN=%d\n" % lead if lead else "") + "exit 0\n")
         return "10%d" % n, _job("kaos-%s-wf%d-train" % (SCOPE, n), body, comment="kaos-commit=bbbbbbb%d" % n, limit="3:00:00")
     guests = dict([guest(1, 10), guest(2, 0), guest(3, 30)])
     node = Node(tmp_path, guests, own_body="sleep 4\nexit 0\n", host_secs=1800, extra_env={"KAOS_IDLE_S": "2"})
@@ -93,6 +94,22 @@ def test_a_resumable_guest_is_taken_when_its_lead_fits_and_a_plain_one_is_not(tm
     assert jobs["101"]["comment"] == "kaos-commit=bbbbbbb1 kaos-state=done rc=0 host=100", log
     for j in ("102", "103"):
         assert jobs[j]["state"] == "PENDING" and "kaos-state" not in jobs[j]["comment"], j
+
+
+def test_a_plain_guest_with_a_lead_that_does_not_fit_is_not_taken(tmp_path):
+    """D-75: every job carries the lead of the warning before its own limit. A lead alone does not make a guest one
+    that may be cut at the host's end: only KAOS_RESUMABLE=1 (saved progress the controller verified) does. The host
+    has 30 min left; a 180-minute plain guest with a 10-minute lead stays in the queue, a verified one is taken."""
+    def guest(n, verified):
+        body = ("export KAOS_STEP_LIMIT_MIN=180\nexport KAOS_RESUMABLE_LEAD_MIN=10\n"
+                + ("export KAOS_RESUMABLE=1\n" if verified else "") + "exit 0\n")
+        return "10%d" % n, _job("kaos-%s-wf%d-train" % (SCOPE, n), body, comment="kaos-commit=bbbbbbb%d" % n, limit="3:00:00")
+    node = Node(tmp_path, dict([guest(1, False), guest(2, True)]), own_body="sleep 4\nexit 0\n", host_secs=1800,
+                extra_env={"KAOS_IDLE_S": "2"})
+    rc, log = node.finish()
+    jobs = node.jobs()
+    assert jobs["101"]["state"] == "PENDING" and "kaos-state" not in jobs["101"]["comment"], log
+    assert jobs["102"]["comment"] == "kaos-commit=bbbbbbb2 kaos-state=done rc=0 host=100", log
 
 
 def test_a_guest_that_saved_as_its_host_goes_away_is_reported_not_requeued(tmp_path):

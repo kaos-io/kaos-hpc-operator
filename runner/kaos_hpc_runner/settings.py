@@ -195,6 +195,10 @@ class Settings:
         # job script passes it only to processes that catch it); 0 = none. On a shared node the slot
         # manager sends it, step by step (AC-73), so a resumable step may host or be a guest.
         self.resumable_lead = int(g('HPC_RESUMABLE_LEAD') or 0)
+        # D-75: the controller verified that the step saves progress and continues from it. Only such a step may be
+        # cut and continued: on a shared node a host takes it when only its lead fits and stops it before the host's
+        # own end. The lead above says nothing about that: a plain step has one too.
+        self.resumable = g('HPC_RESUMABLE') == '1'
         # D-75: the least time (minutes) the site may give the job (Slurm --time-min), so it may fit it into a gap
         # shorter than the job limit. Set only for a step with verified saved progress, on a site whose profile
         # says it takes the field; 0 = not asked.
