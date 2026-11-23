@@ -935,6 +935,58 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Attempts).To(HaveLen(3), "every interrupted attempt is settled")
 	})
 
+	It("bounds a continuation that ends by a node failure or pre-emption before a new checkpoint like a re-run: twice, then RerunLimit", func() {
+		j := newServeJob(nil, nil)
+		reconcileOnce(j)
+		ended(j, 1, "TIMEOUT", nil, "scratch://ckpt/a", progress(1))
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+		settleTo(j, hpcv1alpha1.PhaseAdmitted)
+
+		ended(j, 2, "NODE_FAIL", nil, "", nil)
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+		Expect(got.Status.Message).To(ContainSubstring("before a new checkpoint, continuing again from scratch://ckpt/a (1/2) as attempt 3"))
+		Expect(got.Status.Reruns).To(Equal(int32(1)))
+		Expect(got.Status.Resume.CheckpointRef).To(Equal("scratch://ckpt/a"))
+		got = settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		Expect(envMap(runnerJob(got, 3))).To(HaveKeyWithValue("KAOS_RESUME_REF", "scratch://ckpt/a"))
+
+		ended(j, 3, "PREEMPTED", nil, "", nil)
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+		Expect(got.Status.Reruns).To(Equal(int32(2)))
+		settleTo(j, hpcv1alpha1.PhaseAdmitted)
+
+		ended(j, 4, "NODE_FAIL", nil, "", nil)
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed), got.Status.Message)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRerunLimit))
+		Expect(got.Status.Message).To(ContainSubstring("and the step was already re-run 2 times"))
+		Expect(got.Status.Attempts).To(HaveLen(4), "every interrupted attempt is settled")
+	})
+
+	It("counts the interruptions of a step over its whole life: a job that saved progress in between does not reset them", func() {
+		j := newServeJob(nil, nil)
+		reconcileOnce(j)
+		ended(j, 1, "NODE_FAIL", nil, "", nil) // re-run from the start (1/2)
+		reconcileOnce(j)
+		settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		ended(j, 2, "TIMEOUT", nil, "scratch://ckpt/a", progress(1))
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+		Expect(got.Status.Reruns).To(Equal(int32(1)), "a job that saved progress does not reset the count")
+		settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		ended(j, 3, "NODE_FAIL", nil, "", nil) // continued again (2/2)
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+		Expect(got.Status.Reruns).To(Equal(int32(2)))
+		settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		ended(j, 4, "PREEMPTED", nil, "", nil)
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRerunLimit))
+	})
+
 	It("tier 1: never re-runs the step's own error, an out-of-memory kill, a wall-time kill or a cancel", func() {
 		for _, c := range []struct {
 			state string

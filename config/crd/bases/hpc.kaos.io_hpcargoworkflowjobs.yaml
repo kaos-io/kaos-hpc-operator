@@ -604,8 +604,8 @@ spec:
                 type: string
               reruns:
                 description: |-
-                  Reruns so far: how often a step without a checkpoint was re-run from the start after a node failure
-                  or pre-emption (tier 1, D-75), at most MaxReruns.
+                  Reruns so far: how often a node failure or pre-emption made the step run again without new saved
+                  progress, from the start (no checkpoint, tier 1, D-75) or from the checkpoint it had; at most MaxReruns.
                 format: int32
                 type: integer
               result:

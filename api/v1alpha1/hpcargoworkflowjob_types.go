@@ -206,7 +206,8 @@ const (
 	ReasonRerunNodeFail  = "RerunNodeFailure"
 	ReasonRerunPreempted = "RerunPreempted"
 	ReasonRerunLimit     = "RerunLimit"
-	// MaxReruns caps the re-runs of a step that has no checkpoint.
+	// MaxReruns caps the re-runs of a step: from the start when it has no checkpoint, from the same checkpoint
+	// when a continuation was stopped before it saved a new one.
 	MaxReruns = int32(2)
 	// DefaultLeadMinutes is the longest lead of the warning before a job's limit (D-75); a short job's is a sixth
 	// of its limit (timelimit.Lead).
@@ -820,8 +821,8 @@ type HPCArgoWorkflowJobStatus struct {
 	// on jobs admitted before the field existed: the spec's wallTimeMinutes applies.
 	// +optional
 	Placement *Placement `json:"placement,omitempty"`
-	// Reruns so far: how often a step without a checkpoint was re-run from the start after a node failure
-	// or pre-emption (tier 1, D-75), at most MaxReruns.
+	// Reruns so far: how often a node failure or pre-emption made the step run again without new saved
+	// progress, from the start (no checkpoint, tier 1, D-75) or from the checkpoint it had; at most MaxReruns.
 	// +optional
 	Reruns int32 `json:"reruns,omitempty"`
 	// ResumeEvidence is what the latest continuation showed about the step's checkpoints (D-74).
