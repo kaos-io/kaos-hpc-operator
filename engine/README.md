@@ -37,8 +37,7 @@ is one contract and no older one beside it: a pipeline written for the earlier k
 ```python
 from kubecore.authoring import artifact, dataset, model, pipeline, step
 
-step(name, *, kind=, reads=, inputs=, needs=, produces=, gpu=, when=, walltime=,
-     resumable=, checkpoint_every=, idle_timeout=)
+step(name, *, kind=, reads=, inputs=, needs=, produces=, gpu=, when=, idle_timeout=)
 ```
 
 | Keyword | Rule the engine enforces at render |
@@ -50,7 +49,7 @@ step(name, *, kind=, reads=, inputs=, needs=, produces=, gpu=, when=, walltime=,
 | `needs=` | At most ten steps. A name in `inputs=` and a name a needed step produces must differ; two needed steps must not produce the same name. `inputs=` plus the datasets the needed steps produce: at most 16 |
 | `produces=` | `model("name")`, `artifact("name")`, `dataset("name")`, same name rule. A dataset has one producing step in the pipeline. `dataset(name, of=...)` is refused until that form ships |
 | `when=` | `"<field> == <value>"` or `!=`, joined by `and` / `or` (`and` first, no parentheses). `<field>` must be a field of the run form (a setting's path with dashes); the value is a bare word or number, or quoted. Rendered as `{{=workflow.parameters['<field>'] == '<value>' ...}}` on the task and on its HPC variant. The workflow system's own `{{...}}` form is refused |
-| `walltime=` | `'90m'`, `'12h'` or `'720'`: the step's time limit on the cluster and on an HPC class; the default of the run-form field `<step>-walltime` (`4h` when not declared); on an HPC class a step that is not resumable may ask for 11.5 h at most, compose refuses more |
+| `walltime=`, `resumable=`, `checkpoint_every=` | Refused: the platform sets the time of a step (its cap, `stepCapMinutes` of the pipeline context, 7 days by default) and finds out by itself whether it saves progress. The run form has no time field |
 
 Per kind: `ingest`, `publish` and `control` steps are offered no HPC class and get no HPC variant; a `control`
 step takes no `inputs=` and no `produces=`.
@@ -95,9 +94,9 @@ that identify an app from before the contract each say what is wrong in one sent
 template." Its second sentence is `step_contract.OLD_APP_MARKER`, published as `old_app_marker` in the authoring
 schema. They are: no step of the pipeline with a `kind=` (when at least one step has a `kind=`, a step without it is a
 mistake in a new pipeline and gets the plain message, which ends at the list of kinds; the refusal is raised when the
-pipeline is assembled, not at the `step(...)` call); `outputs=`, `hpc_time_limit=` or `disk=` (the message says what to write instead, then the sentence); the `platform` group in
+pipeline is assembled, not at the `step(...)` call); `outputs=`, `hpc_time_limit=`, `disk=`, `walltime=`, `resumable=` or `checkpoint_every=` (the message says what to write instead, then the sentence); the `platform` group in
 `config/config.yaml`; a top-level `platform` config key (render and compose); a `kubecore/` folder in the app.
-Every other refusal (an unknown `kind`, a name that is too long or reserved, a wrong `walltime`, ...) is a mistake in
+Every other refusal (an unknown `kind`, a name that is too long or reserved, a wrong `idle_timeout`, ...) is a mistake in
 a new pipeline and keeps its plain message without the sentence.
 
 **A step that produces a dataset is not offered an HPC class.** A job on HPC holds a token the lake treats as
@@ -135,8 +134,8 @@ with the sentinel: a skipped or omitted step has an empty output. Section 10 of 
   writes each result as the output `kaos-reused-<step>` (empty for a step that runs); every refusal is one sentence, and every
   run keeps its plan as `kaos-runs/<run>/plan.json` of `outputs-<app>`, best effort; a target names the one step to run with the steps
   it needs, and refuses a name that is not a step (`docs/step-contract.md`, section 13);
-- reads the run form's `promote-<dataset>` (checked only: a step never promotes; the final task below reads it),
-  `<step>-walltime` and `<step>-checkpoint-every` (checked, written as the output `kaos-run-settings`);
+- reads the run form's `promote-<dataset>` (checked only: a step never promotes; the final task below reads it)
+  and the matrix and parallel fields (written as the output `kaos-run-settings`);
   `plan` and `pipeline-version` in the ADVANCED override are reserved and refused (`plan.promote` with a sentence that
   names the form field), so a run never silently ignores one;
 - refuses a config that uses a resolver (`${oc.env:NAME}` and every other `${resolver:...}`; the render refuses it
@@ -203,7 +202,7 @@ holds a reference that is not in this list:
 | a step that is not pinned to one class | `inputs.parameters.cpu`, `inputs.parameters.mem` | computed by the engine from the class (a lookup table of the pool's classes written at render): a number and a quantity like `7` and `27Gi` |
 | GPU steps | `inputs.parameters.gpus` | `0` or `1`, set by the engine |
 | steps with checkpoint copies, the follower | `workflow.name`, `workflow.uid` | the workflow engine |
-| the follower | `inputs.parameters.step-name`, `image`, `step-command`, `step-kind`, `time-limit`, `deadline-seconds`, `hpc-class`, `resumable-lead`, `resumable`, `idle-timeout` | written by the engine at render, or one of the form fields above |
+| the follower | `inputs.parameters.step-name`, `image`, `step-command`, `step-kind`, `time-limit`, `deadline-seconds`, `hpc-class`, `idle-timeout` | written by the engine at render, or one of the form fields above |
 
 The compose step is the one definition that carries the run's free text: every config leaf of the form is one of
 its arguments, and so is the ADVANCED override (`workflow.parameters.config`). Compose refuses an override above

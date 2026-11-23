@@ -1,9 +1,7 @@
 """PRD kaos#1911 F-40 / AC-26, kaos#2212 part 3: the time staging may go on grows with the size of the copy; a token
 is minted again for every attempt; a dataset too large for the job to download is never left to the job; a copy that
 is making progress says how far it is. A fake clock stands in for time."""
-import base64
 import io
-import json
 import urllib.request
 
 import helpers
@@ -39,11 +37,6 @@ def _twin(monkeypatch, lakefs, stager, **env):
 
 
 CLOCKS = []
-
-
-def _jwt(exp):
-    seg = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).rstrip(b"=").decode()
-    return "h.%s.s" % seg
 
 
 def _big(monkeypatch, size, rcs, **kw):
@@ -155,15 +148,6 @@ def test_every_attempt_asks_for_the_apps_key_again_and_sends_that_one(monkeypatc
     auths = [r[0]["authorization"] for w, r in stager.calls if w[0] == "stage"]
     assert len(auths) == 3 and len(set(auths)) == 3, "never the key of an earlier attempt"
     assert auths[-1] == helpers.FakeKeys.auth_of(keys.calls)
-
-
-def test_a_failed_mint_keeps_the_old_token_only_while_it_has_an_hour_left(monkeypatch):
-    clock = Clock(monkeypatch)
-    now = clock.now
-    assert staging.renewed_wallet(lambda: "new", "old") == "new"
-    assert staging.renewed_wallet(lambda: "", _jwt(now + 5 * H)) == _jwt(now + 5 * H)
-    assert staging.renewed_wallet(lambda: "", _jwt(now + 30 * 60)) == "", "close to its end: not reused"
-    assert staging.renewed_wallet(lambda: "", "not-a-jwt") == "not-a-jwt", "an end that is unknown is not a reason"
 
 
 def test_an_attempt_whose_key_cannot_be_obtained_is_a_failed_attempt_that_is_asked_again(monkeypatch, capsys):

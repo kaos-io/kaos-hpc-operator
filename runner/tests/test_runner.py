@@ -145,8 +145,9 @@ class NoStager:
         if words[0] == "version":
             return 0, [{"event": "version", "contract": runmod.staging.CONTRACT}]
         if words[0] == "key":
-            self.keys = getattr(self, "keys", []) + [list(feed)[0]]
-            return 0, [{"event": "key"}]
+            record = list(feed)[0]
+            self.keys = getattr(self, "keys", []) + [record]
+            return 0, [{"event": "key", "tracker": True} if "tracker_token" in record else {"event": "key"}]
         raise AssertionError(words)
 
 
@@ -245,7 +246,7 @@ def test_timeout_and_node_fail_are_terminal_states_too(rig):
 
 def test_the_submitted_job_is_the_proven_one(rig):
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    rig.make(slurm, KAOS_ATTEMPT="3", HPC_RESUMABLE_LEAD="20", KAOS_LIB_SUPPORT='{"a":1}', KAOS_RESUME_REF=REF,
+    rig.make(slurm, KAOS_ATTEMPT="3", HPC_RESUMABLE_LEAD="20", HPC_RESUMABLE="1", KAOS_LIB_SUPPORT='{"a":1}', KAOS_RESUME_REF=REF,
              # what the engine set before the step contract: nothing reads it, so nothing passes it on
              CHECKPOINT_BUCKET="b", KUBECORE_RUN_ID="run-1", OUTPUTS_REPO="outputs-other")
     rig.runner.run()
@@ -257,7 +258,7 @@ def test_the_submitted_job_is_the_proven_one(rig):
     assert (env["KAOS_ATTEMPT"], env["KAOS_RESUMABLE"], env["KAOS_RESUME_REF"]) == ("3", "1", CID)
     assert env["KAOS_RESUME_PREFIX"] == "kaos-ckpt/%s/model-training/000002.tar" % WF and env["HPC_GPUS"] == "4"
     assert env["KAOS_PROJID"] == "1" and env["KAOS_CKPT_BUDGET_PCT"] == "10" and "CKPT_B64" in env
-    assert env["MLFLOW_TRACKING_TOKEN"] == "wallet.jwt" and "LAKEFS_BEARER_TOKEN" not in env
+    assert "MLFLOW_TRACKING_TOKEN" not in env and "wallet.jwt" not in " ".join(env.values()) and "LAKEFS_BEARER_TOKEN" not in env
     assert env["LAKEFS_ENDPOINT"] == "https://lakefs.example" and env["KAOS_OUTPUTS_REPO"] == "outputs-yolo"
     assert env["KAOS_LIB_SUPPORT"] == '{"a":1}' and "HANDBACK_B64" in env and "STAGEIN_B64" in env
     # The step contract: the one value the step receives, unchanged; the inputs to present; nothing of before.
@@ -418,7 +419,7 @@ def test_a_sharing_gpu_job_is_a_host_with_an_offer_window_and_inputs_in_its_scri
     assert job["name"] == "kaos-a1b2c3d4e5-%s-model-training-01234567-a1" % WF
     assert sub["script"].split("\n")[1] == "# kaos-job v2 scope=a1b2c3d4e5"
     assert [e.split("=")[0] for e in job["environment"]] == ["PATH", "HOME", "USER"], "secrets leave the Slurm environment"
-    assert "LAKEFS_BEARER_TOKEN" not in sub["script"] and "wallet.jwt" in sub["script"] and "export KAOS_SLOTS_B64=" in sub["script"]
+    assert "LAKEFS_BEARER_TOKEN" not in sub["script"] and "wallet.jwt" not in sub["script"] and "export KAOS_SLOTS_B64=" in sub["script"]
     assert job["time_limit"] == 480, "twice the step, below the class cap"
     assert job["begin_time"]["set"] and "requeue" not in job
     slurm2 = FakeSlurm({"5001": [acc("COMPLETED")]})
@@ -652,71 +653,38 @@ def test_the_dataset_staging_record_is_reported_from_the_first_report_on(rig):
         "the job is told where the resident copy of each input is"
 
 
-def test_a_queued_job_is_replaced_before_its_wallet_expires(rig, monkeypatch):
-    slurm = FakeSlurm({"5001": [acc("PENDING")], "5002": [acc("COMPLETED")]})
-    rig.make(slurm)
-    exp = [1000.0]
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: exp[0])
-    monkeypatch.setattr(runmod.time, "time", lambda: 1000.0 - 600)        # 10 min before: inside the margin
+def test_a_long_wait_in_the_queue_never_replaces_a_job_for_its_token(rig, monkeypatch):
+    """D-76: the tracker's token is a file replaced while the job waits, so no wait however long replaces the job."""
+    slurm = FakeSlurm({"5001": [acc("PENDING")] * 5 + [acc("COMPLETED")]})
+    rig.make(slurm, SLURM_TIME_LIMIT="2880")
+    clock = [100.0]
+    monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
+    rig.runner.sleep = lambda s: clock.__setitem__(0, clock[0] + 6 * 3600)     # every poll takes six hours
     rig.runner.run()
-    assert slurm.cancelled == ["5001"] and len(slurm.submitted) == 2 and rig.kube.run["siteJobID"] == "5002"
-
-
-def test_a_queued_job_is_replaced_as_soon_as_its_wallet_cannot_cover_the_step(rig, monkeypatch):
-    """PRD kaos#1911 F-40: a job that starts with less wallet than its time limit loses access to its data and
-    to tracking partway through. A queued job is replaced while a fresh wallet can still cover the whole limit."""
-    slurm = FakeSlurm({"5001": [acc("PENDING")], "5002": [acc("COMPLETED")]})
-    rig.make(slurm, SLURM_TIME_LIMIT="240")
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 1000.0)
-    monkeypatch.setattr(runmod.time, "time", lambda: 1000.0 - 4 * 3600 - 200)      # 4 h 3 min 20 s left: less than limit + slack
-    rig.runner.run()
-    assert slurm.cancelled == ["5001"] and rig.kube.run["siteJobID"] == "5002"
-
-
-def test_a_queued_job_whose_wallet_covers_the_step_is_left_in_the_queue(rig, monkeypatch):
-    slurm = FakeSlurm({"5001": [acc("PENDING"), acc("COMPLETED")]})
-    rig.make(slurm, SLURM_TIME_LIMIT="240")
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 1000.0)
-    monkeypatch.setattr(runmod.time, "time", lambda: 1000.0 - 4 * 3600 - 400)      # more than limit + slack left
-    rig.runner.run()
-    assert slurm.cancelled == [] and len(slurm.submitted) == 1
-
-
-def test_the_longest_step_the_controller_allows_is_replaced_only_after_a_short_wait(rig, monkeypatch):
-    """The controller allows a step of life - 30 min (690 min); a wallet of 12 h leaves it a 30 min queue window, less
-    the slack, before it is replaced - never at once."""
-    slurm = FakeSlurm({"5001": [acc("PENDING"), acc("COMPLETED")]})
-    rig.make(slurm, SLURM_TIME_LIMIT="690")
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 1000.0 + 12 * 3600)
-    monkeypatch.setattr(runmod.time, "time", lambda: 1000.0 + 60)                  # a minute after the wallet was minted
-    rig.runner.run()
-    assert slurm.cancelled == [] and len(slurm.submitted) == 1
+    assert slurm.cancelled == [] and len(slurm.submitted) == 1 and not rig.kube.run.get("queueReplaced")
 
 
 def test_the_replacement_of_a_queued_job_is_reported_with_both_ids_and_the_queued_seconds(rig, monkeypatch):
-    """AC-35: the queue place lost to a token refresh is recorded in status.run, not only in the log."""
-    slurm = FakeSlurm({"5001": [acc("PENDING")], "5002": [acc("COMPLETED")]})
-    rig.make(slurm)
+    """AC-35: the queue place lost to a replacement is recorded in status.run, not only in the log."""
+    taken = acc("PENDING", comment="kaos-commit=c0ffee12 kaos-state=taken host=4000 slot=1 attempt=1")
+    slurm = FakeSlurm({"5001": [taken], "5002": [acc("COMPLETED")]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
     clock = [100.0]
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 100.0 + 8 * 3600)
     monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
-    rig.runner.cfg.time_limit = 240
-    rig.runner.sleep = lambda s: clock.__setitem__(0, clock[0] + 3600)   # every poll of the queued job takes an hour
+    monkeypatch.setattr(runmod, "host_gone", lambda slurm, host: True)
+    rig.runner.sleep = lambda s: clock.__setitem__(0, clock[0] + 3600)
     rig.runner.run()
     assert slurm.cancelled == ["5001"] and rig.kube.run["siteJobID"] == "5002"
     (rec,) = rig.kube.run["queueReplaced"]
-    assert (rec["oldSiteJobID"], rec["newSiteJobID"], rec["reason"]) == ("5001", "5002", "TokenRefresh")
-    assert 3 * 3600 <= rec["queuedSeconds"] <= 4 * 3600 and rec["at"].endswith("Z")
-    assert rig.kube.run["queueReplacedCount"] == 1
+    assert (rec["oldSiteJobID"], rec["newSiteJobID"], rec["reason"]) == ("5001", "5002", "HostLost")
+    assert rec["at"].endswith("Z") and rig.kube.run["queueReplacedCount"] == 1
 
 
-def test_a_job_a_host_took_is_never_replaced_for_its_wallet(rig, monkeypatch):
+def test_a_job_a_host_took_is_never_replaced_while_the_host_lives(rig, monkeypatch):
     taken = acc("PENDING", comment="kaos-commit=c0ffee12 kaos-state=taken host=4000 slot=1 attempt=1")
     done = acc("RUNNING", comment="kaos-state=done rc=0 host=4000")
     slurm = FakeSlurm({"5001": [taken, done], "4000": [acc("RUNNING")]})
     rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
-    monkeypatch.setattr(runmod.wallet, "wallet_exp", lambda w: 1000.0)
-    monkeypatch.setattr(runmod.time, "time", lambda: 5000.0)               # long past the wallet
     rig.runner.run()
     assert slurm.cancelled == [] and len(slurm.submitted) == 1
     assert rig.kube.run["state"] == "COMPLETED" and rig.kube.run["exitCode"] == 0 and rig.kube.run["terminal"]
@@ -1282,12 +1250,48 @@ def test_a_guest_stopped_by_its_own_time_limit_reports_a_timeout_and_any_other_k
         assert (run["state"], run["exitCode"], run["hostSiteJobID"], run["slot"]) == (state, 143, "5439966", 0), comment
         assert "hostJobOpen" not in run, "a guest never holds a node of its own"
 
+def test_a_job_asks_the_site_for_a_minimum_time_only_when_the_controller_names_one(rig):
+    """D-75: slurmrestd's `time_minimum` (Slurm --time-min), in minutes, as a set number."""
+    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm, HPC_TIME_MIN_MINUTES="60")
+    rig.runner.run()
+    assert slurm.submitted[0]["job"]["time_minimum"] == {"set": True, "number": 60}
+    slurm2 = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm2)
+    rig.runner.run()
+    assert "time_minimum" not in slurm2.submitted[0]["job"]
+
+
+def test_a_plain_sharing_job_is_not_marked_as_one_a_host_may_cut_and_continue(rig):
+    """D-75: every job gets the lead of the warning before its own limit, a plain step too. Only a step whose saved
+    progress the controller verified (HPC_RESUMABLE=1) is marked KAOS_RESUMABLE=1, the word the slot manager needs
+    before it takes a guest that does not fit and stops it before the host's end."""
+    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", HPC_SHARE_ROLE="guest", HPC_RESUMABLE_LEAD="10")
+    rig.runner.run()
+    script = slurm.submitted[0]["script"].split("\n")
+    assert "export KAOS_RESUMABLE_LEAD_MIN=10" in script, "its own warning, before its own limit"
+    assert not [line for line in script if line.startswith("export KAOS_RESUMABLE=")], "not verified: never cut for a host"
+    slurm2 = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm2, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", HPC_SHARE_ROLE="guest", HPC_RESUMABLE_LEAD="10", HPC_RESUMABLE="1")
+    rig.runner.run()
+    script = slurm2.submitted[0]["script"].split("\n")
+    assert "export KAOS_RESUMABLE=1" in script and "export KAOS_RESUMABLE_LEAD_MIN=10" in script
+    # A job alone: the same meaning, in its environment.
+    slurm3 = FakeSlurm({"5001": [acc("COMPLETED")]})
+    rig.make(slurm3, HPC_RESUMABLE_LEAD="10")
+    rig.runner.run()
+    env = dict(e.split("=", 1) for e in slurm3.submitted[0]["job"]["environment"])
+    assert "KAOS_RESUMABLE" not in env and env["KAOS_RESUMABLE_LEAD_MIN"] == "10"
+    assert slurm3.submitted[0]["job"]["kill_warning_delay"] == {"set": True, "number": 600}, "a plain job alone is still warned"
+
+
 def test_a_resumable_sharing_job_hands_its_lead_to_the_slot_manager_and_asks_slurm_for_no_warning_signal(rig):
     """AC-73: a host's batch shell is the slot manager, which USR1 would kill; every step on a shared node is
     signalled by the slot manager, from the lead in its script (KAOS_RESUMABLE_LEAD_MIN). A resumable job alone
     keeps Slurm's own warning signal (test_the_submitted_job_is_the_proven_one)."""
     slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", HPC_RESUMABLE_LEAD="15")
+    rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5", HPC_RESUMABLE_LEAD="15", HPC_RESUMABLE="1")
     rig.runner.run()
     sub = slurm.submitted[0]
     assert "export KAOS_RESUMABLE_LEAD_MIN=15" in sub["script"].split("\n"), "a host reads it from the waiting script"
@@ -1297,7 +1301,7 @@ def test_a_resumable_sharing_job_hands_its_lead_to_the_slot_manager_and_asks_slu
     slurm2 = FakeSlurm({"5001": [acc("COMPLETED")]})
     rig.make(slurm2, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
     rig.runner.run()
-    assert "KAOS_RESUMABLE_LEAD_MIN" not in slurm2.submitted[0]["script"], "a step that is not resumable carries none"
+    assert "KAOS_RESUMABLE" not in slurm2.submitted[0]["script"], "a step without a lead carries neither word"
 
 
 def test_a_resumable_guest_that_saved_is_reported_like_a_resumable_step_alone(rig):
@@ -1622,49 +1626,6 @@ def test_a_dataset_the_site_could_not_stage_and_the_job_must_not_download_ends_t
     assert run["state"] == "FAILED" and run["exitCode"] == 246 and run["terminal"] is True
     assert "2.5 TB" in run["message"] and not run.get("siteJobID")
     assert "DatasetNotStaged" in capsys.readouterr().out
-
-
-def _jwt_ending(exp):
-    import base64
-    seg = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).rstrip(b"=").decode()
-    return "h.%s.s" % seg
-
-
-def _long_staging(rig, monkeypatch, token_left_after):
-    """A job whose staging took two hours; the token minted before it has token_left_after seconds left then, and
-    the next mint fails."""
-    clock = [1_000_000.0]
-    monkeypatch.setattr(runmod.time, "time", lambda: clock[0])
-    old = _jwt_ending(clock[0] + 2 * 3600 + token_left_after)
-    slurm = FakeSlurm({"5001": [acc("COMPLETED")]})
-    rig.make(slurm)
-    mints = []
-
-    def mint():
-        mints.append(1)
-        return old if len(mints) == 1 else ""
-    rig.runner._mint = mint
-    rig.monkeypatch.setattr(runmod.staging, "stage_dataset",
-                            lambda *a, **kw: clock.__setitem__(0, clock[0] + 2 * 3600) or "/scr/ds")
-    return slurm, old
-
-
-def test_a_token_about_to_end_after_a_long_staging_that_cannot_be_minted_again_fails_the_attempt(rig, monkeypatch, capsys):
-    slurm, _ = _long_staging(rig, monkeypatch, token_left_after=600)
-    with pytest.raises(SystemExit) as e:
-        rig.runner.run()
-    assert e.value.code == 0
-    assert slurm.submitted == []
-    run = rig.kube.run
-    assert run["state"] == "FAILED" and run["exitCode"] == 243 and run["terminal"] is True
-    assert "no tracking token could be minted for this job" in run["message"]
-    assert "ResultNotHandedBack" in capsys.readouterr().out
-
-
-def test_the_old_token_with_enough_life_left_after_a_long_staging_is_kept_when_it_cannot_be_minted_again(rig, monkeypatch):
-    slurm, old = _long_staging(rig, monkeypatch, token_left_after=3 * 3600)
-    rig.runner.run()
-    assert len(slurm.submitted) == 1 and rig.runner.wallet == old
 
 
 def test_every_input_of_a_job_is_staged_against_one_72_hour_clock_started_at_the_first(rig, monkeypatch):

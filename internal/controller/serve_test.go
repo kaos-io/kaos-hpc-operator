@@ -358,9 +358,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 	})
 
 	It("continues in a new runner Job for attempt 2 with the resume environment", func() {
-		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
-			j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: 5}
-		})
+		j := newServeJob(nil, nil)
 		_, got := reconcileOnce(j)
 		Expect(runnerJob(got, 1)).NotTo(BeNil())
 
@@ -829,19 +827,6 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(envMap(runnerJob(got, 1))).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "60"))
 	})
 
-	It("never learns for a resumable step: its checkpoint signal is timed from the declared limit", func() {
-		for range 4 {
-			seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 5, nil)
-		}
-		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
-			j.Spec.Image = appImage
-			j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: 5}
-		})
-		_, got := reconcileOnce(j)
-		Expect(got.Status.Placement.Source).To(Equal(hpcv1alpha1.PlacementDeclared))
-		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(60)))
-	})
-
 	It("retries once at the declared limit when a learned limit times out, then fails as today on a second TIMEOUT", func() {
 		for range 3 {
 			seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
@@ -862,11 +847,12 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(30)))
 
 		got = settleTo(j, hpcv1alpha1.PhaseAdmitted)
-		Expect(got.Status.Placement).To(Equal(&hpcv1alpha1.Placement{TimeLimitMinutes: 240, Source: hpcv1alpha1.PlacementTimeoutRetry, Samples: 3}))
-		Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(240)))
-		Expect(envMap(runnerJob(got, 2))).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "240"))
+		Expect(got.Status.Placement).To(Equal(&hpcv1alpha1.Placement{TimeLimitMinutes: 210, Source: hpcv1alpha1.PlacementTimeoutRetry, Samples: 3}),
+			"the retry gets what is left of the cap: 240 less the 30 the first job ran")
+		Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(210)))
+		Expect(envMap(runnerJob(got, 2))).To(HaveKeyWithValue("SLURM_TIME_LIMIT", "210"))
 
-		timeout(j, 2, 240)
+		timeout(j, 2, 210)
 		_, got = reconcileOnce(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonWallTimeReached))
@@ -874,7 +860,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Attempt).To(Equal(int32(2)), "no third attempt")
 	})
 
-	It("caps the timeout retry at the spec's wall time and does not retry a declared limit", func() {
+	It("gives the timeout retry no more than what is left of the spec's wall time, and no retry when that is no more than the learned limit", func() {
 		for range 3 {
 			seedRun("reg.example/lab/app:v0", hpcv1alpha1.PhaseSucceeded, 20, nil)
 		}
@@ -882,9 +868,9 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		_, got := reconcileOnce(j)
 		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(30)))
 		timeout(j, 1, 30)
-		reconcileOnce(j)
-		got = settleTo(j, hpcv1alpha1.PhaseAdmitted)
-		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(40)), "the declared cap")
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed), "10 minutes of the cap are left, fewer than the learned 30")
+		Expect(got.Status.Attempts).To(HaveLen(1))
 
 		declared := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = "reg.example/lab/fresh:v1" })
 		reconcileOnce(declared)
@@ -894,73 +880,18 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Attempts).To(HaveLen(1))
 	})
 
-	// Time-limit guidance (a stop at the declared limit is explained; a repeat is warned about).
-	stoppedRun := func(wall int32) func(*hpcv1alpha1.HPCArgoWorkflowJob) {
-		return func(g *hpcv1alpha1.HPCArgoWorkflowJob) {
-			g.Status.Reason = hpcv1alpha1.ReasonWallTimeReached
-			g.Status.Run.State = "TIMEOUT"
-			g.Status.Placement = &hpcv1alpha1.Placement{TimeLimitMinutes: wall, Source: hpcv1alpha1.PlacementDeclared}
-		}
-	}
-
-	It("explains a stop at the declared limit with the real limit and the site maximum, and raises a Warning event", func() {
+	It("ends a step that ran its job limit and saved nothing with its own reason and sentence, and raises a Warning event", func() {
 		rec := record.NewFakeRecorder(10)
 		r.Recorder = rec
-		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.WallTimeMinutes = 240 })
+		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.WallTimeMinutes = 10080 })
 		reconcileOnce(j)
-		timeout(j, 1, 240)
+		timeout(j, 1, 2880)
 		_, got := reconcileOnce(j)
-		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonWallTimeReached), "the machine-read code is unchanged")
-		want := "This step ran its full 4 h time limit and was stopped. Set a longer limit for it on the run form (`<step>-walltime`, up to 690 min on this site) " +
-			"or make it resumable so it continues automatically from a checkpoint."
-		Expect(got.Status.Message).To(Equal(want))
-		Expect(<-rec.Events).To(Equal("Warning WallTimeReached " + want))
-	})
-
-	It("says a resumable step was stopped before it saved a checkpoint", func() {
-		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
-			j.Spec.WallTimeMinutes = 90
-			j.Spec.Resumable = &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: 5}
-		})
-		reconcileOnce(j)
-		timeout(j, 1, 90)
-		_, got := reconcileOnce(j)
-		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonWallTimeReached))
-		Expect(got.Status.Message).To(Equal("This step ran its full 90 min time limit and was stopped before it saved a checkpoint; " +
-			"save more often or ask to be signalled earlier."))
-	})
-
-	It("warns at admission when a recent run of the step was stopped at the same declared limit, and changes nothing else", func() {
-		seedRun(appImage, hpcv1alpha1.PhaseFailed, 60, stoppedRun(60))
-		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
-		_, got := reconcileOnce(j)
-		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted))
-		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(60)), "the limit is not raised")
-		Expect(got.Status.Placement.Warning).To(Equal("Warning: this step was stopped at its 1 h limit in an earlier run " +
-			"and will be again unless you raise its limit on the run form (`<step>-walltime`) or make it resumable."))
-	})
-
-	It("gives no warning without such a history: other limit, other app, success, or older than the last three", func() {
-		n := 0
-		ended := func(mod func(*hpcv1alpha1.HPCArgoWorkflowJob)) func(*hpcv1alpha1.HPCArgoWorkflowJob) {
-			n++
-			at := metav1.NewTime(time.Now().Add(-time.Duration(100-n) * time.Minute)) // later seeds ended later
-			return func(g *hpcv1alpha1.HPCArgoWorkflowJob) {
-				if mod != nil {
-					mod(g)
-				}
-				g.Status.Attempts = []hpcv1alpha1.AttemptRecord{{Attempt: 1, Tier: hpcv1alpha1.TierGPU, EndTime: at}}
-			}
-		}
-		seedRun(appImage, hpcv1alpha1.PhaseFailed, 60, ended(stoppedRun(60))) // stopped at 60, but older than the last three
-		for range 3 {
-			seedRun(appImage, hpcv1alpha1.PhaseSucceeded, 10, ended(nil))
-		}
-		seedRun(appImage, hpcv1alpha1.PhaseFailed, 120, ended(stoppedRun(120))) // another declared limit
-		seedRun("reg.example/lab/other:v1", hpcv1alpha1.PhaseFailed, 60, ended(stoppedRun(60)))
-		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
-		_, got := reconcileOnce(j)
-		Expect(got.Status.Placement.Warning).To(BeEmpty())
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonNoSavedProgress))
+		Expect(got.Status.Message).To(ContainSubstring("it ran 2 days on"))
+		Expect(got.Status.Message).To(ContainSubstring("without saving progress. A step that saves progress through the library is continued instead."))
+		Expect(<-rec.Events).To(HavePrefix("Warning NoSavedProgress "))
 	})
 
 	// ---- D-74, D-75: recovery from interrupted attempts, discovered resumability ----
@@ -968,7 +899,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 	// ended reports the end of an attempt: the site state, the step's exit code, and (when the job
 	// persisted a checkpoint copy) its reference and progress.
 	ended := func(j *hpcv1alpha1.HPCArgoWorkflowJob, attempt int32, state string, exit *int32, ref string, ck *hpcv1alpha1.CheckpointInfo) {
-		start, end := metav1.NewTime(time.Now().Add(-30*time.Minute)), metav1.NewTime(time.Now())
+		start, end := metav1.NewTime(time.Now().Add(-10*time.Minute)), metav1.NewTime(time.Now())
 		report(j, hpcv1alpha1.RunStatus{Attempt: attempt, SiteJobID: fmt.Sprintf("30%d", attempt), State: state, ExitCode: exit,
 			StartTime: &start, EndTime: &end, Terminal: true, CheckpointRef: ref, Checkpoint: ck})
 	}
@@ -1004,6 +935,60 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Attempts).To(HaveLen(3), "every interrupted attempt is settled")
 	})
 
+	It("bounds a continuation that ends by a node failure or pre-emption before a new checkpoint like a re-run: twice, then RerunLimit", func() {
+		j := newServeJob(nil, nil)
+		reconcileOnce(j)
+		ended(j, 1, "TIMEOUT", nil, "scratch://ckpt/a", progress(1))
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+		settleTo(j, hpcv1alpha1.PhaseAdmitted)
+
+		ended(j, 2, "NODE_FAIL", nil, "", nil)
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+		Expect(got.Status.Message).To(ContainSubstring("before a new checkpoint, continuing again from scratch://ckpt/a (1/2) as attempt 3"))
+		Expect(got.Status.Reruns).To(Equal(int32(1)))
+		Expect(got.Status.Resume.CheckpointRef).To(Equal("scratch://ckpt/a"))
+		got = settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		Expect(envMap(runnerJob(got, 3))).To(HaveKeyWithValue("KAOS_RESUME_REF", "scratch://ckpt/a"))
+
+		ended(j, 3, "PREEMPTED", nil, "", nil)
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+		Expect(got.Status.Reruns).To(Equal(int32(2)))
+		settleTo(j, hpcv1alpha1.PhaseAdmitted)
+
+		ended(j, 4, "NODE_FAIL", nil, "", nil)
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed), got.Status.Message)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRerunLimit))
+		Expect(got.Status.Message).To(ContainSubstring("and the step was already re-run 2 times"))
+		Expect(got.Status.Attempts).To(HaveLen(4), "every interrupted attempt is settled")
+	})
+
+	It("counts the interruptions of a step since its last saved progress: a job that saved new progress starts the count again", func() {
+		j := newServeJob(nil, nil)
+		reconcileOnce(j)
+		ended(j, 1, "NODE_FAIL", nil, "", nil) // re-run from the start (1/2)
+		reconcileOnce(j)
+		settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		ended(j, 2, "TIMEOUT", nil, "scratch://ckpt/a", progress(1))
+		_, got := reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+		Expect(got.Status.Reruns).To(BeZero(), "a job that saved new progress starts the count again")
+		for n := int32(1); n <= hpcv1alpha1.MaxReruns; n++ {
+			settleTo(j, hpcv1alpha1.PhaseAdmitted)
+			ended(j, 2+n, "NODE_FAIL", nil, "", nil) // continued again from the same checkpoint
+			_, got = reconcileOnce(j)
+			Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
+			Expect(got.Status.Reruns).To(Equal(n))
+		}
+		settleTo(j, hpcv1alpha1.PhaseAdmitted)
+		ended(j, 3+hpcv1alpha1.MaxReruns, "PREEMPTED", nil, "", nil)
+		_, got = reconcileOnce(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRerunLimit))
+	})
+
 	It("tier 1: never re-runs the step's own error, an out-of-memory kill, a wall-time kill or a cancel", func() {
 		for _, c := range []struct {
 			state string
@@ -1016,14 +1001,6 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 			Expect(got.Status.Phase.Terminal()).To(BeTrue(), c.state)
 			Expect(got.Status.Reruns).To(BeZero(), c.state)
 		}
-	})
-
-	It("tier 1: a step that opted out of resuming is still re-run after a node failure", func() {
-		j := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.ResumableOptOut = true })
-		reconcileOnce(j)
-		ended(j, 1, "NODE_FAIL", nil, "", nil)
-		_, got := reconcileOnce(j)
-		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonRerunNodeFail))
 	})
 
 	It("continues a step that was never marked from the checkpoint copy it persisted, on every recoverable end", func() {
@@ -1044,18 +1021,11 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		}
 	})
 
-	It("does not continue the step's own error even when a checkpoint exists, nor a step that opted out", func() {
+	It("does not continue the step's own error even when a checkpoint exists", func() {
 		j := newServeJob(nil, nil)
 		reconcileOnce(j)
 		ended(j, 1, "FAILED", i32(1), "scratch://ckpt/x", progress(1))
 		_, got := reconcileOnce(j)
-		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
-		Expect(got.Status.Continuations).To(BeZero())
-
-		out := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.ResumableOptOut = true })
-		reconcileOnce(out)
-		ended(out, 1, "TIMEOUT", nil, "scratch://ckpt/y", progress(1))
-		_, got = reconcileOnce(out)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
 		Expect(got.Status.Continuations).To(BeZero())
 	})
@@ -1109,20 +1079,6 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Resume.FromAttempt).To(Equal(int32(1)))
 	})
 
-	It("stops at the continuation cap (5 for a step that was never marked)", func() {
-		j := newServeJob(nil, nil)
-		reconcileOnce(j)
-		for a := int32(1); a <= 5; a++ {
-			ended(j, a, "TIMEOUT", nil, fmt.Sprintf("scratch://ckpt/%d", a), progress(int64(a)))
-			_, got := reconcileOnce(j)
-			Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing))
-			settleTo(j, hpcv1alpha1.PhaseAdmitted)
-		}
-		ended(j, 6, "TIMEOUT", nil, "scratch://ckpt/6", progress(6))
-		_, got := reconcileOnce(j)
-		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuationLimit))
-	})
-
 	It("verifies a step passively when its continuation completes (live hpc-289baf48: success leaves no copy to compare)", func() {
 		first := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) { j.Spec.Image = appImage })
 		reconcileOnce(first)
@@ -1147,7 +1103,6 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		reconcileOnce(first)
 		_, got := reconcileOnce(first)
 		Expect(got.Status.Placement.Resumable).To(BeNil(), "nothing is verified before a continuation has shown progress")
-		Expect(envMap(runnerJob(got, 1))).NotTo(HaveKey("HPC_RESUMABLE_LEAD"))
 
 		ended(first, 1, "TIMEOUT", nil, "scratch://ckpt/a", progress(3))
 		reconcileOnce(first)
@@ -1162,19 +1117,11 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		_, got = reconcileOnce(next)
 		Expect(got.Status.Placement.Resumable).NotTo(BeNil())
 		Expect(got.Status.Placement.Resumable.Verified).To(BeTrue())
-		Expect(got.Status.Placement.Source).To(Equal(hpcv1alpha1.PlacementDeclared), "a verified step keeps its declared limit (D-67)")
-		Expect(got.EffectiveResumable()).NotTo(BeNil())
+		Expect(got.Status.Placement.Source).To(Equal(hpcv1alpha1.PlacementDeclared), "no earlier run times: the job limit is declared")
+		Expect(got.VerifiedResumable()).To(BeTrue())
 		env := envMap(runnerJob(got, 1))
 		Expect(env).To(HaveKeyWithValue("HPC_RESUMABLE_LEAD", "10"))
 		Expect(env).To(HaveKeyWithValue("HPC_CKPT_BUDGET_PERCENT", "10"))
-
-		optOut := newServeJob(nil, func(j *hpcv1alpha1.HPCArgoWorkflowJob) {
-			j.Spec.Image = "reg.example/lab/app:v3"
-			j.Spec.ResumableOptOut = true
-		})
-		_, got = reconcileOnce(optOut)
-		Expect(got.EffectiveResumable()).To(BeNil(), "resumable=False wins over a verified history")
-		Expect(envMap(runnerJob(got, 1))).NotTo(HaveKey("HPC_RESUMABLE_LEAD"))
 	})
 
 	It("a later continuation with no progress clears the verification", func() {
@@ -1199,7 +1146,7 @@ var _ = Describe("HPCArgoWorkflowJob serve mode", func() {
 		Expect(got.Status.Placement.Resumable).NotTo(BeNil())
 		Expect(got.Status.Placement.Resumable.Verified).To(BeFalse())
 		Expect(got.Status.Placement.Resumable.Reason).To(ContainSubstring("NoProgress"))
-		Expect(got.EffectiveResumable()).To(BeNil())
+		Expect(got.VerifiedResumable()).To(BeFalse())
 	})
 
 	It("publishes the scratch the project's checkpoint copies hold on the HPCSite and drops a succeeded step's", func() {

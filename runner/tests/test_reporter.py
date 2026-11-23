@@ -156,7 +156,7 @@ def test_the_gpu_readings_ride_every_report_and_are_cleared_for_a_new_site_job()
 def test_queue_replacements_keep_the_newest_and_count_all_and_a_restarted_runner_carries_on():
     r, kube = _reporter()
     for n in range(rep.QUEUE_REPLACED_KEPT + 3):
-        r.note_replacement(str(n + 1), old=str(n), reason="TokenRefresh", queued=60 * n)
+        r.note_replacement(str(n + 1), old=str(n), reason="Replanned", queued=60 * n)
     r.report(siteJobID="8", state="PENDING")
     kept = kube.run["queueReplaced"]
     assert [x["newSiteJobID"] for x in kept] == ["4", "5", "6", "7", "8"] and kube.run["queueReplacedCount"] == 8

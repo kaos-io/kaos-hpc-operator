@@ -56,10 +56,8 @@ the job's class. Every `Reason` the operator writes, what it means and what the 
 | `Failed` / `AppIdentityUnavailable` | The step's app has no identity in the data store: no workflow service account `<app>-workflow` in the job's namespace, the data store does not know the app (not declared with its namespace), or neither answered. The runner stops before it stages or submits anything (exit 247, settled 0); its message names the app. A job never falls back to the project's token for the data store |
 | `Failed` / `ResultNotHandedBack` | The step ended well, but its result could not be brought from the site to `status.result`: the job could not read or upload the result file (job exit 243), the runner could not fetch it, or the run has no way to hand a result back (no data-plane token, lakeFS endpoint or app), in which case nothing is submitted. Never a success with an empty result |
 | `Failed` / `InvalidResult` | The result file reached the runner but is not a result of the step contract (not a JSON object, not version 1 with status `ok` and `values`, `reads`, `writes`, or over 8 KiB by cost). Runner exit 244 |
-| `Refused` / `TooLongNotResumable` | The declared limit is above the longest run the class or site allows (2 days on MeluXina `default`), or above 11.5 hours, how long one run keeps its access to its data and tracking (`timelimit.TokenCoverMinutes`), and the step is not resumable (declared or verified, D-74), so it would be cut. The message gives the declared limit, the maximum and the two fixes: make it resumable or shorten it. Never cut silently |
-| `Refused` / `TooLongBeyondContinuations` | The step is resumable, but its declared limit needs more runs than the continuation cap allows (cap 5: 6 runs, 12 days on MeluXina `default`) |
 | `Refused` / `InvalidImage` | The step's image is not `<registry-host>/<repository>:<tag>` (or `@sha256:` digest), so it can never be pulled (a half-rendered `:app-latest`). Nothing is booked, no runner starts, no site job is submitted. The runner checks the same before it stages or submits and reports exit 239 (`Failed` / `InvalidImage`); a bad reference never triggers the fresh-credentials resubmit |
-| `Refused` / `MultiNodeUnsupported`, `WallTimeOverLimit` (the class's limit is unknown), `ClassNotAllowed`, `NoProject`, `NoSite`, `InvalidSpec` (an `env` name other than `KAOS_LIB_SUPPORT`) | It can never run as asked |
+| `Refused` / `MultiNodeUnsupported`, `ClassNotAllowed`, `NoProject`, `NoSite`, `InvalidSpec` (an `env` name other than `KAOS_LIB_SUPPORT`) | It can never run as asked |
 
 The ledger is derived from the jobs themselves every time, never kept as a counter, and admission
 runs one job at a time, so concurrent jobs never overbook. A job running as a guest on a node
@@ -304,31 +302,37 @@ Controller flags (chart `controllerManager.container.args`, `runnerImage`, `runn
 
 - **Tier 1, every step, no code:** a step with no checkpoint is re-run from the start after a node failure,
   maintenance or pre-emption, at most twice (`status.reruns`; reasons `RerunNodeFailure`, `RerunPreempted`,
-  `RerunLimit`). Never after the step's own error, an out-of-memory kill, a cancel or a wall-time kill.
+  `RerunLimit`). Never after the step's own error, an out-of-memory kill, a cancel or a wall-time kill. A
+  continuation stopped the same way before it saved a new copy starts again from the copy it had and counts with
+  these: two since the step last saved new progress, then `RerunLimit`.
 - **Tier 2, the checkpoint folder:** every job gets `KAOS_CHECKPOINT_DIR` (`/work/ckpt`, on scratch). The job keeps at
   most two copies of it per step (one tar + one manifest each), copies it periodically and when the wall-time signal
   arrives, and deletes the copies when the step succeeds or after 7 days. A copy whose folder digest equals the newest copy's is skipped (the exit-85 copy right after a wall-time copy). A periodic copy is skipped when it would
   take the project over 80 % of its scratch space or file quota or past its checkpoint budget
   (`HPCSite.spec.limits.checkpointBudgetPercent`, default 10 % of the space quota). Details: `runner/README.md`.
-- **Continuation:** on exit 85, wall time, node failure, pre-emption or an idle kill, a step that left a copy continues
-  from the newest verified one (cap 5, or `spec.resumable.maxContinuations`). A continuation that does not get past its
-  checkpoint ends `NoProgress`; one that does (or that runs to completion, which leaves no copy to compare) marks the step key verified (`status.placement.resumable`), after
-  which it keeps its declared limit and gets the wall-time signal. `spec.resumableOptOut` (`resumable=False`) turns
-  continuing off; the follower passes it from `HPC_RESUMABLE=0`.
+- **Continuation:** on exit 85, wall time, node failure, pre-emption or an idle kill, a step that left a new copy continues
+  from the newest verified one, however many times it takes; a person sets nothing for it (D-75). A continuation that does not get past its
+  checkpoint ends `NoProgress`; one that does (or that runs to completion, which leaves no copy to compare) marks the step key verified
+  (`status.placement.resumable`), the only source of "this step saves progress". The cap on the step's total time (`spec.wallTimeMinutes`) ends it
+  too: `WallTimeReached`, "it reached the platform's cap of ... (N jobs)". The cap counts the time each job ran
+  (`status.attempts[].wallMinutes`: start to end at the site, rounded up), also as a guest on a shared node, which is billed nothing
+  (`settledNodeMinutes` 0); N is the number of jobs that ran. A job that ran to its limit and saved nothing ends `NoSavedProgress`.
+  The follower still tolerates an engine that sends `HPC_RESUMABLE*` or `HPC_MAX_CONTINUATIONS`: they are not read.
 - **Resumable steps share nodes (AC-73, reverses D-44's gate):** a resumable step may host or be a guest on a shared
   node. Slurm's warning signal is the batch job's and never reaches a guest, so the slot manager sends USR1 to each
-  resumable step itself, `lead` before the end of the step's own limit or of the host's job, whichever is first
-  (the host's own step included; a plain step is never signalled). A guest whose limit does not fit the host's remaining
-  time is still taken when its lead plus a 5-minute margin does. A guest that saves and exits 85 is reported like a step
+  step itself, its `lead` (a sixth of its limit, at most 10 minutes, always less than the limit) before the end of the step's own limit;
+  only a step with verified saved progress (`KAOS_RESUMABLE=1`) is also taken when its limit does not fit the host's remaining
+  time but its lead plus a 5-minute margin does, and is then signalled its lead before the host job's end. A plain guest is never taken by its lead and never stopped for the host's end. Any other guest whose limit is above 30 minutes is taken when the host has at least its limit less 30 minutes left, and its limit becomes what the host has left less the margin (D-75: a step asks for the job limit, so a guest that starts minutes after its host would otherwise never fit); with less than 15 minutes left after the margin it gets a node of its own. A limit of 30 minutes or less is never cut: such a guest joins only when it fits whole. A guest that saves and exits 85 is reported like a step
   alone and continued from its checkpoint, settled 0 (its host's booking covers the node); the continuation may host,
   guest or run alone. A resumable host's end is reported when its Slurm job ends, so the node time it held is settled to
   that end, and its job is not padded to twice its step. Details and tests: `docs/extreme-cases.md` 4.13-4.18.
-- **Steps longer than the longest lane (D-67, D-74):** a resumable step whose time limit (the run form's `<step>-walltime`) is above the class or
-  site maximum, or above the 11.5 hours a run keeps its access to its data and tracking, is admitted and run as
-  continuations of at most that long each (`status.placement.timeLimitMinutes`, one run booked at a time, each
-  submitted with fresh access), up to the continuation cap + 1 runs in all, and together within the declared limit (a
-  run gets at most what the earlier runs left of it; when none is left the step ends `WallTimeReached`); the follower prints "declared N min runs as
-  continuations of up to M min each". A step that is not resumable is refused at admission (`TooLongNotResumable`).
+- **The time of a job and the cap (D-75):** one job asks for the most a job can get: the lowest of the class's maximum and the site's maximum (no credential bounds a job: the job's keys are files the runner replaces while it queues and runs), or its learned limit
+  (three earlier runs, at most 2 hours). `spec.wallTimeMinutes` is the cap on the step's total time over all its jobs; a job gets at most what the
+  earlier jobs left of it (`status.placement.timeLimitMinutes`, one job booked at a time, each submitted with fresh keys); when none is left
+  the step ends `WallTimeReached`. Nothing is refused for its time; the follower prints "..., at most N min over all its jobs".
+  Every job that is not a shared node's host is warned `HPC_RESUMABLE_LEAD` (10 minutes) before its limit; the job script passes the signal only to
+  processes that catch it. A step with verified progress is also submitted with a minimum time (`HPC_TIME_MIN_MINUTES`, Slurm `--time-min`, REST field
+  `time_minimum`: one hour, or the job limit if shorter) where the site's profile sets `timeMin: true`; off by default.
   The `long` QoS (6 days, one job per user) is not used for this: `placement="long"` (D-71) is not built.
 - **Reported:** `status.run.checkpoint` (progress, size of the newest copy, the step's and the project's total,
   why a copy was skipped) and `HPCSite.status.checkpoints` (scratch held by steps that have not succeeded).

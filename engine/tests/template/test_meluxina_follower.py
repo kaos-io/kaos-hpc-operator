@@ -73,10 +73,7 @@ def test_serve_env_is_the_follower_interface(serve):
             "NODE_KEY": "{{inputs.parameters.step-name}}-hpc",
             "IMAGE_REF": "{{inputs.parameters.image}}", "STEP_COMMAND": "{{inputs.parameters.step-command}}",
             "SLURM_TIME_LIMIT": "{{inputs.parameters.time-limit}}", "HPC_CLASS": "{{inputs.parameters.hpc-class}}",
-            "HPC_RESUMABLE_LEAD": "{{inputs.parameters.resumable-lead}}",
-            "HPC_RESUMABLE": "{{inputs.parameters.resumable}}",
             "HPC_IDLE_TIMEOUT_MINUTES": "{{inputs.parameters.idle-timeout}}",
-            "HPC_MAX_CONTINUATIONS": str(meluxina.HPC_MAX_CONTINUATIONS),
             # the step contract: the follower gets the step's context exactly as the step's pod would
             "KAOS_STEP_CONTEXT": "{{inputs.parameters.kaos-context}}"}
     for k, v in want.items():
@@ -89,7 +86,7 @@ def test_serve_env_is_the_follower_interface(serve):
 
 def test_serve_env_is_only_the_allowlist_and_interface(serve):
     allowed = {"HPC_JOB_NAMESPACE", "WF_NAME", "WF_UID", "STEP_NAME", "NODE_KEY", "IMAGE_REF", "STEP_COMMAND",
-               "SLURM_TIME_LIMIT", "HPC_CLASS", "HPC_RESUMABLE_LEAD", "HPC_RESUMABLE", "HPC_IDLE_TIMEOUT_MINUTES", "HPC_MAX_CONTINUATIONS",
+               "SLURM_TIME_LIMIT", "HPC_CLASS", "HPC_IDLE_TIMEOUT_MINUTES",
                "KAOS_STEP_CONTEXT", "HPC_SHARING", "HPC_SCOPE",
                meluxina.KAOS_LIB_SUPPORT_ENV}
     assert set(_env(_tpl(serve))) <= allowed
@@ -109,7 +106,7 @@ def test_serve_keeps_inputs_outputs_deadline_retry_labels(serve):
     new = _tpl(serve)
     assert {p["name"] for p in new["inputs"]["parameters"]} == {
         "step-name", "image", "step-command", "step-kind", "time-limit", "deadline-seconds", "hpc-class",
-        "resumable-lead", "resumable", "idle-timeout", "kaos-context"}
+        "idle-timeout", "kaos-context"}
     assert new["activeDeadlineSeconds"] == "{{inputs.parameters.deadline-seconds}}"
     assert new["retryStrategy"]["retryPolicy"] == "Always" and new["retryStrategy"]["limit"] == "2"
     assert new["retryStrategy"]["expression"] == meluxina.POD_LOSS_RETRY

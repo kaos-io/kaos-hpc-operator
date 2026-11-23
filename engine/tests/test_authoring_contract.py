@@ -84,7 +84,8 @@ def test_outputs_says_what_to_write_instead():
 
 def test_hpc_time_limit_says_what_to_write_instead():
     message = refused(lambda a: a.step("train", kind="evaluate", hpc_time_limit="12h"))
-    assert message == "step 'train': hpc_time_limit= is gone. Use walltime=, for example walltime=\"12h\". " + OLD_APP_NOTICE
+    assert message == ("step 'train': hpc_time_limit= is gone: the platform sets the time of a step. Delete it. "
+                       + OLD_APP_NOTICE)
 
 
 def test_disk_says_a_step_gets_the_disk_of_its_class():
@@ -96,8 +97,7 @@ def test_any_other_unknown_keyword_lists_the_keywords_that_exist():
     with pytest.raises(TypeError) as exc:
         render(lambda a: a.step("one", kind="evaluate", gpus=1))
     assert str(exc.value) == ("step() got an unexpected keyword argument 'gpus'. The keywords are: name, kind, reads, "
-                              "inputs, needs, produces, gpu, when, walltime, resumable, checkpoint_every, "
-                              "idle_timeout, matrix, matrix_allow_failed.")
+                              "inputs, needs, produces, gpu, when, idle_timeout, matrix, matrix_allow_failed.")
 
 
 def test_an_app_on_the_old_contract_fails_the_render_and_writes_nothing(tmp_path):
@@ -118,11 +118,31 @@ def test_an_app_on_the_old_contract_fails_the_render_and_writes_nothing(tmp_path
     assert not (repo / "out").exists()
 
 
-def test_walltime_takes_the_values_hpc_time_limit_took():
-    wft = render(lambda a: a.step("train", kind="evaluate", walltime="12h"))
+GONE = "= is gone: the platform sets the time of a step and finds out by itself whether it saves progress"
+
+
+@pytest.mark.parametrize("keyword, value, sentence", [
+    ("walltime", "12h", "walltime" + GONE + ". Delete it."),
+    ("resumable", True, "resumable" + GONE + ". Delete it."),
+    ("checkpoint_every", "20m", "checkpoint_every" + GONE + ", and the library chooses how often to save. Delete it."),
+])
+def test_should_refuse_a_time_keyword_with_the_sentence_that_says_the_platform_sets_the_time(keyword, value, sentence):
+    message = refused(lambda a: a.step("train", kind="evaluate", **{keyword: value}))
+    assert message == "step 'train': " + sentence + " " + OLD_APP_NOTICE
+
+
+@pytest.mark.parametrize("keyword", ["walltime", "resumable", "checkpoint_every"])
+@pytest.mark.parametrize("kind", ["ingest", "transform", "train", "evaluate", "publish", "control"])
+def test_should_refuse_a_time_keyword_on_every_kind_whatever_its_value(keyword, kind):
+    for value in ("2h", "0", 90, True, False, None):
+        message = refused(lambda a, value=value: a.step("one", kind=kind, **{keyword: value}, **valid(a, kind)))
+        assert message.startswith(f"step 'one': {keyword}= is gone: the platform sets the time of a step")
+
+
+def test_should_write_no_time_annotation_and_keep_idle_timeout():
+    wft = render(lambda a: a.step("train", kind="evaluate", idle_timeout="40m"))
     step = next(t for t in wft["spec"]["templates"] if t["name"] == "train")
-    assert step["metadata"]["annotations"] == {"platform.kubecore.io/hpc": "12h"}
-    assert "walltime='1d' must be minutes or hours" in refused(lambda a: a.step("train", kind="evaluate", walltime="1d"))
+    assert step["metadata"]["annotations"] == {"platform.kubecore.io/idle-timeout": "40"}
 
 
 # ---------------------------------------------------------------- produces=
@@ -467,22 +487,7 @@ def test_a_rendered_pipeline_carries_no_platform_value():
     assert "platform." not in yaml.safe_dump(wft).replace("platform.kubecore.io", "")
 
 
-# ---------------------------------------------------------------- walltime= and the dataset name
-
-@pytest.mark.parametrize("kind", ["ingest", "publish", "control"])
-def test_walltime_on_a_step_that_never_runs_on_hpc_is_accepted(kind):
-    wft = render(lambda a: a.step("one", kind=kind, walltime="2h", **valid(a, kind)))
-    step = next(t for t in wft["spec"]["templates"] if t["name"] == "one")
-    assert step["metadata"]["annotations"]["platform.kubecore.io/hpc"] == "2h"
-
-
-@pytest.mark.parametrize("kind", ["transform", "train", "evaluate"])
-def test_walltime_on_any_step_that_may_run_on_hpc_is_accepted_with_or_without_a_gpu(kind):
-    for gpu in (False, True):
-        wft = render(lambda a, kind=kind, gpu=gpu: a.step("one", kind=kind, gpu=gpu, walltime="2h", **valid(a, kind)))
-        step = next(t for t in wft["spec"]["templates"] if t["name"] == "one")
-        assert step["metadata"]["annotations"]["platform.kubecore.io/hpc"] == "2h"
-
+# ---------------------------------------------------------------- the dataset name
 
 def test_a_produced_name_may_be_written_through_a_module_attribute():
     """produces=[au.model("m")] is the same call as model("m"): the entries are what counts."""
@@ -518,21 +523,6 @@ def test_a_step_may_not_name_the_same_needed_step_twice():
         up = a.step("up", kind="evaluate")
         a.step("last", kind="evaluate", needs=[up, up])
     assert refused(build) == "step 'last': needs= names up more than once."
-
-
-@pytest.mark.parametrize("value", ["0", "0m", "0h", "00"])
-def test_walltime_of_zero_is_refused_at_render_for_every_step(value):
-    for kind in ("train", "transform", "evaluate", "ingest"):
-        message = refused(lambda a, kind=kind: a.step("one", kind=kind, walltime=value, **valid(a, kind)))
-        assert message == (f"step 'one': walltime={value!r} must be minutes or hours as a string like '90m', '12h' or "
-                           "'720', at least one minute (the default time limit of the step, wherever it runs; the person "
-                           "who starts the run sets the limit on the run form, `<step>-walltime`).")
-    assert render(lambda a: a.step("one", kind="evaluate", walltime="1m"))
-
-
-@pytest.mark.parametrize("value", [90, "90s", "1d", "", "-5", None.__class__])
-def test_a_walltime_of_the_wrong_shape_is_refused_at_render(value):
-    assert "must be minutes or hours as a string" in refused(lambda a: a.step("one", kind="evaluate", walltime=value))
 
 
 def test_no_message_a_client_reads_names_the_workflow_engine():

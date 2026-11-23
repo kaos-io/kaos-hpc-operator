@@ -278,7 +278,7 @@ def lakefs():
 
 
 SHELL_ADDED = {"PWD", "OLDPWD", "SHLVL", "_", "LC_CTYPE"}      # what the shell that runs the step command adds itself
-STEP_ALLOWED = set(jobscript.STEP_ENV) | {"LAKEFS_KEY_FILE", "PATH", "KAOS_STAGED_ROOT", "KAOS_CHECKPOINT_DIR", "KAOS_RESUME_PATH"}
+STEP_ALLOWED = set(jobscript.STEP_ENV) | {"LAKEFS_KEY_FILE", "MLFLOW_TRACKING_TOKEN", "MLFLOW_TRACKING_TOKEN_FILE", "PATH", "KAOS_STAGED_ROOT", "KAOS_CHECKPOINT_DIR", "KAOS_RESUME_PATH"}
 
 
 @tsc.MODES
@@ -296,6 +296,16 @@ def test_the_step_receives_the_allow_list_and_nothing_else(tmp_path, lakefs, mon
     assert saw["KAOS_STEP_CONTEXT"] == helpers.fixture("context-one-upstream.wire"), "the context, unchanged"
     assert not {"WF_UID", "STEP_NAME", "STEP_CMD", "IMAGE_REF", "CKPT_B64", "HANDBACK_B64", "STAGEIN_B64", "IDLEWATCH_B64",
                 "KAOS_OUTPUTS_REPO", "HPC_GPUS", "KAOS_WORK", "SAW", "FAKE_ROOT"} & set(saw)
+
+
+@tsc.MODES
+def test_the_step_gets_the_tracker_bearer_from_its_file_and_the_submit_holds_none(tmp_path, lakefs, monkeypatch, shared):
+    site = HSite(tmp_path, lakefs, shared, monkeypatch)
+    assert site.run() == 0, site.out
+    assert WALLET not in site.batch and WALLET not in "\n".join(site.env), "no bearer in the script text or the submitted environment"
+    assert not any(e.startswith("MLFLOW_TRACKING_TOKEN=") for e in site.env)
+    assert site.step_saw()["MLFLOW_TRACKING_TOKEN"] == "tracker-bearer-made-up", "set from the file when the step starts"
+    assert "tracker-bearer-made-up" not in site.out, "never echoed"
 
 
 @tsc.MODES
@@ -736,7 +746,7 @@ def test_the_variables_of_a_running_step_are_in_a_private_folder_and_gone_on_can
         files = {f.name: stat.S_IMODE(f.stat().st_mode) for f in env_dir.iterdir()}
         assert set(files) >= {"KAOS_STEP_CONTEXT"} and "LAKEFS_BEARER_TOKEN" not in files, files
         assert set(files.values()) == {0o600}
-        assert (env_dir / "MLFLOW_TRACKING_TOKEN").read_text() == WALLET
+        assert not (env_dir / "MLFLOW_TRACKING_TOKEN").exists(), "the bearer is never written to the variables folder"
         key_dir = site.scratch / "kaos-tmp" / "key-5001"          # the key is in its own folder, never among the variables
         assert stat.S_IMODE(os.stat(str(key_dir)).st_mode) == 0o700
         assert stat.S_IMODE(os.stat(str(key_dir / "lakefs-key.json")).st_mode) == 0o600

@@ -20,7 +20,7 @@ Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /ru
 | `identity.py` | the app's own identity in the data store: a token of the app's workflow service account (TokenRequest) exchanged for an access key (the app name must be a DNS-1123 label before it reaches the request path); the key of a shared dataset's owner |
 | `staging.py` | `Stager` (ssh to the forced-command stager), dataset staging (every object of the pinned commit, whatever the dataset's shape; `CONTRACT` is the staging contract the runner checks against the staging tool's `version` and sends with every `status` and `stage`; `name_rule` and `Names` refuse, before anything is staged or submitted, the object names that cannot be copied), `staging_record` (one bounded record of `status.run.staged` per input: kind first/delta/cached, files, bytes, seconds; the follower prints one line from each) |
 | `image.py` | registry client, docker-archive streaming, `image_key` (tar name = SIF name = `kaos-image=` lease, always in the job comment), `cleanup_images` (asks the stager's `gc` when an attempt is over; AC-65) |
-| `jobscript.py` | the batch script (+ KAOS_METRIC sampler, tar deletion after SIF build); private files and folders (umask 077), the step's `--cleanenv` allow-list, the registry token only to an Artifact Registry host and unset after the pull, the redacted failure tail, the host's script copy removed on every exit, a sweep of what a killed job left (`kaos_sweep`), the context and bearers handed to the container as files, never through Apptainer's evaluation: `docs/job-environment.md` |
+| `jobscript.py` | the batch script (+ KAOS_METRIC sampler, tar deletion after SIF build); private files and folders (umask 077), the step's `--cleanenv` allow-list, the registry token only to an Artifact Registry host and unset after the pull, the redacted failure tail, the host's script copy removed on every exit, a sweep of what a killed job left (`kaos_sweep`), the context and the first bearer handed to the container as files, the later tracker bearers as the file `tracker-token` beside the app's key, never through Apptainer's evaluation: `docs/job-environment.md` |
 | `redact.py` | the one credential redaction, run on the node for the failure tail (shipped as `REDACT_B64`, Python 3.6) and by `logs.py` for the live log stream; it holds the app's key and the key before it, and reads the key file again when it changes |
 | `payload/` | on-node programs: stagein/handback/ckpt/slots/idlewatch (`payloads.py` loads them). Stage-in keeps a copy as `<copy>/data/` (the dataset's files) with `.kaos-complete` (it holds the word `data`) and `.kaos-parts/` beside it; it believes a cache hit only if the marker names that layout and is still in the folder after it looked for the cleanup's lock; a copy of an older layout (files directly in the folder) is moved aside whole, under the cleanup's lock, and made again |
 | `result.py` | the step's result on its way back: the check (`version` 1, `status` `ok`, `values`, `reads`, `writes`, 8 KiB by cost) and the wire form it is written in |
@@ -32,11 +32,12 @@ Python 3.12+, stdlib only, nothing installed at run time. Entry: `python3 -u /ru
 ## Inputs
 Env (controller): `HPC_JOB_NAMESPACE`, `HPC_JOB_NAME`, `KAOS_ATTEMPT`, `KAOS_RESUME_REF` (a
 `scratch://<tar path>#<sha256>` checkpoint reference), `HPC_CKPT_BUDGET_PERCENT`, `IMAGE_REF`, `STEP_COMMAND`, `SLURM_TIME_LIMIT`,
-`HPC_RESUMABLE_LEAD`, `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `WF_NAME` (labels the log lines), `KAOS_APP` (the app: its outputs repository is `outputs-<app>`),
+`HPC_RESUMABLE_LEAD` (minutes before its own limit that a job is warned; every job but a shared node's host), `HPC_RESUMABLE` (`1`: the
+controller verified that the step saves progress and continues from it; only such a step may be cut and continued), `HPC_CLASS`, `STEP_NAME`, `WF_UID`, `WF_NAME` (labels the log lines), `KAOS_APP` (the app: its outputs repository is `outputs-<app>`),
 `KAOS_STEP_CONTEXT` (the step context, exactly as the job carries it; the runner never reads into it), `HPC_INPUTS` (the job's inputs as JSON: `name`, `repo`, `commit`, `ref`; the runner never resolves a version), `HPC_SHARING` (`on`/`1`) + `HPC_SCOPE`, allowlisted
 `KAOS_LIB_SUPPORT`, site: `HPC_ACCOUNT`, `HPC_USER`, `HPC_SCRATCH`, `HPC_HOME`, `HPC_CLASSES_JSON`, `HPC_ENDPOINT`,
 `HPC_REST_VERSION`, the lane the controller chose (`HPC_QOS`, `HPC_RESERVATION`, `HPC_QOS_MAX_MINUTES`), the idle window
-(`HPC_IDLE_TIMEOUT_MINUTES`, 0 = off, default 20), the site's per-user submit cap when the profile has one
+(`HPC_IDLE_TIMEOUT_MINUTES`, 0 = off, default 20), the minimum time of a step with verified saved progress (`HPC_TIME_MIN_MINUTES`, sent as the job's `time_minimum`, Slurm `--time-min`; absent = not asked), the site's per-user submit cap when the profile has one
 (`HPC_MAX_SUBMIT_JOBS`), optional `HPC_SITE_WAIT_MAX_S` (how long an unreachable site is waited for, default 1800; the controller's `--site-outage-max`), `HPC_LOGIN_HOST` (`host:port`, default login.lxp.lu:8822), `SLURM_TOKEN` (fallback),
 and the ConfigMap: `ZITADEL_DOMAIN`, `ZITADEL_MLFLOW_PROJECT_ID`, `MLFLOW_EXTERNAL_URL`, `LAKEFS_EXTERNAL_URL`.
 Files: `/etc/meluxina-jwt/token`, `/etc/meluxina-staging/{id_ed25519,known_hosts}`,
@@ -49,7 +50,7 @@ The job script and the runner reserve these codes; the controller turns them int
 
 | Code | Who | Meaning | Job ends |
 |---|---|---|---|
-| 85 | the step | saved a checkpoint, continue me (the wall-time signal arrived) | continues from the newest verified copy, else `Timeout` (checkpoint missing) / `NotResumable` |
+| 85 | the step | saved a checkpoint, continue me (the wall-time signal arrived) | continues from the newest verified copy, else `Timeout` (checkpoint missing) |
 | 210 | job script | no `apptainer` after loading the module | `SiteFAILED` |
 | 231 | job script | the image could not be pulled (the registry token expires while queued: the runner resubmits with a fresh one, bounded) | `SiteFAILED` |
 | 232 | job script | an input could not be staged in the job, or its copy is not complete (never run without the data) | `SiteFAILED` |
@@ -125,7 +126,9 @@ hand-back) and the job's stage-in and hand-back use that pair (HTTP Basic); the 
 staging tool's `key` verb (folder `$SCR/kaos-tmp/key-<job>` 0700, file 0600, replaced atomically) right after submit and
 then every 25 minutes while the job is queued or running; a refresh that fails is logged, written into `status.run.message`
 and asked again at every poll, and never stops the job. The file is never in the job script, the Slurm environment or the
-job log. The job waits up to 10 minutes for the first file and ends 247 without it. A dataset another project shares is
+job log. The same call places the tracker's bearer (`tracker_token` in the record; the staging contract stays 4, the field is additive and the tool answers `"tracker": true` when it placed the file) as the file `tracker-token`
+in the same folder, minted anew on every round the way the first was; the step finds it by `MLFLOW_TRACKING_TOKEN_FILE`
+(`/kaos/key/tracker-token`); the container's startup shell also sets the step's `MLFLOW_TRACKING_TOKEN` from the file just before the step command (jobscript.py `LOADER`), so the bearer is in no submitted environment, job script text (shared-node jobs too) or variables folder. That is why no credential bounds a job's time. The job waits up to 10 minutes for the first files and ends 247 without them. A dataset another project shares is
 staged with the key the app's own data store hands out for the owner (`/kaos/v1/shared-credentials`), over https only.
 
 ## The site job's name, adopt, and a site that does not answer
@@ -173,10 +176,13 @@ manifest; the runner's message says which of the two is unknown.
 A step alone is told to save by Slurm (`kill_warning_signal` USR1 to the batch shell, `lead` minutes before the wall
 time). On a shared node the batch shell is the slot manager and a guest is only a `srun` step of the host's job, so
 the job's signal cannot serve them: the job does not ask for it (`runner.py`), and `payload/slots.py` runs one timer
-per step. A step's lead comes from `KAOS_RESUMABLE_LEAD_MIN` (its script, or the host's environment for its own step);
+per step. A step's lead comes from `KAOS_RESUMABLE_LEAD_MIN` (its script, or the host's environment for its own step):
+every step has one, it is the warning before the step's own limit. `KAOS_RESUMABLE=1` is a different word: the step may be
+cut and continued (the controller verified its saved progress), and only then does `fits()` take a guest that fits by its
+lead alone and stop it before the host's end;
 USR1 goes to the step's own shell (its pid, written by the launcher) at `signal_at()` = `min(start + limit, host job
 end) - lead`, and the shell does what it does for a step alone (`kaos_stop`: copy now, USR1 only to processes that
-handle it). `srun --signal` is not used: see `docs/extreme-cases.md` 4.14. Admission is `fits()`.
+handle it). `srun --signal` is not used: see `docs/extreme-cases.md` 4.14. Admission is `fits()` (the host's end and the margin; no credential bounds a guest).
 
 ## Live lessons
 

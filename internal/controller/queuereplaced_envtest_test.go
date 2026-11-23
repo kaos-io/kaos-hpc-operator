@@ -59,7 +59,7 @@ var _ = Describe("HPC queue replacements", func() {
 		for i := range n {
 			out = append(out, hpcv1alpha1.QueueReplacement{At: metav1.NewTime(time.Now().Add(time.Duration(i) * time.Minute)),
 				OldSiteJobID: fmt.Sprint(100 + i), NewSiteJobID: fmt.Sprint(101 + i), QueuedSeconds: int64(41400 + i),
-				Reason: "TokenRefresh"})
+				Reason: "HostLost"})
 		}
 		return out
 	}

@@ -36,12 +36,13 @@ func fixtures() (*hpcv1alpha1.HPCArgoWorkflowJob, *hpcv1alpha1.HPCSite) {
 		ObjectMeta: metav1.ObjectMeta{Name: "hpc-abc", Namespace: "env-ns", UID: "11111111-2222"},
 		Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{Class: "meluxina-gpu", Image: "reg.example/app:v1", Command: []string{"python", "t.py"},
 			WallTimeMinutes: 120, App: "app", Context: `{"version":1}`, StepName: "train",
-			Inputs:    []hpcv1alpha1.StepInput{{Name: "dataset", Repo: "dataset-ds", Ref: "v1", Commit: "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}},
-			Workflow:  &hpcv1alpha1.WorkflowRef{Name: "wf-1", UID: "wf-uid"},
-			Resumable: &hpcv1alpha1.Resumable{LeadMinutes: 20, MaxContinuations: 5},
-			Sharing:   &hpcv1alpha1.Sharing{Scope: "abcdef12"},
-			Env:       []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: "{}"}}},
+			Inputs:   []hpcv1alpha1.StepInput{{Name: "dataset", Repo: "dataset-ds", Ref: "v1", Commit: "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"}},
+			Workflow: &hpcv1alpha1.WorkflowRef{Name: "wf-1", UID: "wf-uid"},
+			Sharing:  &hpcv1alpha1.Sharing{Scope: "abcdef12"},
+			Env:      []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: "{}"}}},
 	}
+	// A step verified resumable never hosts, so its runner Job's deadline is not padded for guests.
+	job.Status.Placement = &hpcv1alpha1.Placement{Resumable: &hpcv1alpha1.ResumableStatus{Verified: true}}
 	site := &hpcv1alpha1.HPCSite{
 		ObjectMeta: metav1.ObjectMeta{Name: "meluxina", Namespace: "ml-proj"},
 		Spec: hpcv1alpha1.HPCSiteSpec{Site: "meluxina", Sharing: true,
@@ -125,7 +126,7 @@ func TestShouldSetTheRunnerEnvironmentFromSpecAndSite(t *testing.T) {
 		"HPC_JOB_NAMESPACE": "env-ns", "HPC_JOB_NAME": "hpc-abc", "KAOS_ATTEMPT": "2",
 		"KAOS_RESUME_REF": "ckpt-1", "KAOS_RESUME_FROM_ATTEMPT": "1",
 		"IMAGE_REF": "reg.example/app:v1", "STEP_COMMAND": `["python","t.py"]`, "SLURM_TIME_LIMIT": "120",
-		"HPC_RESUMABLE_LEAD": "20", "HPC_CLASS": "meluxina-gpu", "STEP_NAME": "train",
+		"HPC_RESUMABLE_LEAD": "10", "HPC_CLASS": "meluxina-gpu", "STEP_NAME": "train",
 		"WF_UID": "wf-uid", "WF_NAME": "wf-1", "KAOS_APP": "app", "KAOS_STEP_CONTEXT": `{"version":1}`,
 		"HPC_INPUTS":  `[{"name":"dataset","repo":"dataset-ds","commit":"c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2","ref":"v1"}]`,
 		"HPC_SHARING": "1", "HPC_SCOPE": "abcdef12", "KAOS_LIB_SUPPORT": "{}",
@@ -247,7 +248,6 @@ func TestShouldGiveASharingRunnerTimeToFollowItsHostJobToItsEnd(t *testing.T) {
 	// step's limit, and its runner follows it to its end; the runner Job's deadline leaves room for that.
 	job, site := fixtures()
 	job.Status.Placement = &hpcv1alpha1.Placement{TimeLimitMinutes: 30, Source: hpcv1alpha1.PlacementDeclared}
-	job.Spec.Resumable = nil // a resumable step never hosts
 	if job.Spec.Sharing == nil || !site.Spec.Sharing {
 		t.Fatal("the fixtures share nodes")
 	}
@@ -266,7 +266,8 @@ func TestShouldGiveASharingRunnerTimeToFollowItsHostJobToItsEnd(t *testing.T) {
 
 func TestShouldUseThePlacementLimitForTheEnvAndTheDeadline(t *testing.T) {
 	job, site := fixtures()
-	job.Status.Placement = &hpcv1alpha1.Placement{TimeLimitMinutes: 30, Source: hpcv1alpha1.PlacementLearned, Samples: 5}
+	job.Status.Placement = &hpcv1alpha1.Placement{TimeLimitMinutes: 30, Source: hpcv1alpha1.PlacementLearned, Samples: 5,
+		Resumable: &hpcv1alpha1.ResumableStatus{Verified: true}}
 	rj, err := Build(Config{Image: "kaos/op:1"}, job, site, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -529,4 +530,108 @@ func TestAContextWithDollarsReachesTheRunnerWithoutAnyRawDollar(t *testing.T) {
 		}
 	}
 	t.Fatal("no KAOS_STEP_CONTEXT in the runner's environment")
+}
+
+// D-75: every job gets the lead of the warning before its limit, except the host of a shared node, whose slot
+// manager signals each step itself (its job is padded for guests); a step verified resumable always gets it.
+func TestShouldGiveEveryJobTheWarningLeadExceptASharedNodeHost(t *testing.T) {
+	verified := &hpcv1alpha1.ResumableStatus{Verified: true}
+	cases := []struct {
+		name string
+		pl   *hpcv1alpha1.Placement
+		want string
+	}{
+		{"should_warn_a_job_with_no_placement_yet", nil, "10"},
+		{"should_warn_a_job_that_does_not_share", &hpcv1alpha1.Placement{TimeLimitMinutes: 60}, "10"},
+		{"should_warn_a_short_job_late_enough_to_finish", &hpcv1alpha1.Placement{TimeLimitMinutes: 15}, "2"},
+		{"should_warn_a_job_of_three_minutes_in_its_last_minute", &hpcv1alpha1.Placement{TimeLimitMinutes: 3}, "1"},
+		{"should_warn_a_guest", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Share: &hpcv1alpha1.SharePlan{Role: hpcv1alpha1.ShareGuest}}, "10"},
+		{"should_not_warn_a_host_whose_step_is_not_verified", &hpcv1alpha1.Placement{TimeLimitMinutes: 60,
+			Share: &hpcv1alpha1.SharePlan{Role: hpcv1alpha1.ShareHost}}, ""},
+		{"should_warn_a_verified_host", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Resumable: verified,
+			Share: &hpcv1alpha1.SharePlan{Role: hpcv1alpha1.ShareHost}}, "10"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			job, site := fixtures()
+			job.Status.Placement = c.pl
+			env, err := Env(job, site, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := envOf(t, env)["HPC_RESUMABLE_LEAD"]; got != c.want {
+				t.Errorf("HPC_RESUMABLE_LEAD = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// D-75: "this step may be cut and continued" is said only for a step whose saved progress the controller verified.
+// Every other job still gets the lead of the warning before its own limit, and nothing more: on a shared node the
+// slot manager must not take a plain guest by its lead or stop it for the host's end.
+func TestShouldSayAStepMayBeContinuedOnlyWhenItsProgressIsVerified(t *testing.T) {
+	verified := &hpcv1alpha1.ResumableStatus{Verified: true}
+	guest, host := &hpcv1alpha1.SharePlan{Role: hpcv1alpha1.ShareGuest}, &hpcv1alpha1.SharePlan{Role: hpcv1alpha1.ShareHost}
+	cases := []struct {
+		name            string
+		pl              *hpcv1alpha1.Placement
+		lead, resumable string
+	}{
+		{"should_not_say_it_for_a_plain_guest", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Share: guest}, "10", ""},
+		{"should_say_it_for_a_verified_guest", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Share: guest, Resumable: verified}, "10", "1"},
+		{"should_not_say_it_for_a_plain_job_alone", &hpcv1alpha1.Placement{TimeLimitMinutes: 60}, "10", ""},
+		{"should_say_it_for_a_verified_job_alone", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Resumable: verified}, "10", "1"},
+		{"should_not_say_it_for_a_plain_host", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Share: host}, "", ""},
+		{"should_say_it_for_a_verified_host", &hpcv1alpha1.Placement{TimeLimitMinutes: 60, Share: host, Resumable: verified}, "10", "1"},
+		{"should_not_say_it_without_a_placement", nil, "10", ""},
+		{"should_ask_for_no_warning_for_a_job_of_one_minute", &hpcv1alpha1.Placement{TimeLimitMinutes: 1}, "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			job, site := fixtures()
+			job.Status.Placement = c.pl
+			env, err := Env(job, site, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := envOf(t, env)
+			if got["HPC_RESUMABLE_LEAD"] != c.lead || got["HPC_RESUMABLE"] != c.resumable {
+				t.Errorf("HPC_RESUMABLE_LEAD = %q, HPC_RESUMABLE = %q; want %q, %q", got["HPC_RESUMABLE_LEAD"], got["HPC_RESUMABLE"], c.lead, c.resumable)
+			}
+		})
+	}
+}
+
+// D-75: a step with verified saved progress asks for a minimum time (one hour, or the job limit if shorter), only
+// where the site profile says the scheduler takes it.
+func TestShouldAskForAMinimumTimeOnlyForVerifiedProgressOnASiteThatTakesIt(t *testing.T) {
+	cases := []struct {
+		name     string
+		timeMin  bool
+		verified bool
+		limit    int32
+		want     string
+	}{
+		{"should_ask_an_hour_for_a_verified_step", true, true, 690, "60"},
+		{"should_ask_the_limit_when_it_is_shorter_than_an_hour", true, true, 45, "45"},
+		{"should_not_ask_when_the_site_profile_is_off", false, true, 690, ""},
+		{"should_not_ask_for_a_step_not_verified", true, false, 690, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			job, site := fixtures()
+			site.Spec.Profile.TimeMin = c.timeMin
+			job.Status.Placement = &hpcv1alpha1.Placement{TimeLimitMinutes: c.limit}
+			if c.verified {
+				job.Status.Placement.Resumable = &hpcv1alpha1.ResumableStatus{Verified: true}
+			}
+			env, err := Env(job, site, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := envOf(t, env)["HPC_TIME_MIN_MINUTES"]; got != c.want {
+				t.Errorf("HPC_TIME_MIN_MINUTES = %q, want %q", got, c.want)
+			}
+		})
+	}
 }

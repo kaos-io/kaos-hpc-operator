@@ -80,21 +80,15 @@ from omegaconf.nodes import BooleanNode, EnumNode, FloatNode, IntegerNode, Strin
 
 from kubecore.failure import failed
 from kubecore import derive_tree, rerun
-from kubecore.meluxina import HPC_MAX_CONTINUATIONS
 from kubecore.run_settings import (
-    checkpoint_field,
     DEFAULT_PARALLEL,
-    TOKEN_COVER_MINUTES,
     class_problem,
     matrix_field,
     matrix_items,
-    minutes,
     parallel_count,
     parallel_field,
     promote_field,
     promote_problem,
-    time_problem,
-    walltime_field,
 )
 from kubecore.step_contract import (
     CONTEXT_CAP,
@@ -347,36 +341,6 @@ def run_classes(steps: list, chosen: list, offers: str) -> None:
         problem = class_problem(step, value, table[step])
         if problem:
             raise ComposeError(problem)
-
-
-def _hours(value: int) -> str:
-    return f"{value / 60:.1f}".removesuffix(".0") + " hours"
-
-
-def run_token_cover(steps: list, settings: dict, chosen: list, hpc: set, leads: list = ()) -> None:
-    """A step on an HPC class keeps its access to its data and to tracking for TOKEN_COVER_MINUTES at most. One that
-    is not resumable and asks for longer would lose that access partway through and fail late, after spending
-    node-hours: refused here, before any step starts. A resumable step is run as segments that each end inside
-    that time (the controller does it), so it may ask for longer, up to HPC_MAX_CONTINUATIONS + 1 runs."""
-    resumable = {step for step, lead in _pairs(list(leads)).items() if int(lead)}
-    for step, cls in _pairs(chosen).items():
-        wall = settings.get(step, {}).get("walltime", 0)
-        if cls not in hpc or wall <= TOKEN_COVER_MINUTES:
-            continue
-        field, cover = walltime_field(step), _hours(TOKEN_COVER_MINUTES)
-        if step not in resumable:
-            raise ComposeError(
-                f"step '{step}': {field} is {wall} minutes ({_hours(wall)}), but a step keeps its access to its data and to "
-                f"tracking for at most {cover} and this one is not resumable, so it would lose that access partway through "
-                f"and fail late. Shorten the limit ({field} on the run form, or walltime= in pipeline.py) to "
-                f"{TOKEN_COVER_MINUTES} minutes or less, or make the step resumable (resumable=True with checkpoint_every=) "
-                f"so it continues automatically in runs of up to {cover}.")
-        longest = TOKEN_COVER_MINUTES * (HPC_MAX_CONTINUATIONS + 1)
-        if wall > longest:
-            raise ComposeError(
-                f"step '{step}': {field} is {wall} minutes ({_hours(wall)}). As a resumable step it runs in runs of up to "
-                f"{cover} and at most {HPC_MAX_CONTINUATIONS + 1} runs ({HPC_MAX_CONTINUATIONS + 1} runs, {longest} minutes "
-                f"in all). Shorten the limit ({field} on the run form) to {longest} minutes or less.")
 
 
 def run_matrix(steps: list, matrices: list, parallels: list) -> dict:
@@ -696,34 +660,12 @@ def step_params(step: dict, resolved: dict) -> dict:
 
 
 def _pairs(items: list) -> dict:
-    """{step: value} from the repeated `--walltime step=value` arguments."""
+    """{step: value} from repeated `STEP=VALUE` arguments."""
     return {key: value for key, _, value in (item.partition("=") for item in items)}
 
 
-def run_settings(steps: list, walltimes: list, checkpoints: list, leads: list = ()) -> dict:
-    """What the run form says about each step's time (`<step>-walltime`, `<step>-checkpoint-every`), checked
-    here before any step starts: {step: {"walltime": minutes, "checkpoint-every": minutes}} for the steps that
-    have such a field. The refusal names the field."""
-    known = {step["name"] for step in steps}
-    settings = {}
-    for key, flag, field in (("walltime", walltimes, walltime_field), ("checkpoint-every", checkpoints, checkpoint_field)):
-        for step, value in _pairs(flag).items():
-            if step not in known:
-                raise ComposeError(f"{field(step)}: the pipeline has no step '{step}'")
-            problem = time_problem(field(step), value)
-            if problem:
-                raise ComposeError(problem)
-            settings.setdefault(step, {})[key] = minutes(value)
-    for step, lead in _pairs(list(leads)).items():     # a resumable step is told to save this long before its limit
-        if step in settings and settings[step].get("walltime", 0) <= int(lead):
-            raise ComposeError(f"{walltime_field(step)} is {settings[step]['walltime']} minutes, which is not longer "
-                               f"than the {lead} minutes before its limit that the step is told to save "
-                               f"(resumable= in pipeline.py). Give the step more time.")
-    return settings
-
-
 def base_context(step: dict, run: str, app: str, project: str, experiment: str, params: dict, reads: dict,
-                 checkpoint_every: int = 0, instance: str = "") -> dict:
+                 instance: str = "") -> dict:
     """A step's context without `upstream` (the DAG task argument adds it), in the contract's field order.
     `params` is the step's own (step_params)."""
     produces = []
@@ -736,13 +678,11 @@ def base_context(step: dict, run: str, app: str, project: str, experiment: str, 
         "ledger": ledger([reads[name] for name in step["inputs"] if name in reads]),
         "produces": produces,
     }
-    if checkpoint_every:     # only a step that declares checkpoint_every= has it (minutes)
-        context["checkpoint_every"] = checkpoint_every
     return context
 
 
 def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict, reads: dict,
-                  settings: dict = None, instance: str = "") -> dict:
+                  instance: str = "") -> dict:
     """{step: its base context in wire form}, each within its cap.
 
     `params` holds the config sections the step names in reads=. The cap is checked on the real text,
@@ -761,8 +701,7 @@ def step_contexts(steps: list, run: str, app: str, project: str, resolved: dict,
     for step in steps:
         try:
             params = step_params(step, resolved)
-            text = wire(base_context(step, run, app, project, experiment, params, reads,
-                                      (settings or {}).get(step["name"], {}).get("checkpoint-every", 0), instance))
+            text = wire(base_context(step, run, app, project, experiment, params, reads, instance))
         except (TypeError, ValueError) as exc:   # a value JSON cannot hold (inf, nan)
             raise ComposeError(f"the resolved config cannot be handed to the steps: {exc}") from None
         matrix_needs = sum(1 for n in step["needs"] if matrix_steps.get(n))
@@ -812,10 +751,6 @@ def main(argv=None) -> None:
     parser.add_argument("--app", default="", help="The app.")
     parser.add_argument("--project", default="", help="The project.")
     parser.add_argument("--context-dir", default="", help="Where to write each step's context: <dir>/<step>.json.")
-    parser.add_argument("--walltime", action="append", default=[], metavar="STEP=VALUE",
-                        help="The run form's <step>-walltime (repeatable).")
-    parser.add_argument("--checkpoint-every", action="append", default=[], metavar="STEP=VALUE",
-                        help="The run form's <step>-checkpoint-every (repeatable).")
     parser.add_argument("--class", dest="classes", action="append", default=[], metavar="STEP=CLASS",
                         help="The run form's <step>-class (repeatable).")
     parser.add_argument("--class-offers", default="",
@@ -826,10 +761,8 @@ def main(argv=None) -> None:
                         help="The run form's <step>-parallel: how many items of a matrix step run at once (repeatable).")
     parser.add_argument("--promote", action="append", default=[], metavar="DATASET=VALUE",
                         help="The run form's promote-<dataset>, true or false (repeatable).")
-    parser.add_argument("--resumable-lead", action="append", default=[], metavar="STEP=MINUTES",
-                        help="Minutes before its limit that a resumable step is told to save (repeatable).")
     parser.add_argument("--settings-output", default="",
-                        help="Where to write the numbers the form gave each step: {step: {walltime, checkpoint-every}}.")
+                        help="Where to write the numbers the form gave each step: {step: {matrix, parallel}}.")
     parser.add_argument("--images-output", default="",
                         help="Where to write the images the run resolved, {step: image}, from $KAOS_STEP_IMAGES.")
     parser.add_argument("--ledger-output", default="", help="Where to write the run's ledger: every pinned input.")
@@ -863,7 +796,6 @@ def main(argv=None) -> None:
             if reuse_run or start:
                 rerun.check_fields(steps, reuse_run, start)
             rerun.check_target(steps, args.target_step.strip(), start)
-            settings = run_settings(steps, args.walltime, args.checkpoint_every, args.resumable_lead)
             for step, entry in run_matrix(steps, args.matrix, args.parallel).items():
                 settings.setdefault(step, {}).update(entry)
             flags = run_promote(steps, args.promote)   # refuses a value that is not true or false; the final task reads it
@@ -872,7 +804,6 @@ def main(argv=None) -> None:
                         else "false: its version stays sealed and latest does not move")
                 print(f"dataset {name}: {promote_field(name)} is {what}")
             run_classes(steps, args.classes, args.class_offers)
-            run_token_cover(steps, settings, args.classes, {c for c in args.hpc_classes.split(",") if c}, args.resumable_lead)
             claim_run(args.app, args.run, args.run_uid)
             if reuse_run:
                 reuse = rerun.prepare(
@@ -883,7 +814,7 @@ def main(argv=None) -> None:
                     print(line)
             wait_for_grants(steps, args.app)
             reads = pin_inputs(resolved, steps, fixed={k: dict(v, run=reuse_run) for k, v in reuse.pins.items()} if reuse else None)
-            contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, settings, args.run_uid)
+            contexts = step_contexts(steps, args.run, args.app, args.project, resolved, reads, args.run_uid)
     except Exception as exc:  # any composition failure = hard error, pre-GPU
         message = str(exc)
         if exc.__cause__ is not None:  # e.g. enum ValidationError inside Hydra's wrapper

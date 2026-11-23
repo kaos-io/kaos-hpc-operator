@@ -3,15 +3,12 @@
 to hand its guests back. Real slot manager process against the fake Slurm of test_slot_manager.py.
 """
 import json
-import time
 
 from test_slot_manager import SCOPE, Node, _job
 
 
-def _guest(n, step_min, token_in_s=None, limit="2:00:00"):
+def _guest(n, step_min, limit="2:00:00"):
     body = "export KAOS_STEP_LIMIT_MIN=%d\n" % step_min
-    if token_in_s is not None:
-        body += "export KAOS_TOKEN_EXP=%d\n" % int(time.time() + token_in_s)
     return "10%d" % n, _job("kaos-%s-wf%d-train" % (SCOPE, n), body + "exit 0\n",
                             comment="kaos-commit=bbbbbbb%d" % n, limit=limit)
 
@@ -33,17 +30,6 @@ def test_a_30_minute_test_lane_host_takes_only_the_guests_that_end_before_it_doe
         assert jobs[j]["state"] == "PENDING" and not jobs[j]["held"], j
         assert _holds(node, j) == [], "%s does not fit the host's remaining time: never held" % j
         assert "kaos-state" not in jobs[j]["comment"]
-
-
-def test_a_guest_whose_token_ends_before_its_step_could_is_not_taken(tmp_path):
-    """D-07: the host checks the guest's wallet outlives step + margin + 30 min."""
-    guests = dict([_guest(1, 10, token_in_s=900), _guest(2, 10, token_in_s=7200)])
-    node = Node(tmp_path, guests, own_body="sleep 4\nexit 0\n", extra_env={"KAOS_IDLE_S": "2"})
-    rc, log = node.finish()
-    assert rc == 0, log
-    jobs = node.jobs()
-    assert jobs["102"]["comment"].endswith("kaos-state=done rc=0 host=100"), log
-    assert jobs["101"]["state"] == "PENDING" and not jobs["101"]["held"] and _holds(node, "101") == []
 
 
 def test_a_host_killed_hard_leaves_its_guest_held_for_its_runner_to_find(tmp_path):

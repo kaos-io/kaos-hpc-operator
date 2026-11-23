@@ -80,6 +80,11 @@ func TestChoose(t *testing.T) {
 			r.InUse = func(string) int32 { return 9 }
 		}), Lane{QOS: "test"}, true},
 		{"should_treat_a_zero_maximum_wall_time_as_no_limit", req(5000, func(r *Request) { r.Profile.QOS[1].MaxWallTimeMinutes = 0 }), Lane{QOS: "test"}, true},
+		// D-75: a step without a learned limit asks for the job limit, which fits no short lane; it goes to the
+		// class's own QoS. A learned 30-minute limit takes `test` when its slot is free, `dev` when it is not.
+		{"should_leave_a_job_at_the_job_limit_to_the_classs_own_qos", req(690, nil), Lane{}, false},
+		{"should_leave_a_job_at_the_job_limit_to_the_classs_own_qos_even_with_every_slot_free", req(2880, func(r *Request) { r.InUse = taken() }), Lane{}, false},
+		{"should_give_a_learned_30_minute_limit_the_test_lane_when_its_slot_is_free", req(30, func(r *Request) { r.InUse = taken() }), Lane{QOS: "test"}, true},
 		{"should_use_a_reservation_that_never_ends", req(60, func(r *Request) { r.Class.Partition = "cpu" }), Lane{"dev", "cpudev"}, true},
 	}
 	for _, c := range cases {

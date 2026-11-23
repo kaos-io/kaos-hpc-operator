@@ -104,12 +104,13 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(k8sClient.Status().Patch(ctx, got, client.MergeFrom(orig))).To(Succeed())
 	}
 
-	newResumable := func(ns string, wall int32, maxCont int32) *hpcv1alpha1.HPCArgoWorkflowJob {
+	// newResumable is a step of a pipeline (serve mode): only those are continued (D-75).
+	newResumable := func(ns string, wall int32) *hpcv1alpha1.HPCArgoWorkflowJob {
 		seq++
+		r.RunnerImage = "kaos/hpc-operator:test"
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{
 			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("job-%d", seq), Namespace: ns},
-			Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: wall,
-				Resumable: &hpcv1alpha1.Resumable{LeadMinutes: 10, MaxContinuations: maxCont}},
+			Spec:       hpcv1alpha1.HPCArgoWorkflowJobSpec{App: "app", Context: `{"version":1}`, Class: "meluxina-gpu", Image: "reg.example/img:1", WallTimeMinutes: wall, StepName: "train"},
 		}
 		withWorkflow(j)
 		Expect(k8sClient.Create(ctx, j)).To(Succeed())
@@ -389,20 +390,9 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(siteStatus().GPU.BookedNodeMinutes).To(BeZero())
 	})
 
-	It("fails a step that exits 85 but is not declared resumable", func() {
-		newSite(10, nil)
-		j := newJob(envNS, 60)
-		reconcileJob(j)
-		end85(j, 1, 50, "lakefs://outputs/c1")
-		_, got := reconcileJob(j)
-		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
-		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonNotResumable))
-		Expect(*got.Status.SettledNodeMinutes).To(Equal(int64(50)))
-	})
-
 	It("continues a resumable step under the same HPCArgoWorkflowJob: settled, re-admitted, re-booked, resume info set", func() {
 		newSite(10, nil)
-		j := newResumable(envNS, 60, 5)
+		j := newResumable(envNS, 60)
 		_, got := reconcileJob(j)
 		Expect(got.Status.Attempt).To(Equal(int32(1)))
 		Expect(got.Status.Site).NotTo(BeNil())
@@ -421,10 +411,10 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 
 		_, got = reconcileJob(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted), "the continuation is admitted like a new step")
-		Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(60)))
+		Expect(got.Status.Booking.NodeMinutes).To(Equal(int64(10)), "what is left of the cap of 60")
 		st := siteStatus()
 		Expect(st.GPU.UsedNodeMinutes).To(Equal(int64(50)))
-		Expect(st.GPU.BookedNodeMinutes).To(Equal(int64(60)))
+		Expect(st.GPU.BookedNodeMinutes).To(Equal(int64(10)))
 
 		// The runner's late report of attempt 1 is ignored once attempt 2 is the current one.
 		_, got = reconcileJob(j)
@@ -445,7 +435,7 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 	// and exits 85 is continued like a step alone, and holds no node of its own: it settles 0.
 	It("continues a resumable guest that exited 85 on a shared node, settled 0, not failed", func() {
 		newSite(10, nil)
-		j := newResumable(envNS, 60, 5)
+		j := newResumable(envNS, 60)
 		_, got := reconcileJob(j)
 		Expect(got.Status.Site).NotTo(BeNil())
 		code := hpcv1alpha1.ExitCodeContinue
@@ -475,37 +465,81 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 
 	It("does not continue without a staged-out checkpoint: Timeout, checkpoint upload incomplete (T-19)", func() {
 		newSite(10, nil)
-		j := newResumable(envNS, 60, 5)
+		j := newResumable(envNS, 60)
 		reconcileJob(j)
 		end85(j, 1, 55, "")
 		_, got := reconcileJob(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonCheckpointMissing))
-		Expect(got.Status.Message).To(ContainSubstring("checkpoint upload incomplete"))
+		Expect(got.Status.Message).To(ContainSubstring("checkpoint not saved"))
 	})
 
-	It("stops at the step's continuation cap", func() {
+	It("ends a step when its jobs together have used the platform's cap, with no count of continuations", func() {
 		newSite(100, nil)
-		j := newResumable(envNS, 60, 1)
+		j := newResumable(envNS, 60)
 		reconcileJob(j)
 		end85(j, 1, 50, "c1")
 		reconcileJob(j) // continuing
-		reconcileJob(j) // admitted as attempt 2
+		reconcileJob(j) // admitted as attempt 2, for what is left of the cap
 		end85(j, 2, 50, "c2")
 		_, got := reconcileJob(j)
 		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
-		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuationLimit))
-		Expect(got.Status.Continuations).To(Equal(int32(1)))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonWallTimeReached))
+		Expect(got.Status.Message).To(ContainSubstring("it reached the platform's cap of 1 h"))
+	})
+
+	// D-75: the cap counts the time each job ran, whoever pays for the node. A guest is billed 0 (its host pays,
+	// D-26), so a step continued as a guest every time would otherwise never reach its cap.
+	It("ends a step continued as a guest every time at the platform's cap, and bills the guest nothing", func() {
+		newSite(100, nil)
+		j := newResumable(envNS, 60)
+		reconcileJob(j)
+		guest85 := func(attempt int32, progress int64) {
+			code, slot := hpcv1alpha1.ExitCodeContinue, int32(1)
+			start, endT := metav1.NewTime(time.Now().Add(-25*time.Minute)), metav1.NewTime(time.Now())
+			report(j, hpcv1alpha1.RunStatus{Attempt: attempt, SiteJobID: fmt.Sprintf("20%d", attempt), HostSiteJobID: "9000",
+				Slot: &slot, State: "FAILED", ExitCode: &code, StartTime: &start, EndTime: &endT, Terminal: true,
+				CheckpointRef: fmt.Sprintf("c%d", attempt), Checkpoint: &hpcv1alpha1.CheckpointInfo{ProgressValues: []int64{progress}}})
+		}
+		guest85(1, 1)
+		reconcileJob(j) // continuing
+		reconcileJob(j) // admitted as attempt 2
+		guest85(2, 2)
+		_, got := reconcileJob(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing), "50 of 60 minutes: one more job")
+		_, got = reconcileJob(j)
+		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(10)), "the third job gets what is left of the cap")
+		guest85(3, 3)
+		_, got = reconcileJob(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed), got.Status.Message)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonWallTimeReached))
+		Expect(got.Status.Message).To(ContainSubstring("it reached the platform's cap of 1 h (3 jobs)"))
+		Expect(got.Status.Attempts).To(HaveLen(3))
+		for _, a := range got.Status.Attempts {
+			Expect(a.SettledNodeMinutes).To(BeZero(), "a guest holds no node of its own: its host's booking is the charge")
+			Expect(a.WallMinutes).To(Equal(int64(25)), "the time it ran counts toward the cap")
+		}
+		Expect(*got.Status.SettledNodeMinutes).To(BeZero())
+		Expect(siteStatus().GPU.UsedNodeMinutes).To(BeZero())
 	})
 
 	It("refuses a continuation the share can no longer cover, like a new step (block, A4)", func() {
 		newSite(1, nil) // 60 node-minutes
-		j := newResumable(envNS, 60, 5)
+		j := newResumable(envNS, 60)
 		reconcileJob(j)
 		end85(j, 1, 50, "c1")
-		reconcileJob(j)
-		_, got := reconcileJob(j)
-		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused))
+		reconcileJob(j)            // continuing
+		other := newJob(envNS, 10) // takes the 10 minutes the first job left, and uses them
+		_, got := reconcileJob(other)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseAdmitted), got.Status.Message)
+		zero := int32(0)
+		start, endT := metav1.NewTime(time.Now().Add(-10*time.Minute)), metav1.NewTime(time.Now())
+		report(other, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "77", State: "COMPLETED", ExitCode: &zero,
+			StartTime: &start, EndTime: &endT, Terminal: true})
+		_, got = reconcileJob(other)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseSucceeded))
+		_, got = reconcileJob(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseRefused), got.Status.Message)
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonBudgetBlocked))
 	})
 
@@ -680,7 +714,7 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 
 	It("ignores a report without an attempt number once the job has continued", func() {
 		newSite(10, nil)
-		j := newResumable(envNS, 60, 5)
+		j := newResumable(envNS, 60)
 		reconcileJob(j)
 		end85(j, 1, 50, "c1")
 		reconcileJob(j) // continuing
@@ -697,7 +731,7 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 
 	It("is idempotent: reconciling the same state again records nothing twice", func() {
 		newSite(10, nil)
-		j := newResumable(envNS, 60, 5)
+		j := newResumable(envNS, 60)
 		reconcileJob(j)
 		end85(j, 1, 50, "c1")
 		reconcileJob(j)
@@ -708,12 +742,12 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(got.Status.Attempts).To(HaveLen(1))
 		Expect(got.Status.Continuations).To(Equal(int32(1)))
 		Expect(got.Status.Attempt).To(Equal(int32(2)))
-		Expect(siteStatus().GPU.BookedNodeMinutes).To(Equal(int64(60)), "one booking for attempt 2, not one per reconcile")
+		Expect(siteStatus().GPU.BookedNodeMinutes).To(Equal(int64(10)), "one booking for attempt 2, not one per reconcile")
 	})
 
 	It("fails a decision made on a stale copy of the job instead of applying it (optimistic lock)", func() {
 		site := newSite(10, nil)
-		j := newResumable(envNS, 60, 5)
+		j := newResumable(envNS, 60)
 		reconcileJob(j)
 		end85(j, 1, 50, "c1")
 		stale := &hpcv1alpha1.HPCArgoWorkflowJob{}

@@ -550,13 +550,15 @@ func (r *HPCArgoWorkflowJobReconciler) noteBlocked(ctx context.Context, job *hpc
 }
 
 // usedMinutes is what the current attempt spent so far: nodes x minutes from the site's start to
-// its end, or to now when it has not ended. A guest on a shared node is covered by its host (D-26).
-func (r *HPCArgoWorkflowJobReconciler) usedMinutes(job *hpcv1alpha1.HPCArgoWorkflowJob) int64 {
+// its end, or to now when it has not ended. A guest on a shared node is covered by its host (D-26). wall is the
+// time it ran, also for a guest.
+func (r *HPCArgoWorkflowJobReconciler) usedMinutes(job *hpcv1alpha1.HPCArgoWorkflowJob) (used, wall int64) {
 	run := job.Status.Run
 	if run == nil || !current(run, job.Status.Attempt) {
-		return 0
+		return 0, 0
 	}
-	return settleAttempt(job, r.now()).Minutes
+	st := settleAttempt(job, r.now())
+	return st.Minutes, st.Wall
 }
 
 // failAttempt ends the job in a terminal phase without a continuation: it settles the booked
@@ -566,9 +568,9 @@ func (r *HPCArgoWorkflowJobReconciler) failAttempt(ctx context.Context, job *hpc
 	site *hpcv1alpha1.HPCSite, phase hpcv1alpha1.Phase, reason, outcome, msg string) error {
 	orig := job.DeepCopy()
 	if b := job.Status.Booking; b != nil {
-		used := r.usedMinutes(job)
+		used, wall := r.usedMinutes(job)
 		rec := hpcv1alpha1.AttemptRecord{Attempt: max(job.Status.Attempt, 1), Tier: b.Tier, Outcome: outcome,
-			SettledNodeMinutes: used, EndTime: metav1.NewTime(r.now())}
+			SettledNodeMinutes: used, WallMinutes: wall, EndTime: metav1.NewTime(r.now())}
 		if run := job.Status.Run; run != nil && current(run, job.Status.Attempt) {
 			rec.SiteJobID, rec.ExitCode = run.SiteJobID, run.ExitCode
 			rec.QueueReplaced, rec.QueueReplacedCount = run.QueueReplaced, run.QueueReplacedCount

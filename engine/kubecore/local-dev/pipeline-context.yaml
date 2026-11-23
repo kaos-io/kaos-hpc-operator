@@ -153,4 +153,6 @@ checkpoints:
   prefix: main/checkpoints
   # The platform-registry image of the checkpoint helper containers (the operator publishes it for every app).
   helperImage: "registry.example/kaos-hpc-operator:v0.0.0"
+# The platform cap on the time of one step, in minutes (seven days when absent).
+stepCapMinutes: 10080
 serviceAccountName: argo-workflow

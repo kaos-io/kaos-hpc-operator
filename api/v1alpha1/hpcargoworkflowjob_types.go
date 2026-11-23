@@ -106,25 +106,16 @@ const (
 	// names what is wrong. The runner reports ExitCodeInvalidResult.
 	ReasonInvalidResult        = "InvalidResult"
 	ReasonMultiNodeUnsupported = "MultiNodeUnsupported"
-	ReasonWallTimeOverLimit    = "WallTimeOverLimit"
-	// ReasonTooLongNotResumable: the declared limit is above the longest lane and the step is not
-	// resumable, so it would be cut at the lane maximum. Refused at admission, never cut silently.
-	ReasonTooLongNotResumable = "TooLongNotResumable"
-	// ReasonTooLongBeyondContinuations: the step is resumable but the declared limit needs more
-	// runs than the continuation cap allows.
-	ReasonTooLongBeyondContinuations = "TooLongBeyondContinuations"
-	ReasonClassNotAllowed            = "ClassNotAllowed"
-	ReasonNoProject                  = "NoProject"
-	ReasonNoSite                     = "NoSite"
+	ReasonClassNotAllowed      = "ClassNotAllowed"
+	ReasonNoProject            = "NoProject"
+	ReasonNoSite               = "NoSite"
 	// Continuation (D-44 as amended 2026-11-05, F-29, T-19).
 	// ReasonContinuing: the attempt ended with a verified checkpoint copy and the next attempt (phase Pending)
 	// starts from it.
 	ReasonContinuing = "Continuing"
-	// ReasonContinuationLimit: the step used all its continuations (spec.resumable.maxContinuations, default 5).
-	ReasonContinuationLimit = "ContinuationLimit"
-	// ReasonNotResumable: the step exited 85 ("saved, continue me") but opted out (resumable=False) or, in the
-	// phase-0 path, was not declared resumable.
-	ReasonNotResumable = "NotResumable"
+	// ReasonNoSavedProgress: a job ran to its time limit and left no saved progress, so the step is not continued
+	// (D-75, ending 2). The message says how long it ran and on which lane.
+	ReasonNoSavedProgress = "NoSavedProgress"
 	// ReasonCheckpointMissing: the step exited 85 but no verified checkpoint copy exists to continue from. The
 	// reason string is "Timeout" for historical reasons; read it as "checkpoint missing".
 	ReasonCheckpointMissing = "Timeout"
@@ -215,12 +206,9 @@ const (
 	ReasonRerunNodeFail  = "RerunNodeFailure"
 	ReasonRerunPreempted = "RerunPreempted"
 	ReasonRerunLimit     = "RerunLimit"
-	// MaxReruns caps the re-runs of a step that has no checkpoint.
+	// MaxReruns caps the re-runs of a step: from the start when it has no checkpoint, from the same checkpoint
+	// when a continuation was stopped before it saved a new one.
 	MaxReruns = int32(2)
-	// DefaultMaxContinuations caps the continuations of a step discovered resumable (no spec.resumable).
-	DefaultMaxContinuations = int32(5)
-	// DefaultLeadMinutes is the wall-time signal lead of a step discovered resumable (D-75 4: fixed).
-	DefaultLeadMinutes = int32(10)
 )
 
 // CancelFinalizer holds a serve-mode job until its runner Job is gone and its attempt is settled
@@ -281,7 +269,9 @@ type HPCArgoWorkflowJobSpec struct {
 	// Command of the step.
 	// +optional
 	Command []string `json:"command,omitempty"`
-	// WallTimeMinutes is the job's run limit once started (Slurm --time).
+	// WallTimeMinutes is the platform's cap on the step's total time over all its jobs (D-75). The time of one
+	// job is the controller's choice (status.placement.timeLimitMinutes), at most the lowest of the class's, the
+	// site's and the data access's maximum.
 	// +kubebuilder:validation:Minimum=1
 	WallTimeMinutes int32 `json:"wallTimeMinutes"`
 	// Nodes the job asks for. Only 1 is admitted (D-41, CON-06); more is refused with a reason.
@@ -309,19 +299,6 @@ type HPCArgoWorkflowJobSpec struct {
 	// +listMapKey=name
 	// +optional
 	Inputs []StepInput `json:"inputs,omitempty"`
-	// Resumable declares that the step continues across jobs: it gets the wall-time signal LeadMinutes before
-	// its wall time, saves a checkpoint (its checkpoint folder, or the KAOS library) and exits 85, and the job
-	// continues from that checkpoint in a new site job under this same HPCArgoWorkflowJob (D-38, D-44 as amended
-	// 2026-11-05, F-29). A declared step may also ask for more wall time than the longest run the class allows: it
-	// then runs as continuations. Absent: the step is not declared resumable, but one that left a checkpoint copy
-	// is still continued (capped at 5) and one that did so successfully is verified resumable (D-74); a step
-	// that is neither is refused with TooLongNotResumable when it asks for more than the longest run.
-	// +optional
-	Resumable *Resumable `json:"resumable,omitempty"`
-	// ResumableOptOut is resumable=False: the step is never continued from a checkpoint, even when it
-	// uses the checkpoint folder and the controller has verified it (D-74). A node failure still re-runs it.
-	// +optional
-	ResumableOptOut bool `json:"resumableOptOut,omitempty"`
 	// StepName is the DAG step's name (the Argo step-name input). Setting it turns on
 	// serve mode: the controller runs the job through a runner Job (PRD-HPC-1461 D-58, D-64).
 	// Without it the job behaves as in phase 0 (observe and admit; the in-pod runner submits).
@@ -384,21 +361,6 @@ type StepInput struct {
 	// +kubebuilder:validation:MaxLength=255
 	// +optional
 	Line string `json:"line,omitempty"`
-}
-
-// Resumable is a step's declaration that it saves and continues (step(..., resumable=...)).
-type Resumable struct {
-	// LeadMinutes before the wall time the signal arrives: the time to save and upload the
-	// checkpoint (resumable="20m" gives 20).
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:default=10
-	// +optional
-	LeadMinutes int32 `json:"leadMinutes,omitempty"`
-	// MaxContinuations caps how many times the step continues (counted apart from failure retries).
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:default=5
-	// +optional
-	MaxContinuations int32 `json:"maxContinuations,omitempty"`
 }
 
 // SiteRef names an HPCSite.
@@ -484,14 +446,13 @@ type QueueReplacement struct {
 	// QueuedSeconds is how long the old job had been queued.
 	// +kubebuilder:validation:Minimum=0
 	QueuedSeconds int64 `json:"queuedSeconds"`
-	// Reason: TokenRefresh (the job's wallet or token would expire before it started: the replacement
-	// carries fresh credentials), HostLost (the host a guest waited for is gone), Replanned (the
-	// controller planned a waiting guest as a host).
+	// Reason: HostLost (the host a guest waited for is gone), Replanned (the controller planned a
+	// waiting guest as a host).
 	Reason QueueReplacementReason `json:"reason"`
 }
 
 // QueueReplacementReason says why a queued site job was replaced.
-// +kubebuilder:validation:Enum=TokenRefresh;HostLost;Replanned
+// +kubebuilder:validation:Enum=HostLost;Replanned
 type QueueReplacementReason string
 
 // RunStatus is written by the submitter (in phase 0 the in-pod runner, D-34): what the site says
@@ -678,6 +639,12 @@ type AttemptRecord struct {
 	// Tier and SettledNodeMinutes: what the attempt spent.
 	Tier               Tier  `json:"tier"`
 	SettledNodeMinutes int64 `json:"settledNodeMinutes"`
+	// WallMinutes is the time the attempt's step ran, from its start at the site to its end, rounded up (at least 1
+	// for an attempt that started, 0 for one that never did). The cap on the step's total time counts these
+	// (D-75), also for a guest on a shared node, whose SettledNodeMinutes is 0. It is not a billing figure.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	WallMinutes int64 `json:"wallMinutes,omitempty"`
 	// NodeMinutesSaved is set for an attempt the idle watchdog ended (reason Idle): the step's
 	// limit minus the time it ran, times the nodes. A guest on a shared node reports 0 (its host's
 	// booking covers the node).
@@ -739,11 +706,6 @@ type Placement struct {
 	// was rewritten. Empty: no refusal.
 	// +optional
 	RefusedQOS string `json:"refusedQOS,omitempty"`
-	// Warning is a plain-words notice for the pipeline author, set at admission when a recent run
-	// of the same step ended WallTimeReached at this same declared limit. It changes nothing: the
-	// limit is not raised. Empty: no warning.
-	// +optional
-	Warning string `json:"warning,omitempty"`
 	// Resumable is whether the step is treated as resumable, and whether that is verified (D-74). Absent for
 	// a step with no earlier continuation evidence and no declaration.
 	// +optional
@@ -856,8 +818,8 @@ type HPCArgoWorkflowJobStatus struct {
 	// on jobs admitted before the field existed: the spec's wallTimeMinutes applies.
 	// +optional
 	Placement *Placement `json:"placement,omitempty"`
-	// Reruns so far: how often a step without a checkpoint was re-run from the start after a node failure
-	// or pre-emption (tier 1, D-75), at most MaxReruns.
+	// Reruns so far: how often a node failure or pre-emption made the step run again without new saved
+	// progress, from the start (no checkpoint, tier 1, D-75) or from the checkpoint it had; at most MaxReruns.
 	// +optional
 	Reruns int32 `json:"reruns,omitempty"`
 	// ResumeEvidence is what the latest continuation showed about the step's checkpoints (D-74).
@@ -977,17 +939,9 @@ func (j *HPCArgoWorkflowJob) EffectiveWallMinutes() int32 {
 	return j.Spec.WallTimeMinutes
 }
 
-// EffectiveResumable is how the step is treated: its declaration, else (when it did not opt out) the default
-// lead and cap of a step the controller found resumable from its checkpoint history. nil: not resumable.
-func (j *HPCArgoWorkflowJob) EffectiveResumable() *Resumable {
-	if j.Spec.ResumableOptOut {
-		return nil
-	}
-	if j.Spec.Resumable != nil {
-		return j.Spec.Resumable
-	}
-	if p := j.Status.Placement; p != nil && p.Resumable != nil && p.Resumable.Verified {
-		return &Resumable{LeadMinutes: DefaultLeadMinutes, MaxContinuations: DefaultMaxContinuations}
-	}
-	return nil
+// VerifiedResumable reports whether the controller has seen a continuation of the step load its saved state and
+// get further (D-74): the only way a step counts as resumable.
+func (j *HPCArgoWorkflowJob) VerifiedResumable() bool {
+	p := j.Status.Placement
+	return p != nil && p.Resumable != nil && p.Resumable.Verified
 }

@@ -50,8 +50,6 @@ func TestShouldReattachAfterPodLossAgainstTheRealAPIServer(t *testing.T) {
 		{"should_reattach_when_idle_timeout_is_the_platform_default", func(*Config) {}},
 		{"should_reattach_when_idle_timeout_is_off", func(c *Config) { c.IdleTimeout = ptr.To(int32(0)) }},
 		{"should_reattach_when_idle_timeout_is_set", func(c *Config) { c.IdleTimeout = ptr.To(int32(45)) }},
-		{"should_reattach_when_resumable", func(c *Config) { c.ResumableLead = 15; c.MaxContinuations = 5 }},
-		{"should_reattach_when_resumable_opted_out", func(c *Config) { c.ResumableOptOut = true }},
 		{"should_reattach_when_sharing_and_env_are_set", func(c *Config) {
 			c.Scope = "abcdef12"
 			c.Env = []hpcv1alpha1.NameValue{{Name: "KAOS_LIB_SUPPORT", Value: "{}"}}

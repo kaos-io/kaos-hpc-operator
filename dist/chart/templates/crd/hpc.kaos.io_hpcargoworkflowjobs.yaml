@@ -197,37 +197,6 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
-              resumable:
-                description: |-
-                  Resumable declares that the step continues across jobs: it gets the wall-time signal LeadMinutes before
-                  its wall time, saves a checkpoint (its checkpoint folder, or the KAOS library) and exits 85, and the job
-                  continues from that checkpoint in a new site job under this same HPCArgoWorkflowJob (D-38, D-44 as amended
-                  2026-11-05, F-29). A declared step may also ask for more wall time than the longest run the class allows: it
-                  then runs as continuations. Absent: the step is not declared resumable, but one that left a checkpoint copy
-                  is still continued (capped at 5) and one that did so successfully is verified resumable (D-74); a step
-                  that is neither is refused with TooLongNotResumable when it asks for more than the longest run.
-                properties:
-                  leadMinutes:
-                    default: 10
-                    description: |-
-                      LeadMinutes before the wall time the signal arrives: the time to save and upload the
-                      checkpoint (resumable="20m" gives 20).
-                    format: int32
-                    minimum: 1
-                    type: integer
-                  maxContinuations:
-                    default: 5
-                    description: MaxContinuations caps how many times the step continues
-                      (counted apart from failure retries).
-                    format: int32
-                    minimum: 0
-                    type: integer
-                type: object
-              resumableOptOut:
-                description: |-
-                  ResumableOptOut is resumable=False: the step is never continued from a checkpoint, even when it
-                  uses the checkpoint folder and the controller has verified it (D-74). A node failure still re-runs it.
-                type: boolean
               sharing:
                 description: 'Sharing opts the job into node sharing under a scope
                   (PRD-1609). Absent: no sharing.'
@@ -248,8 +217,10 @@ spec:
                 minLength: 1
                 type: string
               wallTimeMinutes:
-                description: WallTimeMinutes is the job's run limit once started (Slurm
-                  --time).
+                description: |-
+                  WallTimeMinutes is the platform's cap on the step's total time over all its jobs (D-75). The time of one
+                  job is the controller's choice (status.placement.timeLimitMinutes), at most the lowest of the class's, the
+                  site's and the data access's maximum.
                 format: int32
                 minimum: 1
                 type: integer
@@ -358,11 +329,9 @@ spec:
                             type: integer
                           reason:
                             description: |-
-                              Reason: TokenRefresh (the job's wallet or token would expire before it started: the replacement
-                              carries fresh credentials), HostLost (the host a guest waited for is gone), Replanned (the
-                              controller planned a waiting guest as a host).
+                              Reason: HostLost (the host a guest waited for is gone), Replanned (the controller planned a
+                              waiting guest as a host).
                             enum:
-                            - TokenRefresh
                             - HostLost
                             - Replanned
                             type: string
@@ -393,6 +362,14 @@ spec:
                       - fpga
                       - largemem
                       type: string
+                    wallMinutes:
+                      description: |-
+                        WallMinutes is the time the attempt's step ran, from its start at the site to its end, rounded up (at least 1
+                        for an attempt that started, 0 for one that never did). The cap on the step's total time counts these
+                        (D-75), also for a guest on a shared node, whose SettledNodeMinutes is 0. It is not a billing figure.
+                      format: int64
+                      minimum: 0
+                      type: integer
                   required:
                   - attempt
                   - endTime
@@ -625,12 +602,6 @@ spec:
                     format: int32
                     minimum: 1
                     type: integer
-                  warning:
-                    description: |-
-                      Warning is a plain-words notice for the pipeline author, set at admission when a recent run
-                      of the same step ended WallTimeReached at this same declared limit. It changes nothing: the
-                      limit is not raised. Empty: no warning.
-                    type: string
                 required:
                 - source
                 - timeLimitMinutes
@@ -639,8 +610,8 @@ spec:
                 type: string
               reruns:
                 description: |-
-                  Reruns so far: how often a step without a checkpoint was re-run from the start after a node failure
-                  or pre-emption (tier 1, D-75), at most MaxReruns.
+                  Reruns so far: how often a node failure or pre-emption made the step run again without new saved
+                  progress, from the start (no checkpoint, tier 1, D-75) or from the checkpoint it had; at most MaxReruns.
                 format: int32
                 type: integer
               result:
@@ -878,11 +849,9 @@ spec:
                           type: integer
                         reason:
                           description: |-
-                            Reason: TokenRefresh (the job's wallet or token would expire before it started: the replacement
-                            carries fresh credentials), HostLost (the host a guest waited for is gone), Replanned (the
-                            controller planned a waiting guest as a host).
+                            Reason: HostLost (the host a guest waited for is gone), Replanned (the controller planned a
+                            waiting guest as a host).
                           enum:
-                          - TokenRefresh
                           - HostLost
                           - Replanned
                           type: string

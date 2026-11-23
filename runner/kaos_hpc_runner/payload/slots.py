@@ -54,7 +54,6 @@ KILLED_EXIT = 137       # 128 + KILL: the exit code of a step the slot manager s
 CHECKPOINT_EXIT = 85    # the step saved its checkpoint (D-44; resume.Classify)
 MARGIN_S = 300          # a guest must end this long before the host's own limit
 LEAD_UNIT_S = 60        # a resumable step's lead is declared in minutes
-TOKEN_MARGIN_S = 1800   # ... and this long before its own token expires (D-07)
 # Not takeable: held (another host took it) or waiting for another job. A job of this
 # scope waiting for its BeginTime is in its offer window (OFFER_S): exactly the job a
 # host should take, so it is NOT skipped.
@@ -273,14 +272,22 @@ def step_limit_of(text):
 
 
 def lead_of(text):
-    # D-44 (AC-73): a resumable step's lead in seconds, from its script (KAOS_RESUMABLE_LEAD_MIN); 0 = not resumable.
+    # D-75 (AC-73): the lead of the warning before a step's own limit in seconds, from its script
+    # (KAOS_RESUMABLE_LEAD_MIN); 0 = none. Every step may have one: it does not say the step can be continued.
     m = re.search(r'^export KAOS_RESUMABLE_LEAD_MIN=(\d+)$', text, re.M)
     return int(m.group(1)) * LEAD_UNIT_S if m else 0
 
 
-def fits(now, limit, lead, token_exp, host_end):
-    # May a guest of this step limit (and resumable lead, 0 = none) and token expiry be taken at `now`? It must
-    # end MARGIN_S before the host's limit and before its token expires. A resumable guest also fits when only
+def resumable_of(text):
+    # D-75: may the step be cut and continued? Only when its script says so (KAOS_RESUMABLE=1: the controller
+    # verified its saved progress).
+    return re.search(r'^export KAOS_RESUMABLE=1$', text, re.M) is not None
+
+
+def fits(now, limit, lead, host_end):
+    # May a guest of this step limit be taken at `now`? lead: the lead of a guest that may be cut and continued
+    # (resumable_of), 0 for any other. It must
+    # end MARGIN_S before the host's limit. A resumable guest also fits when only
     # its lead does: it is signalled at host_end - lead (AC-73) and checkpoints, so it needs host_end - now to
     # cover its lead plus the margin; it then ends no later than the host's end.
     if limit is None:
@@ -290,12 +297,13 @@ def fits(now, limit, lead, token_exp, host_end):
         if host_end - now < lead + MARGIN_S:
             return False
         ends = host_end
-    return ends <= host_end and not (token_exp and ends > token_exp - TOKEN_MARGIN_S)
+    return ends <= host_end
 
 
 def signal_at(s, host_end):
-    # When a resumable step is sent USR1: its lead before the end of its own limit or of the host's job,
-    # whichever comes first. None for a step that is not resumable.
+    # When a step with a lead is sent USR1: its lead before the end of its own limit or of the host's job,
+    # whichever comes first (the host's end only for a guest taken by its lead, and for the host's own step:
+    # any other guest ends before the host does). None for a step without a lead.
     if not s.get('lead'):
         return None
     ends = min(s['start'] + s['limit'], host_end) if s.get('limit') else host_end
@@ -336,8 +344,7 @@ def take(slot, job, name, job_limit):
         return False
     limit = step_limit_of(text) or job_limit
     lead = lead_of(text)
-    m = re.search(r'^export KAOS_TOKEN_EXP=(\d+)$', text, re.M)
-    if not fits(now, limit, lead, int(m.group(1)) if m else None, HOST_END):
+    if not fits(now, limit, lead if resumable_of(text) else 0, HOST_END):
         skip.add(job)
         return False
     c = comment(job)
@@ -475,7 +482,7 @@ while True:
         rc = s['proc'].poll()
         if rc is not None:
             finish(slot, rc)
-    # AC-73: every resumable step is sent USR1 its lead before its limit or the host job's end, one timer per step.
+    # AC-73: every step with a lead is sent USR1 its lead before its limit or the host job's end, one timer per step.
     for s in list(slots.values()):
         due = signal_at(s, HOST_END)
         if due is not None and not s.get('signalled') and time.time() >= due:

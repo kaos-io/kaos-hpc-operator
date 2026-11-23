@@ -228,19 +228,19 @@ func TestScaleSharedResumable(t *testing.T) {
 	rng := rand.New(rand.NewSource(11))
 	hosts := make([]jobSpec, 10)
 	for i := range hosts {
-		hosts[i] = jobSpec{class: "hpc-gpu", wallMinutes: 60, run: fmt.Sprintf("%.1f", 6+2*rng.Float64()),
+		hosts[i] = jobSpec{class: "hpc-gpu", wallMinutes: 90, run: fmt.Sprintf("%.1f", 6+2*rng.Float64()),
 			hostTail: fmt.Sprintf("%.1f", 12+8*rng.Float64())}
 		if i < 6 {
-			hosts[i].resumable, hosts[i].segments, hosts[i].maxCont = true, 3, 12
+			hosts[i].resumable, hosts[i].segments = true, 3
 		}
 	}
 	w.createJobs(p, hosts)
 	time.Sleep(3 * time.Second) // the hosts start first, as a host must be running to take a guest
 	guests := make([]jobSpec, 30)
 	for i := range guests {
-		guests[i] = jobSpec{class: "hpc-gpu", wallMinutes: 60, run: fmt.Sprintf("%.1f", 8+8*rng.Float64()), guest: true}
+		guests[i] = jobSpec{class: "hpc-gpu", wallMinutes: 90, run: fmt.Sprintf("%.1f", 8+8*rng.Float64()), guest: true}
 		if i < 20 {
-			guests[i].resumable, guests[i].segments, guests[i].maxCont = true, 2+i%2, 12
+			guests[i].resumable, guests[i].segments = true, 2+i%2
 		}
 	}
 	w.createJobs(p, guests)
@@ -893,12 +893,14 @@ func TestScaleLChaos(t *testing.T) {
 		specs := mixedSpecs(n/3+boolInt(i < n%3), rng)
 		for k := range specs {
 			switch {
-			case k < 4: // always lose the node: tier-1 re-runs twice, then RerunLimit
-				specs[k].forceEnd = fakeslurm.NodeFail
-			case k < 8: // needs 8 segments, 5 continuations allowed: ContinuationLimit
+			case k < 4: // always lose the node: tier-1 re-runs twice, then RerunLimit (the cap is far enough not to end it first)
+				specs[k].forceEnd, specs[k].wallMinutes = fakeslurm.NodeFail, 240
+			case k < 8: // needs 8 segments of 10 minutes, the cap is 45 minutes: WallTimeReached
 				specs[k].resumable, specs[k].segments, specs[k].wallMinutes, specs[k].run = true, 8, 45, "10"
 			case k < 40: // checkpoints, 2 or 3 segments
 				specs[k].resumable, specs[k].segments, specs[k].wallMinutes, specs[k].run = true, 2+k%2, 45, "10"
+			default: // the jobs lost to the 10% node failures are run again; their time counts against the cap
+				specs[k].wallMinutes *= 4
 			}
 		}
 		w.createJobs(p, specs)
@@ -1100,9 +1102,6 @@ func (w *world) verifyChaosOutcomes(r *result, jobs []hpcv1alpha1.HPCArgoWorkflo
 		if j.Status.Reruns > hpcv1alpha1.MaxReruns {
 			r.fail("job %s/%s was re-run %d times (max %d)", j.Namespace, j.Name, j.Status.Reruns, hpcv1alpha1.MaxReruns)
 		}
-		if j.Status.Continuations > hpcv1alpha1.DefaultMaxContinuations {
-			r.fail("job %s/%s continued %d times (max %d)", j.Namespace, j.Name, j.Status.Continuations, hpcv1alpha1.DefaultMaxContinuations)
-		}
 		if j.Status.Reason == hpcv1alpha1.ReasonRunnerFailed {
 			runnerFailed++
 		}
@@ -1129,7 +1128,7 @@ func (w *world) verifyChaosOutcomes(r *result, jobs []hpcv1alpha1.HPCArgoWorkflo
 		}
 	}
 	if notLimited > 0 {
-		r.fail("%d of %d jobs that need 8 segments succeeded: the continuation cap of 5 did not hold", notLimited, len(overLimit))
+		r.fail("%d of %d jobs that need 8 segments succeeded: the cap on the total time did not hold", notLimited, len(overLimit))
 	}
 	okRes, limited := 0, 0
 	for _, k := range resumable {
@@ -1137,11 +1136,11 @@ func (w *world) verifyChaosOutcomes(r *result, jobs []hpcv1alpha1.HPCArgoWorkflo
 		switch {
 		case j != nil && j.Status.Phase == hpcv1alpha1.PhaseSucceeded:
 			okRes++
-		case j != nil && j.Status.Reason == hpcv1alpha1.ReasonContinuationLimit:
+		case j != nil && j.Status.Reason == hpcv1alpha1.ReasonWallTimeReached:
 			limited++
 		}
 	}
-	r.row("checkpointing steps (2-3 segments): succeeded / hit the continuation cap through node failures / total",
+	r.row("checkpointing steps (2-3 segments): succeeded / hit the cap through node failures / total",
 		fmt.Sprintf("%d / %d / %d", okRes, limited, len(resumable)))
 	// A 10 % node failure rate must not push the checkpointing steps off their rails: most succeed.
 	if okRes < len(resumable)*8/10 {

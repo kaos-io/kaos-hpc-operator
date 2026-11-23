@@ -20,6 +20,9 @@ var (
 // settlement is what one attempt spent, from the times the site reported.
 type settlement struct {
 	Minutes int64
+	// Wall is the time the attempt ran, in minutes rounded up: at least 1 for an attempt that started, also for
+	// a guest. The cap on the step's total time counts it (D-75); it is not billed.
+	Wall int64
 	// End is the attempt's end: the site's when valid, else the controller's own observation time.
 	End metav1.Time
 	// Discarded names each reported time that was rejected, for a Warning event.
@@ -35,7 +38,8 @@ func validSiteTime(t *metav1.Time, now time.Time) bool {
 
 // settle computes the node-minutes an attempt spent. The result is never negative and never
 // absurd: an unknown start means the job never ran on its own (0); an unknown end settles up to
-// now, which is conservative and never zero for a job that ran. A guest is covered by its host (D-26).
+// now, which is conservative and never zero for a job that ran. A guest is covered by its host (D-26): it
+// settles 0 node-minutes, and only its Wall says how long it ran.
 func settle(nodes int32, run *hpcv1alpha1.RunStatus, now time.Time) settlement {
 	s := settlement{End: metav1.NewTime(now)}
 	startOK := validSiteTime(run.StartTime, now)
@@ -53,14 +57,19 @@ func settle(nodes int32, run *hpcv1alpha1.RunStatus, now time.Time) settlement {
 	if endOK {
 		s.End = *run.EndTime
 	}
-	if run.HostSiteJobID != "" || !startOK {
+	if !startOK {
 		return s
 	}
 	end := now
 	if endOK {
 		end = run.EndTime.Time
 	}
-	s.Minutes = int64(max(nodes, 1)) * max(int64(math.Ceil(end.Sub(run.StartTime.Time).Minutes())), 0)
+	ran := max(int64(math.Ceil(end.Sub(run.StartTime.Time).Minutes())), 0)
+	s.Wall = max(ran, 1)
+	if run.HostSiteJobID != "" {
+		return s
+	}
+	s.Minutes = int64(max(nodes, 1)) * ran
 	return s
 }
 

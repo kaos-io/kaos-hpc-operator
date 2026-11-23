@@ -78,8 +78,6 @@ type follower struct {
 	lastPlacement string
 	// shownStaging are the dataset staging lines already printed (see showStaging).
 	shownStaging map[string]bool
-	// lastWarning is the time-limit warning already printed.
-	lastWarning string
 	// lastSaid is the last line said: on a failure, why.
 	lastSaid string
 }

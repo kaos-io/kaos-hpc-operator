@@ -66,6 +66,46 @@ func TestSettle(t *testing.T) {
 	}
 }
 
+// D-75: the wall minutes of an attempt are the time it ran, whoever is billed for the node. They are what the cap
+// on the step's total time counts.
+func TestSettleWallMinutes(t *testing.T) {
+	now := ts("2026-11-06T05:32:31Z").Time
+	cases := []struct {
+		name              string
+		run               hpcv1alpha1.RunStatus
+		nodes             int32
+		wantWall, wantMin int64
+	}{
+		{"should_count_the_time_a_guest_ran_and_bill_it_nothing",
+			hpcv1alpha1.RunStatus{State: "FAILED", Terminal: true, HostSiteJobID: "5427313", StartTime: ts("2026-11-06T05:00:00Z"), EndTime: ts("2026-11-06T05:25:00Z")},
+			1, 25, 0},
+		{"should_round_a_started_minute_up",
+			hpcv1alpha1.RunStatus{State: "FAILED", Terminal: true, HostSiteJobID: "5427313", StartTime: ts("2026-11-06T05:00:00Z"), EndTime: ts("2026-11-06T05:10:01Z")},
+			1, 11, 0},
+		{"should_count_an_attempt_that_started_and_ended_at_once_as_one_minute",
+			hpcv1alpha1.RunStatus{State: "FAILED", Terminal: true, StartTime: ts("2026-11-06T05:00:00Z"), EndTime: ts("2026-11-06T05:00:00Z")},
+			1, 1, 0},
+		{"should_count_the_time_not_the_nodes",
+			hpcv1alpha1.RunStatus{State: "COMPLETED", Terminal: true, StartTime: ts("2026-11-06T05:00:00Z"), EndTime: ts("2026-11-06T05:10:01Z")},
+			2, 11, 22},
+		{"should_count_up_to_now_without_an_end",
+			hpcv1alpha1.RunStatus{State: "COMPLETED", Terminal: true, StartTime: ts("2026-11-06T05:28:53Z")},
+			1, 4, 4},
+		{"should_count_nothing_for_an_attempt_that_never_started",
+			hpcv1alpha1.RunStatus{State: "CANCELLED", Terminal: true, StartTime: ts("2106-02-07T06:28:14Z"), EndTime: ts("2026-11-06T05:30:23Z")},
+			1, 0, 0},
+		{"should_count_nothing_when_nothing_was_reported",
+			hpcv1alpha1.RunStatus{State: "NODE_FAIL", Terminal: true}, 1, 0, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := settle(c.nodes, &c.run, now); got.Wall != c.wantWall || got.Minutes != c.wantMin {
+				t.Fatalf("got wall=%d node-minutes=%d; want %d %d", got.Wall, got.Minutes, c.wantWall, c.wantMin)
+			}
+		})
+	}
+}
+
 // A host whose Slurm job ends after its step: the late end raises the settlement, once.
 func TestLateEnd(t *testing.T) {
 	now := ts("2026-11-07T10:00:00Z").Time

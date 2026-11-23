@@ -191,10 +191,18 @@ class Settings:
         self.qos = g('HPC_QOS') or ''
         self.reservation = g('HPC_RESERVATION') or ''
         self.qos_max = int(g('HPC_QOS_MAX_MINUTES') or 0)
-        # PRD-HPC-1461 D-44 (amended 2026-11-05, 2026-11-10): only a step declared resumable gets the stop
-        # signal, this many minutes before its wall time; 0 = not resumable. On a shared node the slot
+        # D-75: every job but a shared node's host gets the stop signal this many minutes before its time limit (the
+        # job script passes it only to processes that catch it); 0 = none. On a shared node the slot
         # manager sends it, step by step (AC-73), so a resumable step may host or be a guest.
         self.resumable_lead = int(g('HPC_RESUMABLE_LEAD') or 0)
+        # D-75: the controller verified that the step saves progress and continues from it. Only such a step may be
+        # cut and continued: on a shared node a host takes it when only its lead fits and stops it before the host's
+        # own end. The lead above says nothing about that: a plain step has one too.
+        self.resumable = g('HPC_RESUMABLE') == '1'
+        # D-75: the least time (minutes) the site may give the job (Slurm --time-min), so it may fit it into a gap
+        # shorter than the job limit. Set only for a step with verified saved progress, on a site whose profile
+        # says it takes the field; 0 = not asked.
+        self.time_minimum = int(g('HPC_TIME_MIN_MINUTES') or 0)
         # D-72: minutes of idleness (GPU/CPU below 5 % and a silent log) after which the job ends
         # the step as Idle; 0 = off. The controller always sets it; 20 when it is absent or unreadable.
         raw = (g('HPC_IDLE_TIMEOUT_MINUTES') or '').strip()
