@@ -127,7 +127,7 @@ then every 25 minutes while the job is queued or running; a refresh that fails i
 and asked again at every poll, and never stops the job. The file is never in the job script, the Slurm environment or the
 job log. The same call places the tracker's bearer (`tracker_token` in the record; the staging contract stays 4, the field is additive and the tool answers `"tracker": true` when it placed the file) as the file `tracker-token`
 in the same folder, minted anew on every round the way the first was; the step finds it by `MLFLOW_TRACKING_TOKEN_FILE`
-(`/kaos/key/tracker-token`). That is why no credential bounds a job's time. The job waits up to 10 minutes for the first files and ends 247 without them. A dataset another project shares is
+(`/kaos/key/tracker-token`); the container's startup shell also sets the step's `MLFLOW_TRACKING_TOKEN` from the file just before the step command (jobscript.py `LOADER`), so the bearer is in no submitted environment, job script text (shared-node jobs too) or variables folder. That is why no credential bounds a job's time. The job waits up to 10 minutes for the first files and ends 247 without them. A dataset another project shares is
 staged with the key the app's own data store hands out for the owner (`/kaos/v1/shared-credentials`), over https only.
 
 ## The site job's name, adopt, and a site that does not answer

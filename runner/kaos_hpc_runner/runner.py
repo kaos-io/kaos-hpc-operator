@@ -152,7 +152,7 @@ class Runner:
         self.submitted_at = 0.0      # when the current site job was submitted (its queue time starts here)
         self.replacing = None        # the queued job being replaced, noted into the next report
         self.wallet, self.wallet_exp = '', 0.0      # the tracker's token (the newest) and its end
-        self.wallet_before = ''                    # the one before it (a step may still print it)
+        self.wallet_before = []                    # (token, end) of every earlier one still valid (a step may still print it)
         self.staged, self.stage_tried = {}, False   # input name -> its resident path on the site ('' = the job stages it)
         self.resubmits = 0
         self.lost_hosts = 0
@@ -312,14 +312,13 @@ class Runner:
             env.append('KAOS_CKPT_EVERY_S=%d' % every)
         if cfg.env.get('KAOS_LIB_SUPPORT'):      # the one variable a job's spec.env may hand to the step
             env.append('KAOS_LIB_SUPPORT=' + cfg.env['KAOS_LIB_SUPPORT'])
-        w = self.wallet      # the tracker's token, minted by prepare_handback, before anything was staged or cancelled
-        # Public endpoints only, short-lived credentials only (T-03). MLflow's client honors MLFLOW_TRACKING_TOKEN
-        # natively; this first value serves a step whose library does not read the file, for the token's first life.
-        # The data store gets NO credential from this environment: the job reads the app's key from a file
-        # (jobscript.py KEY_MOUNT) that keep_key writes on the site and replaces before the key ends, and the tracker's
-        # token is a file beside it (MLFLOW_TRACKING_TOKEN_FILE) that keep_key replaces on the same round.
+        # Public endpoints only, short-lived credentials only (T-03). Neither the data store nor the tracker gets a
+        # credential from this environment: the job reads the app's key from a file (jobscript.py KEY_MOUNT) that keep_key
+        # writes on the site and replaces before the key ends, and the tracker's token is a file beside it
+        # (MLFLOW_TRACKING_TOKEN_FILE) that keep_key replaces on the same round; the job script sets the step's
+        # MLFLOW_TRACKING_TOKEN from that file when the step starts.
         if cfg.mlflow_url:
-            env += ['MLFLOW_TRACKING_URI=' + cfg.mlflow_url, 'MLFLOW_TRACKING_TOKEN=' + w]
+            env.append('MLFLOW_TRACKING_URI=' + cfg.mlflow_url)
         env += ['LAKEFS_ENDPOINT=' + cfg.lakefs_url,
                 'KAOS_OUTPUTS_REPO=' + cfg.outputs_repo,     # for the result hand-back only
                 'STAGEIN_B64=' + payloads.b64(payloads.STAGEIN),
@@ -443,8 +442,8 @@ class Runner:
     def held_secrets(self):
         """What the log stream must never print: the tracker's token and the app's key, and the ones before them (both
         files are replaced while a step runs; the step may still hold what it read earlier)."""
-        return ((self.wallet, self.wallet_before) + (self.key.secrets() if self.key else ())
-                + (self.key_before.secrets() if self.key_before else ()))
+        return ((self.wallet,) + tuple(t for t, end in self.wallet_before if not end or end > self.clock())
+                + (self.key.secrets() if self.key else ()) + (self.key_before.secrets() if self.key_before else ()))
 
     def keep_key(self):
         """The app's key file and the tracker's token file for the current site job, on the site (the staging tool's `key`
@@ -489,7 +488,7 @@ class Runner:
         if not token:
             raise RuntimeError('no tracking token could be minted')
         if self.wallet and self.wallet != token:
-            self.wallet_before = self.wallet
+            self.wallet_before.append((self.wallet, self.wallet_exp))
         self.wallet, self.wallet_exp = token, wallet.wallet_exp(token)
         return token
 
@@ -1078,8 +1077,8 @@ class Runner:
     def replan_guest(self):
         """D-70: a deferred guest that no host took asks the controller's plan every ROLE_POLL_S. The controller plans
         it again when its host ended, did not start, no longer fits or did not take it; when the plan now says host,
-        this job is replaced by one that starts at once in the lane the plan names (the same cancel and submit as the
-        wallet resubmit). True when it did. Nothing is read, nothing changes, while the job is not a waiting guest."""
+        this job is replaced by one that starts at once in the lane the plan names (the same cancel and submit as a
+        resubmission of the job). True when it did. Nothing is read, nothing changes, while the job is not a waiting guest."""
         cfg = self.cfg
         if cfg.share_role != 'guest' or self.clock() - self.last_role < ROLE_POLL_S:
             return False

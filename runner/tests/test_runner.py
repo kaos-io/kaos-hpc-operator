@@ -258,7 +258,7 @@ def test_the_submitted_job_is_the_proven_one(rig):
     assert (env["KAOS_ATTEMPT"], env["KAOS_RESUMABLE"], env["KAOS_RESUME_REF"]) == ("3", "1", CID)
     assert env["KAOS_RESUME_PREFIX"] == "kaos-ckpt/%s/model-training/000002.tar" % WF and env["HPC_GPUS"] == "4"
     assert env["KAOS_PROJID"] == "1" and env["KAOS_CKPT_BUDGET_PCT"] == "10" and "CKPT_B64" in env
-    assert env["MLFLOW_TRACKING_TOKEN"] == "wallet.jwt" and "LAKEFS_BEARER_TOKEN" not in env
+    assert "MLFLOW_TRACKING_TOKEN" not in env and "wallet.jwt" not in " ".join(env.values()) and "LAKEFS_BEARER_TOKEN" not in env
     assert env["LAKEFS_ENDPOINT"] == "https://lakefs.example" and env["KAOS_OUTPUTS_REPO"] == "outputs-yolo"
     assert env["KAOS_LIB_SUPPORT"] == '{"a":1}' and "HANDBACK_B64" in env and "STAGEIN_B64" in env
     # The step contract: the one value the step receives, unchanged; the inputs to present; nothing of before.
@@ -419,7 +419,7 @@ def test_a_sharing_gpu_job_is_a_host_with_an_offer_window_and_inputs_in_its_scri
     assert job["name"] == "kaos-a1b2c3d4e5-%s-model-training-01234567-a1" % WF
     assert sub["script"].split("\n")[1] == "# kaos-job v2 scope=a1b2c3d4e5"
     assert [e.split("=")[0] for e in job["environment"]] == ["PATH", "HOME", "USER"], "secrets leave the Slurm environment"
-    assert "LAKEFS_BEARER_TOKEN" not in sub["script"] and "wallet.jwt" in sub["script"] and "export KAOS_SLOTS_B64=" in sub["script"]
+    assert "LAKEFS_BEARER_TOKEN" not in sub["script"] and "wallet.jwt" not in sub["script"] and "export KAOS_SLOTS_B64=" in sub["script"]
     assert job["time_limit"] == 480, "twice the step, below the class cap"
     assert job["begin_time"]["set"] and "requeue" not in job
     slurm2 = FakeSlurm({"5001": [acc("COMPLETED")]})

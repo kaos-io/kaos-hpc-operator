@@ -227,7 +227,7 @@ for v in $(compgen -v APPTAINERENV_); do
   case "$val" in /*) val=$ROOT$val ;; esac
   export "${v#APPTAINERENV_}=$val"
 done
-ARGS=(); for a in "$@"; do ARGS+=("${a//\/kaos\/env/$ROOT/kaos/env}"); done
+ARGS=(); for a in "$@"; do a=${a//\/kaos\/env/$ROOT/kaos/env}; ARGS+=("${a//\/kaos\/key/$ROOT/kaos/key}"); done
 exec "${ARGS[@]}"
 '''
 

@@ -124,7 +124,7 @@ job's environment.
 |---|---|
 | `KAOS_STEP_CONTEXT` | the step's context |
 | `LAKEFS_ENDPOINT` | the data store. Its credential is NOT in the environment: the step reads the app's own key from the file `LAKEFS_KEY_FILE` (`/kaos/key/lakefs-key.json`, see below) |
-| `MLFLOW_TRACKING_URI`, `MLFLOW_TRACKING_TOKEN`, `MLFLOW_TRACKING_TOKEN_FILE` | MLflow. `MLFLOW_TRACKING_TOKEN` is the token the job started with, for a step whose library does not read the file (it ends with the token's 12 hours). `MLFLOW_TRACKING_TOKEN_FILE` (`/kaos/key/tracker-token`, see below) is the file the platform replaces while the job runs; the library reads it again on every call and every minute, so a step is not bounded by the token's life |
+| `MLFLOW_TRACKING_URI`, `MLFLOW_TRACKING_TOKEN`, `MLFLOW_TRACKING_TOKEN_FILE` | MLflow. `MLFLOW_TRACKING_TOKEN` is set from the file when the step starts, for a step whose library does not read the file (it ends with the token's 12 hours); the Slurm job, its script and its variables folder never hold it. `MLFLOW_TRACKING_TOKEN_FILE` (`/kaos/key/tracker-token`, see below) is the file the platform replaces while the job runs; the library reads it again on every call and every minute, so a step is not bounded by the token's life |
 | `KAOS_LIB_SUPPORT` | the one variable a job's `spec.env` may hand over |
 | `CUDA_VISIBLE_DEVICES`, `NVIDIA_VISIBLE_DEVICES` | GPU selection (renumbered by the script on a fenced shared node) |
 | `KUBECORE_SLOT_GPUS`, `_CPUS`, `_MEM_GIB`, `_SHARED` | the slot's share of the node (`kaos_lib.runtime`) |
@@ -152,7 +152,7 @@ and Evaluation of Environment Variables"): `$(...)`, backticks, `$VAR` and backs
 step's context carries run parameters, so the script does not hand the dangerous values to Apptainer at all, and does not
 depend on the flag or on the site's Apptainer version:
 
-* the context, the tracker's bearer and `KAOS_LIB_SUPPORT` always travel as files, byte for byte;
+* the context and `KAOS_LIB_SUPPORT` always travel as files, byte for byte;
 * any other value travels as `APPTAINERENV_<name>` only when every character is one of `A-Za-z0-9_.,:/+=@%[]-`, which
   evaluation leaves as it is; a value with any other character (a proxy with `$` in the password, a path with a space)
   travels as a file too;
@@ -162,8 +162,10 @@ depend on the flag or on the site's Apptainer version:
 * the folder is removed when the step ends and by the job's exit trap; the sweep below removes one a killed job left;
 * a value that cannot be written ends the step with exit 233 before it starts.
 
-So for as long as the step runs the tracker's first bearer is in a 0600 file of a 0700 folder as well as in the container's
-environment (nothing the runner writes holds it after the step). Later bearers are a file of their own, below.
+The tracker's bearer is not among them: it is in no submitted environment, in no job script (also not one that carries its
+inputs, on a shared node) and in no file of this folder. The loader reads it from its own file (below) when the step starts
+and exports `MLFLOW_TRACKING_TOKEN` in the container, so for as long as the step runs the first bearer is in the container's
+environment and in the 0600 file of the 0700 key folder, nowhere else.
 
 ### The tracker's token file
 The tracker's bearer lives 12 hours; a job runs longer. The runner mints a new one the way it minted the first (same
@@ -171,7 +173,7 @@ identity, same life) and places it as the file `$SCR/kaos-tmp/key-<job>/tracker-
 and on the same round as the data store key below: folder 0700, file 0600, written to a temporary name and renamed, so a
 reader sees the whole old file or the whole new one. The folder is bound read-only at `/kaos/key`, and
 `MLFLOW_TRACKING_TOKEN_FILE` points at the file in the container. It is replaced every 25 minutes from the first poll to
-the job's end, queued or running, and goes with the key folder on every way out of the job. A step on a shared node has
+the job's end, queued or running, and goes with the key folder on every way out of the job. The container's startup shell reads the file just before the step command and sets `MLFLOW_TRACKING_TOKEN` from it (the value is not written anywhere else or printed). A step on a shared node has
 its own site job and so its own folder and file. The job waits for it with the key (10 minutes, else 247) and checks it
 is the job user's own and not a link, as it does the key. The bearer is never in the job script, the Slurm job comment, an
 argument list or the job log; the runner's log stream redacts the one in the file and the one it replaced, and the node's

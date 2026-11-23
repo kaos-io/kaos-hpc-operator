@@ -185,7 +185,7 @@ def test_the_job_holds_no_bearer_for_the_data_store_in_its_environment_script_or
     everything = json.dumps(sub)
     assert "LAKEFS_BEARER_TOKEN" not in everything
     assert helpers.APP_KEY_SECRET not in everything and helpers.APP_KEY_ID not in everything, "the key is not in the submission"
-    assert "LAKEFS_KEY_FILE" in sub["script"] and "wallet.jwt" in sub["script"], "the tracker's token is the only credential"
+    assert "LAKEFS_KEY_FILE" in sub["script"] and "wallet.jwt" not in everything, "the tracker's bearer is in neither"
     assert "LAKEFS_KEY_FILE" not in "\n".join(sub["job"]["environment"])
 
 
@@ -288,6 +288,21 @@ def test_a_new_site_job_reuses_the_token_minted_a_moment_ago_when_it_lives_long_
     assert len(minted) == 1 and r.stager.keys[0]["tracker_token"] == "tracker-token-1.made.up"
 
 
+def test_every_token_minted_for_a_live_job_stays_in_the_redaction_list(rig):
+    r = rig.make(FakeSlurm({}))
+    r.keys.expires = 5000.0 + 10 ** 6
+    clock = [5000.0]
+    r.runner.clock = lambda: clock[0]
+    minted = _minting(r)
+    r.runner.prepare_handback()
+    r.runner.jid = "5001"
+    for _ in range(4):
+        r.runner.keep_key()
+        clock[0] += 26 * 60
+    held = r.runner.held_secrets()
+    assert len(minted) >= 4 and all("tracker-token-%d.made.up" % i in held for i in range(1, 5)), held
+
+
 def test_a_job_without_a_tracker_gets_no_token_file(rig):
     r = rig.make(FakeSlurm({}), MLFLOW_EXTERNAL_URL="")
     minted = _minting(r)
@@ -385,9 +400,8 @@ def test_the_job_script_says_where_the_token_file_is_and_never_holds_a_later_tok
     assert "APPTAINERENV_MLFLOW_TRACKING_TOKEN_FILE=/kaos/key/tracker-token" in script
     assert "-B $KAOS_KEY_DIR:/kaos/key:ro" in script, "the folder the file is in is bound read-only"
     assert "$KAOS_KEY_DIR" in script and 'rm -rf "$KAOS_KEY_DIR"' in script, "removed with the key on every way out"
-    assert "MLFLOW_TRACKING_TOKEN=tracker-token-FIRST.made.up" in slurm.submitted[0]["job"]["environment"], \
-        "the first value is still handed over, as before"
-    assert "tracker-token-FIRST" not in script, "and is not in the script text"
+    assert "tracker-token-FIRST" not in str(slurm.submitted[0]["job"]), "the first value is not in the job's environment"
+    assert "tracker-token-FIRST" not in script, "nor in the script text"
     refreshed = "tracker-token-LATER.made.up"
     r.runner._mint = lambda: refreshed
     r.runner.key_for = None
@@ -484,7 +498,9 @@ def test_the_tracker_token_is_the_only_token_in_the_job(rig):
     rig.make(slurm, HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
     assert rig.runner.run() == 0
     script = slurm.submitted[0]["script"]
-    assert "export MLFLOW_TRACKING_TOKEN=wallet.jwt" in script and "LAKEFS_BEARER_TOKEN" not in script
+    assert "wallet.jwt" not in script and "MLFLOW_TRACKING_TOKEN=wallet" not in script and "LAKEFS_BEARER_TOKEN" not in script
+    assert "wallet.jwt" not in str(slurm.submitted[0]["job"]), "no bearer in the shared-node job's environment either"
+    assert "export MLFLOW_TRACKING_TOKEN=$(cat" in script and "/kaos/key/tracker-token" in script, "the step reads it from the file"
 
 
 # ---------------------------------------------------------------- the staging tool's stderr never shows a credential

@@ -19,11 +19,12 @@ mode separates two of them from each other (see docs/job-environment.md).
 from .settings import CONTEXT_ENV
 
 # What the step container receives, and nothing else (Apptainer --cleanenv; see "How a value reaches the step").
-#  - the step context, the data store's endpoint, the MLflow endpoint and its first bearer (MLFLOW_TRACKING_TOKEN, for a
-#    step whose library does not read the file below, for the token's first life). The data store has NO credential in the
+#  - the step context, the data store's endpoint and the MLflow endpoint. The data store has NO credential in the
 #    environment: the app's own key is a FILE (KEY_MOUNT), set by the script itself as APPTAINERENV_LAKEFS_KEY_FILE, which
 #    the platform replaces before the key ends. The tracker's bearer is a FILE too, beside it (TRACKER_FILE_NAME, set as
-#    APPTAINERENV_MLFLOW_TRACKING_TOKEN_FILE), replaced on the same round, so a job is not bounded by the token's life;
+#    APPTAINERENV_MLFLOW_TRACKING_TOKEN_FILE), replaced on the same round, so a job is not bounded by the token's life.
+#    The step's own MLFLOW_TRACKING_TOKEN (for a library that does not read the file) is set by the container's startup shell
+#    from that file, just before the step command (LOADER): the bearer is in no submitted environment, script or file;
 #  - KAOS_LIB_SUPPORT (the one variable a job's spec.env may hand over);
 #  - the GPU selection and the slot's share of the node (kaos_lib.runtime reads KUBECORE_SLOT_*);
 #  - SLURM_JOB_ID, SLURM_STEP_ID, KAOS_STEP_GPUS: the slot manager finds a step's processes (memory use, GPU
@@ -39,7 +40,7 @@ PASS_ENV = ('http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'no_proxy'
             'SLURM_JOB_NODELIST', 'SLURM_TMPDIR',
             'OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'LANG', 'LC_ALL', 'TZ', 'PYTHONUNBUFFERED', 'XDG_CACHE_HOME',
             'NVIDIA_DRIVER_CAPABILITIES', 'GPU_DEVICE_ORDINAL')
-STEP_ENV = (CONTEXT_ENV, 'LAKEFS_ENDPOINT', 'MLFLOW_TRACKING_URI', 'MLFLOW_TRACKING_TOKEN',
+STEP_ENV = (CONTEXT_ENV, 'LAKEFS_ENDPOINT', 'MLFLOW_TRACKING_URI',
             'KAOS_LIB_SUPPORT', 'CUDA_VISIBLE_DEVICES', 'NVIDIA_VISIBLE_DEVICES', 'KUBECORE_SLOT_GPUS',
             'KUBECORE_SLOT_CPUS', 'KUBECORE_SLOT_MEM_GIB', 'KUBECORE_SLOT_SHARED', 'KAOS_STEP_GPUS',
             'SLURM_JOB_ID', 'SLURM_STEP_ID', 'SLURM_CPUS_ON_NODE') + PASS_ENV
@@ -48,13 +49,13 @@ STEP_ENV = (CONTEXT_ENV, 'LAKEFS_ENDPOINT', 'MLFLOW_TRACKING_URI', 'MLFLOW_TRACK
 # shell unless --no-eval is given: `$(...)`, backticks, `$VAR` and backslashes in a value are run or changed; --no-eval
 # exists since 1.1.0, and --env-file values are evaluated the same way). The script does not depend on either flag or on
 # the site's Apptainer version:
-#  - these three values always travel as files, byte for byte: the context (run parameters, any character), the
-#    tracker's bearer, and spec.env's KAOS_LIB_SUPPORT;
+#  - these two values always travel as files, byte for byte: the context (run parameters, any character) and
+#    spec.env's KAOS_LIB_SUPPORT;
 #  - any other value travels as APPTAINERENV_<name> ONLY when it is made of characters that evaluation leaves as they are
 #    (PLAIN_CHARS); one that is not travels as a file too;
 #  - a file holds one value, written with printf %s in a private folder (0700, file 0600) bound read-only at /kaos/env;
 #    a small loader in the container's own shell reads each file and exports the value before the step command runs.
-FILE_ENV = (CONTEXT_ENV, 'MLFLOW_TRACKING_TOKEN', 'KAOS_LIB_SUPPORT')
+FILE_ENV = (CONTEXT_ENV, 'KAOS_LIB_SUPPORT')
 PLAIN_CHARS = ']A-Za-z0-9_.,:/+=@%[-'      # as a bash `[!...]` set; the `]` is first and the `-` last on purpose
 ENV_MOUNT = '/kaos/env'
 # The app's key file for the data store: a folder of its own (NOT the folder above: its loader exports every file there as a
@@ -65,8 +66,10 @@ KEY_FILE_NAME = 'lakefs-key.json'
 # The tracker's bearer: a file of the same folder (the bearer only), placed by the same verb and replaced on the same round.
 TRACKER_FILE_NAME = 'tracker-token'
 # POSIX sh, run by the image's /bin/sh. `$(cat f; printf x)` keeps trailing newlines, which `$(cat f)` would drop.
+# The last part reads the tracker's bearer (printable characters only) from its file, as it is when the step starts.
 LOADER = ('for f in ' + ENV_MOUNT + '/*; do [ -f "$f" ] || continue; v=$(cat "$f"; printf x); export "${f##*/}=${v%x}"; done;'
-          ' unset f v;')
+          ' unset f v;'
+          ' f=' + KEY_MOUNT + '/' + TRACKER_FILE_NAME + '; [ -s "$f" ] && export MLFLOW_TRACKING_TOKEN=$(cat "$f"); unset f;')
 
 # Credentials are replaced before a line of job output is copied anywhere (the job comment, which the controller and the
 # console read). One implementation, redact.py, shipped to the node as REDACT_B64 (and used by the runner's log stream).
