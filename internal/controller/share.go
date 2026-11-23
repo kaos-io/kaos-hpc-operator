@@ -85,16 +85,16 @@ func resumableOf(pl *hpcv1alpha1.Placement) (int32, bool) {
 // guestLimit is the limit a guest of step limit and resumable lead (0: plain) gets on a host with remaining minutes
 // of its job left, and whether the host can take it. The slot manager's rule (payload/slots.py fits) plus a minute for
 // its poll: the step and the margin must end before the host does. A guest with verified progress is also taken
-// when only its lead plus the margin do, since it is told to save before the host's end. Any other guest is taken
-// when the host has at least its limit less ShareLateMinutes left, and its limit becomes what the host has left
-// less the margin.
+// when only its lead plus the margin do, since it is told to save before the host's end. Any other guest whose
+// limit is above ShareLateMinutes is taken when the host has at least its limit less ShareLateMinutes left, and its
+// limit becomes what the host has left less the margin; a limit of ShareLateMinutes or less is never cut.
 func guestLimit(remaining, limit, lead int32) (int32, bool) {
 	switch {
 	case remaining >= limit+ShareMarginMinutes:
 		return limit, true
 	case lead > 0 && remaining >= lead+ShareMarginMinutes:
 		return limit, true
-	case remaining >= limit-ShareLateMinutes && remaining-ShareMarginMinutes >= timelimit.RoundMinutes:
+	case limit > ShareLateMinutes && remaining >= limit-ShareLateMinutes && remaining-ShareMarginMinutes >= timelimit.RoundMinutes:
 		return remaining - ShareMarginMinutes, true
 	}
 	return 0, false

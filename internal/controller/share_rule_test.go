@@ -17,6 +17,10 @@ func TestGuestLimit(t *testing.T) {
 		{"should_get_a_node_of_its_own_when_the_host_has_more_than_30_minutes_less_than_its_limit", 89, 120, 0, 0, false},
 		{"should_get_a_node_of_its_own_when_what_is_left_after_the_margin_is_below_the_rounding", 7, 30, 0, 0, false},
 		{"should_keep_the_rule_of_a_verified_guest_when_its_lead_does_not_fit_either", 10, 120, 10, 0, false},
+		{"should_never_cut_a_limit_of_30_minutes_or_less_for_a_late_guest", 21, 30, 0, 0, false},
+		{"should_never_cut_a_learned_limit_of_15_minutes", 21, 15, 0, 15, true},
+		{"should_not_take_a_15_minute_step_that_does_not_fit", 20, 15, 0, 0, false},
+		{"should_cut_a_limit_just_above_30_minutes", 30, 45, 0, 30 - ShareMarginMinutes, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
