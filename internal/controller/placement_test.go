@@ -144,8 +144,15 @@ func TestTheCapIsTheTotalOverTheStepsJobs(t *testing.T) {
 	mk := func(cap int32, ran ...int64) *hpcv1alpha1.HPCArgoWorkflowJob {
 		j := &hpcv1alpha1.HPCArgoWorkflowJob{Spec: hpcv1alpha1.HPCArgoWorkflowJobSpec{WallTimeMinutes: cap}}
 		for i, m := range ran {
-			j.Status.Attempts = append(j.Status.Attempts, hpcv1alpha1.AttemptRecord{Attempt: int32(i + 1), SettledNodeMinutes: m})
+			j.Status.Attempts = append(j.Status.Attempts, hpcv1alpha1.AttemptRecord{Attempt: int32(i + 1), WallMinutes: m})
 		}
+		return j
+	}
+	// guests: every job ran as a guest (billed 0). billed: one job that ran `ran` minutes and was billed more.
+	guests := func(cap int32, ran ...int64) *hpcv1alpha1.HPCArgoWorkflowJob { return mk(cap, ran...) }
+	billed := func(cap int32, settled, ran int64) *hpcv1alpha1.HPCArgoWorkflowJob {
+		j := mk(cap, ran)
+		j.Status.Attempts[0].SettledNodeMinutes = settled
 		return j
 	}
 	cases := []struct {
@@ -160,6 +167,8 @@ func TestTheCapIsTheTotalOverTheStepsJobs(t *testing.T) {
 		{"should_count_a_job_that_ended_early_at_its_checkpoint", mk(3*job, 600, 650), job, false},
 		{"should_give_the_last_job_what_is_left", mk(3*job-100, job, job), job - 100, false},
 		{"should_be_spent_when_the_jobs_used_the_whole_cap", mk(2*job, job, job), 0, true},
+		{"should_count_the_time_a_guest_ran_though_it_is_billed_nothing", guests(2*job, job, job), 0, true},
+		{"should_not_count_what_a_job_on_more_nodes_was_billed", billed(3*job, 2*job, job), job, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

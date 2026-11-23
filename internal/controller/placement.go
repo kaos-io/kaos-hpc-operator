@@ -56,12 +56,12 @@ func capAtRemaining(p *hpcv1alpha1.Placement, caps timelimit.Caps, used int64) *
 // defaultQOS names the QoS of a class that names none.
 const defaultQOS = "default"
 
-// usedMinutes is the time the job's earlier attempts ran (their settled node-minutes; a job runs on one node).
-// A guest on a shared node settles to zero, so its runs are not counted.
+// usedMinutes is the time the job's earlier attempts ran: their wall minutes, not what they were billed. A guest
+// on a shared node settles to zero node-minutes (its host pays), and its run counts toward the cap all the same.
 func usedMinutes(job *hpcv1alpha1.HPCArgoWorkflowJob) int64 {
 	var total int64
 	for _, a := range job.Status.Attempts {
-		total += a.SettledNodeMinutes
+		total += a.WallMinutes
 	}
 	return total
 }

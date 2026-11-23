@@ -641,6 +641,12 @@ type AttemptRecord struct {
 	// Tier and SettledNodeMinutes: what the attempt spent.
 	Tier               Tier  `json:"tier"`
 	SettledNodeMinutes int64 `json:"settledNodeMinutes"`
+	// WallMinutes is the time the attempt's step ran, from its start at the site to its end, rounded up (at least 1
+	// for an attempt that started, 0 for one that never did). The cap on the step's total time counts these
+	// (D-75), also for a guest on a shared node, whose SettledNodeMinutes is 0. It is not a billing figure.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	WallMinutes int64 `json:"wallMinutes,omitempty"`
 	// NodeMinutesSaved is set for an attempt the idle watchdog ended (reason Idle): the step's
 	// limit minus the time it ran, times the nodes. A guest on a shared node reports 0 (its host's
 	// booking covers the node).

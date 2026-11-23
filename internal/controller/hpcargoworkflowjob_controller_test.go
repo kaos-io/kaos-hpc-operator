@@ -488,6 +488,41 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(got.Status.Message).To(ContainSubstring("it reached the platform's cap of 1 h"))
 	})
 
+	// D-75: the cap counts the time each job ran, whoever pays for the node. A guest is billed 0 (its host pays,
+	// D-26), so a step continued as a guest every time would otherwise never reach its cap.
+	It("ends a step continued as a guest every time at the platform's cap, and bills the guest nothing", func() {
+		newSite(100, nil)
+		j := newResumable(envNS, 60)
+		reconcileJob(j)
+		guest85 := func(attempt int32, progress int64) {
+			code, slot := hpcv1alpha1.ExitCodeContinue, int32(1)
+			start, endT := metav1.NewTime(time.Now().Add(-25*time.Minute)), metav1.NewTime(time.Now())
+			report(j, hpcv1alpha1.RunStatus{Attempt: attempt, SiteJobID: fmt.Sprintf("20%d", attempt), HostSiteJobID: "9000",
+				Slot: &slot, State: "FAILED", ExitCode: &code, StartTime: &start, EndTime: &endT, Terminal: true,
+				CheckpointRef: fmt.Sprintf("c%d", attempt), Checkpoint: &hpcv1alpha1.CheckpointInfo{ProgressValues: []int64{progress}}})
+		}
+		guest85(1, 1)
+		reconcileJob(j) // continuing
+		reconcileJob(j) // admitted as attempt 2
+		guest85(2, 2)
+		_, got := reconcileJob(j)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonContinuing), "50 of 60 minutes: one more job")
+		_, got = reconcileJob(j)
+		Expect(got.Status.Placement.TimeLimitMinutes).To(Equal(int32(10)), "the third job gets what is left of the cap")
+		guest85(3, 3)
+		_, got = reconcileJob(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed), got.Status.Message)
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonWallTimeReached))
+		Expect(got.Status.Message).To(ContainSubstring("it reached the platform's cap of 1 h (3 jobs)"))
+		Expect(got.Status.Attempts).To(HaveLen(3))
+		for _, a := range got.Status.Attempts {
+			Expect(a.SettledNodeMinutes).To(BeZero(), "a guest holds no node of its own: its host's booking is the charge")
+			Expect(a.WallMinutes).To(Equal(int64(25)), "the time it ran counts toward the cap")
+		}
+		Expect(*got.Status.SettledNodeMinutes).To(BeZero())
+		Expect(siteStatus().GPU.UsedNodeMinutes).To(BeZero())
+	})
+
 	It("refuses a continuation the share can no longer cover, like a new step (block, A4)", func() {
 		newSite(1, nil) // 60 node-minutes
 		j := newResumable(envNS, 60)
