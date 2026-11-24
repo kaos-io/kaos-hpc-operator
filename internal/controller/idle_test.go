@@ -20,6 +20,8 @@ func TestOutcomeMapsTheIdleExitToFailedIdle(t *testing.T) {
 		{"should_not_call_a_completed_job_idle", "COMPLETED", ptr.To(hpcv1alpha1.ExitCodeIdle), hpcv1alpha1.PhaseFailed, "SiteCOMPLETED"},
 		{"should_keep_other_failures_as_site_state", "FAILED", ptr.To(int32(1)), hpcv1alpha1.PhaseFailed, "SiteFAILED"},
 		{"should_map_failed_with_the_gpu_violation_exit_to_gpu_violation", "FAILED", ptr.To(hpcv1alpha1.ExitCodeGPUViolation), hpcv1alpha1.PhaseFailed, "GPUViolation"},
+		{"should_map_failed_with_the_memory_limit_exit_to_memory_limit", "FAILED", ptr.To(hpcv1alpha1.ExitCodeMemoryLimit), hpcv1alpha1.PhaseFailed, "MemoryLimit"},
+		{"should_map_a_site_out_of_memory_kill_to_memory_limit", "OUT_OF_MEMORY", ptr.To(int32(0)), hpcv1alpha1.PhaseFailed, "MemoryLimit"},
 		{"should_keep_a_timeout_a_wall_time_end", "TIMEOUT", ptr.To(int32(0)), hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonWallTimeReached},
 	}
 	for _, c := range cases {

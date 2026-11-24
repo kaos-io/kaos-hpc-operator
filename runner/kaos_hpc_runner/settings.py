@@ -33,6 +33,9 @@ SUBMIT_LIMIT_EXIT = 238
 INVALID_IMAGE_EXIT = 239
 # The runner reports it for a step the slot manager stopped for computing on a GPU outside its set (reason GPUViolation).
 GPU_VIOLATION_EXIT = 240
+# The runner reports it for a step the slot manager stopped for using more than its memory share (reason MemoryLimit).
+MEMORY_LIMIT_EXIT = 248
+MEMORY_LIMIT_MESSAGE = 'stopped: the step used more memory than it asked for. Ask for more memory or use less.'
 # The runner reports it (FAILED, no site job) when the site's staging tool speaks another staging contract.
 STAGING_MISMATCH_EXIT = 241
 # The runner reports it (FAILED, no site job) when the dataset holds an object whose name is reserved for the platform,

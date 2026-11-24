@@ -408,6 +408,16 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		}
 	}
 
+	if reason == hpcv1alpha1.ReasonMemoryLimit {
+		msg = strings.TrimSpace(run.Message)
+		if msg == "" {
+			msg = memoryLimitMessage
+		}
+		if r.Recorder != nil {
+			r.Recorder.Event(job, corev1.EventTypeWarning, hpcv1alpha1.ReasonMemoryLimit, msg)
+		}
+	}
+
 	if refusedBeforeStaging(reason) {
 		msg = refusedMessage(run, strings.TrimSpace(run.Message))
 		if r.Recorder != nil {
@@ -494,6 +504,10 @@ func refusedBeforeStaging(reason string) bool {
 	return false
 }
 
+// memoryLimitMessage is what the job says when a step used more memory than it had (the slot manager or the site
+// stopped it). The runner sends the same sentence; this is the one for a site kill, which has no runner message.
+const memoryLimitMessage = "stopped: the step used more memory than it asked for. Ask for more memory or use less."
+
 // failedExitReasons are the exit codes the job script and the runner reserve for an attempt that FAILED, each
 // with the reason it means.
 var failedExitReasons = map[int32]string{
@@ -509,6 +523,7 @@ var failedExitReasons = map[int32]string{
 	hpcv1alpha1.ExitCodeInvalidResult:            hpcv1alpha1.ReasonInvalidResult,
 	hpcv1alpha1.ExitCodeSubmitLimit:              hpcv1alpha1.ReasonSubmitLimit,
 	hpcv1alpha1.ExitCodeGPUViolation:             hpcv1alpha1.ReasonGPUViolation,
+	hpcv1alpha1.ExitCodeMemoryLimit:              hpcv1alpha1.ReasonMemoryLimit,
 }
 
 // outcome maps the site's final state and exit code of one attempt to the job's phase.
@@ -530,6 +545,8 @@ func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 		return hpcv1alpha1.PhaseSucceeded, "Completed"
 	case state == "TIMEOUT":
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonWallTimeReached
+	case state == "OUT_OF_MEMORY":
+		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonMemoryLimit
 	case state == "":
 		return hpcv1alpha1.PhaseFailed, "Ended"
 	default:
