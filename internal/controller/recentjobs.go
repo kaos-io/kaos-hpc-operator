@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"sort"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -148,6 +149,22 @@ func jobOfSite(j *hpcv1alpha1.HPCArgoWorkflowJob, site *hpcv1alpha1.HPCSite, pro
 	return ok
 }
 
+// boundBytes cuts s to at most max bytes on a rune boundary: the site's own words (a Slurm reason can list every
+// unavailable node) must never exceed a RecentJob field's MaxLength, because one refused value fails the whole
+// site status update.
+func boundBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max]
+}
+
+// recentJobFieldMax is the MaxLength of the RecentJob strings that carry text from the job or the site.
+const recentJobFieldMax = 63
+
 // recentJobOf copies the console-relevant fields of one job.
 func recentJobOf(j *hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) hpcv1alpha1.RecentJob {
 	st := &j.Status
@@ -188,6 +205,10 @@ func recentJobOf(j *hpcv1alpha1.HPCArgoWorkflowJob, now time.Time) hpcv1alpha1.R
 			// message the console shows, in the follower's words. What is booked stays in its own field.
 			rj.Message = truncateMessage("held by the site: " + t)
 		}
+	}
+	for _, f := range []*string{&rj.Reason, &rj.SiteState, &rj.PendingReason, &rj.QOS, &rj.Reservation, &rj.RefusedQOS,
+		&rj.SiteJobID, &rj.HostSiteJobID} {
+		*f = boundBytes(*f, recentJobFieldMax)
 	}
 	rj.BookedNodeMinutes = bookedOf(j)
 	for _, a := range st.Attempts {

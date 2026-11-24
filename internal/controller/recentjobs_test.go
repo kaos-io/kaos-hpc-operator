@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -382,5 +383,43 @@ func TestResumableStepsPerAppAndStep(t *testing.T) {
 	}
 	if resumableStepsOf(site, nil, projectNS) != nil {
 		t.Error("no jobs must give nil")
+	}
+}
+
+func TestRecentJobOfBoundsEveryLimitedStringToItsFieldLimit(t *testing.T) {
+	long := "ReqNodeNotAvail, UnavailableNodes:" + strings.Repeat("mel2008,", 25) // 200+ bytes
+	if len(long) < 200 {
+		t.Fatalf("test input is %d bytes", len(long))
+	}
+	j := recentJob("q", time.Minute, hpcv1alpha1.PhaseRunning)
+	j.Status.SiteObservation = &hpcv1alpha1.SiteObservation{JobID: "1", State: "PENDING", PendingReason: long}
+	j.Status.Reason = long
+	j.Status.Run = &hpcv1alpha1.RunStatus{SiteJobID: long, State: long, QOS: long, Reservation: long}
+	j.Status.Placement = &hpcv1alpha1.Placement{QOS: long, Reservation: long, RefusedQOS: long}
+	rj := recentJobOf(&j, time.Now())
+	for name, got := range map[string]string{"pendingReason": rj.PendingReason, "reason": rj.Reason, "siteState": rj.SiteState,
+		"siteJobID": rj.SiteJobID, "qos": rj.QOS, "reservation": rj.Reservation,
+		"refusedQOS": rj.RefusedQOS} {
+		if len(got) == 0 || len(got) > 63 {
+			t.Errorf("%s is %d bytes, want 1..63", name, len(got))
+		}
+	}
+	j.Status.Run.HostSiteJobID = long
+	if got := recentJobOf(&j, time.Now()).HostSiteJobID; len(got) == 0 || len(got) > 63 {
+		t.Errorf("hostSiteJobID is %d bytes, want 1..63", len(got))
+	}
+	if !strings.HasPrefix(rj.PendingReason, "ReqNodeNotAvail, UnavailableNodes:") {
+		t.Errorf("the start of the reason must stay: %q", rj.PendingReason)
+	}
+}
+
+func TestBoundBytesCutsOnARuneBoundary(t *testing.T) {
+	s := strings.Repeat("é", 40) // 2 bytes each
+	got := boundBytes(s, 63)
+	if len(got) != 62 || !utf8.ValidString(got) {
+		t.Fatalf("got %d bytes valid=%v, want 62 valid", len(got), utf8.ValidString(got))
+	}
+	if boundBytes("fits", 63) != "fits" {
+		t.Fatal("a short value must be unchanged")
 	}
 }
