@@ -419,7 +419,7 @@ func TestBoundBytesCutsOnARuneBoundary(t *testing.T) {
 	if len(got) != 62 || !utf8.ValidString(got) {
 		t.Fatalf("got %d bytes valid=%v, want 62 valid", len(got), utf8.ValidString(got))
 	}
-	if boundBytes("Priority", 63) != "Priority" {
+	if boundBytes("fits", 63) != "fits" {
 		t.Fatal("a short value must be unchanged")
 	}
 }
