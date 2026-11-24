@@ -168,12 +168,76 @@ def test_should_copy_at_once_when_stopped_before_the_step_ends(world):
     assert len(objects(world)) == 2
 
 
-def test_should_keep_copies_untouched_when_the_stop_comes_after_the_step_ended_with_85(world):
+def test_should_keep_the_copy_and_save_nothing_new_when_the_stop_comes_after_85_and_nothing_changed(world):
     write(world, "last.pt", b"a")
     h.copy_once(world.api, None)
     world.exit_file.write_text("85")
-    # the step already ended with "saved, continue me": the stop is Argo's, keep what exists
-    h.on_stop(world.api, time.time(), None)
+    h.on_stop(world.api, time.time(), h.scan(world.folder))
+    assert len(objects(world)) == 2
+
+
+def restored_into(world, tmp_path):
+    other = tmp_path / "next-attempt"
+    other.mkdir()
+    cfg = h.Config(dict(world.env, KAOS_CHECKPOINT_DIR=str(other)))
+    assert h.restore(h.LakeFS(cfg)) is True
+    return other
+
+
+def test_should_save_the_state_before_the_sidecar_ends_when_the_step_exits_85_before_any_periodic_copy(world, tmp_path):
+    write(world, "weights/last.pt", b"saved at 60 s")
+    world.exit_file.write_text("85")
+    h.run_watch(world.cfg)          # the first periodic copy is 10 minutes away: only the final copy can save it
+    assert (restored_into(world, tmp_path) / "weights/last.pt").read_bytes() == b"saved at 60 s"
+
+
+def test_should_save_the_final_state_when_the_sidecar_is_stopped_after_exit_85(world, tmp_path):
+    write(world, "last.pt", b"old")
+    _took, signature = h.copy_once(world.api, None)
+    write(world, "last.pt", b"newer, written just before exit 85")
+    world.exit_file.write_text("85")
+    h.on_stop(world.api, time.time(), signature)
+    assert (restored_into(world, tmp_path) / "last.pt").read_bytes() == b"newer, written just before exit 85"
+
+
+def test_should_say_loudly_when_the_final_copy_fails_after_exit_85(world, capsys, monkeypatch, tmp_path):
+    write(world, "last.pt", b"a")
+    log = tmp_path / "termination-log"
+    monkeypatch.setattr(world.cfg, "termination_log", str(log))
+    monkeypatch.setattr(h, "FINAL_TRIES", 2)
+    monkeypatch.setattr(h, "FINAL_PAUSE", 0)
+    monkeypatch.setattr(world.api, "upload", lambda *a: (_ for _ in ()).throw(RuntimeError("store down")))
+    assert h.finish(world.api, 85, None) is False
+    said = capsys.readouterr().err
+    assert "could not be saved" in said and "starts from the beginning" in said
+    assert "starts from the beginning" in log.read_text()
+
+
+def test_should_say_the_step_saved_nothing_when_it_exits_85_with_an_empty_folder(world, capsys, monkeypatch, tmp_path):
+    log = tmp_path / "termination-log"
+    monkeypatch.setattr(world.cfg, "termination_log", str(log))
+    assert h.finish(world.api, 85, None) is False
+    assert objects(world) == []
+    said = capsys.readouterr().err
+    assert "exit code 85" in said and "empty" in said and "starts from the beginning" in said
+    assert "empty" in log.read_text()
+
+
+def test_should_copy_soon_after_the_first_save_appears_and_then_not_again_until_it_changes(world, monkeypatch):
+    import signal
+    import threading
+    monkeypatch.setattr(signal, "signal", lambda *a: None)    # handlers can only be set from the main thread
+    monkeypatch.setattr(h, "FIRST_CHECK_SECONDS", 0.05)
+    write(world, "last.pt", b"saved early")
+    runner = threading.Thread(target=h.run_watch, args=(world.cfg,))
+    runner.start()
+    deadline = time.time() + 10
+    while len(objects(world)) < 2 and time.time() < deadline:
+        time.sleep(0.05)
+    assert len(objects(world)) == 2      # well before the 10 minute interval
+    world.exit_file.write_text("1")
+    runner.join(10)
+    assert not runner.is_alive()
     assert len(objects(world)) == 2
 
 

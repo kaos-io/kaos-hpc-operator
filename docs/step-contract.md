@@ -104,9 +104,14 @@ pipeline context (default 7 days, 10080 minutes), ends every step of the develop
 pod's deadline, on an HPC class it is the `time-limit` (minutes) of the step's job. A deadline is final and is not retried.
 The platform's own compose step has a fixed limit of 30 minutes. The engine sends no `resumable` value to the HPC follower.
 
-Every step except the kinds `control` and `publish` gets the checkpoint helper (restore on start, copies while it runs), at
-one interval chosen by the platform (10 minutes, `resilience.DEFAULT_EVERY_MINUTES`); the library decides what to save
-(`kaos_lib.checkpoint`). One retry rule covers every step: the step is run again, and continues from its newest
+Every step except the kinds `control` and `publish` gets the checkpoint helper (restore on start, copies while it runs).
+The first copy is taken soon after the step first saves a file into `KAOS_CHECKPOINT_DIR` (within about 10 seconds), later
+copies at one interval chosen by the platform (10 minutes, `resilience.DEFAULT_EVERY_MINUTES`) and only when the folder
+changed, and one more copy when the pod is told to stop. When a step exits with code 85 ("I saved my progress, run me
+again") the helper copies the folder once more, as the step left it, before it finishes: the saved state at the moment of
+exit 85 is what the next attempt continues from, however recently it was saved. If that copy cannot be made, or the folder
+is empty, the step's log says so in plain words ("the next attempt starts from the beginning") and the next attempt starts
+from an older copy or from the beginning. The library decides what to save (`kaos_lib.checkpoint`). One retry rule covers every step: the step is run again, and continues from its newest
 checkpoint, when its machine is lost or it exits with code 85 (`kaos_lib.checkpoint.exit_for_restart`). Its limit is 50
 runs (`resilience.RETRY_LIMIT`), because the workflow system has one limit for both causes; a step that is ended as idle,
 fails by itself or reaches its deadline is not run again. The checkpoint folder `KAOS_CHECKPOINT_DIR` is set on every step.

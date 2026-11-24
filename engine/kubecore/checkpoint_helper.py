@@ -6,9 +6,10 @@ never touched). Python standard library only; the CI ships this file once per ap
 
   restore  (init container)  put the newest VERIFIED copy of the step's checkpoint folder back before the
                              step starts, and expire copies of long-dead runs.
-  watch    (sidecar)         copy the folder periodically (and when the pod is told to stop) as ONE tar
-                             archive plus a sha256 manifest, keep at most KEEP copies, delete all of them
-                             when the step succeeds.
+  watch    (sidecar)         copy the folder as ONE tar archive plus a sha256 manifest: once soon after the
+                             first saved file appears, then periodically, when the pod is told to stop, and
+                             once more when the step ends with exit code 85 ("saved, run me again"). Keep at
+                             most KEEP copies, delete all of them when the step succeeds.
 
 Copies live in the app's lakeFS outputs repository, on their own branch that is never merged or
 committed:  <branch>:<KEY>/ckpt-<utc time>-<id>.tar  and  .json  (the manifest, written LAST: a copy
@@ -38,6 +39,10 @@ OVERHEAD = 10             # a copy may take about 1/10 of the time between copie
 SETTLE_SECONDS = 2        # a file modified more recently than this is still being written
 SETTLE_MAX_WAIT = 10
 SNAPSHOT_TRIES = 3
+FIRST_CHECK_SECONDS = 10  # until the first copy exists: look this often for a first saved file and copy it at once
+FINAL_TRIES = 3           # the copy after exit 85 is tried this many times (the promise "my saved state is safe")
+FINAL_PAUSE = 3           # seconds between those tries
+CONTINUE_EXIT = 85        # "I saved my progress, run me again"
 CHUNK = 1 << 20
 
 
@@ -66,6 +71,7 @@ class Config:
         self.stage = env.get("CKPT_STAGE", "/stage")
         self.exit_file = env.get("CKPT_EXIT_FILE", "/var/run/argo/ctr/main/exitcode")
         self.poll = float(env.get("CKPT_POLL_SECONDS", "1"))
+        self.termination_log = env.get("CKPT_TERMINATION_LOG", "/dev/termination-log")
 
     def usable(self):
         return all([self.folder, self.endpoint, self.access, self.secret, self.repo, self.key])
@@ -370,7 +376,9 @@ def copy_once(api, last_signature):
         files = pack(cfg.folder, archive)
         if not files:
             return 0, last_signature
-        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + secrets.token_hex(2)
+        now = time.time()    # microseconds: two copies in one second (stop copy, then final copy) must sort by age
+        stamp = (time.strftime("%Y%m%dT%H%M%S", time.gmtime(now)) + "%06dZ" % int(now % 1 * 1e6)
+                 + "-" + secrets.token_hex(2))
         base = "%s/%s/ckpt-%s" % (cfg.root, cfg.key, stamp)
         api.upload(base + ".tar", archive)
         size = os.path.getsize(archive)
@@ -433,14 +441,22 @@ def run_watch(cfg):
         say("checkpoint copies are off (%s)" % exc)
         return
     interval, signature = cfg.every, None
+    # The first copy is taken soon after the step first saves something (a step may save and be lost long before
+    # the periodic interval is over); after that, copies are periodic and only when the folder changed.
     next_at = time.time() + interval
+    next_look = time.time() + FIRST_CHECK_SECONDS
     while True:
         code = step_exit_code(cfg)
         if code is not None:
-            return finish(api, code)
+            return finish(api, code, signature)
         if stopping:
             return on_stop(api, stopping[0], signature)
-        if time.time() >= next_at:
+        now = time.time()
+        early = signature is None and now >= next_look
+        if early:
+            next_look = now + FIRST_CHECK_SECONDS
+            early = bool(os.path.isdir(cfg.folder) and scan(cfg.folder))
+        if early or now >= next_at:
             took, signature = copy_once(api, signature)
             # a copy should take about a tenth of the time between copies
             interval = min(MAX_EVERY, max(cfg.every, int(took * OVERHEAD), MIN_EVERY))
@@ -448,33 +464,75 @@ def run_watch(cfg):
         time.sleep(cfg.poll)
 
 
-def finish(api, code):
-    """The step has ended: success removes every copy, anything else keeps them."""
+def tell_pod(cfg, message):
+    """Put the message where `kubectl describe pod` and the workflow node show it (best effort)."""
+    try:
+        with open(cfg.termination_log, "w") as fh:
+            fh.write(message[:2000])
+    except OSError:
+        pass
+
+
+def final_copy(api, signature):
+    """The step has ended with exit code 85: its saved state is the promise for the next attempt. Copy it (the
+    step has exited, so nothing writes any more) and try again when the copy fails. Returns True when the store
+    holds a copy of the folder as the step left it."""
+    cfg = api.cfg
+    for attempt in range(FINAL_TRIES):
+        if attempt:
+            time.sleep(FINAL_PAUSE)
+        _took, signature = copy_once(api, signature)
+        if signature is not None and signature == scan(cfg.folder):
+            return True
+    return False
+
+
+def finish(api, code, signature=None):
+    """The step has ended: success removes every copy; exit 85 saves its state once more; anything else keeps
+    the copies. Returns False only when exit 85 left no saved state in the store."""
+    cfg = api.cfg
     try:
         if code == 0:
             delete_all(api)
             say("step finished; its checkpoint copies were removed")
+        elif code == CONTINUE_EXIT:
+            if not (os.path.isdir(cfg.folder) and scan(cfg.folder)):
+                msg = ("the step ended with exit code 85 (saved, run me again) but its checkpoint folder is empty: "
+                       "nothing was saved, the next attempt starts from the beginning")
+            elif final_copy(api, signature):
+                say("step ended with exit code 85; its saved state is copied for the next attempt")
+                return True
+            else:
+                msg = ("the step ended with exit code 85 but its saved state could not be saved to the store: "
+                       "the next attempt starts from the beginning (or from an older copy)")
+            say("ERROR " + msg)
+            tell_pod(cfg, "%s ERROR %s" % (TAG, msg))
+            return False
         else:
             say("step ended with exit code %d; its checkpoint copies are kept" % code)
     except Exception as exc:
-        say("could not remove the checkpoint copies (%s); they expire by themselves" % exc)
+        say("could not finish the checkpoint copies (%s); they expire by themselves" % exc)
+    return True
 
 
 def on_stop(api, stopped_at, signature):
-    """The pod is being stopped (node loss, preemption): save at once, again if the step saves and ends."""
+    """The pod is being stopped (node loss, preemption, Argo stopping the sidecar): save at once, again if the
+    step saves and ends."""
     cfg = api.cfg
     code = step_exit_code(cfg)
-    if code is not None:       # Argo stopping the sidecar after the step ended
-        return finish(api, code)
+    if code is not None:       # the step ended before the stop signal: finish() does what that exit asks
+        return finish(api, code, signature)
     deadline = stopped_at + cfg.grace - 3
     took, signature = copy_once(api, signature)
     while time.time() < deadline and step_exit_code(cfg) is None:
         time.sleep(cfg.poll)
     code = step_exit_code(cfg)
     if code == 0:
-        return finish(api, code)
+        return finish(api, code, signature)
+    if code == CONTINUE_EXIT:
+        return finish(api, code, signature)   # the step saved on the stop signal and ended: the final copy
     if code is not None and deadline - time.time() > took * 1.5:
-        copy_once(api, signature)    # the step saved its own checkpoint on the stop signal
+        copy_once(api, signature)
 
 
 def main(argv):
