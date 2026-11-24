@@ -693,7 +693,7 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonMemoryLimit))
 		Expect(got.Status.Attempts[0].Outcome).To(Equal(hpcv1alpha1.ReasonMemoryLimit))
 		Expect(got.Status.Message).To(ContainSubstring("memory"))
-		Expect(got.Status.Message).To(ContainSubstring("Ask for more memory"))
+		Expect(got.Status.Message).To(ContainSubstring("Use less memory"))
 	})
 
 	It("keeps a guest at zero when a later end is reported", func() {

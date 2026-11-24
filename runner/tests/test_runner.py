@@ -1353,7 +1353,7 @@ def test_a_guest_stopped_for_memory_reports_its_exit_code_and_a_message_that_say
     rig.make(FakeSlurm({"5001": [taken, done], "5447506": [acc("RUNNING")]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
     rig.runner.run()
     assert (rig.kube.run["state"], rig.kube.run["exitCode"]) == ("FAILED", 248)
-    assert "memory" in rig.kube.run["message"] and "Ask for more memory" in rig.kube.run["message"]
+    assert "memory" in rig.kube.run["message"] and "its share of the node" in rig.kube.run["message"]
 
 
 # ---------------------------------------------------------------- the controller's batched reading (D-36)
