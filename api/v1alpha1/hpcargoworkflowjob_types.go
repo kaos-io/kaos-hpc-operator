@@ -142,6 +142,13 @@ const (
 	// ExitCodeGPUViolation is the exit code the runner reports for a step stopped for GPUViolation. Next to
 	// ExitCodeInvalidImage, in the same reserved range.
 	ExitCodeGPUViolation = int32(240)
+	// ReasonMemoryLimit: the step used more memory than it had. On a node shared by several steps the slot manager
+	// stopped it for using more than its memory share; the runner reports ExitCodeMemoryLimit for it. A step the site
+	// itself killed for memory (state OUT_OF_MEMORY) ends with the same reason. The attempt is Failed.
+	ReasonMemoryLimit = "MemoryLimit"
+	// ExitCodeMemoryLimit is the exit code the runner reports for a step the slot manager stopped for memory. After
+	// ExitCodeAppIdentityUnavailable, the last free code of the reserved range.
+	ExitCodeMemoryLimit = int32(248)
 	// ExitCodeStagingMismatch is the exit code the runner reports (state FAILED, no site job) when the site's
 	// staging tool speaks another staging contract.
 	ExitCodeStagingMismatch = int32(241)
@@ -473,7 +480,7 @@ type RunStatus struct {
 	// reserve: 210 (no Apptainer), 231 (image pull), 232 (staging), 233 (batch script), 234 (no verified
 	// checkpoint to restore), 235 (checkpoint copy or job comment failed), 236 (Idle), 237 (InsufficientQuota),
 	// 238 (SubmitLimit), 239 (InvalidImage), 240 (GPUViolation), 241 (StagingMismatch), 242 (ReservedName),
-	// 243 (ResultNotHandedBack), 244 (InvalidResult), 245 (SharedDatasetUnavailable), 246 (DatasetNotStaged), 247 (AppIdentityUnavailable).
+	// 243 (ResultNotHandedBack), 244 (InvalidResult), 245 (SharedDatasetUnavailable), 246 (DatasetNotStaged), 247 (AppIdentityUnavailable), 248 (MemoryLimit).
 	// +optional
 	ExitCode *int32 `json:"exitCode,omitempty"`
 	// StartTime and EndTime as the site reports them.

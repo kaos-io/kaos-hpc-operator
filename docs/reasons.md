@@ -71,12 +71,13 @@ Phases: `Pending` (not judged yet, or the next attempt is about to be judged), `
 | `InvalidResult` | Failed | The result file reached the runner but is not a result of the step contract: not JSON, not an object, not `version` 1, a `status` other than `ok`, `values`, `reads` or `writes` missing, or a cost over 8 KiB. Exit 244. Nothing is published. | Message naming what is wrong, for example "the step's result costs 9000 bytes, more than the 8192 (8 KiB) a result may cost ...". `InvalidResult` Warning event. |
 | `SubmitLimit` | Failed | The site itself refused a submit for its per-user cap (`QOSMaxSubmitJobPerUserLimit`, `AssocMaxSubmitJobLimit`, ...). The runner reports exit 238 with the cap and the count it read from the site. See the Refused form above. | Message with the cap and the count, "resubmit when the count is below the cap". `SubmitLimit` Warning event. |
 | `GPUViolation` | Failed | On a node shared by several steps (AC-57 / D-29), the step computed on a GPU outside its own set and the slot manager stopped that step alone; neighbouring steps keep running. The slot manager writes `kaos-state=done rc=N reason=GPUViolation` into the host job's Slurm comment and `gpu: step ... outside its set: stopping it` into the job log; the runner reports exit 240 (live 2026-11-11, job 5447505, read `SiteFAILED` exit 137 before). Prevention first: where `nvidia-container-cli` works the step cannot see the other GPUs (`gpu fence: nvccli` in the job log). | Reason `GPUViolation`; the guest settles 0 node-minutes (its host pays). |
+| `MemoryLimit` | Failed | The step used more memory than it had. On a node shared by several steps the slot manager stopped that step alone for using more than its memory share (`kaos-state=done rc=N reason=memkill` in the host job's Slurm comment; the runner reports exit 248; it read `SiteFAILED` exit 137 before). A step the site itself killed for memory (Slurm state `OUT_OF_MEMORY`) ends with the same reason. | Reason `MemoryLimit`; the message says the step used more memory than its share of the node (the node's memory divided by its GPU slots), or that it ran out of memory on its node when the site ended it, and to use less memory in the step. `MemoryLimit` Warning event. A guest settles 0 node-minutes (its host pays). |
 
 Other final states in `status.reason`: `Completed` (Succeeded), `Cancelled` (Cancelled), `Continued` (attempt record
 outcome only), `Ended` (the site reported no state), and `Site<STATE>` (the site's own state of an attempt that ended
-without one of the reasons above, for example `SiteFAILED` for the step's own non-zero exit or `SiteOUT_OF_MEMORY`).
-A guest on a shared node stopped by anything other than its own time limit (exit 143 before its limit, a memory or
-GPU kill) stays `SiteFAILED` and is not retried.
+without one of the reasons above, for example `SiteFAILED` for the step's own non-zero exit).
+A guest on a shared node stopped by anything other than its own time limit (exit 143 before its limit) stays
+`SiteFAILED` and is not retried; a memory or GPU stop ends `MemoryLimit` or `GPUViolation`.
 
 A host on a shared node (D-26) is `Succeeded` or `Failed` when its step ends, but while its Slurm job still holds the
 node for guests the message ends "its Slurm job still holds the node for guests: the booking is held until that job
@@ -166,7 +167,7 @@ may still run). See [extreme-cases.md](extreme-cases.md) 2.13 and 2.17.
   on a shared node was stopped by its own time limit (it ended by TERM or KILL after running its whole `srun --time`).
   The runner turns it into the attempt state `TIMEOUT` (see `WallTimeReached`).
 - `memkill` in a host's Slurm comment (`kaos-state=done rc=N reason=memkill`): the slot manager stopped a step on a
-  shared node for using more than its memory share. The attempt ends `Failed/SiteFAILED` (never exit 0; live
+  shared node for using more than its memory share. The attempt ends `Failed/MemoryLimit` (never exit 0; live
   2026-11-10, job 5442274).
 - Events not tied to a reason constant: `LaneRefused` (the site refused the lane; the attempt ran on the class
   default), `HostSettledToJobEnd` (a host's attempt settled to its Slurm job's end, booking released), `HostEndUnknown`

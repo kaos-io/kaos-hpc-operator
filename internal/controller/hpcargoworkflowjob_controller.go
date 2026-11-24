@@ -408,6 +408,8 @@ func (r *HPCArgoWorkflowJobReconciler) endAttempt(ctx context.Context, job *hpcv
 		}
 	}
 
+	msg = r.memoryLimitEnd(job, run, reason, msg)
+
 	if refusedBeforeStaging(reason) {
 		msg = refusedMessage(run, strings.TrimSpace(run.Message))
 		if r.Recorder != nil {
@@ -494,6 +496,28 @@ func refusedBeforeStaging(reason string) bool {
 	return false
 }
 
+// memoryLimitEnd is the sentence of a job stopped for memory, also sent as a Warning event: the runner's own
+// (a step stopped by the slot manager on a shared node) or, when the site ended the job, memoryLimitMessage.
+// Any other reason keeps the message it has.
+func (r *HPCArgoWorkflowJobReconciler) memoryLimitEnd(job *hpcv1alpha1.HPCArgoWorkflowJob, run *hpcv1alpha1.RunStatus,
+	reason, msg string) string {
+	if reason != hpcv1alpha1.ReasonMemoryLimit {
+		return msg
+	}
+	msg = strings.TrimSpace(run.Message)
+	if msg == "" {
+		msg = memoryLimitMessage
+	}
+	if r.Recorder != nil {
+		r.Recorder.Event(job, corev1.EventTypeWarning, hpcv1alpha1.ReasonMemoryLimit, msg)
+	}
+	return msg
+}
+
+// memoryLimitMessage is what the job says when a step used more memory than it had (the slot manager or the site
+// stopped it). The runner sends the same sentence; this is the one for a site kill, which has no runner message.
+const memoryLimitMessage = "stopped: the step ran out of memory on its node. Use less memory in the step."
+
 // failedExitReasons are the exit codes the job script and the runner reserve for an attempt that FAILED, each
 // with the reason it means.
 var failedExitReasons = map[int32]string{
@@ -509,6 +533,7 @@ var failedExitReasons = map[int32]string{
 	hpcv1alpha1.ExitCodeInvalidResult:            hpcv1alpha1.ReasonInvalidResult,
 	hpcv1alpha1.ExitCodeSubmitLimit:              hpcv1alpha1.ReasonSubmitLimit,
 	hpcv1alpha1.ExitCodeGPUViolation:             hpcv1alpha1.ReasonGPUViolation,
+	hpcv1alpha1.ExitCodeMemoryLimit:              hpcv1alpha1.ReasonMemoryLimit,
 }
 
 // outcome maps the site's final state and exit code of one attempt to the job's phase.
@@ -530,6 +555,8 @@ func outcome(run *hpcv1alpha1.RunStatus) (hpcv1alpha1.Phase, string) {
 		return hpcv1alpha1.PhaseSucceeded, "Completed"
 	case state == "TIMEOUT":
 		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonWallTimeReached
+	case state == "OUT_OF_MEMORY":
+		return hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonMemoryLimit
 	case state == "":
 		return hpcv1alpha1.PhaseFailed, "Ended"
 	default:

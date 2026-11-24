@@ -1323,7 +1323,7 @@ def test_a_step_the_slot_manager_stopped_is_a_failure_even_with_exit_0__live_job
     """Live 2026-11-10: `reason=GPUViolation` with rc 0 ended the HPC job Succeeded. Whatever exit code an older
     slot manager wrote, a memkill or GPUViolation step is FAILED, as a guest and as a host's own step. A
     GPUViolation reports exit 240 so the controller records the reason (live 2026-11-11 job 5447505 read SiteFAILED)."""
-    for reason, code in (("GPUViolation", 240), ("memkill", 1)):
+    for reason, code in (("GPUViolation", 240), ("memkill", 248)):
         taken = acc("PENDING", comment="kaos-state=taken host=5442272 slot=2 attempt=1")
         done = acc("CANCELLED", comment="kaos-state=done rc=0 host=5442272 reason=" + reason, start=4294967294, end=0)
         rig.make(FakeSlurm({"5001": [taken, done], "5442272": [acc("RUNNING")]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
@@ -1343,6 +1343,17 @@ def test_a_guest_stopped_for_gpu_violation_reports_its_exit_code__live_job_54475
     rig.make(FakeSlurm({"5001": [taken, done], "5447506": [acc("RUNNING")]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
     rig.runner.run()
     assert (rig.kube.run["state"], rig.kube.run["exitCode"], rig.kube.run["hostSiteJobID"]) == ("FAILED", 240, "5447506")
+
+
+def test_a_guest_stopped_for_memory_reports_its_exit_code_and_a_message_that_says_memory(rig):
+    """The slot manager stopped a guest for using more than its memory share (`rc=137 reason=memkill`): the job read
+    SiteFAILED exit 137 with nothing about memory. It reports exit 248 and a plain message."""
+    taken = acc("PENDING", comment="kaos-state=taken host=5447506 slot=2 attempt=1")
+    done = acc("CANCELLED", comment="kaos-state=done rc=137 host=5447506 reason=memkill", start=4294967294, end=0)
+    rig.make(FakeSlurm({"5001": [taken, done], "5447506": [acc("RUNNING")]}), HPC_SHARING="on", HPC_SCOPE="a1b2c3d4e5")
+    rig.runner.run()
+    assert (rig.kube.run["state"], rig.kube.run["exitCode"]) == ("FAILED", 248)
+    assert "memory" in rig.kube.run["message"] and "its share of the node" in rig.kube.run["message"]
 
 
 # ---------------------------------------------------------------- the controller's batched reading (D-36)

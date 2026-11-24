@@ -33,7 +33,7 @@ def checkpoint_every_seconds(context):
 from .sharing import inputs_in_script
 from .slurm import (RECOVERABLE, TERMINAL, Refused, Slurm, comment_of, host_gone, is_access_refused, is_site_down, lane_refusal,
                     share_state, site_time, submit_limit_refusal)
-from .settings import (APP_IDENTITY_UNAVAILABLE_EXIT, CHECKPOINT_EXIT, CONTEXT_ENV, GPU_VIOLATION_EXIT, GUEST_HOLD_S, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT,
+from .settings import (APP_IDENTITY_UNAVAILABLE_EXIT, CHECKPOINT_EXIT, CONTEXT_ENV, GPU_VIOLATION_EXIT, GUEST_HOLD_S, MEMORY_LIMIT_EXIT, MEMORY_LIMIT_MESSAGE, IDLE_EXIT, INSUFFICIENT_QUOTA_EXIT,
                        INVALID_IMAGE_EXIT, INVALID_RESULT_EXIT, OFFER_S, ROLE_POLL_S, RESERVED_NAME_EXIT, DATASET_NOT_STAGED_EXIT,
                        SHARED_DATASET_UNAVAILABLE_EXIT,
                        RESULT_NOT_HANDED_BACK_EXIT, STAGING_MISMATCH_EXIT, SUBMIT_LIMIT_EXIT, Settings, image_problem,
@@ -1042,6 +1042,8 @@ class Runner:
                             rc = 1      # a step the slot manager stopped did not succeed, whatever exit code it left
                         if share.get('reason') == 'GPUViolation':
                             rc = GPU_VIOLATION_EXIT   # its own exit code, so the controller says why (not SiteFAILED)
+                        if share.get('reason') == 'memkill':
+                            rc = MEMORY_LIMIT_EXIT    # likewise: the controller ends it MemoryLimit
                         print('ran on a shared node: host job', share.get('host'),
                               'exit:', share.get('rc'), 'reason:', share.get('reason'), flush=True)
                         st = ['COMPLETED'] if rc == 0 else ['FAILED']
@@ -1256,6 +1258,8 @@ class Runner:
                       'step (neither Slurm accounting nor the live job has kaos-ckpt=). If the step log shows '
                       '"checkpoint: copy NNNNNN", the copy exists on scratch and only its entry in the job comment '
                       'is missing; if it does not, no copy was made in time', flush=True)
+        if rc == MEMORY_LIMIT_EXIT and 'COMPLETED' not in st:
+            fields['message'] = MEMORY_LIMIT_MESSAGE
         if rc == RESULT_NOT_HANDED_BACK_EXIT and 'COMPLETED' not in st:
             fields['message'] = self.handback_failure()[:500]
             print('ERROR: ResultNotHandedBack:', fields['message'], flush=True)

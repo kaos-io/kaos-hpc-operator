@@ -22,7 +22,7 @@ func TestOutcomeOfEverySiteEndStateOfAnAttempt(t *testing.T) {
 		{"should_fail_on_completed_with_a_nonzero_exit_code", "COMPLETED", &three, hpcv1alpha1.PhaseFailed, "SiteCOMPLETED"},
 		{"should_fail_a_lost_node_as_site_node_fail", "NODE_FAIL", nil, hpcv1alpha1.PhaseFailed, "SiteNODE_FAIL"},
 		{"should_fail_a_preempted_job_as_site_preempted", "PREEMPTED", nil, hpcv1alpha1.PhaseFailed, "SitePREEMPTED"},
-		{"should_fail_an_oom_kill_as_site_out_of_memory", "OUT_OF_MEMORY", nil, hpcv1alpha1.PhaseFailed, "SiteOUT_OF_MEMORY"},
+		{"should_fail_an_oom_kill_as_site_out_of_memory", "OUT_OF_MEMORY", nil, hpcv1alpha1.PhaseFailed, "MemoryLimit"},
 		{"should_fail_a_plain_failure", "FAILED", &three, hpcv1alpha1.PhaseFailed, "SiteFAILED"},
 		{"should_name_the_wall_time_on_timeout", "TIMEOUT", nil, hpcv1alpha1.PhaseFailed, hpcv1alpha1.ReasonWallTimeReached},
 		{"should_cancel_on_cancelled", "CANCELLED", nil, hpcv1alpha1.PhaseCancelled, "Cancelled"},

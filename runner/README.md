@@ -69,6 +69,7 @@ The job script and the runner reserve these codes; the controller turns them int
 | 245 | runner | a dataset another project shares cannot be read: not shared with this project (any more), the owner unknown or without a public address, or the site could not stage it; the job never downloads it itself (reported FAILED, nothing staged, no site job) | `SharedDatasetUnavailable` |
 | 246 | runner | an own dataset above 50 GB was not staged in the time allowed for its size and the job must not download it (reported FAILED, nothing submitted) | `DatasetNotStaged` |
 | 247 | runner, or job script | the app has no identity in the data store (no `<app>-workflow` service account, not declared there, or nobody answered): reported FAILED before anything is staged; the job script ends 247 when the app's key never reached the site | `AppIdentityUnavailable` |
+| 248 | runner | the slot manager stopped the step for using more than its memory share, on a node shared by several steps | `MemoryLimit` |
 
 ## What the step gets and hands back (the step contract)
 

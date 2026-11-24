@@ -679,6 +679,23 @@ var _ = Describe("HPCArgoWorkflowJob admission", func() {
 		Expect(got.Status.Attempts[0].SettledNodeMinutes).To(Equal(int64(0)))
 	})
 
+	It("ends a step stopped for memory Failed/MemoryLimit with a message that says memory", func() {
+		newSite(10, nil)
+		j := newJob(envNS, 60)
+		reconcileJob(j)
+		code := hpcv1alpha1.ExitCodeMemoryLimit
+		start := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+		endT := metav1.NewTime(time.Now())
+		report(j, hpcv1alpha1.RunStatus{Attempt: 1, SiteJobID: "5447505", HostSiteJobID: "5447506", State: "FAILED",
+			ExitCode: &code, StartTime: &start, EndTime: &endT, Terminal: true})
+		_, got := reconcileJob(j)
+		Expect(got.Status.Phase).To(Equal(hpcv1alpha1.PhaseFailed))
+		Expect(got.Status.Reason).To(Equal(hpcv1alpha1.ReasonMemoryLimit))
+		Expect(got.Status.Attempts[0].Outcome).To(Equal(hpcv1alpha1.ReasonMemoryLimit))
+		Expect(got.Status.Message).To(ContainSubstring("memory"))
+		Expect(got.Status.Message).To(ContainSubstring("Use less memory"))
+	})
+
 	It("keeps a guest at zero when a later end is reported", func() {
 		newSite(10, nil)
 		j := newJob(envNS, 240)
